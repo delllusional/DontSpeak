@@ -8,8 +8,8 @@
 //! Output: first tensor, f32 24 kHz mono `[-1, 1]`, then `trim_silence`.
 //!
 //! load-dynamic: compiles without onnxruntime; dylib from `ORT_DYLIB_PATH` at runtime.
-//! Missing dylib → `load` Err → fail-quiet. Not unit-tested (no model); pure stages
-//! in vocab/voices/trim/batch.
+//! Missing dylib → `load` Err → fail-quiet. Sessions not unit-tested (no model); pure
+//! stages in vocab/voices/trim/batch + `style_for_voice` below.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,16 +40,9 @@ impl KokoroSynth {
     /// Session from model bytes + voices npz. Call [`ds_model::ensure_ort_dylib`]
     /// (or set path) first. Errors for caller fail-quiet.
     pub fn load(model_bytes: &[u8], voices_npz: &[u8]) -> Result<Self, String> {
-        // cpu|cuda|coreml|auto (`ane` → FluidAudio, not here).
-        let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
-        match Self::load_with_provider(model_bytes, voices_npz, &pref) {
-            Ok(s) => Ok(s),
-            Err(e) if !pref.eq_ignore_ascii_case("cpu") => {
-                eprintln!("dontspeak/synth: provider '{pref}' failed ({e}); falling back to CPU");
-                Self::load_with_provider(model_bytes, voices_npz, "cpu")
-            }
-            Err(e) => Err(e),
-        }
+        crate::ort_session::load_with_fallback("synth", |preference| {
+            Self::load_with_provider(model_bytes, voices_npz, preference)
+        })
     }
 
     /// Like [`KokoroSynth::load`] but with an EXPLICIT provider — also used by the
@@ -63,53 +56,9 @@ impl KokoroSynth {
             .into_iter()
             .map(|(name, style)| (name, Arc::new(style)))
             .collect();
-        // One cfg branch binds builder + realized provider (shared CUDA path with Parakeet).
-        // win-arm64: cuda_session_builder compiles to CPU-only — safe.
-        #[cfg(any(
-            target_os = "windows",
-            all(target_os = "linux", target_arch = "x86_64")
-        ))]
-        let (mut builder, provider) = {
-            let want_gpu = ds_config::provider_pref_wants_gpu(pref);
-            ds_model::cuda_session_builder(want_gpu)?
-        };
-
-        #[cfg(target_os = "macos")]
-        let (mut builder, provider) = {
-            use ort::execution_providers::CoreMLExecutionProvider;
-            // Full-duplex + auto → CoreML: CPU Kokoro starves VPIO RT thread (choppy).
-            // Half-duplex auto stays CPU (CoreML benches slightly slower).
-            let full_duplex = std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some();
-            let want_coreml = pref.eq_ignore_ascii_case("coreml")
-                || (full_duplex && pref.eq_ignore_ascii_case("auto"));
-            let gpu = if want_coreml {
-                (|| -> ort::Result<_> {
-                    let b = Session::builder()?;
-                    Ok(b.with_execution_providers([CoreMLExecutionProvider::default().build()])?)
-                })()
-                .ok()
-            } else {
-                None
-            };
-            match gpu {
-                Some(b) => (b, ds_config::RealizedProvider::CoreMl),
-                None => (
-                    Session::builder().map_err(|e| format!("ort session builder: {e}"))?,
-                    ds_config::RealizedProvider::Cpu,
-                ),
-            }
-        };
-
-        // Other Unix: CPU only.
-        #[cfg(all(
-            not(any(target_os = "windows", target_os = "macos")),
-            not(all(target_os = "linux", target_arch = "x86_64"))
-        ))]
-        let (mut builder, provider) = {
-            let _ = &pref;
-            let b = Session::builder().map_err(|e| format!("ort session builder: {e}"))?;
-            (b, ds_config::RealizedProvider::Cpu)
-        };
+        let mut sessions =
+            crate::ort_session::OrtSessions::from_preference(ds_config::TtsModel::Kokoro, pref);
+        let (mut builder, provider) = sessions.builder()?;
 
         // Full-duplex on CPU: keep Kokoro off the CoreAudio REAL-TIME render thread
         // (VPIO), or the speech chops/stutters. Two parts, per Apple's audio-glitch
@@ -119,7 +68,7 @@ impl KokoroSynth {
         //     busy-wait, pinning every core even between forwards and starving the
         //     render thread (the actual smoking gun: chops even when synth ≫ realtime
         //     and the ring is huge, because it's deadline jitter, not throughput).
-        // (Half-duplex uses rodio, which buffers; CoreML/CUDA offload off the CPU.)
+        // (Half-duplex uses rodio, which buffers; the MLX path bypasses this session.)
         #[cfg(target_os = "macos")]
         if provider == ds_config::RealizedProvider::Cpu
             && std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some()
@@ -171,11 +120,7 @@ impl KokoroSynth {
         voice: &str,
         speed: f32,
     ) -> Result<Vec<f32>, String> {
-        let style = self
-            .voices
-            .get(voice)
-            .ok_or_else(|| format!("unknown voice '{voice}'"))?
-            .clone();
+        let style = style_for_voice(&self.voices, voice)?;
         let speed = speed.clamp(0.5, 2.0);
         let mut audio: Vec<f32> = Vec::new();
         for batch in split_phonemes(phonemes) {
@@ -238,5 +183,50 @@ impl KokoroSynth {
             ));
         }
         Ok(crate::trim::trim_silence(data))
+    }
+}
+
+/// Style lookup with a registry-default fallback: a stale pool id (config voice pool
+/// survives a model switch; ds-config cannot see the on-disk voices) must not drop the
+/// utterance. Safe at synth time — the Kokoro frontend ignores the voice id. Err only
+/// when the fallback is absent from the loaded voices too.
+fn style_for_voice(
+    voices: &HashMap<String, Arc<Vec<f32>>>,
+    voice: &str,
+) -> Result<Arc<Vec<f32>>, String> {
+    if let Some(style) = voices.get(voice) {
+        return Ok(style.clone());
+    }
+    let fallback = ds_config::TtsModel::Kokoro.descriptor().voices[0];
+    match voices.get(fallback) {
+        Some(style) => {
+            log::warn!(target: "tts", "unknown voice '{voice}'; falling back to '{fallback}'");
+            Ok(style.clone())
+        }
+        None => Err(format!("unknown voice '{voice}'")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(names: &[&str]) -> HashMap<String, Arc<Vec<f32>>> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| (n.to_string(), Arc::new(vec![i as f32])))
+            .collect()
+    }
+
+    #[test]
+    fn unknown_voice_falls_back_to_the_registry_default() {
+        let voices = map(&["af_sarah", "bf_emma"]);
+        assert_eq!(*style_for_voice(&voices, "bf_emma").unwrap(), vec![1.0]);
+        // Stale pool id → the registry default's style, not an error.
+        assert_eq!(*style_for_voice(&voices, "xx_gone").unwrap(), vec![0.0]);
+        // Fallback missing too → Err (nothing sensible to synthesize with).
+        let no_default = map(&["bf_emma"]);
+        assert!(style_for_voice(&no_default, "xx_gone").is_err());
     }
 }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ds_config::{ClientSource, Paths, TtsEngine, VoiceConfig};
+use ds_config::{ClientSource, Paths, TtsEngine, TtsModel, VoiceConfig};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -169,6 +169,8 @@ struct MuteArgs {
 #[serde(default, deny_unknown_fields)]
 struct VoicesArgs {
     tts_engine: Option<TtsEngine>,
+    tts_model: Option<TtsModel>,
+    language: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -200,10 +202,36 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
         .tts_engine
         .or_else(|| cfg.resolved_tts())
         .unwrap_or(ds_config::TtsEngine::BuiltIn);
-    // English-only build: never surface other Kokoro pack languages.
-    let mut groups = voice_groups(engine, "en");
-    // `active` = in per-agent pool — no privileged first entry.
-    let pool = cfg.active_voices().to_vec();
+    let model = a.tts_model.unwrap_or(cfg.tts_model);
+    // Normalize the explicit arg (parity with set_config); empty after trim = unset.
+    let requested = a
+        .language
+        .as_deref()
+        .map(|l| l.trim().to_ascii_lowercase())
+        .filter(|l| !l.is_empty());
+    let language = match (requested, engine) {
+        (Some(l), _) => Some(l),
+        (None, ds_config::TtsEngine::BuiltIn) => {
+            Some(model.descriptor().default_language.to_string())
+        }
+        // System with no explicit language: NO filter — never inherit the built-in
+        // model default (OmniVoice's "auto" would filter every system voice out).
+        (None, ds_config::TtsEngine::System) => None,
+    };
+    if engine == ds_config::TtsEngine::BuiltIn {
+        let lang = language.as_deref().unwrap_or_default();
+        if !model.descriptor().supports_language(lang) {
+            return Err(format!(
+                "language `{lang}` is not supported by {}",
+                model.as_str()
+            ));
+        }
+    }
+    let mut groups = voice_groups(engine, model, language.as_deref());
+    let pool = match engine {
+        ds_config::TtsEngine::BuiltIn => cfg.voices_for(model).to_vec(),
+        ds_config::TtsEngine::System => cfg.tts_voices.system.clone(),
+    };
     let languages: Vec<Value> = groups
         .iter_mut()
         .map(|(subtag, voices)| {
@@ -220,8 +248,18 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
         .collect();
     let out = json!({
         "engine": engine.as_str(),
-        "language": "en",
+        "model": (engine == ds_config::TtsEngine::BuiltIn).then(|| model.as_str()),
+        "language": language,
         "languages": languages,
+        "models": ds_config::TTS_MODELS.iter().map(|descriptor| json!({
+            "id": descriptor.id,
+            "name": descriptor.display_name,
+            "default_language": descriptor.default_language,
+            "languages": descriptor.languages,
+            "providers": descriptor.providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
+            "supports_rate": descriptor.supports_rate,
+            "supports_full_duplex": descriptor.supports_full_duplex,
+        })).collect::<Vec<_>>(),
     });
     Ok(out)
 }
@@ -250,10 +288,17 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         },
         None => json!({ "running": false, "note": "cannot resolve engine socket" }),
     };
+    let resolved_tts = cfg.resolved_tts();
+    let voices = match resolved_tts {
+        Some(ds_config::TtsEngine::BuiltIn) => cfg.active_voices().to_vec(),
+        Some(ds_config::TtsEngine::System) => cfg.tts_voices.system.clone(),
+        None => Vec::new(),
+    };
     let mut out = json!({
-        "engine": cfg.resolved_tts().map(|e| e.as_str()).unwrap_or("off"),
-        // Shared pool — agents each claim one entry; no single "current" voice.
-        "voices": cfg.active_voices().to_vec(),
+        "engine": resolved_tts.map(|e| e.as_str()).unwrap_or("off"),
+        "model": cfg.tts_model.as_str(),
+        "language": "auto",
+        "voices": voices,
         "rate": cfg.rate,
         "state": state,
     });
@@ -677,6 +722,8 @@ mod drift {
             "voices",
             serde_json::to_value(VoicesArgs {
                 tts_engine: Some(TtsEngine::BuiltIn),
+                tts_model: Some(TtsModel::Kokoro),
+                language: Some("en".into()),
             })
             .unwrap(),
         );
@@ -1043,6 +1090,18 @@ mod voices_tests {
         assert_eq!(out["language"], json!("en"));
     }
 
+    #[test]
+    fn language_argument_is_trimmed_and_lowercased() {
+        // Registry-only model (chatterbox) keeps this disk-free.
+        let (_dir, paths) = rooted_paths();
+        let out = call_voices(
+            &paths,
+            &json!({ "tts_engine": "built_in", "tts_model": "chatterbox", "language": " RU " }),
+        )
+        .expect("normalized language is accepted");
+        assert_eq!(out["language"], json!("ru"));
+    }
+
     /// Regression: `"off"` used to deserialize to deleted `TtsEngine::Off` and return an
     /// empty catalog; schema never listed it — now hard-errors at deserialize (parity).
     #[test]
@@ -1065,7 +1124,7 @@ mod voices_tests {
         let (_dir, paths) = rooted_paths();
         std::fs::write(
             &paths.config_toml,
-            "tts_voices = [\"am_michael\", \"bf_emma\"]\n",
+            "[tts_voices]\nkokoro = [\"am_michael\", \"bf_emma\"]\n",
         )
         .unwrap();
         let out = call_voices(&paths, &json!({ "tts_engine": "built_in" }))

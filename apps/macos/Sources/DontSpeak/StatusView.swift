@@ -131,7 +131,7 @@ struct StatusView: View {
                         PlatterDivider()
                         EngineStatRow(
                             role: L.t("status.engine.role_diar"),
-                            detail: L.t("status.engine.pyannote"),
+                            detail: L.t("status.engine.sortformer"),
                             status: core.diarization.status
                         ) { DiarStatsContent() }
                     }
@@ -157,12 +157,25 @@ struct StatusView: View {
                 status: core.tts.status
             ) { TtsStatsContent() }
         case "built_in":
-            EngineStatRow(
-                role: L.t("status.engine.role_tts"), detail: L.t("status.engine.kokoro"),
-                status: core.tts.status
-            ) { TtsStatsContent() }
+            if let model = core.tts.model {
+                EngineStatRow(
+                    role: L.t("status.engine.role_tts"), detail: ttsModelName(model),
+                    status: core.tts.status
+                ) { TtsStatsContent() }
+            } else {
+                OffEngineRow(role: L.t("status.engine.role_tts"))
+            }
         default:
             OffEngineRow(role: L.t("status.engine.role_tts"))
+        }
+    }
+
+    private func ttsModelName(_ model: TtsModel) -> String {
+        switch model {
+        case .kokoro: L.t("status.engine.kokoro")
+        case .chatterbox: L.t("status.engine.chatterbox")
+        case .qwen: L.t("status.engine.qwen")
+        case .omnivoice: L.t("status.engine.omnivoice")
         }
     }
 
@@ -489,7 +502,7 @@ private struct DiarStatsContent: View {
                 value: s.speakers.joined(separator: ", "))
             LabeledContent(
                 L.t("status.diarization_sensitivity"),
-                value: String(format: "%.2f", s.clusteringThreshold))
+                value: String(format: "%.2f", s.activityThreshold))
         }
     }
 }

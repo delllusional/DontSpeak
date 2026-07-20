@@ -138,6 +138,18 @@ sha2 = "0.11"
 # (ds-model::update_check), so "is a newer release out" is a real semver compare, not a
 # string compare (which would misorder e.g. "0.9.0" vs "0.10.0").
 semver = "1"
+# HF tokenizer runtime for the pinned Chatterbox, Qwen, and OmniVoice tokenizers
+# (Apache-2.0). Default features pull native onig; this fancy-regex configuration is
+# pure Rust and covers inference (training-only paths are unused).
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+# Offline language identification over the exact multilingual TTS language set. Limiting
+# model features keeps the detector smaller and more accurate than the all-language build.
+lingua = { version = "1.8", default-features = false, features = [
+    "arabic", "bokmal", "chinese", "danish", "dutch", "english", "finnish",
+    "french", "german", "greek", "hebrew", "hindi", "italian", "japanese",
+    "korean", "malay", "polish", "portuguese", "russian", "spanish", "swahili",
+    "swedish", "turkish",
+] }
 # RFC 3339 provider reset timestamps. Parsing only; native hosts format in the
 # user's locale/time zone.
 time = { version = "0.3", features = ["parsing"] }
@@ -191,8 +203,8 @@ tar = "0.4"
 # Win32 API bindings. NO features here — each member opts into exactly the Win32
 # feature gates it calls; cargo unifies them additively across the workspace.
 windows = "0.62"
-# Runtime dlopen of dylibs we deliberately don't link at build time (the FluidAudio
-# Core ML / ANE shim, NVML) — resolved by env var/path, like ort's load-dynamic.
+# Runtime dlopen of dylibs we deliberately don't link at build time (the MLX Audio
+# shim, NVML) — resolved by env var/path, like ort's load-dynamic.
 libloading = "0.9"
 # Read Claude Code's OAuth JSON from its macOS Keychain item without allowing
 # authentication UI. Other platforms keep using the protected credentials file.

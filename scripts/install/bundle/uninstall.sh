@@ -81,9 +81,8 @@ case "$(uname -s)" in
     for b in dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
-    # Current config/state roots + the legacy ProjectDirs layout; the ONNX model cache; the
-    # FluidAudio Core ML / ANE model cache (Kokoro/Parakeet/diarization — its OWN ~900 MB
-    # dir, separate from our model_dir); OS app caches.
+    # Current config/state roots + the legacy ProjectDirs layout, model cache, and OS app caches.
+    # FluidAudio dirs: the pre-MLX builds' Core ML/ANE model cache — kept so upgraders get cleaned.
     rm -rf \
       "$H/Library/Application Support/DontSpeak" \
       "$H/Library/Application Support/org.dontspeak.DontSpeak" \

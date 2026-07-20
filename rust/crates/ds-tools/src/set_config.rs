@@ -4,9 +4,62 @@ use serde::{Deserialize, Serialize};
 
 use ds_config::{
     CancelSpeechScope, CaptureGain, DiarizerProvider, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine, default_provider,
-    normalize_tray,
+    TtsEngine, TtsModel, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
+    default_provider, normalize_tray,
 };
+
+fn de_opt_tts_model<'de, D>(deserializer: D) -> Result<Option<TtsModel>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|token| {
+            TtsModel::parse(&token).ok_or_else(|| {
+                D::Error::custom("tts_model must be kokoro, chatterbox, qwen, or omnivoice")
+            })
+        })
+        .transpose()
+}
+
+/// Partial update for the nested `tts_voices` config object.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TtsVoiceUpdates {
+    pub system: Option<Vec<String>>,
+    pub kokoro: Option<Vec<String>>,
+    pub chatterbox: Option<Vec<String>>,
+    pub qwen: Option<Vec<String>>,
+    pub omnivoice: Option<Vec<String>>,
+}
+
+struct TtsVoiceUpdateParts {
+    system: Option<Vec<String>>,
+    models: [(TtsModel, Option<Vec<String>>); 4],
+}
+
+impl TtsVoiceUpdates {
+    fn is_empty(&self) -> bool {
+        self.system.is_none()
+            && self.kokoro.is_none()
+            && self.chatterbox.is_none()
+            && self.qwen.is_none()
+            && self.omnivoice.is_none()
+    }
+
+    fn into_updates(self) -> TtsVoiceUpdateParts {
+        TtsVoiceUpdateParts {
+            system: self.system,
+            models: [
+                (TtsModel::Kokoro, self.kokoro),
+                (TtsModel::Chatterbox, self.chatterbox),
+                (TtsModel::Qwen, self.qwen),
+                (TtsModel::OmniVoice, self.omnivoice),
+            ],
+        }
+    }
+}
 
 /// Single source for set_config (schema/parse/apply can't drift). Guards:
 /// parse (`deny_unknown_fields` + strict enums); apply (no `..`); schema name parity test.
@@ -14,14 +67,15 @@ use ds_config::{
 #[serde(default, deny_unknown_fields)]
 pub struct SetConfigArgs {
     pub rate: Option<f32>,
-    pub tts_voices: Option<Vec<String>>,
-    pub tts_system_voice: Option<String>,
+    pub tts_voices: Option<TtsVoiceUpdates>,
+    #[serde(deserialize_with = "de_opt_tts_model")]
+    pub tts_model: Option<TtsModel>,
     #[serde(deserialize_with = "de_opt_pref_tts_engine")]
     pub tts_engine: Option<Vec<TtsEngine>>,
     #[serde(deserialize_with = "de_opt_pref_stt_engine")]
     pub stt_engine: Option<Vec<SttEngine>>,
     pub diarizer: Option<Vec<DiarizerProvider>>,
-    pub cluster_threshold: Option<f32>,
+    pub activity_threshold: Option<f32>,
     pub match_threshold: Option<f32>,
     pub speaker_lock: Option<bool>,
     pub full_duplex: Option<bool>,
@@ -41,16 +95,39 @@ pub struct SetConfigArgs {
 
 impl SetConfigArgs {
     /// Merge fields onto `cfg`; `key=value` tokens. Clamps rate/gain; rejects empty voices.
-    /// Exhaustive destructure (no `..`) — new fields fail at compile.
     pub fn apply(self, cfg: &mut VoiceConfig) -> Result<Vec<String>, String> {
+        // Enumerate Kokoro disk ids only when this call changes the Kokoro voice pool —
+        // non-Kokoro applies and rejected-before-validation shapes stay disk-free.
+        let needs_ids = self
+            .tts_voices
+            .as_ref()
+            .and_then(|voices| voices.kokoro.as_ref())
+            .is_some_and(|voices| !voices.is_empty());
+        let kokoro_ids = needs_ids
+            .then(ds_voices::enumerate::kokoro_disk_voice_ids)
+            .flatten();
+        self.apply_with(cfg, kokoro_ids.as_deref())
+    }
+
+    /// [`apply`](Self::apply) with the Kokoro voice-id source injected (hermetic tests).
+    /// `Some(ids)` = enumerated disk voices: pool ids must be members AND match the
+    /// English language family. `None` = fresh install (no voices bin / MLX voices dir
+    /// yet): accept any id whose `kokoro_language` family matches English,
+    /// so lazily-downloaded pack voices aren't rejected against the static fallback.
+    /// Exhaustive destructure (no `..`) — new fields fail at compile.
+    pub fn apply_with(
+        self,
+        cfg: &mut VoiceConfig,
+        kokoro_ids: Option<&[String]>,
+    ) -> Result<Vec<String>, String> {
         let SetConfigArgs {
             rate,
             tts_voices,
-            tts_system_voice,
+            tts_model,
             tts_engine,
             stt_engine,
             diarizer,
-            cluster_threshold,
+            activity_threshold,
             match_threshold,
             speaker_lock,
             full_duplex,
@@ -69,32 +146,66 @@ impl SetConfigArgs {
         } = self;
 
         let mut changes = Vec::new();
+        // The call's FINAL engine: an explicit `tts_engine` arg wins, else the config
+        // resolution. System TTS consumes `rate` (and ignores the model), so the
+        // model-descriptor gates below apply only when the final engine is `built_in`.
+        let final_engine = match &tts_engine {
+            Some(pref) => pref.first().copied(),
+            None => cfg.resolved_tts(),
+        };
+        if let Some(model) = tts_model {
+            cfg.tts_model = model;
+            changes.push(format!("tts_model={}", model.as_str()));
+        }
         if let Some(r) = rate {
+            if final_engine == Some(TtsEngine::BuiltIn) && !cfg.tts_model.descriptor().supports_rate
+            {
+                return Err(format!(
+                    "rate is not supported by {}",
+                    cfg.tts_model.as_str()
+                ));
+            }
             let r = r.clamp(0.5, 2.0);
             cfg.rate = r;
             changes.push(format!("rate={r}"));
         }
-        if let Some(vs) = tts_voices {
-            if vs.is_empty() || vs.iter().any(|s| s.trim().is_empty()) {
-                return Err("`tts_voices` needs non-empty voice ids".into());
+        if let Some(voice_updates) = tts_voices {
+            if voice_updates.is_empty() {
+                return Err("`tts_voices` needs at least one engine or model".into());
             }
-            // English-only: Kokoro language family is the leading id char (`a`/`b`).
-            // Gate for the persistent pool (`voices` surfaces English only).
-            if let Some(bad) = vs
-                .iter()
-                .find(|s| !matches!(s.chars().next(), Some('a') | Some('b')))
-            {
-                return Err(format!(
-                    "`{bad}` is not English (ids start with a/b); see voices"
-                ));
+            let TtsVoiceUpdateParts { system, models } = voice_updates.into_updates();
+            if let Some(system) = system {
+                if system.iter().any(|voice| voice.trim().is_empty()) {
+                    return Err("`tts_voices.system` needs non-empty voice names".into());
+                }
+                changes.push(format!("tts_voices.system=[{}]", system.join(", ")));
+                cfg.tts_voices.system = system;
             }
-            changes.push(format!("tts_voices=[{}]", vs.join(", ")));
-            cfg.tts_voices = vs;
-        }
-        if let Some(v) = tts_system_voice {
-            // Empty = OS default; don't reject.
-            changes.push(format!("tts_system_voice={v}"));
-            cfg.tts_system_voice = v;
+            for (model, voices) in models {
+                let Some(voices) = voices else { continue };
+                let key = format!("tts_voices.{}", model.as_str());
+                if voices.is_empty() || voices.iter().any(|voice| voice.trim().is_empty()) {
+                    return Err(format!("`{key}` needs non-empty voice ids"));
+                }
+                let descriptor = model.descriptor();
+                if let Some(bad) = voices.iter().find(|voice| {
+                    if model != TtsModel::Kokoro {
+                        return !descriptor.voices.contains(&voice.as_str());
+                    }
+                    let family_ok = ds_voices::enumerate::kokoro_language(voice) == "en";
+                    match kokoro_ids {
+                        Some(known) => !known.contains(voice) || !family_ok,
+                        None => !family_ok,
+                    }
+                }) {
+                    return Err(format!(
+                        "`{bad}` is not a {} voice; see voices",
+                        model.as_str()
+                    ));
+                }
+                changes.push(format!("{key}=[{}]", voices.join(", ")));
+                *cfg.voices_for_mut(model) = voices;
+            }
         }
         if let Some(pref) = tts_engine {
             // PREFERENCE not ladder: Some([]) = `"off"`, Some([engine]) = force that one.
@@ -156,10 +267,10 @@ impl SetConfigArgs {
             changes.push(format!("diarizer=[{}]", toks.join(",")));
             cfg.diarizer = uniq;
         }
-        if let Some(t) = cluster_threshold {
-            let t = t.clamp(0.5, 0.9);
-            cfg.cluster_threshold = t;
-            changes.push(format!("cluster_threshold={t}"));
+        if let Some(t) = activity_threshold {
+            let t = t.clamp(0.1, 0.9);
+            cfg.activity_threshold = t;
+            changes.push(format!("activity_threshold={t}"));
         }
         if let Some(t) = match_threshold {
             let t = t.clamp(0.0, 1.0);
@@ -171,6 +282,14 @@ impl SetConfigArgs {
             changes.push(format!("speaker_lock={b}"));
         }
         if let Some(b) = full_duplex {
+            if b && final_engine == Some(TtsEngine::BuiltIn)
+                && !cfg.tts_model.descriptor().supports_full_duplex
+            {
+                return Err(format!(
+                    "full_duplex is not supported by {}",
+                    cfg.tts_model.as_str()
+                ));
+            }
             cfg.full_duplex = b;
             changes.push(format!("full_duplex={b}"));
         }
@@ -295,7 +414,7 @@ mod tests {
 
     #[test]
     fn set_config_args_strict_enum_errors_on_bad_token() {
-        // Strict (unlike config-file fail-open): bad scalar + non-string shape both reject.
+        // MCP set_config is strict; config-file deserialize is fail-open.
         let err = serde_json::from_value::<SetConfigArgs>(serde_json::json!({
             "stt_engine": "deepgram"
         }))
@@ -319,7 +438,6 @@ mod tests {
         assert_eq!(cfg.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert_eq!(changes, vec!["narrate=[shorts,digests]".to_string()]);
 
-        // Strict (unlike fail-open config file).
         let err =
             serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "narrate": ["loud"] }))
                 .unwrap_err();
@@ -460,24 +578,224 @@ mod tests {
     }
 
     #[test]
+    fn set_config_model_and_voice_follow_the_registry() {
+        let mut cfg = VoiceConfig::default();
+        let ok: SetConfigArgs = serde_json::from_value(serde_json::json!({
+            "tts_model": "chatterbox",
+            "tts_voices": { "chatterbox": ["default"] }
+        }))
+        .unwrap();
+        let changes = ok.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.tts_model, TtsModel::Chatterbox);
+        assert_eq!(cfg.tts_voices.chatterbox, ["default"]);
+        assert_eq!(
+            changes,
+            vec!["tts_model=chatterbox", "tts_voices.chatterbox=[default]"]
+        );
+
+        let bad: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "chatterbox": ["ru_boris"] } }),
+        )
+        .unwrap();
+        let err = bad.apply(&mut cfg).unwrap_err();
+        assert!(
+            err.contains("ru_boris") && err.contains("chatterbox"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn set_config_rejects_model_names_as_engines() {
+        let err = serde_json::from_value::<SetConfigArgs>(
+            serde_json::json!({ "tts_engine": "chatterbox" }),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must be one of"), "got: {err}");
+    }
+
+    #[test]
+    fn set_config_system_voice_pool_accepts_names_and_os_default() {
+        let mut cfg = VoiceConfig::default();
+        let named: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "system": ["Ava", "Samantha"] } }),
+        )
+        .unwrap();
+        assert_eq!(
+            named.apply(&mut cfg).unwrap(),
+            ["tts_voices.system=[Ava, Samantha]"]
+        );
+        assert_eq!(cfg.tts_voices.system, ["Ava", "Samantha"]);
+
+        let default_voice: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "system": [] } })).unwrap();
+        assert_eq!(
+            default_voice.apply(&mut cfg).unwrap(),
+            ["tts_voices.system=[]"]
+        );
+        assert!(cfg.tts_voices.system.is_empty());
+    }
+
+    #[test]
     fn set_config_args_empty_voices_rejected() {
         let mut cfg = VoiceConfig::default();
         let args: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": [] })).unwrap();
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": [] } })).unwrap();
         assert!(args.apply(&mut cfg).is_err());
     }
 
     #[test]
     fn set_config_args_non_english_voices_rejected() {
-        // English-only: non-`a`/`b` Kokoro ids rejected.
+        // Hermetic: a FIXED enumerated-id list via apply_with (never the developer's live
+        // model cache). English-only pool: a non-`a`/`b` family id is rejected even when
+        // enumerated, and an id absent from the enumeration is rejected too.
+        let known: Vec<String> = ["af_sarah", "bm_george", "ef_dora"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let mut cfg = VoiceConfig::default();
         let bad: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": ["ef_dora"] })).unwrap();
-        assert!(bad.apply(&mut cfg).is_err());
-
-        let good: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": ["af_sarah", "bm_george"] }))
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["ef_dora"] } }))
                 .unwrap();
-        assert!(good.apply(&mut cfg).is_ok());
+        assert!(bad.apply_with(&mut cfg, Some(&known)).is_err());
+
+        let unknown: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["af_nova"] } }))
+                .unwrap();
+        assert!(unknown.apply_with(&mut cfg, Some(&known)).is_err());
+
+        let good: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "kokoro": ["af_sarah", "bm_george"] } }),
+        )
+        .unwrap();
+        assert!(good.apply_with(&mut cfg, Some(&known)).is_ok());
+        assert_eq!(cfg.tts_voices.kokoro, ["af_sarah", "bm_george"]);
+    }
+
+    #[test]
+    fn set_config_args_fresh_install_accepts_family_valid_kokoro_ids() {
+        // No enumeration source (None = fresh install, no voices bin / MLX dir yet):
+        // lazily-downloadable pack ids with a matching English family prefix are accepted
+        // instead of being rejected against the static fallback list; wrong-language and
+        // unknown-family shapes still reject.
+        let mut cfg = VoiceConfig::default();
+        let ok: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "kokoro": ["af_nova", "bm_lewis"] } }),
+        )
+        .unwrap();
+        let changes = ok.apply_with(&mut cfg, None).expect("pack ids accepted");
+        assert_eq!(cfg.tts_voices.kokoro, ["af_nova", "bm_lewis"]);
+        assert_eq!(
+            changes,
+            vec!["tts_voices.kokoro=[af_nova, bm_lewis]".to_string()]
+        );
+
+        let wrong_language: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["ef_dora"] } }))
+                .unwrap();
+        assert!(wrong_language.apply_with(&mut cfg, None).is_err());
+
+        let unknown_family: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["xq_bogus"] } }))
+                .unwrap();
+        assert!(unknown_family.apply_with(&mut cfg, None).is_err());
+    }
+
+    #[test]
+    fn same_model_set_leaves_pool_untouched() {
+        let mut cfg = VoiceConfig {
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_heart".into()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let args: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_model": "kokoro" })).unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.tts_voices.kokoro, ["af_heart"]);
+        assert_eq!(changes, vec!["tts_model=kokoro".to_string()]);
+    }
+
+    #[test]
+    fn model_change_preserves_per_model_pools() {
+        let mut cfg = VoiceConfig {
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_heart".into()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let args: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_model": "omnivoice" })).unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.tts_model, TtsModel::OmniVoice);
+        assert_eq!(cfg.tts_voices.kokoro, ["af_heart"]);
+        assert_eq!(cfg.tts_voices.omnivoice, ["warm, clear female voice"]);
+        assert_eq!(changes, vec!["tts_model=omnivoice"]);
+    }
+
+    /// Forced `built_in` in the same call: model-descriptor gates apply — even before the
+    /// (later) engine-usability check runs for the rate arm.
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn rate_and_full_duplex_reject_for_built_in_chatterbox() {
+        let mut cfg = VoiceConfig {
+            tts_model: TtsModel::Chatterbox,
+            ..VoiceConfig::default()
+        };
+        let rate: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_engine": "built_in", "rate": 1.3 }))
+                .unwrap();
+        let err = rate.apply(&mut cfg).unwrap_err();
+        assert!(err.contains("rate is not supported"), "{err}");
+
+        let duplex: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_engine": "built_in", "full_duplex": true }),
+        )
+        .unwrap();
+        let err = duplex.apply(&mut cfg).unwrap_err();
+        assert!(err.contains("full_duplex is not supported"), "{err}");
+    }
+
+    /// With the call's FINAL engine off, `rate`/`full_duplex` are inert persisted config —
+    /// settable regardless of the built-in model's descriptor (System consumes cfg.rate,
+    /// off consumes nothing).
+    #[test]
+    fn rate_and_full_duplex_are_settable_when_the_final_engine_is_not_built_in() {
+        let mut cfg = VoiceConfig {
+            tts_model: TtsModel::Chatterbox,
+            ..VoiceConfig::default()
+        };
+        let args: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_engine": "off", "rate": 1.3, "full_duplex": true }),
+        )
+        .unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.rate, 1.3);
+        assert!(cfg.full_duplex);
+        assert!(changes.contains(&"rate=1.3".to_string()), "{changes:?}");
+        assert!(
+            changes.contains(&"tts_engine=off".to_string()),
+            "{changes:?}"
+        );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn rate_is_settable_when_the_call_switches_to_system() {
+        let mut cfg = VoiceConfig {
+            tts_model: TtsModel::Chatterbox,
+            ..VoiceConfig::default()
+        };
+        let args: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_engine": "system", "rate": 1.3 }))
+                .unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.rate, 1.3);
+        assert!(changes.contains(&"rate=1.3".to_string()), "{changes:?}");
+        assert!(
+            changes.contains(&"tts_engine=system".to_string()),
+            "{changes:?}"
+        );
     }
 }

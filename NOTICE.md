@@ -29,6 +29,32 @@ DontSpeak's MIT licensing.
   their own source files remain under MPL-2.0.
 - **option-ext** (a transitive dependency of `directories`, used by `ds-config` for
   OS data-dir resolution) — **MPL-2.0**. Used unmodified.
+- **tokenizers** (Hugging Face, used by `ds-tts` for the Chatterbox, Qwen, and OmniVoice
+  text frontends; built with default features off, so optional native `onig` is not compiled)
+  and its pure-Rust `esaxx-rs` dependency — **Apache-2.0**.
+
+## Swift packages and adapted source
+
+- **MLX Audio Swift** (built-in TTS: Kokoro, Chatterbox, Qwen3-TTS, OmniVoice; Parakeet
+  STT; Sortformer diarization) — **MIT**.
+  A copy of the pinned tag's license is shipped at `licenses/mlx-audio-swift-MIT.txt`.
+  https://github.com/Blaizzy/mlx-audio-swift
+- **MLX Swift** (Apple Silicon array and neural-network runtime) — **MIT**.
+  A copy of the pinned tag's license is shipped at `licenses/mlx-swift-MIT.txt`.
+  https://github.com/ml-explore/mlx-swift
+- **MLX Swift LM** (shared model-loading and language-model layers) — **MIT**.
+- **EventSource** and **yyjson** (transitive networking and JSON support) — **MIT**.
+- **Swift Transformers**, **Swift Hugging Face**, **Swift Xet**, **Swift Numerics**,
+  **Swift Algorithms**, **Swift Collections**, **Swift Crypto**, **Swift ASN.1**,
+  **Swift Certificates**, **Swift Configuration**, **Swift Distributed Tracing**,
+  **Swift HTTP Types**, **Swift HTTP Structured Headers**, **Swift Jinja**,
+  **Swift Log**, **Swift NIO** and its linked companion packages, **Swift Atomics**,
+  **Swift Async Algorithms**, **Swift Service Context**, **Swift Service Lifecycle**,
+  **Swift System**, and **Async HTTP Client** — **Apache-2.0**. The app bundle copies
+  every available upstream `LICENSE` and `NOTICE` file from the resolved Swift package
+  checkouts. SwiftSyntax is used only by a build-time macro target and is not shipped.
+- The WeSpeaker feature-extraction implementation is adapted from **speech-swift** —
+  **Apache-2.0**. https://github.com/soniqo/speech-swift
 
 ### Other permissive licenses in the dependency graph
 
@@ -90,13 +116,20 @@ Each carries its upstream license:
 
 - **ONNX Runtime** (Microsoft) — **MIT**.
 - **Kokoro-82M** TTS model (hexgrad) — **Apache-2.0**.
+- **Chatterbox Multilingual** TTS model and default reference voice (Resemble AI,
+  onnx-community export) — **MIT**. https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX
+- **Qwen3-TTS 12 Hz 0.6B CustomVoice** (Qwen), downloaded as either the onnx-community
+  int4 export or the mlx-community 8-bit conversion — **Apache-2.0**.
+  https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+- **OmniVoice / Prince-1** TTS model (onnx-community int4 export) — **Apache-2.0**.
+  https://huggingface.co/onnx-community/OmniVoice-Onnx
 - **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
   words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license
   but documents no training record. The pinned repository's script suggests training from local
   Misaki dictionaries plus regular plurals mined from WikiText, but it does not establish the
   exact lineage of the published en-US weights and is committed with its British-dictionary flag
   enabled. The model's precise training provenance therefore remains unverified.
-- **Parakeet TDT 0.6b v2** STT model (NVIDIA), the macOS Core ML / ANE path — **CC-BY-4.0**.
+- **Parakeet TDT 0.6b v2** STT model (NVIDIA), converted for the macOS MLX path — **CC-BY-4.0**.
   Attribution is required: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
 - **stt_en_fastconformer_hybrid_large_streaming_1040ms** STT model (NVIDIA NeMo), the
   cross-platform ONNX path — **CC-BY-4.0**. The streaming ONNX export is by csukuangfj /
@@ -107,10 +140,11 @@ Each carries its upstream license:
   of SpeechBrain's `sepformer-wsj02mix` model, published with provenance at
   https://huggingface.co/dellusional/sepformer-wsj02mix-int8-onnx. SpeechBrain,
   **Apache-2.0**. https://github.com/speechbrain/speechbrain
-- **pyannote** speaker-segmentation model — **MIT**.
-- **WeSpeaker** speaker-embedding model — **Apache-2.0**.
-- **FluidAudio** (Apple Neural Engine inference for Kokoro/Parakeet/diarization) —
-  **Apache-2.0**. https://github.com/FluidInference/FluidAudio
+- **Streaming Sortformer 4-speaker v2.1** diarization model (NVIDIA), converted to MLX —
+  **NVIDIA Open Model License**.
+  https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1
+- **WeSpeaker VoxCeleb ResNet34-LM** speaker-embedding model, converted to MLX — **MIT**.
+  https://huggingface.co/mlx-community/wespeaker-voxceleb-resnet34-LM
 - **NVIDIA CUDA** execution-provider runtime (Windows/Linux GPU path, x86_64) — redistributed
   by the user under NVIDIA's CUDA redistributable EULA.
 

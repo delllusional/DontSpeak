@@ -1,5 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // engine pipes stdio; no console
-//! Kokoro synth + playback helper.
+//! Built-in TTS/STT warm helper (registry model + Parakeet) and one-shot synth.
 //!
 //! - one-shot: `ds-helper <text> <voice> <rate>` — own process group (pidfile/barge)
 //! - `--serve`: load once; NDJSON stdin; `READY`/`DONE`/`ERR`; listen ends `LDONE`

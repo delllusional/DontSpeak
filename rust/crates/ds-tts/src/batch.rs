@@ -30,7 +30,7 @@ fn atomic_parts(phonemes: &str) -> Vec<String> {
 pub fn split_phonemes(phonemes: &str) -> Vec<String> {
     // Constant cap, greedy across sentences (preserve inter-sentence pause).
     // Unpunctuated runs can stay oversized after pack — hard_split_words so
-    // engines never see over-cap (ONNX truncates silently; Core ML drops whole).
+    // engines never see over-cap inputs.
     pack_batches(
         phonemes,
         MAX_PHONEME_LENGTH,
@@ -179,16 +179,25 @@ fn pack_batches(
     batched
 }
 
-/// First ramped batch budget (phonemes). Grows geometrically to `MAX_PHONEME_LENGTH`.
+/// First low-latency batch budget. Every built-in frontend starts here; the unit is
+/// frontend-specific (phonemes for Kokoro, characters for the plain-text models).
 pub const STREAM_FIRST_BUDGET: usize = 80;
+/// Shared floor that avoids unstable, tiny first or trailing batches.
+pub const STREAM_MIN_BUDGET: usize = 64;
 /// Growth factor 1.4 = 7/5.
 const STREAM_GROWTH_NUM: usize = 7;
 const STREAM_GROWTH_DEN: usize = 5;
 
+/// Advance the shared low-latency batch schedule without exceeding a model's input cap.
+/// Keeping this policy here prevents the Kokoro and plain-text frontends from drifting.
+pub fn grow_stream_budget(current: usize, hard_cap: usize) -> usize {
+    (current * STREAM_GROWTH_NUM / STREAM_GROWTH_DEN).min(hard_cap)
+}
+
 /// Floor (phonemes). Sub-floor batches pick a short-utterance style row
 /// (`synth::style_row` by token count) → compressed, high-pitched prosody.
 /// Never flush below floor; fold short tail into previous. ≤ [`STREAM_FIRST_BUDGET`].
-const MIN_PHONEME_LENGTH: usize = 64;
+const MIN_PHONEME_LENGTH: usize = STREAM_MIN_BUDGET;
 const _: () = assert!(
     MIN_PHONEME_LENGTH <= STREAM_FIRST_BUDGET,
     "the min-batch floor must not exceed the first-batch budget"
@@ -212,7 +221,7 @@ pub fn stream_batches(phonemes: &str) -> Vec<String> {
         STREAM_FIRST_BUDGET,
         MAX_PHONEME_LENGTH,
         MIN_PHONEME_LENGTH,
-        |b| (b * STREAM_GROWTH_NUM / STREAM_GROWTH_DEN).min(MAX_PHONEME_LENGTH),
+        |b| grow_stream_budget(b, MAX_PHONEME_LENGTH),
         true,
     )
     .into_iter()
@@ -250,7 +259,7 @@ mod tests {
     #[test]
     fn split_phonemes_hard_splits_a_long_run_with_no_punctuation() {
         // Unpunctuated run = one atomic part; hard-split must still bound (ONNX truncates,
-        // Core ML drops). Expanded digit strings hit this path.
+        // MLX rejects). Expanded digit strings hit this path.
         let run = "wʌn tu θɹiː foːɹ faɪv sɪks sɛvn eɪt naɪn tɛn ".repeat(20); // ~460 chars, no marks
         assert!(run.chars().count() > MAX_PHONEME_LENGTH);
         let batches = split_phonemes(&run);

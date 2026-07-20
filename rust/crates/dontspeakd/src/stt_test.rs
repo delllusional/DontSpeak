@@ -33,7 +33,7 @@ impl TestSession {
     /// Run a recognition session, streaming responses via `emit`. Blocks on the
     /// calling (connection) thread until `stop()` ends the helper's listen.
     pub fn run(&self, emit: &mut dyn FnMut(&Response)) {
-        // Provider-aware gate: on the ANE (Core ML) path the ONNX model files are never
+        // Provider-aware gate: on the MLX path the ONNX model files are never
         // downloaded, so the raw ONNX-only `parakeet_present()` would wrongly block here.
         let parakeet_ok = ds_config::Paths::resolve()
             .map(|p| crate::config_gate::parakeet_present_for(&ds_config::VoiceConfig::load(&p)))

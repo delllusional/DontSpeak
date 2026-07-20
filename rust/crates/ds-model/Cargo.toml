@@ -27,11 +27,11 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 # Compare the running version against the latest GitHub release tag (update_check).
 semver = { workspace = true }
-# ONE GPU-aware ORT SessionBuilder (`cuda_session_builder`) shared by Kokoro TTS + Parakeet STT,
+# ONE GPU-aware ORT SessionBuilder (`cuda_session_builder`) shared by ONNX TTS + Parakeet STT,
 # so the CUDA-EP registration + CPU-fallback logic lives here, not copy-pasted per engine.
 ort = { workspace = true }
 # Parse the HuggingFace tree API (file list + sizes + LFS oids) so we self-manage the
-# FluidAudio Core ML downloads at a pinned revision (see coreml_repo.rs).
+# MLX Audio model downloads at pinned revisions (see mlx_repo.rs).
 serde_json = { workspace = true }
 # Extract libonnxruntime.dylib from the microsoft/pyke .tgz (Kokoro route A).
 flate2 = { workspace = true }
@@ -51,9 +51,9 @@ windows = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_F
 zip = { workspace = true }
 libc = { workspace = true }
 
-# macOS: the shared FluidAudio Core ML / ANE shim loader (shim.rs) dlopens libdskokoro at
-# runtime (resolved via DSKOKORO_DYLIB_PATH), like ort's load-dynamic onnxruntime. Both the
-# STT backends (ds-stt) and the apple-native Kokoro TTS backend (ds-tts) go through it.
+# macOS: the shared MLX Audio shim loader (mlx_shim.rs) dlopens libdontspeak_mlx at
+# runtime (resolved via DONTSPEAK_MLX_DYLIB_PATH), like ort's load-dynamic onnxruntime. Both the
+# STT backends (ds-stt) and the MLX Kokoro TTS backend (ds-tts) go through it.
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = { workspace = true }
 

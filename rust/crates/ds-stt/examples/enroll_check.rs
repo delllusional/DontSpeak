@@ -1,26 +1,26 @@
 //! On-device check for the enrollment primitive: embed three clips (two of the SAME
 //! voice, one different), enroll the first as "Alex", and confirm `match_speaker`
 //! recognizes the same voice and rejects the different one. macOS only; needs
-//! `DSKOKORO_DYLIB_PATH`.
+//! `DONTSPEAK_MLX_DYLIB_PATH`.
 //!
-//!   DSKOKORO_DYLIB_PATH=…/libdskokoro.dylib cargo run -p ds-stt --example enroll_check -- \
+//!   DONTSPEAK_MLX_DYLIB_PATH=…/libdontspeak_mlx.dylib cargo run -p ds-stt --example enroll_check -- \
 //!     enroll.wav same.wav different.wav
 
 #[cfg(target_os = "macos")]
 fn main() {
     use ds_config::speakers::SpeakerStore;
-    use ds_stt::diarize::{CoremlDiarizer, Diarizer, cosine, match_speaker};
+    use ds_stt::diarize::{Diarizer, MlxDiarizer, cosine, match_speaker};
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 3 || std::env::var_os("DSKOKORO_DYLIB_PATH").is_none() {
+    if args.len() != 3 || std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH").is_none() {
         eprintln!(
-            "usage: DSKOKORO_DYLIB_PATH=… enroll_check <enroll.wav> <same.wav> <different.wav>"
+            "usage: DONTSPEAK_MLX_DYLIB_PATH=… enroll_check <enroll.wav> <same.wav> <different.wav>"
         );
         std::process::exit(2);
     }
 
-    let mut d = CoremlDiarizer::new();
-    let embed = |d: &mut CoremlDiarizer, path: &str| -> Vec<f32> {
+    let mut d = MlxDiarizer::new();
+    let embed = |d: &mut MlxDiarizer, path: &str| -> Vec<f32> {
         let r = hound::WavReader::open(path).expect("open wav");
         let spec = r.spec();
         let max = (1i64 << (spec.bits_per_sample - 1)) as f32;

@@ -19,7 +19,7 @@ name = "ds-helper"
 path = "src/main.rs"
 
 [dependencies]
-# The native Kokoro TTS pipeline (g2p / batch / synth / play) + the apple-native Core ML backend.
+# The native Kokoro TTS pipeline (g2p / batch / synth / play) + the Apple MLX backend.
 ds-tts = { workspace = true }
 # Local dictation: the streaming Parakeet transducer + diarization (the `listen` op).
 ds-stt = { workspace = true }

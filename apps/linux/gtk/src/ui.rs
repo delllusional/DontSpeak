@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 
 use adw::prelude::*;
-use ds_status::{EngineState, EngineStatus, ModelStatus, StatusSttEngine, StatusTtsEngine};
+use ds_status::{
+    EngineState, EngineStatus, ModelStatus, StatusSttEngine, StatusTtsEngine, StatusTtsModel,
+};
 
 use crate::ffi::{UsageCard, UsageDeck, UsageRow};
 use crate::status::Snapshot;
@@ -430,7 +432,12 @@ fn set_failures(row: &adw::ActionRow, label: &gtk::Label, failures: u64) {
 fn tts_engine(s: &ModelStatus) -> Option<(String, EngineState, &EngineStatus)> {
     let status = s.tts.status.as_ref()?;
     let name = match s.tts.engine {
-        StatusTtsEngine::BuiltIn => t("status.engine.kokoro"),
+        StatusTtsEngine::BuiltIn => match s.tts.model? {
+            StatusTtsModel::Kokoro => t("status.engine.kokoro"),
+            StatusTtsModel::Chatterbox => t("status.engine.chatterbox"),
+            StatusTtsModel::Qwen => t("status.engine.qwen"),
+            StatusTtsModel::OmniVoice => t("status.engine.omnivoice"),
+        },
         StatusTtsEngine::System => t("status.engine.system"),
         StatusTtsEngine::Off => return None,
     };
@@ -1273,6 +1280,30 @@ fn build_credits_page() -> gtk::Widget {
                 .title(p["name"].as_str().unwrap_or(""))
                 .subtitle(p["usage"].as_str().unwrap_or(""))
                 .build();
+            if let Some(languages) = p["languages"].as_array() {
+                let automatic = p["automatic_language_detection"].as_bool().unwrap_or(false);
+                let language_summary = if automatic {
+                    let count = p["language_count"].as_u64().unwrap_or_default().to_string();
+                    crate::ffi::t_args("libraries.automatic_languages", &[("count", &count)])
+                } else {
+                    languages
+                        .iter()
+                        .filter_map(|code| code.as_str())
+                        .filter(|code| *code != "auto")
+                        .map(|code| t(&format!("language.{code}")))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                row.add_row(
+                    &adw::ActionRow::builder()
+                        .title(t("libraries.languages"))
+                        .subtitle(&language_summary)
+                        .build(),
+                );
+            }
+            if let Some(url) = p["language_list_url"].as_str().filter(|s| !s.is_empty()) {
+                row.add_row(&link_row(&t("libraries.full_language_list"), url));
+            }
             if let Some(hp) = p["homepage"].as_str().filter(|s| !s.is_empty()) {
                 row.add_row(&link_row(&t("libraries.homepage"), hp));
             }

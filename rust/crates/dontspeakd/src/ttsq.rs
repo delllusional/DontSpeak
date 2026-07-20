@@ -96,7 +96,7 @@ const GREETINGS: &[&str] = &[
     "Hi, {n} here — what are we building?",
 ];
 
-/// System / empty `tts_system_voice`.
+/// System / empty `tts_voices.system`.
 const GREETINGS_ANON: &[&str] = &[
     "I'm with you today.",
     "Ready when you are.",
@@ -965,7 +965,8 @@ impl TtsQueue {
     ) -> Option<(ds_config::TtsEngine, String)> {
         let engine = cfg.resolved_tts()?;
         let voice = match engine {
-            ds_config::TtsEngine::System => cfg.tts_system_voice.clone(),
+            ds_config::TtsEngine::System if cfg.tts_voices.system.is_empty() => String::new(),
+            ds_config::TtsEngine::System => self.assign_agent_voice(source, &cfg.tts_voices.system),
             ds_config::TtsEngine::BuiltIn => {
                 let pool = cfg.active_voices();
                 if pool.is_empty() {
@@ -986,7 +987,7 @@ impl TtsQueue {
         let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source) else {
             return;
         };
-        let name = ds_tts::enumerate::voice_display_name(engine, &voice);
+        let name = ds_tts::enumerate::voice_display_name(engine, cfg.tts_model, &voice);
         let idx = GREET_ROTATION.fetch_add(1, Ordering::Relaxed);
         let text = greeting_line(name.as_deref(), idx);
         if let Err(e) = self.enqueue(text, Some(voice), None, source, session) {
@@ -1068,11 +1069,12 @@ impl TtsQueue {
         voice_override: Option<&String>,
         rate_override: Option<f32>,
     ) -> (SpeechOutcome, usize) {
+        let language = ds_tts::detect_language(text);
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
             let (engine, voice, rate) =
-                match self.gate_item(item, gen0, voice_override, rate_override) {
+                match self.gate_item(item, gen0, &language, voice_override, rate_override) {
                     GateOutcome::Play {
                         engine,
                         voice,
@@ -1086,13 +1088,22 @@ impl TtsQueue {
                 };
 
             self.set_tts_active(true);
-            let result = self.speak_one(engine, text, &voice, rate, resume_skip);
-            if matches!(engine, Some(ds_config::TtsEngine::BuiltIn)) {
+            let result = self.speak_one(engine, text, &voice, &language, rate, resume_skip);
+            let model_supports_resume = self
+                .config
+                .lock()
+                .unwrap()
+                .tts_model_descriptor()
+                .supports_resume;
+            if matches!(engine, Some(ds_config::TtsEngine::BuiltIn)) && model_supports_resume {
                 resume_skip = resume_skip.max(self.tts.last_speak_progress());
             }
             match result {
                 Ok(()) => return (SpeechOutcome::Finished, resume_skip),
-                Err(e) if retries_left > 0 && should_retry_speak(engine, &e) => {
+                Err(e)
+                    if retries_left > 0
+                        && should_retry_speak(engine, model_supports_resume, &e) =>
+                {
                     retries_left -= 1;
                     // Clear active before re-gate so cancel can't strand tts_active.
                     self.set_tts_active(false);
@@ -1115,6 +1126,7 @@ impl TtsQueue {
         &self,
         item: &Item,
         gen0: u64,
+        language: &str,
         voice_override: Option<&String>,
         rate_override: Option<f32>,
     ) -> GateOutcome {
@@ -1144,7 +1156,7 @@ impl TtsQueue {
 
             let cfg = self.config.lock().unwrap().clone();
             // Engine + base voice come from config via the SAME shared helper the greeting
-            // uses — System reads `tts_system_voice`; Kokoro claims this agent's pool
+            // uses — System and built-in both claim this agent's configured pool
             // voice. Off / no usable rung / empty pool ⇒ a blank voice (speak_one no-ops,
             // value unused). A per-call `item.voice` (e.g. the MCP `speak` voice arg) then
             // overrides just the voice string within the chosen engine.
@@ -1154,12 +1166,22 @@ impl TtsQueue {
             };
             let voice = voice_override.cloned().unwrap_or(base_voice);
             let rate = rate_override.unwrap_or(cfg.rate);
+            if engine == Some(ds_config::TtsEngine::BuiltIn)
+                && !cfg
+                    .tts_model_descriptor()
+                    .accepts_detected_language(language)
+            {
+                return GateOutcome::Drop(format!(
+                    "detected language `{language}` is not supported by {}",
+                    cfg.tts_model.as_str()
+                ));
+            }
 
-            // Never send Kokoro work before its model is ready. Accepted work is HELD during
-            // an ordinary warm-up and remains busy; it is dropped only for an explicit cancel,
-            // disabled engine, terminal load failure, or readiness timeout. The wait never
-            // blocks on child lifecycle calls (healing is async, issue #59), so its deadline
-            // is a real upper bound.
+            // Never send built-in TTS work before its model is ready. Accepted work is HELD
+            // during an ordinary warm-up and remains busy; it is dropped only for an explicit
+            // cancel, disabled engine, terminal load failure, or readiness timeout. The wait
+            // never blocks on child lifecycle calls (healing is async, issue #59), so its
+            // deadline is a real upper bound.
             if !crate::config_gate::tts_can_play(engine, self.tts.is_tts_loaded()) {
                 match self.wait_until_ready(engine, gen0) {
                     ReadyOutcome::Ready => {}
@@ -1229,15 +1251,18 @@ impl TtsQueue {
         engine: Option<ds_config::TtsEngine>,
         text: &str,
         voice: &str,
+        language: &str,
         rate: f32,
         skip: usize,
     ) -> std::io::Result<()> {
         match engine {
             None => Err(std::io::Error::other("TTS is disabled")),
-            Some(ds_config::TtsEngine::System) => self.tts.speak_system(text, voice, rate),
+            Some(ds_config::TtsEngine::System) => {
+                self.tts.speak_system(text, voice, language, rate)
+            }
             Some(ds_config::TtsEngine::BuiltIn) => {
                 self.tts.ensure_started();
-                self.tts.speak(text, voice, rate, skip)
+                self.tts.speak(text, voice, language, rate, skip)
             }
         }
     }
@@ -1333,9 +1358,10 @@ impl TtsQueue {
                 }
             }
             if Instant::now() >= deadline {
-                return ReadyOutcome::Unavailable(
-                    "timed out waiting for the Kokoro model to become ready".to_string(),
-                );
+                let model = self.tts.selected_tts_model().descriptor().display_name;
+                return ReadyOutcome::Unavailable(format!(
+                    "timed out waiting for the {model} model to become ready"
+                ));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1398,8 +1424,13 @@ enum SpeechOutcome {
     Requeue,
 }
 
-fn should_retry_speak(engine: Option<ds_config::TtsEngine>, error: &std::io::Error) -> bool {
-    matches!(engine, Some(ds_config::TtsEngine::BuiltIn))
+fn should_retry_speak(
+    engine: Option<ds_config::TtsEngine>,
+    model_supports_resume: bool,
+    error: &std::io::Error,
+) -> bool {
+    model_supports_resume
+        && matches!(engine, Some(ds_config::TtsEngine::BuiltIn))
         && matches!(
             error.kind(),
             std::io::ErrorKind::BrokenPipe
@@ -1701,7 +1732,7 @@ mod tests {
     #[test]
     fn stale_assignment_is_dropped_when_voice_leaves_the_pool() {
         // Regression: an agent assigned under the OLD pool keeps speaking the old
-        // voice after the user changes `tts_voices` (the assignment cache
+        // voice after the user changes the selected model's voice pool (the assignment cache
         // survives a config hot-reload). The stale pick must be discarded and a voice
         // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
@@ -3445,7 +3476,7 @@ mod tests {
     }
 
     #[test]
-    fn only_kokoro_transport_errors_are_retried() {
+    fn only_resume_capable_builtin_transport_errors_are_retried() {
         use std::io::ErrorKind;
 
         for kind in [
@@ -3458,15 +3489,23 @@ mod tests {
             let error = std::io::Error::new(kind, "child replaced");
             assert!(should_retry_speak(
                 Some(ds_config::TtsEngine::BuiltIn),
+                true,
                 &error
             ));
             assert!(!should_retry_speak(
                 Some(ds_config::TtsEngine::System),
+                true,
+                &error
+            ));
+            assert!(!should_retry_speak(
+                Some(ds_config::TtsEngine::BuiltIn),
+                false,
                 &error
             ));
         }
         assert!(!should_retry_speak(
             Some(ds_config::TtsEngine::BuiltIn),
+            true,
             &std::io::Error::other("helper rejected the utterance")
         ));
     }
@@ -3528,6 +3567,24 @@ mod tests {
             outcome,
             ReadyOutcome::Unavailable(
                 "timed out waiting for the Kokoro model to become ready".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn wait_until_ready_names_the_selected_model() {
+        let q = mk_queue();
+        q.tts.suppress_heal_for_test();
+        q.tts.set_tts_selection(ds_config::TtsModel::Qwen);
+        let outcome = q.wait_until_ready_with_timeout(
+            Some(ds_config::TtsEngine::BuiltIn),
+            q.generation.load(Ordering::SeqCst),
+            Duration::from_millis(10),
+        );
+        assert_eq!(
+            outcome,
+            ReadyOutcome::Unavailable(
+                "timed out waiting for the Qwen3-TTS model to become ready".to_string()
             )
         );
     }
@@ -3659,7 +3716,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             done_tx
-                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None))
+                .send(gated.gate_item(&item("held across warm-up"), gen0, "en", None, None))
                 .unwrap();
         });
         // The gate publishes in-flight once it passes the (currently clear) hold gate; give it
@@ -3853,12 +3910,37 @@ mod tests {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::System],
-            tts_system_voice: "Ava (Premium)".to_string(),
+            tts_voices: ds_config::TtsVoicePools {
+                system: vec!["Ava (Premium)".to_string()],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         assert_eq!(
             q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode),
             Some((ds_config::TtsEngine::System, "Ava (Premium)".to_string()))
+        );
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn resolve_engine_voice_uses_the_selected_models_pool() {
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
+            tts_model: ds_config::TtsModel::Chatterbox,
+            ..VoiceConfig::default()
+        };
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode),
+            Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
+        );
+        assert_eq!(
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&ClientSource::ClaudeCode),
+            Some(&"default".to_string())
         );
     }
 
@@ -3871,14 +3953,17 @@ mod tests {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
             .expect("Kokoro is usable on this build");
         assert_eq!(engine, ds_config::TtsEngine::BuiltIn);
-        assert!(cfg.tts_voices.contains(&voice));
+        assert!(cfg.tts_voices.kokoro.contains(&voice));
         // The source is threaded through to the agent-voice map.
         assert_eq!(
             q.agent_voices
@@ -3908,7 +3993,10 @@ mod tests {
         let q = mk_queue();
         let empty_pool = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: vec![],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec![],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         assert_eq!(
@@ -3927,13 +4015,16 @@ mod tests {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         let (_, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::Unknown)
             .expect("Kokoro is usable on this build");
-        assert!(cfg.tts_voices.contains(&voice));
+        assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
             q.agent_voices.lock().unwrap().get(&ClientSource::Unknown),
             Some(&voice)
@@ -3948,13 +4039,16 @@ mod tests {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         let (_, voice) = q
             .resolve_engine_voice(&cfg, ClientSource::DontSpeak)
             .expect("Kokoro is usable on this build");
-        assert!(cfg.tts_voices.contains(&voice));
+        assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
             q.agent_voices.lock().unwrap().get(&ClientSource::DontSpeak),
             Some(&voice)
@@ -3969,7 +4063,10 @@ mod tests {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: vec!["af_sarah".to_string(), "am_adam".to_string()],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
             greet: true,
             ..VoiceConfig::default()
         };

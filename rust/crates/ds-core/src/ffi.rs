@@ -391,7 +391,7 @@ pub extern "C" fn ds_usage_resets_in(resets_at_unix: i64) -> *mut c_char {
     })
 }
 
-/// Runtime label for provider token (ane|coreml|cuda|cpu; unknown verbatim). Owned
+/// Runtime label for provider token (mlx|coreml|cuda|cpu; unknown verbatim). Owned
 /// `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_runtime_label(provider: *const c_char) -> *mut c_char {
@@ -458,8 +458,8 @@ pub extern "C" fn ds_diarization_ui_enabled() -> u8 {
     guard_val(0, || ds_tools::DIARIZATION_ENABLED as u8)
 }
 
-/// Session TTS provider: "cpu"|"cuda"|"coreml"|"ane"|"auto" (NULL/unknown → "auto").
-/// Restarts warm Kokoro + resets TTS stats only if provider actually changes. 1 if
+/// Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
+/// Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if
 /// delivered; new provider/stats via `ds_model_status_json`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_set_provider(provider: *const c_char) -> u8 {

@@ -1,29 +1,29 @@
-//! Smoke-test the FluidAudio Core ML / ANE Kokoro backend (the libdskokoro shim).
-//! Requires DSKOKORO_DYLIB_PATH to point at a built libdskokoro.dylib.
-//!   DSKOKORO_DYLIB_PATH=.../libdskokoro.dylib \
-//!     cargo run -q --release -p ds-tts --example ane_check
+//! Smoke-test the MLX Audio Kokoro backend through the libdontspeak_mlx shim.
+//! Requires DONTSPEAK_MLX_DYLIB_PATH to point at a built libdontspeak_mlx.dylib.
+//!   DONTSPEAK_MLX_DYLIB_PATH=.../libdontspeak_mlx.dylib \
+//!     cargo run -q --release -p ds-tts --example mlx_check
 //!
-//! macOS-only: the Core ML backend (`ds_tts::synth_coreml`) is `#[cfg(target_os = "macos")]`,
+//! macOS-only: the MLX backend (`ds_tts::synth_mlx`) is `#[cfg(target_os = "macos")]`,
 //! so this example is gated to match — otherwise `cargo …--all-targets` (clippy/CI on Linux
 //! + the Windows dev box) fails to compile the unconditional import.
 #[cfg(target_os = "macos")]
-use ds_tts::synth_coreml::KokoroCoremlTts;
+use ds_tts::synth_mlx::MlxTts;
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("ane_check is macOS-only (the Core ML / ANE backend is not built on this target)");
+    eprintln!("mlx_check is macOS-only (the MLX backend is not built on this target)");
     std::process::exit(1);
 }
 
 #[cfg(target_os = "macos")]
 fn main() {
     let t = Instant::now();
-    let synth = match KokoroCoremlTts::load() {
+    let synth = match MlxTts::load(ds_config::TtsModel::Kokoro) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("ANE load FAILED: {e}");
+            eprintln!("MLX load FAILED: {e}");
             std::process::exit(1);
         }
     };
@@ -36,7 +36,7 @@ fn main() {
     let text = "The neural engine is now synthesizing speech on device.";
     let t2 = Instant::now();
     let phonemes = ds_tts::g2p::phonemize(text);
-    match synth.synthesize_phonemes(&phonemes, "af_heart", 1.0) {
+    match synth.synthesize(&phonemes, "af_heart", "en", 1.0) {
         Ok(pcm) => {
             let audio_s = pcm.len() as f32 / 24_000.0;
             let synth_s = t2.elapsed().as_secs_f32();
@@ -50,7 +50,7 @@ fn main() {
                 eprintln!("WARNING: empty PCM");
                 std::process::exit(2);
             }
-            println!("OK: ANE Kokoro produced audio");
+            println!("OK: MLX Kokoro produced audio");
         }
         Err(e) => {
             eprintln!("synthesize FAILED: {e}");

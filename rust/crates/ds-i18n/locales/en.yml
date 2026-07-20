@@ -50,15 +50,18 @@ status:
     role_tts: TTS
     role_stt: STT
     role_diar: Diarization
-    coreml_ane: FluidAudio ANE
+    mlx: MLX Audio
     coreml: ORT Core ML
     cuda: ORT CUDA
     cpu: ORT CPU
     kokoro: Kokoro
+    chatterbox: Chatterbox
+    qwen: Qwen3-TTS
+    omnivoice: OmniVoice
     claude_code: Claude Code
     parakeet: Parakeet
     system: System
-    pyannote: Pyannote
+    sortformer: Sortformer
     status:
       missing: "Not downloaded"
       downloading: "Downloading %{pct}%"
@@ -136,6 +139,34 @@ tools:
 libraries:
   files: Files
   homepage: Project page
+  languages: Languages
+  automatic_languages: "Automatic detection · %{count} languages"
+  full_language_list: Full language list
+
+language:
+  ar: Arabic
+  da: Danish
+  de: German
+  el: Greek
+  en: English
+  es: Spanish
+  fi: Finnish
+  fr: French
+  he: Hebrew
+  hi: Hindi
+  it: Italian
+  ja: Japanese
+  ko: Korean
+  ms: Malay
+  nl: Dutch
+  no: Norwegian
+  pl: Polish
+  pt: Portuguese
+  ru: Russian
+  sv: Swedish
+  sw: Swahili
+  tr: Turkish
+  zh: Chinese
 
 # ──────────────────────────────────── LOGS ──────────────────────────────────
 logs:

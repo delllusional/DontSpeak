@@ -12,9 +12,7 @@ use std::sync::{Arc, Mutex};
 use ds_config::{Paths, Provider, VoiceConfig};
 use ds_model::DownloadTarget;
 
-use crate::config_gate::{
-    apple_native_shim_available, apple_native_tts_active, stt_uses_onnx_runtime,
-};
+use crate::config_gate::{mlx_shim_available, mlx_tts_active, stt_uses_onnx_runtime};
 use crate::tts::TtsManager;
 
 /// Byte progress of one in-flight download target.
@@ -99,28 +97,27 @@ pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags
     s.shutdown = Some(flags.running);
 }
 
-/// Pure core of [`download_needs_child_reload`]: does the warm child host a model this
-/// `target` produced? Kokoro/Parakeet ONNX + Core ML yes; `cuda` if either engine runs;
-/// diarization/unknown never.
-fn target_hosts_engine(target: DownloadTarget, kokoro: bool, parakeet: bool) -> bool {
-    match target {
-        DownloadTarget::KokoroModel
-        | DownloadTarget::KokoroFrontend
-        | DownloadTarget::KokoroCoreml => kokoro,
-        DownloadTarget::ParakeetModel | DownloadTarget::ParakeetCoreml => parakeet,
-        DownloadTarget::Cuda => kokoro || parakeet,
-        _ => false,
-    }
-}
-
 /// Restart warm child after a completed download so it loads the new model(s).
-/// Platform variance is in `resolved_tts`/`resolved_stt`; see [`target_hosts_engine`].
 pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceConfig) -> bool {
-    target_hosts_engine(
-        target,
-        cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn),
-        cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn),
-    )
+    let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
+    // Shim-aware (same predicate as [`compute_needs`]): provider=mlx without the loaded
+    // shim runs ONNX, so the ONNX model download is the one the child actually hosts.
+    let mlx_tts = mlx_tts_active(cfg);
+    let tts_target_matches =
+        target.tts_model() == Some(cfg.tts_model) && target.is_mlx_tts() == mlx_tts;
+    (builtin_tts && tts_target_matches)
+        || (mlx_tts
+            && cfg.tts_model == ds_config::TtsModel::Kokoro
+            && target == DownloadTarget::KokoroFrontend)
+        || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
+            && matches!(
+                target,
+                DownloadTarget::ParakeetModel | DownloadTarget::ParakeetMlx
+            ))
+        || (target == DownloadTarget::Cuda
+            && ((builtin_tts && cfg.resolved_tts_provider() == Provider::OrtCuda)
+                || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
+                    && cfg.resolved_stt_provider() == Provider::OrtCuda)))
 }
 
 /// Mark `which` Active (clears prior Failed/Done). `false` if already Active — attach.
@@ -198,15 +195,30 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
         } else {
             match which {
                 DownloadTarget::KokoroModel => {
-                    ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
+                    ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, &prog)
+                        .map(|_| ())
                 }
-                // ANE frontend: voices + OOV G2P + ORT (not the 310 MB synth graph).
+                // MLX frontend: vocabulary + OOV G2P + ORT (not the synth graph).
                 DownloadTarget::KokoroFrontend => {
                     ds_model::run_setup_kokoro_frontend_with_progress(&prog).map(|_| ())
                 }
                 DownloadTarget::ParakeetModel => {
                     ds_model::run_setup_parakeet_with_progress(&prog).map(|_| ())
                 }
+                DownloadTarget::ChatterboxModel => ds_model::run_setup_tts_model_with_progress(
+                    ds_config::TtsModel::Chatterbox,
+                    &prog,
+                )
+                .map(|_| ()),
+                DownloadTarget::QwenModel => {
+                    ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Qwen, &prog)
+                        .map(|_| ())
+                }
+                DownloadTarget::OmniVoiceModel => ds_model::run_setup_tts_model_with_progress(
+                    ds_config::TtsModel::OmniVoice,
+                    &prog,
+                )
+                .map(|_| ()),
                 // Shared CUDA EP runtime (~1.4 GB) — same completion hook as model fetch.
                 #[cfg(all(
                     any(target_os = "windows", target_os = "linux"),
@@ -215,21 +227,26 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::Cuda => {
                     ds_model::ensure_cuda_runtime_with_progress(&prog).map(|_| ())
                 }
-                // Diarization Core ML — engine-managed fetch (real %), offline shim load.
+                // MLX diarization — engine-managed fetch (real %), offline shim load.
                 #[cfg(target_os = "macos")]
-                DownloadTarget::DiarizationCoreml => ds_model::coreml_repo::ensure_coreml_repo(
-                    &ds_model::coreml_repo::DIARIZATION_COREML,
+                DownloadTarget::DiarizationMlx => ds_model::mlx_repo::ensure_mlx_repos(
+                    &ds_model::mlx_repo::DIARIZATION_MLX_SET,
                     &prog,
                 ),
-                // Core ML sets: standard path (not helper self-fetch); FluidAudio offlineMode.
+                // MLX sets: standard path (not helper self-fetch).
                 #[cfg(target_os = "macos")]
-                DownloadTarget::KokoroCoreml => ds_model::coreml_repo::ensure_coreml_repos(
-                    &ds_model::coreml_repo::KOKORO_COREML_SET,
+                target @ (DownloadTarget::KokoroMlx
+                | DownloadTarget::ChatterboxMlx
+                | DownloadTarget::QwenMlx
+                | DownloadTarget::OmniVoiceMlx) => ds_model::mlx_repo::ensure_mlx_repos(
+                    ds_model::mlx_repo::tts_mlx_set(
+                        target.tts_model().expect("MLX TTS target has a model"),
+                    ),
                     &prog,
                 ),
                 #[cfg(target_os = "macos")]
-                DownloadTarget::ParakeetCoreml => ds_model::coreml_repo::ensure_coreml_repos(
-                    &ds_model::coreml_repo::PARAKEET_COREML_SET,
+                DownloadTarget::ParakeetMlx => ds_model::mlx_repo::ensure_mlx_repos(
+                    &ds_model::mlx_repo::PARAKEET_MLX_SET,
                     &prog,
                 ),
                 // SepFormer speaker-lock — re-resolved per dictation; no warm-child restart.
@@ -269,14 +286,19 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
         if result.is_ok()
             && still_running
             && let (Some(tts), Some(paths)) = (warm, paths)
-            && download_needs_child_reload(which, &VoiceConfig::load(&paths))
-            && tts.reload_models()
         {
-            log::info!(
-                target: "engine",
-                "warm child restarted to load freshly-downloaded '{}'",
-                which.as_str()
-            );
+            let cfg = VoiceConfig::load(&paths);
+            // Refresh the preload pref first: the pre-download pref was computed with
+            // the model absent (tts_preload=false), so restarting with it would leave
+            // TTS unloaded and force a second restart on the daemon-reload pass below.
+            tts.set_tts_wanted(crate::config_gate::helper_preloads_tts(&cfg));
+            if download_needs_child_reload(which, &cfg) && tts.reload_models() {
+                log::info!(
+                    target: "engine",
+                    "warm child restarted to load freshly-downloaded '{}'",
+                    which.as_str()
+                );
+            }
         }
         // Daemon reload: rebuild Stt/Tts selection (inert placeholder → real model).
         // Separate from warm-child reload above (inference child vs engine Stt object).
@@ -289,36 +311,38 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     });
 }
 
-/// ANE Kokoro still needs shared Rust frontend assets (`KokoroFrontend`). Pure for tests.
-fn ane_needs_frontend_assets(
+/// MLX diarization fetch only on hosts that can run it (Apple Silicon) — elsewhere an
+/// enabled diarizer must not loop a doomed fetch on an unsupported target. Pure for tests.
+fn diarization_mlx_needed(host_supported: bool, diarization_on: bool, set_present: bool) -> bool {
+    host_supported && diarization_on && !set_present
+}
+
+/// MLX Kokoro still needs shared Rust frontend assets (`KokoroFrontend`). Pure for tests.
+fn mlx_needs_frontend_assets(
     tts_is_kokoro: bool,
-    ane_active: bool,
+    mlx_active: bool,
     frontend_assets_present: bool,
 ) -> bool {
-    tts_is_kokoro && ane_active && !frontend_assets_present
+    tts_is_kokoro && mlx_active && !frontend_assets_present
 }
 
 /// "Enabled but files missing" flags → download targets. Named (not positional) so needs
-/// can't transpose. ONNX vs Core ML mutually exclusive via `ane_active`.
+/// can't transpose. ONNX vs MLX are mutually exclusive via `mlx_active`.
 #[derive(Default)]
 struct DownloadNeeds {
-    // Field names match DownloadTarget variants they kick.
-    kokoro_model: bool,
-    kokoro_coreml: bool,
+    tts_model: Option<DownloadTarget>,
     kokoro_frontend: bool,
     parakeet_model: bool,
-    parakeet_coreml: bool,
+    parakeet_mlx: bool,
+    diarization_mlx: bool,
     sepformer_model: bool,
 }
 
 /// Targets for `need`, start order TTS → frontend → STT (all kicked in parallel). Pure.
 fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     let mut targets = Vec::new();
-    if need.kokoro_model {
-        targets.push(DownloadTarget::KokoroModel);
-    }
-    if need.kokoro_coreml {
-        targets.push(DownloadTarget::KokoroCoreml);
+    if let Some(target) = need.tts_model {
+        targets.push(target);
     }
     if need.kokoro_frontend {
         targets.push(DownloadTarget::KokoroFrontend);
@@ -326,8 +350,11 @@ fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     if need.parakeet_model {
         targets.push(DownloadTarget::ParakeetModel);
     }
-    if need.parakeet_coreml {
-        targets.push(DownloadTarget::ParakeetCoreml);
+    if need.parakeet_mlx {
+        targets.push(DownloadTarget::ParakeetMlx);
+    }
+    if need.diarization_mlx {
+        targets.push(DownloadTarget::DiarizationMlx);
     }
     if need.sepformer_model {
         targets.push(DownloadTarget::SepformerModel);
@@ -360,7 +387,7 @@ pub(crate) fn apply_provider_and_autofetch(
     downloads: &DownloadProg,
     cfg: &VoiceConfig,
 ) {
-    let prefetch_cuda = apply_tts_provider(tts, cfg.resolved_tts_provider());
+    let prefetch_cuda = apply_tts_provider(tts, cfg, cfg.resolved_tts_provider());
     for which in fetch_plan(prefetch_cuda, &compute_needs(cfg)) {
         start_download(downloads, which);
     }
@@ -369,34 +396,30 @@ pub(crate) fn apply_provider_and_autofetch(
 /// Live probe: which model sets need fetching. Impure; [`fetch_plan`] is the pure part.
 fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
-    // `uses_apple_native_model()` is arch-blind; `apple_native_tts_active` is shim-aware
-    // so exactly one flavor (ONNX vs Core ML) fetches — never both/neither.
-    let tts_is_kokoro = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
-    let ane_active = apple_native_tts_active(cfg);
-    let kokoro_model = tts_is_kokoro
-        && !ane_active
-        && !(exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
-            && exists(ds_model::onnxruntime_dylib_path()));
-    // ANE: revision-pinned markers so partial/stale pins re-download.
-    let kokoro_coreml = tts_is_kokoro
-        && ane_active
-        && !ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET);
-    // Core ML ships only af_heart; other voices need shared frontend npz (silent degrade otherwise).
-    let kokoro_frontend = ane_needs_frontend_assets(
-        tts_is_kokoro,
-        ane_active,
-        exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
+    let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
+    let mlx_active = builtin_tts && mlx_tts_active(cfg);
+    let tts_model = if !builtin_tts {
+        None
+    } else if mlx_active {
+        (!ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(cfg.tts_model)))
+            .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))
+    } else {
+        let target = DownloadTarget::portable_for_tts(cfg.tts_model);
+        (!(ds_model::tts_model_files_present(cfg.tts_model)
+            && exists(ds_model::onnxruntime_dylib_path())))
+        .then_some(target)
+    };
+    // Shared Rust frontend assets provide the vocabulary and phonemizer.
+    let kokoro_frontend = mlx_needs_frontend_assets(
+        builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro,
+        mlx_active,
+        exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
             && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
             && exists(ds_model::onnxruntime_dylib_path()),
     );
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
-    let stt_onnx_runtime =
-        stt_uses_onnx_runtime(cfg.resolved_stt_provider(), apple_native_shim_available());
+    let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
     let parakeet_model = stt_is_builtin
         && stt_onnx_runtime
         && !(exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
@@ -404,22 +427,25 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
             && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
             && exists(ds_model::onnxruntime_dylib_path()));
-    let parakeet_coreml = stt_is_builtin
+    let parakeet_mlx = stt_is_builtin
         && !stt_onnx_runtime
-        && !ds_model::coreml_repo::is_coreml_set_present(
-            &ds_model::coreml_repo::PARAKEET_COREML_SET,
-        );
+        && !ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
+    let diarization_mlx = diarization_mlx_needed(
+        DownloadTarget::DiarizationMlx.is_supported_on_this_host(),
+        cfg.is_diarization_on(),
+        ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
+    );
     // Speaker-lock on + model absent: without it lock fails open (unfiltered).
     let sepformer_model = cfg!(target_os = "macos")
         && cfg.speaker_lock
         && cfg.is_diarization_on()
         && !exists(ds_model::model_path(ds_model::SEPFORMER_FILE));
     DownloadNeeds {
-        kokoro_model,
-        kokoro_coreml,
+        tts_model,
         kokoro_frontend,
         parakeet_model,
-        parakeet_coreml,
+        parakeet_mlx,
+        diarization_mlx,
         sepformer_model,
     }
 }
@@ -431,13 +457,34 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
 ))]
-fn should_prefetch_cuda(which: Provider, driver_present: bool, runtime_present: bool) -> bool {
-    which == Provider::OrtCuda && driver_present && !runtime_present
+fn should_prefetch_cuda(
+    which: Provider,
+    has_cuda_consumer: bool,
+    driver_present: bool,
+    runtime_present: bool,
+) -> bool {
+    which == Provider::OrtCuda && has_cuda_consumer && driver_present && !runtime_present
+}
+
+#[cfg(all(
+    any(target_os = "windows", target_os = "linux"),
+    target_arch = "x86_64"
+))]
+fn cuda_prefetch_provider(
+    tts_provider: Provider,
+    stt_provider: Provider,
+    stt_consumer: bool,
+) -> Provider {
+    if stt_consumer && stt_provider == Provider::OrtCuda {
+        Provider::OrtCuda
+    } else {
+        tts_provider
+    }
 }
 
 /// Apply provider to warm child; report whether CUDA runtime should enter [`fetch_plan`].
 /// Always false off x86_64 Windows/Linux.
-fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
+fn apply_tts_provider(tts: &Arc<TtsManager>, cfg: &VoiceConfig, which: Provider) -> bool {
     // Token string only at the child/FFI edge; gating uses typed Provider.
     tts.set_provider(which.as_str());
     #[cfg(all(
@@ -445,8 +492,17 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
         target_arch = "x86_64"
     ))]
     {
+        let tts_consumer = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+            && cfg
+                .tts_model_descriptor()
+                .supports_provider(ds_config::Provider::OrtCuda);
+        let stt_consumer = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
+            && cfg.resolved_stt_provider() == Provider::OrtCuda;
+        let cuda_provider =
+            cuda_prefetch_provider(which, cfg.resolved_stt_provider(), stt_consumer);
         should_prefetch_cuda(
-            which,
+            cuda_provider,
+            tts_consumer || stt_consumer,
             ds_model::is_cuda_driver_present(),
             ds_model::is_cuda_runtime_present(),
         )
@@ -455,15 +511,18 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, which: Provider) -> bool {
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
     )))]
-    false
+    {
+        let _ = cfg;
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadNeeds, DownloadProgress, DownloadState, TargetState, ane_needs_frontend_assets,
-        begin_download, download_event_msg, fetch_plan, finish_download, needed_downloads,
-        target_hosts_engine,
+        DownloadNeeds, DownloadProgress, DownloadState, TargetState, begin_download,
+        diarization_mlx_needed, download_event_msg, download_needs_child_reload, fetch_plan,
+        finish_download, mlx_needs_frontend_assets, needed_downloads,
     };
     use ds_model::DownloadTarget;
 
@@ -471,7 +530,7 @@ mod tests {
     #[test]
     fn fetch_plan_puts_cuda_first_then_all_models() {
         let needs = DownloadNeeds {
-            kokoro_model: true,
+            tts_model: Some(DownloadTarget::KokoroModel),
             parakeet_model: true,
             ..Default::default()
         };
@@ -497,60 +556,74 @@ mod tests {
     }
 
     #[test]
-    fn target_hosts_engine_maps_downloads_to_warm_child() {
-        // Platform-agnostic: restart iff warm child hosts a model this target produced.
-        for t in [
+    fn child_reload_is_model_and_provider_aware() {
+        use ds_config::{Provider, TtsEngine, TtsModel, VoiceConfig};
+
+        let config = |model| VoiceConfig {
+            tts_engine: Some(vec![TtsEngine::BuiltIn]),
+            tts_model: model,
+            provider: vec![Provider::OrtCpu],
+            stt_engine: Some(Vec::new()),
+            ..VoiceConfig::default()
+        };
+        let kokoro = config(TtsModel::Kokoro);
+        assert!(download_needs_child_reload(
             DownloadTarget::KokoroModel,
-            DownloadTarget::KokoroFrontend,
-            DownloadTarget::KokoroCoreml,
-        ] {
-            assert!(target_hosts_engine(t, true, false), "{t:?} (tts)");
-            assert!(!target_hosts_engine(t, false, true), "{t:?} (stt only)");
-        }
+            &kokoro
+        ));
+        assert!(!download_needs_child_reload(
+            DownloadTarget::ChatterboxModel,
+            &kokoro
+        ));
+        assert!(!download_needs_child_reload(DownloadTarget::Cuda, &kokoro));
 
-        for t in [
-            DownloadTarget::ParakeetModel,
-            DownloadTarget::ParakeetCoreml,
-        ] {
-            assert!(target_hosts_engine(t, false, true), "{t:?} (stt)");
-            assert!(!target_hosts_engine(t, true, false), "{t:?} (tts only)");
-        }
+        let chatterbox = config(TtsModel::Chatterbox);
+        assert!(download_needs_child_reload(
+            DownloadTarget::ChatterboxModel,
+            &chatterbox
+        ));
+        assert!(!download_needs_child_reload(
+            DownloadTarget::KokoroModel,
+            &chatterbox
+        ));
+        assert!(!download_needs_child_reload(
+            DownloadTarget::Cuda,
+            &chatterbox
+        ));
+    }
 
-        let cuda = DownloadTarget::Cuda;
-        assert!(target_hosts_engine(cuda, true, false), "cuda (tts only)");
-        assert!(target_hosts_engine(cuda, false, true), "cuda (stt only)");
-        assert!(target_hosts_engine(cuda, true, true), "cuda (both)");
-        assert!(!target_hosts_engine(cuda, false, false), "cuda (neither)");
-
-        // Diarization / SepFormer / installer tokens never restart the warm child.
-        for t in [
-            DownloadTarget::DiarizationCoreml,
-            DownloadTarget::SepformerModel,
-            DownloadTarget::Onnxruntime,
-            DownloadTarget::Models,
-        ] {
-            assert!(!target_hosts_engine(t, true, true), "{t:?}");
-        }
+    /// `diarization_mlx` need only when host supports the target.
+    #[test]
+    fn diarization_mlx_need_is_gated_on_host_support() {
+        let host = DownloadTarget::DiarizationMlx.is_supported_on_this_host();
+        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+        assert!(!host, "MLX diarization is Apple Silicon only");
+        // Diarizer on + set absent: the need still follows host support.
+        assert_eq!(diarization_mlx_needed(host, true, false), host);
+        assert!(!diarization_mlx_needed(false, true, false));
+        assert!(!diarization_mlx_needed(true, false, false));
+        assert!(!diarization_mlx_needed(true, true, true));
+        assert!(diarization_mlx_needed(true, true, false));
     }
 
     #[test]
-    fn ane_path_still_needs_the_shared_frontend_assets() {
-        // ANE ships only af_heart; other voices need the shared frontend npz.
+    fn mlx_path_still_needs_the_shared_frontend_assets() {
+        // MLX uses the shared Rust frontend assets.
         assert!(
-            ane_needs_frontend_assets(true, true, false),
-            "ANE active + frontend assets missing ⇒ must fetch them"
+            mlx_needs_frontend_assets(true, true, false),
+            "MLX active + frontend assets missing ⇒ must fetch them"
         );
         assert!(
-            !ane_needs_frontend_assets(true, true, true),
+            !mlx_needs_frontend_assets(true, true, true),
             "frontend assets already present ⇒ nothing to fetch"
         );
         // ONNX pulls frontend via kokoro_model — don't double-fetch.
         assert!(
-            !ane_needs_frontend_assets(true, false, false),
+            !mlx_needs_frontend_assets(true, false, false),
             "ONNX path fetches the frontend via kokoro_model, not this trigger"
         );
         assert!(
-            !ane_needs_frontend_assets(false, true, false),
+            !mlx_needs_frontend_assets(false, true, false),
             "non-Kokoro TTS needs no Kokoro frontend assets"
         );
     }
@@ -562,7 +635,7 @@ mod tests {
         // Parallel kick; Kokoro first only in start order.
         assert_eq!(
             need(DownloadNeeds {
-                kokoro_model: true,
+                tts_model: Some(DownloadTarget::KokoroModel),
                 parakeet_model: true,
                 ..Default::default()
             }),
@@ -570,15 +643,17 @@ mod tests {
         );
         assert_eq!(
             need(DownloadNeeds {
-                kokoro_coreml: true,
+                tts_model: Some(DownloadTarget::KokoroMlx),
                 kokoro_frontend: true,
-                parakeet_coreml: true,
+                parakeet_mlx: true,
+                diarization_mlx: true,
                 ..Default::default()
             }),
             vec![
-                DownloadTarget::KokoroCoreml,
+                DownloadTarget::KokoroMlx,
                 DownloadTarget::KokoroFrontend,
-                DownloadTarget::ParakeetCoreml,
+                DownloadTarget::ParakeetMlx,
+                DownloadTarget::DiarizationMlx,
             ]
         );
         assert_eq!(
@@ -589,6 +664,18 @@ mod tests {
             }),
             vec![
                 DownloadTarget::KokoroFrontend,
+                DownloadTarget::ParakeetModel,
+            ]
+        );
+        // Any selected TTS model slots before the STT targets.
+        assert_eq!(
+            need(DownloadNeeds {
+                tts_model: Some(DownloadTarget::ChatterboxModel),
+                parakeet_model: true,
+                ..Default::default()
+            }),
+            vec![
+                DownloadTarget::ChatterboxModel,
                 DownloadTarget::ParakeetModel,
             ]
         );
@@ -755,24 +842,35 @@ mod tests {
         );
     }
 
-    /// REGRESSION (fcf2072): typed `Provider::OrtCuda` only; driver/runtime vetoes.
+    /// CUDA prefetch: typed `Provider::OrtCuda` only; driver/runtime vetoes.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
     ))]
     #[test]
     fn cuda_prefetch_requires_cuda_rung_driver_and_absent_runtime() {
-        use super::should_prefetch_cuda;
+        use super::{cuda_prefetch_provider, should_prefetch_cuda};
         use ds_config::Provider;
 
-        assert!(should_prefetch_cuda(Provider::OrtCuda, true, false));
-        assert!(!should_prefetch_cuda(Provider::OrtCuda, false, false));
-        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, true));
-        for p in [Provider::OrtCpu, Provider::OrtCoreMl, Provider::Ane] {
+        assert!(should_prefetch_cuda(Provider::OrtCuda, true, true, false));
+        assert!(!should_prefetch_cuda(Provider::OrtCuda, false, true, false));
+        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, false, false));
+        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, true, true));
+        for p in [Provider::OrtCpu, Provider::Mlx] {
             assert!(
-                !should_prefetch_cuda(p, true, false),
+                !should_prefetch_cuda(p, true, true, false),
                 "{p:?} must not prefetch"
             );
         }
+
+        assert_eq!(
+            cuda_prefetch_provider(Provider::OrtCpu, Provider::OrtCuda, true),
+            Provider::OrtCuda,
+            "CUDA STT must prefetch even when the selected TTS model is CPU-only"
+        );
+        assert_eq!(
+            cuda_prefetch_provider(Provider::OrtCpu, Provider::OrtCuda, false),
+            Provider::OrtCpu
+        );
     }
 }

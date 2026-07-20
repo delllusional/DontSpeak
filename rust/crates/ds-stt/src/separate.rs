@@ -24,11 +24,10 @@ pub struct Separator {
 impl Separator {
     /// Load int8 SepFormer on CPU.
     ///
-    /// DELIBERATELY CPU, not CoreML: dynamic time axis → CoreML recompiles every
-    /// length (>120 s/call on-device). CPU handles dynamic shapes, RTF ~0.4; separation
-    /// is OFFLINE. Kokoro/Parakeet keep CoreML (static shapes).
+    /// The dynamic time axis is CPU-only. CPU handles dynamic shapes at roughly 0.4 RTF;
+    /// separation is offline.
     pub fn load(model_path: &std::path::Path) -> Result<Self, String> {
-        // Resolve ort dylib BEFORE first session. On Apple Silicon TTS/STT use Core ML,
+        // Resolve the ORT dylib before the first session. Apple Silicon TTS/STT use MLX,
         // so separator may be the only ort user — without this load-dynamic has nothing
         // to dlopen.
         ds_model::ensure_ort_dylib()?;

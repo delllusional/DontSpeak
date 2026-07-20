@@ -1,10 +1,10 @@
-//! Self-managed FluidAudio (Core ML / ANE) model downloads.
+//! Self-managed MLX model downloads.
 //!
-//! We fetch every Core ML asset (same HTTP/retry/SHA/atomic-rename/progress as ONNX),
-//! then run FluidAudio offline (`ModelHub.offlineMode = true`) so it only loads our dirs.
-//! Each set is pinned to an immutable HF commit; tree API + LFS `oid` (content sha256) or
+//! We fetch every MLX asset with the same HTTP/retry/SHA/atomic-rename/progress path as ONNX.
+//! The native shim loads only these local directories. Each set is pinned to an immutable
+//! HF commit; tree API + LFS `oid` (content sha256) or
 //! plain-blob `oid` (`git hash-object`) + size verify bytes. `.ds-ready` holds the revision
-//! as the local presence signal (status poll is network-free; partials never look ready).
+//! and downloaded path manifest (status poll is network-free; partials never look ready).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,12 +17,11 @@ const HF_HOST: &str = "https://huggingface.co";
 /// so bumping the pin invalidates a stale tree and forces a re-fetch.
 const READY_MARKER: &str = ".ds-ready";
 
-/// One FluidAudio Core ML model set, pinned to an immutable HF revision. `include_prefixes`
+/// One MLX model set, pinned to an immutable HF revision. `include_prefixes`
 /// keeps only tree paths beginning with one of them (empty = whole repo); `exclude_substrings`
-/// drops junk/dupes (`.mlpackage` source copies, `.DS_Store`, docs). Each kept tree path is
-/// written under `target()` preserving its sub-path (so `ANE/Foo.mlmodelc/...` lands at
-/// `target/ANE/Foo.mlmodelc/...`).
-pub struct CoremlRepo {
+/// drops junk/duplicate formats. Each kept tree path is written under `target()` preserving
+/// its sub-path.
+pub struct MlxRepo {
     pub name: &'static str,
     pub repo: &'static str,
     pub revision: &'static str,
@@ -41,242 +40,277 @@ pub struct CoremlRepo {
     pub license_url: &'static str,
 }
 
-/// On-disk folder name (== the FluidAudio repo's last path segment) of the apple-native
-/// Kokoro Core ML chain. The ONE source of truth for this folder name — both the download
-/// target and the voice-pack materialize dir derive from it, so they can't drift apart.
-pub const KOKORO_COREML_DIR_NAME: &str = "kokoro-82m-coreml";
+/// On-disk folder name for the MLX Kokoro model and per-voice safetensors.
+pub const KOKORO_MLX_DIR_NAME: &str = "kokoro-82m";
+pub const CHATTERBOX_MLX_DIR_NAME: &str = "mlx-audio/mlx-community_chatterbox-8bit";
+pub const CHATTERBOX_S3_MLX_DIR_NAME: &str = "mlx-audio/mlx-community_S3TokenizerV2";
+pub const QWEN_MLX_DIR_NAME: &str = "qwen3-tts-0.6b-customvoice";
+pub const OMNIVOICE_MLX_DIR_NAME: &str = "mlx-audio/mlx-community_OmniVoice-bf16";
 
-/// The HuggingFace repo + pinned revision shared by BOTH Kokoro Core ML sets — the runtime
-/// ANE chain ([`KOKORO_COREML`]) and the G2P/lexicon sub-models ([`KOKORO_G2P_COREML`]) live
-/// in the SAME repo at the SAME commit (they're just different sub-paths of one tree). ONE
-/// source of truth so a revision bump can't update one set and silently leave the other
-/// pinned to a stale tree (which would mix model files across two commits). The
-/// `kokoro_sets_share_one_repo_and_revision` test pins both statics to these.
-const KOKORO_HF_REPO: &str = "FluidInference/kokoro-82m-coreml";
-const KOKORO_HF_REVISION: &str = "c94edcb4b671856795458645cd389c0a9184e8bb";
-
-/// `coreml_dir()/kokoro-82m-coreml` — the apple-native Kokoro runtime chain (the `ANE/`
-/// subtree). FluidAudio's `KokoroAneManager(directory: coreml_dir)` looks here.
 fn kokoro_main_target() -> Option<PathBuf> {
-    Some(ds_config::coreml_dir()?.join(KOKORO_COREML_DIR_NAME))
+    Some(ds_config::mlx_dir()?.join(KOKORO_MLX_DIR_NAME))
 }
 
-/// `coreml_dir()/kokoro-82m-coreml/ANE` — the exact directory FluidAudio's ANE Kokoro chain
-/// LOADS voice packs from (the `<voice>.bin` files; `af_heart.bin` ships here). Because we
-/// init the shim with [`ds_config::coreml_dir`] (NOT FluidAudio's empty-default cache),
-/// `KokoroAneManager` resolves voice packs UNDER this tree — so any voice pack we materialize
-/// for the ANE path MUST land here, or the shim 404s and silently falls back to `af_heart`.
-pub fn kokoro_ane_dir() -> Option<PathBuf> {
-    Some(kokoro_main_target()?.join("ANE"))
+fn chatterbox_tts_target() -> Option<PathBuf> {
+    Some(ds_config::mlx_dir()?.join(CHATTERBOX_MLX_DIR_NAME))
 }
 
-/// `~/.cache/fluidaudio/Models/kokoro` — FluidAudio's `G2PModel` singleton HARDCODES this
-/// path (`TtsCacheDirectory`), so we can't relocate the G2P/lexicon sub-models; we pre-fill
-/// the exact dir it reads. Uninstall already wipes `~/.cache/fluidaudio`.
-fn kokoro_g2p_target() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".cache/fluidaudio/Models/kokoro"))
+fn chatterbox_s3_target() -> Option<PathBuf> {
+    Some(ds_config::mlx_dir()?.join(CHATTERBOX_S3_MLX_DIR_NAME))
 }
 
-/// `model_dir()/parakeet-tdt-0.6b-v2` — FluidAudio's ASR loader appends this folder name to
-/// the PARENT of the dir we pass `dsk_asr_init` (we pass `coreml_dir`, whose parent is
-/// `model_dir`), so this is where it looks.
+fn qwen_tts_target() -> Option<PathBuf> {
+    Some(ds_config::mlx_dir()?.join(QWEN_MLX_DIR_NAME))
+}
+
+fn omnivoice_tts_target() -> Option<PathBuf> {
+    Some(ds_config::mlx_dir()?.join(OMNIVOICE_MLX_DIR_NAME))
+}
+
+/// Exact DontSpeak-managed directory passed to the selected MLX TTS loader.
+pub fn tts_mlx_dir(model: ds_config::TtsModel) -> Option<PathBuf> {
+    match model {
+        ds_config::TtsModel::Kokoro => kokoro_main_target(),
+        ds_config::TtsModel::Chatterbox => chatterbox_tts_target(),
+        ds_config::TtsModel::Qwen => qwen_tts_target(),
+        ds_config::TtsModel::OmniVoice => omnivoice_tts_target(),
+    }
+}
+
+/// Exact local directory passed to `ParakeetModel.fromDirectory`.
 fn parakeet_target() -> Option<PathBuf> {
-    Some(ds_config::model_dir()?.join("parakeet-tdt-0.6b-v2"))
+    Some(ds_config::mlx_dir()?.join("parakeet-tdt-0.6b-v2"))
 }
 
-/// On-disk folder name of the apple-native STREAMING STT set (Parakeet EOU 120M).
-pub const PARAKEET_EOU_DIR_NAME: &str = "parakeet-eou-streaming";
-/// The EOU variant subfolder we fetch — MIRRORS the chunk size the shim requests
-/// (`StreamingEouAsrManager(chunkSize: .ms160)` in `shim.swift`), so they can't drift. 160ms is
-/// FluidAudio's lowest-latency EOU variant (~6 partials/sec) — picked for a snappier live overlay.
-pub const PARAKEET_EOU_VARIANT: &str = "160ms";
-
-/// `coreml_dir()/parakeet-eou-streaming` — download target for the streaming EOU set. The repo's
-/// `320ms/` subtree lands under here, so the loadable model dir is the `320ms` subfolder (see
-/// [`parakeet_eou_dir`]).
-fn parakeet_eou_target() -> Option<PathBuf> {
-    Some(ds_config::coreml_dir()?.join(PARAKEET_EOU_DIR_NAME))
+pub fn parakeet_mlx_dir() -> Option<PathBuf> {
+    parakeet_target()
 }
 
-/// The exact dir FluidAudio's `StreamingEouAsrManager.loadModels(from:)` reads the streaming
-/// `.mlmodelc` set + `vocab.json` from (handed to the shim's `dsk_asr_stream_start`). The download
-/// writes the repo's `320ms/` subtree under `parakeet_eou_target`, so the loadable dir is that
-/// subfolder. ONE source of truth so the download target and the shim load path (via
-/// `ds_stt::coreml::CoremlStreamer`) can't drift.
-pub fn parakeet_eou_dir() -> Option<PathBuf> {
-    Some(parakeet_eou_target()?.join(PARAKEET_EOU_VARIANT))
-}
+pub const DIARIZATION_MLX_DIR_NAME: &str = "sortformer";
+pub const SPEAKER_EMBEDDING_DIR_NAME: &str = "wespeaker";
 
-/// On-disk folder name of the speaker-diarization Core ML set (== the FluidAudio repo's last
-/// path segment). ONE source of truth: the download target, the presence check, and the Swift
-/// shim's load path (`shim.swift`, kept in sync by comment + the `diarization_model_names_match_prefixes`
-/// test) all derive from this so they can't drift.
-pub const DIARIZATION_COREML_DIR_NAME: &str = "speaker-diarization-coreml";
-/// The two `.mlmodelc` bundles the diarizer shim loads from [`diarization_dir`]. Mirrored as
-/// literals in the Swift shim (`dsk_diar_init`) — a Rust-side rename trips
-/// `diarization_model_names_match_prefixes` so the cross-language pair can't silently drift.
-pub const DIARIZATION_SEGMENTATION_MODEL: &str = "pyannote_segmentation.mlmodelc";
-pub const DIARIZATION_EMBEDDING_MODEL: &str = "wespeaker_v2.mlmodelc";
-
-/// `coreml_dir()/speaker-diarization-coreml` — a dir WE choose; the shim's `dsk_diar_init`
-/// loads the two diarization `.mlmodelc` ([`DIARIZATION_SEGMENTATION_MODEL`] /
-/// [`DIARIZATION_EMBEDDING_MODEL`]) from here via FluidAudio's explicit local-file API.
 fn diarization_target() -> Option<PathBuf> {
-    Some(ds_config::coreml_dir()?.join(DIARIZATION_COREML_DIR_NAME))
+    Some(ds_config::mlx_dir()?.join(DIARIZATION_MLX_DIR_NAME))
 }
 
-/// Public accessor for the diarization model dir (== `diarization_target`) — the ONE place
-/// Rust consumers resolve where the two diarization `.mlmodelc` live.
+fn speaker_embedding_target() -> Option<PathBuf> {
+    Some(ds_config::mlx_dir()?.join(SPEAKER_EMBEDDING_DIR_NAME))
+}
+
+/// Exact local directory passed to `SortformerModel.fromModelDirectory`.
 pub fn diarization_dir() -> Option<PathBuf> {
     diarization_target()
 }
 
-/// Apple-native Kokoro TTS runtime models (the `ANE/` subtree). Pinned to the FluidInference
-/// repo revision audited 2026-06. apache-2.0.
-pub static KOKORO_COREML: CoremlRepo = CoremlRepo {
-    name: "kokoro_coreml",
-    repo: KOKORO_HF_REPO,
-    revision: KOKORO_HF_REVISION,
-    include_prefixes: &["ANE/"],
-    exclude_substrings: &[".mlpackage", ".DS_Store", "ANE/LICENSE", "ANE/README"],
+/// Exact local directory for the MLX WeSpeaker embedding checkpoint.
+pub fn speaker_embedding_dir() -> Option<PathBuf> {
+    speaker_embedding_target()
+}
+
+/// MLX Kokoro TTS weights and voice embeddings. Apache-2.0.
+pub static KOKORO_MLX: MlxRepo = MlxRepo {
+    name: "kokoro_mlx",
+    repo: "mlx-community/Kokoro-82M-bf16",
+    revision: "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
+    include_prefixes: &["config.json", "kokoro-v1_0.safetensors", "voices/"],
+    exclude_substrings: &[".pt", ".DS_Store"],
     target: kokoro_main_target,
-    display_name: "Kokoro (Core ML / ANE)",
-    usage: "Apple-Silicon text-to-speech voice model (FluidAudio Core ML / ANE)",
+    display_name: "Kokoro (MLX)",
+    usage: "Apple-Silicon text-to-speech model and voice embeddings for MLX Audio",
     license: "Apache-2.0",
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
-/// Shared Kokoro G2P + lexicon (the repo ROOT files), which FluidAudio loads from its own
-/// hardcoded `~/.cache/fluidaudio/Models/kokoro`. Same repo + revision as the runtime set.
-pub static KOKORO_G2P_COREML: CoremlRepo = CoremlRepo {
-    name: "kokoro_g2p_coreml",
-    repo: KOKORO_HF_REPO,
-    revision: KOKORO_HF_REVISION,
+/// MLX Chatterbox Multilingual 8-bit weights and default voice conditioning. Apache-2.0.
+pub static CHATTERBOX_MLX: MlxRepo = MlxRepo {
+    name: "chatterbox_mlx",
+    repo: "mlx-community/chatterbox-8bit",
+    revision: "9617d61b596a03d1bed766a28c341680e993a1b9",
     include_prefixes: &[
-        "G2PEncoder",
-        "G2PDecoder",
-        "g2p_vocab.json",
-        "us_lexicon_cache.json",
-    ],
-    exclude_substrings: &[".mlpackage", ".DS_Store"],
-    target: kokoro_g2p_target,
-    // Folded into Kokoro Core ML catalog entry (empty display_name).
-    display_name: "",
-    usage: "",
-    license: "Apache-2.0",
-    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
-};
-
-/// Apple-native Parakeet TDT 0.6b v2 STT. cc-by-4.0 (attribution required). Pinned revision
-/// audited 2026-06. We fetch only the v2 runtime set; the repo also ships alternate encoders
-/// (`_v2`, `_4bit_par`) and `.mlpackage` source copies, which the excludes drop.
-pub static PARAKEET_COREML: CoremlRepo = CoremlRepo {
-    name: "parakeet_coreml",
-    repo: "FluidInference/parakeet-tdt-0.6b-v2-coreml",
-    revision: "ee09c569f73759e6d44c9bd16766f477b2b36d39",
-    include_prefixes: &[
-        "Preprocessor.mlmodelc/",
-        "Encoder.mlmodelc/",
-        "Decoder.mlmodelc/",
-        "JointDecision.mlmodelc/",
-        "parakeet_vocab.json",
+        "Cangjie5_TC.json",
+        "conds.safetensors",
         "config.json",
+        "model.safetensors",
+        "model.safetensors.index.json",
+        "tokenizer.json",
+    ],
+    exclude_substrings: &[".DS_Store"],
+    target: chatterbox_tts_target,
+    display_name: "Chatterbox Multilingual (MLX)",
+    usage: "Apple-Silicon multilingual text-to-speech model and default voice conditioning",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+};
+
+/// Chatterbox's local S3 speech tokenizer. Apache-2.0; folded into its model set.
+pub static CHATTERBOX_S3_MLX: MlxRepo = MlxRepo {
+    name: "chatterbox_s3_mlx",
+    repo: "mlx-community/S3TokenizerV2",
+    revision: "e0c9886f0e1c35ae85b1f27277416fb19fc72bec",
+    include_prefixes: &["config.json", "model.safetensors"],
+    exclude_substrings: &[".DS_Store"],
+    target: chatterbox_s3_target,
+    display_name: "S3TokenizerV2 (MLX)",
+    usage: "Apple-Silicon speech tokenizer required by Chatterbox MLX",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+};
+
+/// MLX Qwen3-TTS 0.6B CustomVoice weights. Apache-2.0.
+pub static QWEN_MLX: MlxRepo = MlxRepo {
+    name: "qwen_mlx",
+    repo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+    revision: "049ef77fe8816b536193c0c25f9a214d17921282",
+    include_prefixes: &[
+        "config.json",
+        "generation_config.json",
+        "merges.txt",
+        "model.safetensors",
+        "speech_tokenizer/",
+        "tokenizer_config.json",
+        "vocab.json",
+    ],
+    exclude_substrings: &[".DS_Store", "README"],
+    target: qwen_tts_target,
+    display_name: "Qwen3-TTS (MLX)",
+    usage: "Apple-Silicon multilingual text-to-speech model for MLX Audio",
+    license: "Apache-2.0",
+    license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+};
+
+/// MLX OmniVoice bfloat16 model and Higgs audio tokenizer.
+pub static OMNIVOICE_MLX: MlxRepo = MlxRepo {
+    name: "omnivoice_mlx",
+    repo: "mlx-community/OmniVoice-bf16",
+    revision: "8fb0b754cad788aaefec690cd55c207e8a628f85",
+    include_prefixes: &[
+        "audio_tokenizer/config.json",
+        "audio_tokenizer/model.safetensors",
+        "audio_tokenizer/preprocessor_config.json",
+        "chat_template.jinja",
+        "config.json",
+        "model.safetensors",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    ],
+    exclude_substrings: &[".DS_Store"],
+    target: omnivoice_tts_target,
+    display_name: "OmniVoice (MLX)",
+    usage: "Apple-Silicon omnilingual text-to-speech model and Higgs Audio 2 tokenizer",
+    license: "CC-BY-NC / Boson Community License",
+    license_url: "https://huggingface.co/k2-fsa/OmniVoice#license",
+};
+
+/// MLX Parakeet TDT 0.6b v2 STT. CC-BY-4.0.
+pub static PARAKEET_MLX: MlxRepo = MlxRepo {
+    name: "parakeet_mlx",
+    repo: "mlx-community/parakeet-tdt-0.6b-v2",
+    revision: "8ae155301e23d820d82aa60d24817c900e69e487",
+    include_prefixes: &[
+        "config.json",
+        "model.safetensors",
+        "tokenizer.model",
+        "tokenizer.vocab",
+        "vocab.txt",
     ],
     exclude_substrings: &[".DS_Store"],
     target: parakeet_target,
-    display_name: "Parakeet (Core ML)",
-    usage: "Apple-Silicon speech-to-text model (NVIDIA NeMo; Core ML export by FluidInference)",
+    display_name: "Parakeet (MLX)",
+    usage: "Apple-Silicon speech-to-text model (NVIDIA NeMo; MLX conversion)",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
-/// Parakeet EOU 120M streaming STT (dictation overlay). Absent → offline sliding-window fallback.
-/// 160 ms variant only (~6 partials/sec); drops `.mlpackage`/scripts. CC-BY-4.0.
-pub static PARAKEET_EOU_COREML: CoremlRepo = CoremlRepo {
-    name: "parakeet_eou_coreml",
-    repo: "FluidInference/parakeet-realtime-eou-120m-coreml",
-    revision: "40a23f4c0b333aa17ad8c0f2ea47ec2347f2f355",
-    include_prefixes: &[
-        "160ms/streaming_encoder.mlmodelc/",
-        "160ms/decoder.mlmodelc/",
-        "160ms/joint_decision.mlmodelc/",
-        "160ms/vocab.json",
-    ],
-    exclude_substrings: &[".mlpackage", ".DS_Store"],
-    target: parakeet_eou_target,
-    display_name: "Parakeet EOU streaming (Core ML)",
-    usage: "Apple-Silicon real-time streaming speech-to-text (NVIDIA NeMo; Core ML export by FluidInference)",
-    license: "CC-BY-4.0",
-    license_url: "https://creativecommons.org/licenses/by/4.0/",
-};
-
-/// Apple-native speaker diarization (pyannote segmentation + wespeaker embedding). cc-by-4.0.
-/// We fetch only the two `.mlmodelc` the shim hands to FluidAudio's local-file loader.
-pub static DIARIZATION_COREML: CoremlRepo = CoremlRepo {
-    name: "diarization_coreml",
-    repo: "FluidInference/speaker-diarization-coreml",
-    revision: "1ed7a662fdc7109e36d822db793ee6eebdaf8594",
-    include_prefixes: &["pyannote_segmentation.mlmodelc/", "wespeaker_v2.mlmodelc/"],
+/// MLX Sortformer speaker diarization. The converted repository does not publish
+/// SPDX metadata, so the original NVIDIA model terms are linked explicitly in NOTICE.
+pub static DIARIZATION_MLX: MlxRepo = MlxRepo {
+    name: "diarization_mlx",
+    repo: "mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16",
+    revision: "e23e6404bd9859e93edbf94a740eb1c7fc58f12e",
+    include_prefixes: &["config.json", "model.safetensors"],
     exclude_substrings: &[".DS_Store"],
     target: diarization_target,
-    display_name: "Diarization (Core ML)",
-    usage: "Apple-Silicon speaker diarization (pyannote segmentation + wespeaker embedding)",
-    license: "CC-BY-4.0",
-    license_url: "https://creativecommons.org/licenses/by/4.0/",
+    display_name: "Sortformer diarization (MLX)",
+    usage: "Apple-Silicon speaker diarization (NVIDIA Sortformer; MLX conversion)",
+    license: "NVIDIA Open Model License",
+    license_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
 };
 
-/// The repos one `DownloadTarget::KokoroCoreml` fetch produces — the apple-native Kokoro
-/// runtime chain plus its G2P/lexicon sub-models. ONE source of truth shared by the engine's
+/// MLX WeSpeaker ResNet34 embedding model used for enrollment and speaker identity matching.
+pub static SPEAKER_EMBEDDING_MLX: MlxRepo = MlxRepo {
+    name: "speaker_embedding_mlx",
+    repo: "mlx-community/wespeaker-voxceleb-resnet34-LM",
+    revision: "038a61d379b8729c72d64d7c209e0cee80b11d0f",
+    include_prefixes: &["config.json", "weights.npz"],
+    exclude_substrings: &[],
+    target: speaker_embedding_target,
+    display_name: "WeSpeaker embedding (MLX)",
+    usage: "Apple-Silicon speaker enrollment and identity matching",
+    license: "MIT",
+    license_url: "https://opensource.org/license/mit",
+};
+
+/// The repos one `DownloadTarget::KokoroMlx` fetch produces. ONE source of truth shared by the engine's
 /// download manager (fetch + presence gate) and the status row, so they can never disagree
-/// about what "the Kokoro Core ML set" is.
-pub static KOKORO_COREML_SET: [&CoremlRepo; 2] = [&KOKORO_COREML, &KOKORO_G2P_COREML];
+/// about what "the Kokoro MLX set" is.
+pub static KOKORO_MLX_SET: [&MlxRepo; 1] = [&KOKORO_MLX];
 
-/// The repos one `DownloadTarget::ParakeetCoreml` fetch produces — the streaming EOU set (the
-/// smooth real-time path) plus the offline sliding-window fallback. Same one-source-of-truth
-/// role as [`KOKORO_COREML_SET`].
-pub static PARAKEET_COREML_SET: [&CoremlRepo; 2] = [&PARAKEET_EOU_COREML, &PARAKEET_COREML];
+/// The repos one `DownloadTarget::ChatterboxMlx` fetch produces.
+pub static CHATTERBOX_MLX_SET: [&MlxRepo; 2] = [&CHATTERBOX_MLX, &CHATTERBOX_S3_MLX];
 
-/// LOCAL presence of a whole set (no network): every repo's completion marker present at the
-/// pinned revision — see [`is_coreml_repo_present`].
-pub fn is_coreml_set_present(set: &[&CoremlRepo]) -> bool {
-    set.iter().all(|r| is_coreml_repo_present(r))
+/// The repos one `DownloadTarget::QwenMlx` fetch produces.
+pub static QWEN_MLX_SET: [&MlxRepo; 1] = [&QWEN_MLX];
+
+/// The repos one `DownloadTarget::OmniVoiceMlx` fetch produces.
+pub static OMNIVOICE_MLX_SET: [&MlxRepo; 1] = [&OMNIVOICE_MLX];
+
+/// Complete pinned asset set for one built-in MLX TTS model.
+pub fn tts_mlx_set(model: ds_config::TtsModel) -> &'static [&'static MlxRepo] {
+    match model {
+        ds_config::TtsModel::Kokoro => &KOKORO_MLX_SET,
+        ds_config::TtsModel::Chatterbox => &CHATTERBOX_MLX_SET,
+        ds_config::TtsModel::Qwen => &QWEN_MLX_SET,
+        ds_config::TtsModel::OmniVoice => &OMNIVOICE_MLX_SET,
+    }
 }
 
-/// Every Core ML repo we self-manage, in the order a clean install fetches them.
-pub fn all_coreml_repos() -> [&'static CoremlRepo; 5] {
+/// The repos one `DownloadTarget::ParakeetMlx` fetch produces.
+pub static PARAKEET_MLX_SET: [&MlxRepo; 1] = [&PARAKEET_MLX];
+
+/// Sortformer segmentation plus WeSpeaker embeddings are one user-visible diarization download.
+pub static DIARIZATION_MLX_SET: [&MlxRepo; 2] = [&DIARIZATION_MLX, &SPEAKER_EMBEDDING_MLX];
+
+/// LOCAL presence of a whole set (no network): every repo's completion marker present at the
+/// pinned revision — see [`is_mlx_repo_present`].
+pub fn is_mlx_set_present(set: &[&MlxRepo]) -> bool {
+    set.iter().all(|r| is_mlx_repo_present(r))
+}
+
+/// Every MLX repo we self-manage, in the order a clean install fetches them.
+pub fn all_mlx_repos() -> [&'static MlxRepo; 8] {
     [
-        &KOKORO_COREML,
-        &KOKORO_G2P_COREML,
-        &PARAKEET_COREML,
-        &PARAKEET_EOU_COREML,
-        &DIARIZATION_COREML,
+        &KOKORO_MLX,
+        &CHATTERBOX_MLX,
+        &CHATTERBOX_S3_MLX,
+        &QWEN_MLX,
+        &OMNIVOICE_MLX,
+        &PARAKEET_MLX,
+        &DIARIZATION_MLX,
+        &SPEAKER_EMBEDDING_MLX,
     ]
 }
 
-/// One file in a repo's tree at the pinned revision: where it goes (`path`, relative to the
-/// repo root / target), its byte size (for the progress bar), its content sha256 when LFS-
-/// tracked, and — for a plain (non-LFS) git blob — the tree API's git blob `oid` for it (see
-/// `git_blob_sha1_hex`). Every file gets SOME form of content verification: `sha256` for LFS
-/// blobs, `git_blob_sha1` (plus `size`) for everything else.
+/// One tree entry at the pinned revision. Content verify: LFS → `sha256`; else `git_blob_sha1` + size.
 #[derive(Debug)]
 struct TreeFile {
     path: String,
     size: u64,
     sha256: Option<String>,
-    /// Plain (non-LFS) git blob hash (`git hash-object`'s id) of this file's real bytes, from
-    /// the tree API's top-level `oid`. `None` for LFS-tracked entries — their top-level `oid`
-    /// is the LFS *pointer* file's hash, not the real (resolved) content we download, so it
-    /// would never match and must not be captured here.
+    /// Non-LFS tree `oid` only — LFS top-level oid is the pointer file, not resolved content.
     git_blob_sha1: Option<String>,
 }
 
-/// SHA-1 of `message`, lowercase hex. Hand-rolled (no `sha1` crate dependency) purely to
-/// compute `git_blob_sha1_hex` below — git's object hash is SHA-1, distinct from the SHA-256
-/// this crate uses everywhere else ([`crate::hash`]), so the existing hasher can't be reused
-/// for it. Verified against the standard NIST test vectors and against real `git hash-object`
-/// output for both single- and multi-block inputs (see the tests below) — a textbook
-/// implementation, not exposed outside this module.
+/// Lowercase hex SHA-1 (git blob hash; no `sha1` crate — distinct from [`crate::hash`]).
 fn sha1_hex(message: &[u8]) -> String {
     let (mut h0, mut h1, mut h2, mut h3, mut h4): (u32, u32, u32, u32, u32) =
         (0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0);
@@ -335,11 +369,7 @@ fn sha1_hex(message: &[u8]) -> String {
     out
 }
 
-/// Git's blob object hash for the file at `path`: `sha1("blob {len}\0" + content)` — exactly
-/// what `git hash-object <path>` reports, and what the HF tree API's top-level `oid` is for a
-/// plain (non-LFS) tree entry. Comparing this against that pinned `oid` catches a same-size
-/// MITM substitution that a bare size check (the old behavior) would silently accept.
-/// `None` only if `path` can't be read.
+/// `git hash-object` oid: `sha1("blob {len}\0" + content)`. Same-size MITM fails oid check.
 fn git_blob_sha1_hex(path: &Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
     let mut data = format!("blob {}\0", bytes.len()).into_bytes();
@@ -348,7 +378,7 @@ fn git_blob_sha1_hex(path: &Path) -> Option<String> {
 }
 
 /// Whether a kept tree path passes a repo's include/exclude filters.
-fn keep(repo: &CoremlRepo, path: &str) -> bool {
+fn keep(repo: &MlxRepo, path: &str) -> bool {
     let included = repo.include_prefixes.is_empty()
         || repo.include_prefixes.iter().any(|p| path.starts_with(p));
     let excluded = repo.exclude_substrings.iter().any(|s| path.contains(s));
@@ -358,7 +388,7 @@ fn keep(repo: &CoremlRepo, path: &str) -> bool {
 /// GET the HF tree API at the pinned revision and return the kept files. The revision is
 /// immutable, so this list is stable. Network — only called during a download, never on the
 /// status poll (that uses the local marker).
-fn fetch_tree(repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>> {
+fn fetch_tree(repo: &MlxRepo) -> std::io::Result<Vec<TreeFile>> {
     let url = format!(
         "{HF_HOST}/api/models/{}/tree/{}?recursive=true",
         repo.repo, repo.revision
@@ -369,7 +399,7 @@ fn fetch_tree(repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>> {
 /// The GET + parse half of [`fetch_tree`], taking the tree-API URL as a parameter so tests can
 /// point it at a local mock server instead of the real `huggingface.co` — everything below this
 /// is the exact production code path (same `http_get_builder`, same JSON shape, same filters).
-fn fetch_tree_at(url: &str, repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>> {
+fn fetch_tree_at(url: &str, repo: &MlxRepo) -> std::io::Result<Vec<TreeFile>> {
     let body = crate::download::http_get_builder(url)
         .send()
         .and_then(|r| r.error_for_status())
@@ -407,6 +437,14 @@ fn fetch_tree_at(url: &str, repo: &CoremlRepo) -> std::io::Result<Vec<TreeFile>>
         } else {
             None
         };
+        // Every kept file needs SOME verifier (see `verify_downloaded`); an entry with
+        // none would download unverifiable bytes. Permanent per the crate's retry policy.
+        if sha256.is_none() && git_blob_sha1.is_none() && size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tree entry {path} has no verifier (no LFS sha256, git oid, or size)"),
+            ));
+        }
         out.push(TreeFile {
             path: path.to_string(),
             size,
@@ -466,7 +504,7 @@ fn verify_downloaded(path: &Path, f: &TreeFile) -> std::io::Result<()> {
 /// revision's tree metadata (see [`verify_downloaded`]) before persisting. Transient failures
 /// retry; a verification failure / 404 fails fast (same policy as the ONNX path).
 fn download_one(
-    repo: &CoremlRepo,
+    repo: &MlxRepo,
     f: &TreeFile,
     dest: &Path,
     progress: &dyn Fn(u64, u64),
@@ -513,12 +551,12 @@ fn download_one_at(
     }
 }
 
-/// Download a SINGLE Core ML repo, reporting ONE overall 0..1 byte-progress bar — a thin
-/// single-repo wrapper over the universal [`ensure_coreml_repos`] (identical byte-weighted
+/// Download a single MLX repo, reporting one overall 0..1 byte-progress bar — a thin
+/// single-repo wrapper over the universal [`ensure_mlx_repos`] (identical byte-weighted
 /// aggregate), for callers that fetch exactly one repo (the engine-side download manager / the
 /// diarization fetch).
-pub fn ensure_coreml_repo(repo: &CoremlRepo, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
-    ensure_coreml_repos(&[repo], progress)
+pub fn ensure_mlx_repo(repo: &MlxRepo, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
+    ensure_mlx_repos(&[repo], progress)
 }
 
 /// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:
@@ -526,14 +564,11 @@ pub fn ensure_coreml_repo(repo: &CoremlRepo, progress: &dyn Fn(u64, u64)) -> std
 /// so the UI shows a single monotonic "Downloading `<pct>`%" over the WHOLE set (a true global
 /// percent, not a per-file percent that resets each file). Writes each repo's completion marker
 /// once its files are all present.
-pub fn ensure_coreml_repos(
-    repos: &[&CoremlRepo],
-    progress: &dyn Fn(u64, u64),
-) -> std::io::Result<()> {
+pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     // Resolve every not-yet-present repo's tree first so the total byte count is exact up front.
-    let mut plan: Vec<(&CoremlRepo, PathBuf, Vec<TreeFile>)> = Vec::new();
+    let mut plan: Vec<(&MlxRepo, PathBuf, Vec<TreeFile>)> = Vec::new();
     for r in repos {
-        if is_coreml_repo_present(r) {
+        if is_mlx_repo_present(r) {
             continue;
         }
         let target = (r.target)().ok_or_else(|| {
@@ -565,7 +600,7 @@ pub fn ensure_coreml_repos(
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("unsafe path in Core ML tree response: {}", f.path),
+                    format!("unsafe path in Apple model tree response: {}", f.path),
                 ));
             }
             let dest = target.join(relative);
@@ -582,24 +617,46 @@ pub fn ensure_coreml_repos(
             done_bytes = base + size;
             progress(done_bytes, total_bytes);
         }
-        // All of this repo's files are present → mark it complete (revision-pinned).
-        std::fs::write(target.join(READY_MARKER), r.revision)?;
+        // Persist the exact file set so a missing asset invalidates presence and self-repairs.
+        let mut marker = String::with_capacity(
+            r.revision.len() + files.iter().map(|f| f.path.len() + 1).sum::<usize>() + 1,
+        );
+        marker.push_str(r.revision);
+        marker.push('\n');
+        for file in files {
+            marker.push_str(&file.path);
+            marker.push('\n');
+        }
+        std::fs::write(target.join(READY_MARKER), marker)?;
     }
     Ok(())
 }
 
-/// LOCAL presence (no network): the completion marker exists AND matches the pinned revision.
-/// A partial download has no marker; a stale pin has a mismatching one → both read absent.
-pub fn is_coreml_repo_present(repo: &CoremlRepo) -> bool {
+/// LOCAL presence (no network): marker revision matches and every manifested file still exists.
+pub fn is_mlx_repo_present(repo: &MlxRepo) -> bool {
     let Some(target) = (repo.target)() else {
         return false;
     };
     let marker = target.join(READY_MARKER);
     let mut s = String::new();
-    std::fs::File::open(&marker)
+    if std::fs::File::open(&marker)
         .and_then(|mut f| f.read_to_string(&mut s))
-        .is_ok()
-        && s.trim() == repo.revision
+        .is_err()
+    {
+        return false;
+    }
+    let mut lines = s.lines();
+    lines.next() == Some(repo.revision)
+        && lines
+            .try_fold(false, |_, path| {
+                let relative = Path::new(path);
+                let safe = relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)));
+                safe.then(|| target.join(relative).is_file())
+                    .filter(|present| *present)
+            })
+            .unwrap_or(false)
 }
 
 // `target` is `fn() -> Option<PathBuf>` (no captures). Thread-local seam for presence tests.
@@ -618,60 +675,59 @@ mod tests {
     use super::*;
 
     #[test]
-    fn diarization_model_names_match_prefixes() {
-        // Drift: Rust prefixes vs Swift `dsk_diar_init` literals (cross-language).
-        assert_eq!(
-            DIARIZATION_COREML.include_prefixes,
-            [
-                format!("{DIARIZATION_SEGMENTATION_MODEL}/"),
-                format!("{DIARIZATION_EMBEDDING_MODEL}/"),
-            ]
-        );
-        assert!(
-            DIARIZATION_COREML
-                .repo
-                .ends_with(DIARIZATION_COREML_DIR_NAME)
-        );
+    fn model_sets_have_the_expected_components() {
+        assert_eq!(KOKORO_MLX_SET.len(), 1);
+        assert_eq!(CHATTERBOX_MLX_SET.len(), 2);
+        assert_eq!(OMNIVOICE_MLX_SET.len(), 1);
+        assert_eq!(PARAKEET_MLX_SET.len(), 1);
+        assert_eq!(DIARIZATION_MLX_SET.len(), 2);
+        assert!(DIARIZATION_MLX.repo.contains("sortformer"));
+        assert!(SPEAKER_EMBEDDING_MLX.repo.contains("wespeaker"));
     }
 
     #[test]
-    fn kokoro_sets_share_one_repo_and_revision() {
-        // ANE + G2P subtrees of one HF tree — half-bumped pin mixes commits.
-        assert_eq!(KOKORO_COREML.repo, KOKORO_G2P_COREML.repo);
-        assert_eq!(KOKORO_COREML.revision, KOKORO_G2P_COREML.revision);
-        assert_eq!(KOKORO_COREML.repo, KOKORO_HF_REPO);
-        assert!(KOKORO_HF_REPO.ends_with(KOKORO_COREML_DIR_NAME));
+    fn native_shim_loads_only_rust_managed_local_directories() {
+        let shim =
+            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift");
+        for forbidden in ["ModelHub", "snapshotDownload", "downloadModel"] {
+            assert!(
+                !shim.contains(forbidden),
+                "native model download API: {forbidden}"
+            );
+        }
+        assert_eq!(
+            shim.matches("OmniVoiceModel.fromPretrained").count(),
+            1,
+            "OmniVoice's repository-only API must remain the sole native repository load"
+        );
+        assert!(shim.contains("configureManagedHubCache"));
+        for required in ["fromModelDirectory", "fromDirectory"] {
+            assert!(
+                shim.contains(required),
+                "missing local model load: {required}"
+            );
+        }
     }
 
     #[test]
     fn filters_keep_only_the_runtime_set() {
-        assert!(keep(
-            &KOKORO_COREML,
-            "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
-        ));
-        assert!(keep(&KOKORO_COREML, "ANE/af_heart.bin"));
-        assert!(!keep(&KOKORO_COREML, "ANE/KokoroVocoder.mlpackage/x"));
-        assert!(!keep(&KOKORO_COREML, "ANE/.DS_Store"));
-        assert!(!keep(&KOKORO_COREML, "ANE/LICENSE"));
-        assert!(!keep(&KOKORO_COREML, "G2PEncoder.mlmodelc/coremldata.bin"));
-        assert!(keep(
-            &KOKORO_G2P_COREML,
-            "G2PEncoder.mlmodelc/coremldata.bin"
-        ));
-        assert!(keep(&KOKORO_G2P_COREML, "g2p_vocab.json"));
+        assert!(keep(&KOKORO_MLX, "config.json"));
+        assert!(keep(&KOKORO_MLX, "kokoro-v1_0.safetensors"));
+        assert!(keep(&KOKORO_MLX, "voices/af_heart.safetensors"));
+        assert!(!keep(&KOKORO_MLX, "voices/af_heart.pt"));
+        assert!(!keep(&KOKORO_MLX, "README.md"));
+        assert!(keep(&CHATTERBOX_MLX, "conds.safetensors"));
+        assert!(keep(&CHATTERBOX_S3_MLX, "model.safetensors"));
         assert!(!keep(
-            &KOKORO_G2P_COREML,
-            "ANE/KokoroVocoder.mlmodelc/coremldata.bin"
+            &CHATTERBOX_MLX,
+            "models--ResembleAI--chatterbox/model.safetensors"
         ));
-        assert!(keep(
-            &PARAKEET_COREML,
-            "Encoder.mlmodelc/weights/weight.bin"
-        ));
-        assert!(keep(&PARAKEET_COREML, "parakeet_vocab.json"));
-        assert!(!keep(
-            &PARAKEET_COREML,
-            "ParakeetEncoder_4bit_par.mlmodelc/x"
-        ));
+        assert!(keep(&OMNIVOICE_MLX, "audio_tokenizer/model.safetensors"));
+        assert!(keep(&PARAKEET_MLX, "model.safetensors"));
+        assert!(keep(&PARAKEET_MLX, "tokenizer.model"));
+        assert!(!keep(&PARAKEET_MLX, "README.md"));
+        assert!(keep(&DIARIZATION_MLX, "model.safetensors"));
+        assert!(keep(&SPEAKER_EMBEDDING_MLX, "weights.npz"));
     }
 
     #[test]
@@ -747,9 +803,7 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
-    /// The high-severity gap this closes: a MITM (or a stale same-size leftover from an older
-    /// pinned revision) that substitutes bytes of the SAME length would pass a size-only check
-    /// — the pre-fix behavior — but must be rejected once the tree API exposed a git blob oid.
+    /// Same-size wrong content must fail when a git blob oid is pinned.
     #[test]
     fn verify_downloaded_rejects_git_blob_oid_mismatch_even_at_the_right_size() {
         let tmp = tempfile::tempdir().unwrap();
@@ -823,7 +877,7 @@ mod tests {
     fn presence_is_false_without_a_matching_marker() {
         let tmp = tempfile::tempdir().unwrap();
         TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
-        let repo = CoremlRepo {
+        let repo = MlxRepo {
             name: "test_repo",
             repo: "Test/test-repo",
             revision: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
@@ -837,21 +891,35 @@ mod tests {
         };
 
         // No marker at all → absent.
-        assert!(!is_coreml_repo_present(&repo), "no marker yet");
+        assert!(!is_mlx_repo_present(&repo), "no marker yet");
 
         // Marker present but revision mismatches → still absent.
         std::fs::write(tmp.path().join(READY_MARKER), "some-other-revision").unwrap();
         assert!(
-            !is_coreml_repo_present(&repo),
+            !is_mlx_repo_present(&repo),
             "mismatched revision reads as absent"
         );
 
-        // Matching marker → present.
+        // Revision alone is a pre-manifest marker and therefore absent.
         std::fs::write(tmp.path().join(READY_MARKER), repo.revision).unwrap();
         assert!(
-            is_coreml_repo_present(&repo),
+            !is_mlx_repo_present(&repo),
+            "old marker has no file manifest"
+        );
+
+        let model = tmp.path().join("model.safetensors");
+        std::fs::write(&model, b"weights").unwrap();
+        std::fs::write(
+            tmp.path().join(READY_MARKER),
+            format!("{}\nmodel.safetensors\n", repo.revision),
+        )
+        .unwrap();
+        assert!(
+            is_mlx_repo_present(&repo),
             "matching marker reads as present"
         );
+        std::fs::remove_file(model).unwrap();
+        assert!(!is_mlx_repo_present(&repo), "missing manifested file");
     }
 
     /// A local `httpmock` server stands in for `huggingface.co`, so the JSON-shape handling —
@@ -862,11 +930,11 @@ mod tests {
         let server = httpmock::MockServer::start();
         let lfs_sha = "a".repeat(64);
         let body = serde_json::json!([
-            // LFS-tracked runtime weight: kept (matches KOKORO_COREML's "ANE/" prefix), the
+            // LFS-tracked runtime weight: kept; the
             // real content sha256 comes from `lfs.oid`, NOT the top-level (pointer-file) oid.
             {
                 "type": "file",
-                "path": "ANE/KokoroVocoder.mlmodelc/weights.bin",
+                "path": "kokoro-v1_0.safetensors",
                 "size": 12345,
                 "oid": "pointerfileblobsha1notusedforlfs01",
                 "lfs": { "oid": format!("sha256:{lfs_sha}"), "size": 12345 }
@@ -874,53 +942,53 @@ mod tests {
             // Plain (non-LFS) blob: kept, verified via the top-level git-blob `oid` instead.
             {
                 "type": "file",
-                "path": "ANE/af_heart.bin",
+                "path": "config.json",
                 "size": 20,
                 "oid": "deadbeefcafef00d"
             },
-            // Excluded by substring filter (.mlpackage source copy) — must be dropped.
+            // Excluded duplicate voice format — must be dropped.
             {
                 "type": "file",
-                "path": "ANE/KokoroVocoder.mlpackage/x",
+                "path": "voices/af_heart.pt",
                 "size": 5,
                 "oid": "ignored"
             },
-            // Not included by prefix (belongs to the G2P sub-tree, not "ANE/") — dropped.
+            // Not included by prefix — dropped.
             {
                 "type": "file",
-                "path": "G2PEncoder.mlmodelc/coremldata.bin",
+                "path": "README.md",
                 "size": 5,
                 "oid": "ignored"
             },
             // A `directory` entry — never a file, must be skipped regardless of path/filters.
             {
                 "type": "directory",
-                "path": "ANE/KokoroVocoder.mlmodelc",
+                "path": "voices",
                 "size": 0,
                 "oid": "ignored"
             }
         ]);
         let mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path("/api/models/FluidInference/kokoro-82m-coreml/tree/c94edcb4b671856795458645cd389c0a9184e8bb")
+                .path("/api/models/mlx-community/Kokoro-82M-bf16/tree/a71e4d38b236d968966a2002c4c895dbd12b1c3c")
                 .query_param("recursive", "true");
             then.status(200).json_body(body);
         });
 
         let url = server.url(
-            "/api/models/FluidInference/kokoro-82m-coreml/tree/c94edcb4b671856795458645cd389c0a9184e8bb?recursive=true",
+            "/api/models/mlx-community/Kokoro-82M-bf16/tree/a71e4d38b236d968966a2002c4c895dbd12b1c3c?recursive=true",
         );
-        let files = fetch_tree_at(&url, &KOKORO_COREML).expect("tree fetch parses");
+        let files = fetch_tree_at(&url, &KOKORO_MLX).expect("tree fetch parses");
         mock.assert();
 
         assert_eq!(
             files.len(),
             2,
-            "only the two ANE/-prefixed, non-excluded files survive: {files:?}",
+            "only the selected non-excluded files survive: {files:?}",
         );
         let weights = files
             .iter()
-            .find(|f| f.path == "ANE/KokoroVocoder.mlmodelc/weights.bin")
+            .find(|f| f.path == "kokoro-v1_0.safetensors")
             .expect("LFS weights file kept");
         assert_eq!(weights.size, 12345);
         assert_eq!(weights.sha256.as_deref(), Some(lfs_sha.as_str()));
@@ -930,7 +998,7 @@ mod tests {
         );
         let heart = files
             .iter()
-            .find(|f| f.path == "ANE/af_heart.bin")
+            .find(|f| f.path == "config.json")
             .expect("plain blob kept");
         assert_eq!(heart.size, 20);
         assert!(heart.sha256.is_none(), "plain blobs have no lfs.oid");
@@ -945,12 +1013,31 @@ mod tests {
         let mock = server.mock(|when, then| {
             when.method(httpmock::Method::GET).path("/empty-tree");
             then.status(200).json_body(serde_json::json!([
-                { "type": "file", "path": "G2PEncoder.mlmodelc/coremldata.bin", "size": 5, "oid": "x" }
+                { "type": "file", "path": "README.md", "size": 5, "oid": "x" }
             ]));
         });
-        let err = fetch_tree_at(&server.url("/empty-tree"), &KOKORO_COREML).unwrap_err();
+        let err = fetch_tree_at(&server.url("/empty-tree"), &KOKORO_MLX).unwrap_err();
         mock.assert();
         assert!(err.to_string().contains("matched no files"));
+    }
+
+    /// A kept tree entry that carries NO verifier at all (no `lfs.oid`, no top-level `oid`,
+    /// no size) must reject the whole tree as permanent `InvalidData` — otherwise its bytes
+    /// would land with zero content verification.
+    #[test]
+    fn fetch_tree_at_rejects_an_entry_with_no_verifier() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/no-verifier");
+            then.status(200).json_body(serde_json::json!([
+                { "type": "file", "path": "config.json" }
+            ]));
+        });
+        let err = fetch_tree_at(&server.url("/no-verifier"), &KOKORO_MLX).unwrap_err();
+        mock.assert();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(is_permanent_error(&err), "no-verifier entries fail fast");
+        assert!(err.to_string().contains("no verifier"), "got: {err}");
     }
 
     /// A non-2xx tree-API response (moved/deleted repo, bad revision) must surface as an
@@ -962,7 +1049,7 @@ mod tests {
             when.method(httpmock::Method::GET).path("/missing-repo");
             then.status(404).body("Not Found");
         });
-        let err = fetch_tree_at(&server.url("/missing-repo"), &KOKORO_COREML).unwrap_err();
+        let err = fetch_tree_at(&server.url("/missing-repo"), &KOKORO_MLX).unwrap_err();
         mock.assert();
         assert!(err.to_string().contains("HF tree fetch failed"));
     }
@@ -1022,7 +1109,7 @@ mod tests {
 
     #[test]
     fn revisions_are_full_40_char_commit_shas() {
-        for r in all_coreml_repos() {
+        for r in all_mlx_repos() {
             assert_eq!(
                 r.revision.len(),
                 40,
@@ -1030,7 +1117,7 @@ mod tests {
                 r.name
             );
             assert!(r.revision.chars().all(|c| c.is_ascii_hexdigit()));
-            assert!(r.repo.starts_with("FluidInference/"));
+            assert!(r.repo.starts_with("mlx-community/"));
         }
     }
 }

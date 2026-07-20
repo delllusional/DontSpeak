@@ -3,7 +3,7 @@
 // DontSpeak — macOS SwiftUI host (MenuBarExtra + sidebar Status/Tools/Logs/Libraries)
 // over the Rust C ABI (`CDontSpeak/include/dontspeak.h`).
 //
-// Floor: macOS 14 (MenuBarExtra / Layout / SMAppService + DsKokoro Core ML stack).
+// Floor: macOS 14 (MenuBarExtra / Layout / SMAppService + DontSpeakMLX stack).
 // Newer APIs degrade behind availability (e.g. Liquid Glass → ultraThinMaterial).
 // Link against libds_core.a from build.sh (`../../rust/target/release-ffi`); plain
 // `swift build` without that staticlib fails at link.

@@ -17,6 +17,10 @@ struct LibraryInfo: Identifiable, Sendable {
     let homepage: String
     let license: String
     let licenseURL: String
+    let languages: [String]
+    let languageCount: Int?
+    let automaticLanguageDetection: Bool
+    let languageListURL: String
     let files: [LibraryFile]
     var id: String { name }
 }
@@ -27,11 +31,19 @@ private struct LibraryDTO: Decodable {
     let homepage: String?
     let license: String?
     let licenseURL: String?
+    let languages: [String]?
+    let languageCount: Int?
+    let automaticLanguageDetection: Bool?
+    let languageListURL: String?
     let files: [LibraryFileDTO]?
 
     enum CodingKeys: String, CodingKey {
         case name, usage, homepage, license, files
         case licenseURL = "license_url"
+        case languages
+        case languageCount = "language_count"
+        case automaticLanguageDetection = "automatic_language_detection"
+        case languageListURL = "language_list_url"
     }
 }
 
@@ -56,6 +68,10 @@ private func loadLibraries() -> [LibraryInfo] {
             homepage: d.homepage ?? "",
             license: d.license ?? "",
             licenseURL: d.licenseURL ?? "",
+            languages: d.languages ?? [],
+            languageCount: d.languageCount,
+            automaticLanguageDetection: d.automaticLanguageDetection ?? false,
+            languageListURL: d.languageListURL ?? "",
             files: (d.files ?? []).map {
                 LibraryFile(name: $0.name, url: $0.url ?? "", sizeBytes: $0.sizeBytes)
             }
@@ -115,6 +131,22 @@ struct CreditsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            if !lib.languages.isEmpty || lib.languageCount != nil {
+                Text(L.t("libraries.languages"))
+                    .font(.caption2).fontWeight(.semibold)
+                    .foregroundStyle(.tertiary).textCase(.uppercase)
+                    .padding(.top, 2)
+                Text(languageSummary(lib))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !lib.languageListURL.isEmpty, let url = URL(string: lib.languageListURL) {
+                    Link(destination: url) {
+                        Label(L.t("libraries.full_language_list"), systemImage: "globe")
+                    }
+                    .font(.caption)
+                }
+            }
+
             HStack(spacing: 14) {
                 if !lib.homepage.isEmpty, let url = URL(string: lib.homepage) {
                     Link(destination: url) {
@@ -142,6 +174,16 @@ struct CreditsView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    private func languageSummary(_ lib: LibraryInfo) -> String {
+        if lib.automaticLanguageDetection, let count = lib.languageCount {
+            return L.t("libraries.automatic_languages", ["count": String(count)])
+        }
+        return lib.languages
+            .filter { $0 != "auto" }
+            .map { L.t("language.\($0)") }
+            .joined(separator: ", ")
     }
 
     @ViewBuilder

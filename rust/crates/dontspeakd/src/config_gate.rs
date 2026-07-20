@@ -26,7 +26,7 @@ pub(crate) fn helper_needed(cfg: &VoiceConfig) -> bool {
     helper_uses_tts(cfg) || helper_uses_stt(cfg)
 }
 
-/// Kokoro via warm helper.
+/// Built-in TTS via the warm helper.
 pub(crate) fn helper_uses_tts(cfg: &VoiceConfig) -> bool {
     cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
 }
@@ -39,42 +39,47 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// macOS + `DSKOKORO_DYLIB_PATH`. Pair with model-asset gates before advertising.
+/// macOS + `DONTSPEAK_MLX_DYLIB_PATH`. Pair with model-asset gates before advertising.
 #[cfg(target_os = "macos")]
-pub(crate) fn apple_native_shim_available() -> bool {
-    std::env::var_os("DSKOKORO_DYLIB_PATH")
+pub(crate) fn mlx_shim_available() -> bool {
+    std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH")
         .map(|p| std::path::Path::new(&p).exists())
         .unwrap_or(false)
 }
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn apple_native_shim_available() -> bool {
+pub(crate) fn mlx_shim_available() -> bool {
     false
 }
 
-/// Shim + Core ML sets (same revision markers as downloader).
+/// Shim + MLX sets (same revision markers as downloader).
 pub(crate) fn parakeet_available() -> bool {
-    apple_native_shim_available()
-        && ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET)
+    mlx_shim_available()
+        && ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET)
 }
 
-/// Provider-aware Parakeet readiness: ONNX files vs ANE shim+Core ML (not raw ONNX-only).
+/// Provider-aware Parakeet readiness: ONNX files versus shim plus MLX assets.
 pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
-    if stt_uses_onnx_runtime(cfg.resolved_stt_provider(), apple_native_shim_available()) {
+    if stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available()) {
         ds_model::is_parakeet_present() // ONNX-CPU/CUDA: needs the downloaded model FILES
     } else {
-        parakeet_available() // genuine ANE: shim + its downloaded Core ML sets
+        parakeet_available() // MLX: shim + its downloaded model set
     }
 }
 
-/// Built-in STT on ONNX (needs model files) vs real ANE. `Provider::Ane` is arch-blind —
+/// Built-in STT on ONNX (needs model files) vs native MLX.
 /// real only when shim present; else downgrades to ONNX-CPU. Shared by presence + status.
 pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
-    !(provider == ds_config::Provider::Ane && shim_available)
+    !(provider == ds_config::Provider::Mlx && shim_available)
 }
 
-/// Genuine apple-native Kokoro: preference + shim (TTS twin of `!stt_uses_onnx_runtime`).
-pub(crate) fn apple_native_tts_active(cfg: &VoiceConfig) -> bool {
-    cfg.uses_apple_native_model() && apple_native_shim_available()
+/// Genuine MLX TTS: supported model and platform plus the loaded shim.
+pub(crate) fn mlx_tts_active(cfg: &VoiceConfig) -> bool {
+    cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+        && tts_uses_mlx_runtime(cfg.resolved_tts_provider(), mlx_shim_available())
+}
+
+fn tts_uses_mlx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
+    provider == ds_config::Provider::Mlx && shim_available
 }
 
 /// System STT usable (probe, no prompt). `build_stt` + status row.
@@ -97,20 +102,34 @@ pub(crate) fn helper_stt_provider(cfg: &VoiceConfig) -> &'static str {
     }
 }
 
-/// Cheap Kokoro ONNX file presence (no sha256). Shared by status row + spawn gate.
-pub(crate) fn kokoro_onnx_files_present() -> bool {
-    let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
-    exists(ds_model::model_path(ds_model::KOKORO_ONNX_FILE))
-        && exists(ds_model::model_path(ds_model::KOKORO_VOICES_FILE))
-        && kokoro_g2p_files_present()
-}
-
 /// Cheap shared-frontend presence gate used by both Kokoro synthesis backends.
 pub(crate) fn kokoro_g2p_files_present() -> bool {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
         && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
         && exists(ds_model::onnxruntime_dylib_path())
+}
+
+/// Cheap selected-model presence gate used by status and helper spawn.
+pub(crate) fn tts_model_files_present(cfg: &VoiceConfig) -> bool {
+    if mlx_tts_active(cfg) {
+        let frontend_present =
+            cfg.tts_model != ds_config::TtsModel::Kokoro || kokoro_g2p_files_present();
+        frontend_present
+            && ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(
+                cfg.tts_model,
+            ))
+    } else {
+        ds_model::tts_model_files_present(cfg.tts_model)
+            && ds_model::onnxruntime_dylib_path()
+                .map(|path| path.is_file())
+                .unwrap_or(false)
+    }
+}
+
+/// The helper may preload TTS only when the selected model and runtime are present.
+pub(crate) fn helper_preloads_tts(cfg: &VoiceConfig) -> bool {
+    helper_uses_tts(cfg) && tts_model_files_present(cfg)
 }
 
 /// Cheap Parakeet ONNX file presence (status row; absence non-fatal to warm child).
@@ -123,17 +142,13 @@ pub(crate) fn parakeet_onnx_files_present() -> bool {
         && exists(ds_model::onnxruntime_dylib_path())
 }
 
-/// Kokoro status "present": ONNX needs files; apple-native needs shim + files.
-pub(crate) fn kokoro_present_for(apple_native: bool, shim: bool, files: bool) -> bool {
-    if apple_native { shim && files } else { files }
-}
-
-/// Full-duplex AEC: opted in + BuiltIn Parakeet + Kokoro TTS (not System STT). docs/AEC.md.
+/// Full-duplex AEC: opted in + built-in STT/TTS + a model with streaming headroom.
 pub(crate) fn full_duplex_wanted(cfg: &VoiceConfig) -> bool {
     // Parakeet-only AEC path; System stays half-duplex (owns its own recognition).
     cfg.full_duplex
         && cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
-        && helper_uses_tts(cfg)
+        && cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+        && cfg.tts_model_descriptor().supports_full_duplex
 }
 
 /// Eager load/unload helper models to match config (single residency truth for status/stats).
@@ -141,7 +156,7 @@ pub(crate) fn reconcile_helper_models(tts: &Arc<tts::TtsManager>, cfg: &VoiceCon
     if !helper_needed(cfg) || !tts.is_running() {
         return;
     }
-    if helper_uses_tts(cfg) {
+    if helper_preloads_tts(cfg) {
         tts.load_engine(ds_helper_proto::HelperModel::Tts);
     } else {
         tts.unload_engine(ds_helper_proto::HelperModel::Tts);
@@ -203,32 +218,15 @@ pub(crate) fn refusal_cue_on_refused_start(resolved: Option<ds_config::SttEngine
     )
 }
 
-/// Trailing-edge reload debounce: apply a config change
-/// only once `window` has passed with NO NEW trigger, rather than merely `window` since
-/// the last reload that actually ran. Every `set_config` write fires TWO triggers for the
-/// SAME edit: an immediate IPC `Reload` nudge (the fast path) and a slower filesystem-watch
-/// event for the same write (the fallback for a hand-edit, or a missed/late nudge — see
-/// `config_watch`). A LEADING-edge cooldown (a fixed gap since the last reload that ran)
-/// lets a straggling watch event that arrives just past the window through as if it were
-/// an independent, brand new change — which is exactly what fired a second, redundant
-/// reload (and a second warm-child restart) ~581 ms after the nudge had already applied
-/// the identical edit. Resetting the window on EVERY trigger — not just the first —
-/// collapses the whole burst into ONE `Run`, at the cost of landing `window` after the
-/// LAST trigger rather than the first (still comfortably sub-second).
-///
-/// `pending_since` is `None` when nothing is outstanding, else the tick a trigger was
-/// first (or most recently) observed. The caller threads the returned `Option<Instant>`
-/// into the next tick's `pending_since` — it's the memory `Defer`/`Run` needs instead of
-/// re-arming `reload_requested` (a fresh trigger is folded into this state immediately, so
-/// nothing is lost even though the poll loop already swapped the flag back to false).
+/// Trailing-edge reload debounce: quiet for `window` after the *last* trigger (not
+/// since last run). Collapses IPC nudge + watch-event bursts for the same write into
+/// one `Run`. `pending_since` is the most recent trigger tick (`None` = idle).
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum ReloadTick {
-    /// Apply the reload now — `window` has elapsed since the most recent trigger.
+    /// Quiet window elapsed since most recent trigger.
     Run,
-    /// A trigger is outstanding (this tick's, or an earlier tick's) but the quiet window
-    /// hasn't elapsed yet.
+    /// Trigger outstanding; window not elapsed.
     Defer,
-    /// Nothing outstanding.
     Idle,
 }
 pub(crate) fn reload_tick(
@@ -237,9 +235,7 @@ pub(crate) fn reload_tick(
     pending_since: Option<Instant>,
     window: Duration,
 ) -> (ReloadTick, Option<Instant>) {
-    // A fresh trigger ALWAYS resets the quiet window, even over an already-pending one —
-    // that's what lets a straggling second trigger for the same edit push the reload out
-    // instead of racing in as its own separate `Run`.
+    // Fresh trigger resets the quiet window (even over an already-pending one).
     let anchor = if triggered_now {
         Some(now)
     } else {
@@ -292,9 +288,10 @@ pub(crate) fn reload_watermark(
 }
 
 /// GUARD: whether a TTS reply for the SELECTED engine can PLAY right now. `System` (macOS
-/// `say`) needs no model → always ready; `Kokoro` plays only when its model is resident +
-/// warm (`tts_loaded`); `None` (TTS off) never plays. The worker uses this so a
-/// not-yet-downloaded / still-loading model never produces silent or garbage playback. PURE.
+/// `say`) needs no model → always ready; built-in plays only when its model
+/// is resident + warm (`tts_loaded`); `None` (TTS off) never plays. The worker uses this
+/// so a not-yet-downloaded / still-loading model never produces silent or garbage
+/// playback. PURE.
 pub(crate) fn tts_can_play(engine: Option<ds_config::TtsEngine>, tts_loaded: bool) -> bool {
     use ds_config::TtsEngine;
     match engine {
@@ -367,7 +364,7 @@ pub(crate) fn debug_enabled() -> bool {
 }
 
 /// Serializes every `dontspeakd`-crate test (here and in `tts.rs`) that mutates the
-/// process-wide `DONTSPEAK_MODEL_DIR` / `DSKOKORO_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
+/// process-wide `DONTSPEAK_MODEL_DIR` / `DONTSPEAK_MLX_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
 /// mirrors `ds-model/src/spec.rs`'s own `ENV_LOCK` idiom (`spec.rs:326`). ONE shared lock, not
 /// a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching the SAME var can't
 /// interleave (`dontspeakd`'s test binary runs multi-threaded by default).
@@ -381,13 +378,13 @@ mod tests {
     #[test]
     fn stt_uses_onnx_runtime_gates_on_the_shim_not_the_raw_provider() {
         use ds_config::Provider;
-        // Genuine ANE: `Ane` preference AND the FluidAudio shim present ⇒ Core ML path
+        // MLX preference and shim presence select the MLX path
         // (NOT ONNX) ⇒ `parakeet_present_for` checks `parakeet_available()`, not the files.
-        assert!(!stt_uses_onnx_runtime(Provider::Ane, true));
-        // The Intel (and any no-shim) case: `resolved_stt_provider()` still says `Ane`
+        assert!(!stt_uses_onnx_runtime(Provider::Mlx, true));
+        // The Intel (and any no-shim) case downgrades to ONNX CPU
         // arch-blindly, but with no shim it DOWNGRADES to ONNX-CPU ⇒ needs the model FILES.
         // This is the regression that made dictation fall back to Claude Code on Intel.
-        assert!(stt_uses_onnx_runtime(Provider::Ane, false));
+        assert!(stt_uses_onnx_runtime(Provider::Mlx, false));
         // Explicit ONNX providers are always the ONNX path, shim or not.
         assert!(stt_uses_onnx_runtime(Provider::OrtCpu, false));
         assert!(stt_uses_onnx_runtime(Provider::OrtCpu, true));
@@ -396,65 +393,12 @@ mod tests {
     }
 
     #[test]
-    fn kokoro_present_reflects_active_backend() {
-        // apple-native: needs the shim (the loader) AND the downloaded Core ML sets — a clean
-        // apple-native install with the sets not yet fetched reads MISSING (the download
-        // manager then lights "downloading"), never a false "present".
-        assert!(kokoro_present_for(true, true, true));
-        assert!(!kokoro_present_for(true, true, false));
-        assert!(!kokoro_present_for(true, false, true));
-        // onnx providers: gated on the downloaded ONNX model+voices+runtime, shim irrelevant.
-        assert!(kokoro_present_for(false, false, true));
-        assert!(!kokoro_present_for(false, true, false));
-    }
+    fn tts_uses_mlx_runtime_gates_on_the_shim_not_the_raw_provider() {
+        use ds_config::Provider;
 
-    #[test]
-    fn kokoro_onnx_files_present_needs_synth_frontend_and_dylib() {
-        // Hermetic: point `model_dir()` at a FRESH, EMPTY temp dir via `DONTSPEAK_MODEL_DIR`
-        // (the same override `ds_config::model_dir()` respects) so this never reads the real
-        // ambient OS model cache. `ORT_DYLIB_PATH` is checked BEFORE the `DONTSPEAK_MODEL_DIR`-
-        // honoring fallback (`ds_model::onnxruntime_dylib_path()`), so clear it too for a
-        // genuinely hermetic claim.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
-
-        let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
-        // below before returning.
-        unsafe {
-            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
-            std::env::remove_var("ORT_DYLIB_PATH");
-        }
-        // Empty dir, no dylib override: definitely false. `&&` short-circuits on the first
-        // missing file, so this doesn't even need `ORT_DYLIB_PATH` set deliberately.
-        assert!(!kokoro_onnx_files_present());
-
-        std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_ENCODER_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_DECODER_FILE), b"dummy").unwrap();
-        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
-        std::fs::write(&dylib, b"dummy").unwrap();
-        // SAFETY: test-only env mutation, still serialized by ENV_LOCK (held for the
-        // whole test), restored below.
-        unsafe {
-            std::env::set_var("ORT_DYLIB_PATH", &dylib);
-        }
-        assert!(kokoro_onnx_files_present());
-
-        // SAFETY: restore the prior values (or clear them) so later tests see the real
-        // env again.
-        unsafe {
-            match prev_model_dir {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-            match prev_ort {
-                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
-        }
+        assert!(tts_uses_mlx_runtime(Provider::Mlx, true));
+        assert!(!tts_uses_mlx_runtime(Provider::Mlx, false));
+        assert!(!tts_uses_mlx_runtime(Provider::OrtCpu, true));
     }
 
     #[test]
@@ -591,20 +535,14 @@ mod tests {
 
     #[test]
     fn reload_tick_resets_the_window_on_a_second_trigger() {
-        // Regression for the real incident: an explicit IPC nudge fires, then a slower
-        // filesystem-watch event for the SAME edit lands 581 ms later — well past a
-        // 250 ms window, but the trailing-edge reset still collapses both into ONE run
-        // instead of letting the straggler race in as its own independent reload.
+        // Second trigger re-arms the quiet window so nudge + straggling watch collapse.
         let base = Instant::now();
         let window = Duration::from_millis(750);
         let straggler_gap = Duration::from_millis(581);
 
-        // The explicit nudge: first trigger, defers.
         let (tick, pending) = reload_tick(true, base, None, window);
         assert_eq!(tick, ReloadTick::Defer);
 
-        // The straggling watch event for the SAME write, 581ms later: still a fresh
-        // trigger, so the anchor moves forward instead of running here.
         let straggler_at = base + straggler_gap;
         let (tick, pending) = reload_tick(true, straggler_at, pending, window);
         assert_eq!(tick, ReloadTick::Defer);
@@ -614,16 +552,10 @@ mod tests {
             "anchor re-armed on the second trigger"
         );
 
-        // Nothing new, window elapsed from the SECOND trigger (not the first): exactly
-        // one `Run` for the whole burst.
         let (tick, pending) = reload_tick(false, straggler_at + window, pending, window);
         assert_eq!(tick, ReloadTick::Run);
         assert_eq!(pending, None);
 
-        // Sanity: had the debounce been anchored on the FIRST trigger only (the old
-        // leading-edge bug), `base + window` would already be past — window is 750ms and
-        // the straggler landed at 581ms, i.e. still inside it — so this single window is
-        // what proves the straggler didn't just sail through as an independent reload.
         assert!(straggler_gap < window);
     }
 
@@ -641,15 +573,31 @@ mod tests {
     #[test]
     fn tts_can_play_gates_on_engine_readiness() {
         use ds_config::TtsEngine;
-        // None (off) never plays, regardless of the loaded flag.
         assert!(!tts_can_play(None, true));
         assert!(!tts_can_play(None, false));
-        // System (macOS `say`) needs no model — always playable.
         assert!(tts_can_play(Some(TtsEngine::System), false));
         assert!(tts_can_play(Some(TtsEngine::System), true));
-        // Kokoro plays ONLY when its model is resident + warm — never mid-download/load.
         assert!(!tts_can_play(Some(TtsEngine::BuiltIn), false));
         assert!(tts_can_play(Some(TtsEngine::BuiltIn), true));
+    }
+
+    #[test]
+    fn model_capability_gates_full_duplex() {
+        use ds_config::{SttEngine, TtsEngine, TtsModel};
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let cfg = VoiceConfig {
+                tts_engine: Some(vec![TtsEngine::BuiltIn]),
+                tts_model: TtsModel::Chatterbox,
+                stt_engine_ladder: vec![SttEngine::BuiltIn],
+                stt_engine: None,
+                full_duplex: true,
+                ..VoiceConfig::default()
+            };
+            assert!(helper_uses_tts(&cfg));
+            assert!(helper_needed(&cfg));
+            assert!(!full_duplex_wanted(&cfg));
+        }
     }
 
     #[test]
@@ -709,15 +657,11 @@ mod tests {
     #[test]
     fn stt_can_start_gates_on_engine_availability() {
         use ds_config::SttEngine;
-        // None (off) never dictates.
         assert!(!stt_can_start(None, true, true));
-        // BuiltIn (Parakeet) records ONLY when its model is resident + warm.
         assert!(!stt_can_start(Some(SttEngine::BuiltIn), false, true));
         assert!(stt_can_start(Some(SttEngine::BuiltIn), true, false));
-        // System (OS recognizer) only when its on-device model is ready.
         assert!(!stt_can_start(Some(SttEngine::System), true, false));
         assert!(stt_can_start(Some(SttEngine::System), false, true));
-        // Claude Code delegates (no local model) — always startable, ignoring local flags.
         assert!(stt_can_start(Some(SttEngine::ClaudeCode), false, false));
     }
 

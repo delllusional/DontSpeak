@@ -59,7 +59,7 @@ apps/macos/dist-apps.sh
 ```
 
 - Output: `~/Desktop/dontspeak-<version>-macos-<arch>.app.zip` (`OUTDIR` overrides)
-- `DONTSPEAK_ARCHES` default `arm64`; `"arm64 x86_64"` for both (Intel without Core ML shim)
+- `DONTSPEAK_ARCHES` default `arm64`; `"arm64 x86_64"` for both (Intel uses ONNX CPU + a system-only Swift shim)
 - `DONTSPEAK_DIST=1` (default): requires Developer ID + hardened runtime; `0` = ad-hoc
 - Notarize if `DONTSPEAK_NOTARY_PROFILE` or Apple ID/team/password trio set
 - Standalone: `DONTSPEAK_NOTARY_PROFILE=… apps/macos/notarize.sh <path>/DontSpeak.app`

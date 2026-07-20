@@ -177,7 +177,7 @@ impl Stt for HelperStt {
     }
 
     fn is_available(&self) -> bool {
-        // Provider-aware: ANE (Core ML) needs no ONNX model files, so the raw
+        // Provider-aware: MLX needs no ONNX model files, so the raw
         // `parakeet_present()` would wrongly report unavailable on that path.
         ds_config::Paths::resolve()
             .map(|p| crate::config_gate::parakeet_present_for(&ds_config::VoiceConfig::load(&p)))

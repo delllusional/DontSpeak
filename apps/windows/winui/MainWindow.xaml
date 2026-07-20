@@ -144,7 +144,7 @@
                                 </StackPanel>
                             </Grid>
                             <StackPanel x:Name="TtsStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
-                                <!-- The active runtime/EP Kokoro runs on (ORT CPU/CUDA/Core ML, FluidAudio ANE). -->
+                                <!-- The active runtime Kokoro runs on (ORT CPU/CUDA or MLX). -->
                                 <Grid x:Name="TtsRuntimeRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.engine.role_runtime}" Opacity="0.6" /><TextBlock x:Name="TtsRuntimeText" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                 <TextBlock x:Name="TtsStatsMsg" TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
                                 <!-- System TTS: a clickable "Manage voices" link to the OS voice settings page
@@ -193,7 +193,7 @@
                                 </StackPanel>
                             </Grid>
                             <StackPanel x:Name="SttStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
-                                <!-- The active runtime/EP Parakeet runs on (built_in only; ORT CPU, FluidAudio ANE). -->
+                                <!-- The active runtime Parakeet runs on (built_in only; ORT CPU or MLX). -->
                                 <Grid x:Name="SttRuntimeRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.engine.role_runtime}" Opacity="0.6" /><TextBlock x:Name="SttRuntimeText" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                 <TextBlock x:Name="SttStatsMsg" TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
                                 <StackPanel x:Name="SttStatsGrid" Spacing="6">
@@ -209,7 +209,7 @@
                                   Background="Transparent" Tapped="DiarHeader_Tapped" Visibility="Collapsed">
                                 <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
                                     <TextBlock Text="{loc:Loc Key=status.engine.role_diar}" />
-                                    <TextBlock Text="{loc:Loc Key=status.engine.pyannote}" Opacity="0.6" VerticalAlignment="Center" />
+                                    <TextBlock Text="{loc:Loc Key=status.engine.sortformer}" Opacity="0.6" VerticalAlignment="Center" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
                                     <!-- Dot for every settled state; an orange determinate progress ring swaps in while the
@@ -222,7 +222,7 @@
                                 </StackPanel>
                             </Grid>
                             <StackPanel x:Name="DiarStats" Spacing="6" Margin="12,0,0,6" Visibility="Collapsed">
-                                <!-- The active runtime/EP the diarizer runs on (Core ML / ANE). -->
+                                <!-- The active runtime the diarizer runs on (MLX). -->
                                 <Grid x:Name="DiarRuntimeRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.engine.role_runtime}" Opacity="0.6" /><TextBlock x:Name="DiarRuntimeText" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                 <TextBlock x:Name="DiarStatsMsg" TextWrapping="Wrap" Opacity="0.7" Visibility="Collapsed" />
                                 <StackPanel x:Name="DiarStatsGrid" Spacing="6">

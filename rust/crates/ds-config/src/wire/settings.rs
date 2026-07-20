@@ -115,9 +115,9 @@ mod tests {
     #[test]
     fn ds_block_parses_from_json_wrapper() {
         let r: SettingsRoot =
-            serde_json::from_str(r#"{"dontspeak":{"tts_voices":["am_adam"]}}"#).unwrap();
+            serde_json::from_str(r#"{"dontspeak":{"tts_voices":{"kokoro":["am_adam"]}}}"#).unwrap();
         let v = r.dontspeak.unwrap();
-        assert_eq!(v.tts_voices, vec!["am_adam"]);
+        assert_eq!(v.tts_voices.kokoro, vec!["am_adam"]);
         assert_eq!(v.rate, 1.0);
     }
 
@@ -146,7 +146,7 @@ mod tests {
             serde_json::json!({ "enabled": true, "mode": "tap", "autoSubmit": true })
         );
         assert_eq!(
-            merged["dontspeak"]["tts_voices"][0],
+            merged["dontspeak"]["tts_voices"]["kokoro"][0],
             serde_json::json!("am_michael")
         );
         assert_eq!(
@@ -214,7 +214,7 @@ mod tests {
             let merged = merge_settings(garbage, &sample_voice());
             assert!(merged.is_object());
             assert_eq!(
-                merged["dontspeak"]["tts_voices"][0],
+                merged["dontspeak"]["tts_voices"]["kokoro"][0],
                 serde_json::json!("am_michael")
             );
         }
@@ -224,7 +224,7 @@ mod tests {
         assert_eq!(merged["keep"], serde_json::json!(true));
         assert!(merged["dontspeak"].is_object());
         assert_eq!(
-            merged["dontspeak"]["tts_voices"][0],
+            merged["dontspeak"]["tts_voices"]["kokoro"][0],
             serde_json::json!("am_michael")
         );
     }

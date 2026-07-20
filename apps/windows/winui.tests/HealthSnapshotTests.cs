@@ -79,7 +79,7 @@ public class HealthSnapshotTests
     public void SelectedEngineSectionsMapWithoutSlotProjection()
     {
         var s = Parse("""
-            {"tts":{"engine":"system","provider":null,
+            {"tts":{"engine":"system","model":null,"language":null,"provider":null,
                     "status":{"state":"idle","progress":0,"error":null}},
              "stt":{"engine":"claude_code","provider":null,"voice_key":"Space",
                     "status":{"state":"running","progress":0,"error":null}}}
@@ -89,6 +89,22 @@ public class HealthSnapshotTests
         Assert.Equal("claude_code", s.SttEngine.Engine);
         Assert.Equal("Space", s.SttEngine.VoiceKey);
         Assert.Equal(EngineState.Running, s.SttEngine.Status.State);
+
+        var cb = Parse("""
+            {"tts":{"engine":"built_in","model":"chatterbox","language":"ru","provider":"cpu",
+                    "status":{"state":"running","progress":0,"error":null}}}
+            """);
+        Assert.Equal("built_in", cb.TtsEngine.Engine);
+        Assert.Equal(TtsModel.Chatterbox, cb.TtsEngine.Model);
+        Assert.Equal("ru", cb.TtsEngine.Language);
+        Assert.Equal(EngineState.Running, cb.TtsEngine.Status.State);
+
+        var unknown = Parse("""
+            {"tts":{"engine":"built_in","model":"future_model","language":"en","provider":"cpu",
+                    "status":{"state":"running","progress":0,"error":null}}}
+            """);
+        Assert.Equal("off", unknown.TtsEngine.Engine);
+        Assert.Equal(EngineState.Missing, unknown.TtsEngine.Status.State);
     }
 
     [Theory]
@@ -101,7 +117,7 @@ public class HealthSnapshotTests
     [InlineData("something_new", EngineState.Missing)]
     public void EngineStateStringMapsToEnum(string state, EngineState expected)
     {
-        var s = Parse($$"""{"tts":{"engine":"built_in","status":{"state":"{{state}}","progress":0.5} } }""");
+        var s = Parse($$"""{"tts":{"engine":"built_in","model":"kokoro","status":{"state":"{{state}}","progress":0.5} } }""");
         Assert.Equal(expected, s.TtsEngine.Status.State);
         Assert.Equal(0.5, s.TtsEngine.Status.Progress);
     }
@@ -111,13 +127,13 @@ public class HealthSnapshotTests
     {
         var s = Parse("""
             {"diarization":{"status":{"state":"running","progress":1.0,"error":null},
-             "enabled":true,"provider":"ane","speakers":["Alex"],"cluster_threshold":0.72}}
+             "enabled":true,"provider":"mlx","speakers":["Alex"],"activity_threshold":0.72}}
             """);
         Assert.Equal(EngineState.Running, s.Diarization.Status.State);
         Assert.True(s.Diarization.Enabled);
-        Assert.Equal("ane", s.Diarization.Runtime);
+        Assert.Equal("mlx", s.Diarization.Runtime);
         Assert.Equal(AlexOnly, s.Diarization.Speakers);
-        Assert.Equal(0.72, s.Diarization.ClusteringThreshold);
+        Assert.Equal(0.72, s.Diarization.ActivityThreshold);
     }
 
     [Fact]

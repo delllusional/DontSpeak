@@ -334,7 +334,10 @@ mod tests {
             resolve_subcommand(&argv(&["dontspeak"])),
             Subcommand::Server
         );
-        assert_eq!(resolve_subcommand(&Vec::<String>::new()), Subcommand::Server);
+        assert_eq!(
+            resolve_subcommand(&Vec::<String>::new()),
+            Subcommand::Server
+        );
     }
 
     #[test]

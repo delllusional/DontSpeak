@@ -55,16 +55,22 @@ pub(super) fn phonemize(word: &str) -> Result<String, String> {
 
 impl BartG2p {
     fn load() -> Result<Self, String> {
+        crate::ort_session::load_with_fallback("g2p", Self::load_with_provider)
+    }
+
+    fn load_with_provider(preference: &str) -> Result<Self, String> {
         if !ds_model::is_kokoro_g2p_present() {
             return Err("Kokoro G2P model is not downloaded".to_string());
         }
         // Same ORT dylib as synth (G2P first): process-global API can't switch CPU→CUDA later.
-        let want_gpu = ds_config::provider_pref_wants_gpu(
-            &std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".to_string()),
-        );
+        let want_gpu = ds_config::provider_pref_wants_gpu(preference);
         ds_model::ensure_ort_dylib_gpu(want_gpu)?;
-        let encoder = load_session(ds_model::KOKORO_G2P_ENCODER_FILE)?;
-        let decoder = load_session(ds_model::KOKORO_G2P_DECODER_FILE)?;
+        let mut sessions = crate::ort_session::OrtSessions::from_preference(
+            ds_config::TtsModel::Kokoro,
+            preference,
+        );
+        let encoder = load_session(&mut sessions, ds_model::KOKORO_G2P_ENCODER_FILE)?;
+        let decoder = load_session(&mut sessions, ds_model::KOKORO_G2P_DECODER_FILE)?;
         Ok(Self { encoder, decoder })
     }
 
@@ -140,10 +146,13 @@ impl BartG2p {
     }
 }
 
-fn load_session(file_name: &str) -> Result<Session, String> {
+fn load_session(
+    sessions: &mut crate::ort_session::OrtSessions,
+    file_name: &str,
+) -> Result<Session, String> {
     let path = ds_model::model_path(file_name).ok_or("cannot resolve model_dir()")?;
     let bytes = ds_model::read_model_file(&path)?;
-    let mut builder = Session::builder().map_err(|e| format!("Kokoro G2P session builder: {e}"))?;
+    let (mut builder, _) = sessions.builder()?;
     builder = builder
         .with_intra_threads(1)
         .map_err(|e| format!("Kokoro G2P session threads: {e}"))?;

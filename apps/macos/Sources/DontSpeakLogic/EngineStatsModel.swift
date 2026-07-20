@@ -73,11 +73,11 @@ public struct DiarizationStatusDTO: Decodable {
     public var enabled: Bool
     public var provider: String
     public var speakers: [String]
-    public var clusteringThreshold: Double
+    public var activityThreshold: Double
 
     enum CodingKeys: String, CodingKey {
         case status, enabled, provider, speakers
-        case clusteringThreshold = "cluster_threshold"
+        case activityThreshold = "activity_threshold"
     }
 }
 

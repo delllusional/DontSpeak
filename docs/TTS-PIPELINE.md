@@ -1,13 +1,15 @@
 # Text-to-speech narration pipeline
 
-Canonical path from assistant text to Kokoro audio. Streaming mechanics:
+Canonical path from assistant text to built-in or system speech. Streaming mechanics:
 [STREAMING-NARRATION.md](STREAMING-NARRATION.md). Focus/session:
 [PER-TERMINAL-QUEUES.md](PER-TERMINAL-QUEUES.md).
 
 ## Contract
 
 1. Adapters select narration; engine owns schedule, focus, mic, readiness, cancel, play.
-2. ONNX and Core ML share validated phoneme chunks — no backend-local text frontend.
+2. Kokoro's ORT and MLX paths share validated phoneme chunks. Chatterbox, Qwen, and
+   OmniVoice share deterministic plain-text chunks and keep model-specific tokenization
+   inside their inference pipelines.
 3. Accepted work stays observable (queued/in-flight) until terminal outcome, except
    external focus hold that leaves always-listening usable.
 4. Nothing speakable → successful no-op. Synthesis that produces no audio → failure.
@@ -20,14 +22,17 @@ Canonical path from assistant text to Kokoro audio. Streaming mechanics:
 | Assistant text | Client hooks / Codex subscriber / MCP `speak` | Streamed batches or final utterance |
 | Narration select | `ds-narrate` | Emit completed top-level blockquotes once; optional short non-quote final; preserve selected text for the shared frontend |
 | Delivery | Hook/MCP IPC or in-process Codex | `SpeakNarration` / `Speak` / direct enqueue |
-| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy |
-| Text frontend | `ds-tts` | One GFM → prose cleanup for every route. Kokoro then runs English norm → IPA → vocab filter → typed chunks; System stops at prose |
-| Synthesis | `ds-helper` (Kokoro) / OS voice (System) | Kokoro: `KokoroPhonemeChunk` → ONNX or Core ML. System: `say` / SAPI / spd-say |
+| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect and pin one ISO language per utterance |
+| Text frontend | `ds-tts` | One GFM → prose cleanup for every route; model-capability frontend → bounded typed chunks; System stops at prose |
+| Synthesis | `ds-helper` (built-in) / OS voice (System) | Selected built-in model → ORT CPU everywhere or a supported accelerator; System → `say` / SAPI / spd-say |
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
 
 Narration selection decides what to speak but does not rewrite it. Every delivery route
 converges on `ds_tts::normalize_spoken_text`, which owns markup, URL, hash, and whitespace
 cleanup once. Backend normalization starts from that prose; it does not duplicate cleanup.
+The same `lingua` detector sees that normalized prose for every engine and model. An
+ambiguous or unspeakable input resolves to English; a detected language unsupported by
+the selected model fails that utterance instead of changing models or engines.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
 Codex (in-process). Streaming routes retry rejected work; no route yet propagates
@@ -53,14 +58,31 @@ zero chunks = success before opening audio.
 
 ## Models and backends
 
-`ds-model` owns URLs/paths/digests. Kokoro + styles + BART + ORT checked as one stack.
-BART is frontend, not ONNX-synth-only — Core ML path still needs ORT
+`ds-model` owns immutable URLs, paths, digests, licenses, and per-model directories.
+Kokoro + styles + BART + ORT are checked as one stack.
+BART is frontend, not ONNX-synth-only — MLX still needs ORT
 (`kokoro_g2p_files_present`, `ensure_ort_dylib_gpu`).
 
-**ONNX:** chunk → token IDs → style row → pad → shared ORT → PCM commit per batch.
+**ONNX:** detected language + bounded chunk → model tokenizer/conditioning → shared ORT sessions → PCM
+commit per batch. Provider acceleration is enabled only where the registry declares it.
 
-**Apple Core ML:** `DsKokoro` / `dsk_synthesize_phonemes` — caller IPA only; 24 kHz;
-sync non-null PCM callback; null callback rejected.
+**Apple MLX:** the shared `DontSpeakMLX` ABI loads only DontSpeak-populated model
+directories. Kokoro receives IPA; Chatterbox uses its pinned default conditioning; Qwen
+receives plain multilingual text and a speaker ID; OmniVoice uses automatic voice design.
+All return 24 kHz PCM through the synchronous borrowed-buffer callback.
+
+### Built-in model registry
+
+| Model | Language mode | Voices | Providers | Rate / full duplex |
+|---|---|---|---|---|
+| Kokoro | English; accent per voice | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
+| Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
+| Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
+| OmniVoice | auto (any detected language) | default voice | ORT CPU, MLX (no CUDA — pinned int4 export) | no / no |
+
+Chatterbox caches transient reference-voice conditioning and uses named/model-derived KV
+caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice performs
+32-step confidence-weighted unmasking before Higgs decoding. All long loops poll cancel.
 
 ## Queue and focus
 
@@ -82,6 +104,7 @@ records outcome.
 
 Shared one-shot + warm-server:
 
+- Each speak request carries its detected ISO language; helper startup has no language setting
 - Zero chunks → success, no backend load
 - Load fail → `TTSLOADERR` (+ terminal `ERR` warm)
 - Empty PCM / synth fail → `ERR`; never commit partial on later batch fail

@@ -15,6 +15,9 @@ serde_json = { workspace = true }
 # The typed SetConfigArgs surface (its fields, enums, serde attrs) lives here now (issue #6),
 # so the catalog crate depends on ds-config at build time.
 ds-config = { workspace = true }
+# Chatterbox voice-id validation reads the LIGHT registry mirror (ds-voices depends only
+# on ds-config — no ort/rodio/ds-model), keeping this crate a build leaf.
+ds-voices = { workspace = true }
 
 [lints]
 workspace = true

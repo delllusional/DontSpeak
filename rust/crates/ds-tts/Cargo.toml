@@ -17,8 +17,8 @@ ds-proc = { workspace = true }
 # this crate's old `enumerate`/`Gender`/`Quality`/`SpeakerVoice` paths (see lib.rs) so
 # every existing call site keeps compiling unchanged.
 ds-voices = { workspace = true }
-# The shared ORT session builder + the apple-native FluidAudio shim loader (used by
-# synth_coreml). The warm-media helper that unions synth + dictation + AEC is its OWN
+# The shared ORT session builder + the Apple MLX Audio shim loader (used by
+# synth_mlx). The warm-media helper that unions synth + dictation + AEC is its OWN
 # crate now (ds-helper), so this TTS library no longer depends on ds-stt / ds-aec.
 ds-model = { workspace = true }
 serde = { workspace = true }
@@ -37,14 +37,22 @@ pulldown-cmark = { workspace = true }
 # Report phonemes dropped for being outside Kokoro's vocabulary — the loss must be observable,
 # not silent (see g2p::drop_unsupported_phonemes).
 log = { workspace = true }
+# Chatterbox's HF tokenizer.json (see the workspace pin for the pure-Rust feature choice).
+tokenizers = { workspace = true }
+# Shared per-utterance language detection before every backend dispatch.
+lingua = { workspace = true }
 # 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
 # earcon `cue` op decode macOS system sounds (.aiff); wav (Windows) + vorbis/oga (Linux) are
 # already in rodio's defaults.
 rodio = { workspace = true, features = ["symphonia-aiff"] }
 
+[dev-dependencies]
+# Tempdir-only fixtures (wav round-trip, tokenizer.json fixture) — never live resources.
+tempfile = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
-# dlopen libdskokoro.dylib (the FluidAudio Core ML / ANE Kokoro shim) for the
-# apple-native TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
+# dlopen libdontspeak_mlx.dylib (the MLX Audio Kokoro shim) for the
+# MLX TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
 libloading = { workspace = true }
 
 [lints]

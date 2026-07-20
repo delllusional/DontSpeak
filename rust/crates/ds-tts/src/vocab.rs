@@ -8,7 +8,7 @@
 //! `tokenizer.py`. Clause batching under [`MAX_PHONEME_LENGTH`] is in [`crate::batch`].
 
 /// Max phoneme chars per batch (both synth backends). One retained char → one token;
-/// Kokoro style table has 510 rows (0..=509); also within FluidAudio's 510-phoneme bound.
+/// Kokoro style table has 510 rows (0..=509).
 pub const MAX_PHONEME_LENGTH: usize = 509;
 /// Kokoro output: 24 kHz mono.
 pub const SAMPLE_RATE: u32 = 24_000;

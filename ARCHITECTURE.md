@@ -18,7 +18,8 @@ bundle.
 `config.toml` under the OS data dir (e.g. macOS
 `~/Library/Application Support/DontSpeak/`). Separate from any client config —
 `~/.claude/settings.json` stays Claude's (hooks + `voice`). Hot-reload by mtime:
-`stt_engine` / `tts_engine` rebuilds that subsystem; voice/rate/narrate apply next call.
+engine, built-in model, and provider changes reconcile the shared helper;
+voice/rate/narrate apply on the next call.
 
 ## Pluggable STT/TTS
 
@@ -34,8 +35,11 @@ Two fields each, resolved by `resolved_stt` / `resolved_tts`:
 **STT ladder default:** `system` → `built_in` (Parakeet) → `claude_code`. `system` is
 macOS-only today, so Parakeet leads on Windows/Linux.
 
-**TTS:** `Kokoro` (in-process `ort` + `voice-g2p` + `rodio`; Core ML/ANE on Apple
-Silicon) or `System` (OS voice).
+**TTS engines:** `built_in` or `system`. The built-in model registry contains Kokoro,
+Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU and MLX;
+Kokoro, Chatterbox, and Qwen also support CUDA; Kokoro alone has Core ML, rate control,
+and full-duplex. Model capabilities drive voice, rate, full-duplex, download, and
+provider selection. Speech language is detected per utterance in the shared text pipeline.
 
 ## Caps Lock
 
@@ -46,7 +50,7 @@ state — gestures never read the light. Windows: low-level hook. macOS/Linux: 3
 
 ## TTS pipeline
 
-One FIFO TTS queue; warm helper keeps Kokoro loaded. `narrate` selects content.
+One FIFO TTS queue; the warm helper keeps the selected built-in model loaded. `narrate` selects content.
 Barge-in pauses and resumes on cancel. Session-scoped earcons (reply-done,
 needs-input) queue after admitted narration; they don't mix over in-flight speech
 except needs-input under pause-in-background focus hold (idle playback → sound
@@ -64,20 +68,22 @@ and [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 ## Local STT (built-in)
 
 Same warm helper as TTS: Caps-ON opens mic → streaming FastConformer over ORT on
-Windows/Linux, or Parakeet via FluidAudio Core ML on Apple Silicon. Caps-OFF: final
+Windows/Linux, or Parakeet via MLX Audio on Apple Silicon. Caps-OFF: final
 transcript → focus-gated key injector.
 Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 ## Models & ONNX
 
 `ds-model`: URLs, paths, digests. On-demand download into app data dir, SHA-256 pinned.
-`ort` loaded dynamically; Kokoro and Parakeet share one runtime. CUDA on demand
-(Windows/Linux x86_64); Core ML/ANE on Apple Silicon. UI "Runtime" reflects the EP
-actually in use.
+`ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
+(Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
+built-in model. Intel macOS never builds or bundles MLX code; its built-in path remains ORT CPU
+when an Intel-compatible runtime is present. A dependency-free Swift shim retains Apple System
+STT on Intel. UI "Runtime" reflects the backend actually in use.
 
 Kokoro English frontend uses checksum-pinned BART G2P (ORT) before backend selection —
-Core ML TTS path still needs the ORT dylib. See
-[docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-runtime-and-backends).
+MLX Kokoro still uses the shared Rust BART G2P frontend and therefore needs the ORT dylib. See
+[docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-and-backends).
 
 ## FFI boundary
 

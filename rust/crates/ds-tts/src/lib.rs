@@ -6,7 +6,7 @@
 //!   * [`SystemTts`] — macOS `say`; Windows System.Speech + Linux spd-say behind cfg.
 //!
 //! Helper pipeline: markdown → prose ([`spoken`]) → numbers → G2P ([`g2p`]) → vocab
-//! tokens → clause batches ([`batch`]) → ort synth ([`synth`] / Core ML) → trim →
+//! tokens → clause batches ([`batch`]) → synth ([`synth`] / MLX) → trim →
 //! play. Pure stages unit-tested without audio/model/network.
 //!
 //! Single-speaker pidfile is sacred: every engine spawns in its OWN process group and
@@ -15,22 +15,25 @@
 
 use std::io;
 
-/// Materialize ANE Kokoro voice packs from local ONNX `voices-v1.0.bin` (ANE ships only
-/// `af_heart`). Only the apple-native backend calls this.
-pub mod ane_voices;
 /// Model-bounded phoneme batching (helper bin).
 pub mod batch;
+/// Chatterbox Multilingual AR backend.
+pub mod chatterbox;
 pub mod g2p;
 pub(crate) mod kokoro;
+mod language;
 pub(crate) mod numbers;
+pub mod omnivoice;
+pub(crate) mod ort_session;
 pub mod play;
+pub mod qwen;
 /// Incremental rodio sink (warm serve + one-shot player).
 pub mod sink;
 pub mod spoken;
 pub mod synth;
-/// FluidAudio Core ML / ANE Kokoro. macOS only.
+/// MLX Audio Kokoro. macOS Apple Silicon only.
 #[cfg(target_os = "macos")]
-pub mod synth_coreml;
+pub mod synth_mlx;
 pub mod system;
 pub(crate) mod trim;
 pub(crate) mod vocab;
@@ -38,13 +41,14 @@ pub(crate) mod vocab;
 pub mod wav;
 
 pub use kokoro::KokoroTts;
+pub use language::{DEFAULT_LANGUAGE, detect_language};
 pub use system::SystemTts;
 pub use vocab::SAMPLE_RATE;
 
 /// Re-export from `ds-voices` (issue #5) — CLI lists voices without this heavy crate.
 pub use ds_voices::enumerate;
 pub use ds_voices::{Gender, Quality, SpeakerVoice};
-// Private: synth/ane_voices use `crate::voices` for the npz parser.
+// Private: ONNX synthesis uses `crate::voices` for the npz parser.
 pub(crate) use ds_voices::voices;
 
 /// Canonical agent-text cleanup used by every speech backend.

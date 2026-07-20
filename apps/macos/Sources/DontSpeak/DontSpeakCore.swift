@@ -40,8 +40,14 @@ struct Activity: Sendable, Equatable {
     var trayIndicator = ["stt", "tts_animated"]
 }
 
+enum TtsModel: String, Decodable, Sendable, Equatable {
+    case kokoro, chatterbox, qwen, omnivoice
+}
+
 struct TtsEngine: Sendable, Equatable {
     var engine = "off"
+    var model: TtsModel? = nil
+    var language: String? = nil
     var provider: String? = nil
     var status: EngineStatus = .missing
 }
@@ -59,7 +65,7 @@ struct Diarization: Sendable, Equatable {
     var enabled = false
     var provider = ""
     var speakers: [String] = []
-    var clusteringThreshold = 0.7
+    var activityThreshold = 0.5
 }
 
 /// Dictation overlay state for DictationPanelController.
@@ -316,6 +322,8 @@ final class Core {
         else { return nil }
         var s = HealthSnapshot()
         s.tts.engine = dto.tts.engine
+        s.tts.model = dto.tts.model
+        s.tts.language = dto.tts.language
         s.tts.provider = dto.tts.provider
         s.tts.status = dto.tts.status.engineStatus
         s.stt.engine = dto.stt.engine
@@ -326,7 +334,7 @@ final class Core {
         s.diarization.enabled = dto.diarization.enabled
         s.diarization.provider = dto.diarization.provider
         s.diarization.speakers = dto.diarization.speakers
-        s.diarization.clusteringThreshold = dto.diarization.clusteringThreshold
+        s.diarization.activityThreshold = dto.diarization.activityThreshold
         s.activity.capsActive = dto.activity.capsActive
         s.activity.capsEnabled = dto.activity.caps
         s.activity.recording = dto.activity.recording
@@ -426,6 +434,8 @@ struct DictationDTO: Decodable {
 
 struct TtsStatusDTO: Decodable {
     var engine: String
+    var model: TtsModel?
+    var language: String?
     var provider: String?
     var status: EngineStatusDTO?
 }

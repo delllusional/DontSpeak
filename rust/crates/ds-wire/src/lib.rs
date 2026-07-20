@@ -329,10 +329,7 @@ fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) ->
             println!("// {}\n{s}", cfg.display());
             0
         }
-        (
-            WireMechanism::HermesYamlHooks | WireMechanism::HermesYamlMcp,
-            PreviewDoc::Yaml(s),
-        ) => {
+        (WireMechanism::HermesYamlHooks | WireMechanism::HermesYamlMcp, PreviewDoc::Yaml(s)) => {
             println!("// {}\n{s}", cfg.display());
             0
         }
@@ -374,9 +371,7 @@ fn print_registry(paths: Option<&Paths>) {
                     WireMechanism::HermesYamlHooks => {
                         "voice hooks (Hermes nested hooks.<event>, YAML)"
                     }
-                    WireMechanism::HermesYamlMcp => {
-                        "MCP server (stdio, mcp_servers table in YAML)"
-                    }
+                    WireMechanism::HermesYamlMcp => "MCP server (stdio, mcp_servers table in YAML)",
                     WireMechanism::HermesShellAllowlist => {
                         "shell-hook allowlist (Hermes consent JSON)"
                     }
@@ -775,7 +770,10 @@ mod tests {
         let allow_before = std::fs::read(&paths.hermes_shell_hooks_allowlist).unwrap();
         let baks_before = count_bak_files(dir.path());
         assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
-        assert_eq!(std::fs::read(&paths.hermes_config_yaml).unwrap(), cfg_before);
+        assert_eq!(
+            std::fs::read(&paths.hermes_config_yaml).unwrap(),
+            cfg_before
+        );
         assert_eq!(
             std::fs::read(&paths.hermes_shell_hooks_allowlist).unwrap(),
             allow_before
@@ -809,7 +807,11 @@ mod tests {
         let spec = ds_config::client_spec(ClientSource::Hermes).unwrap();
         let results = wire_surfaces_print_only(spec, &paths, false);
         // config.yaml (hooks+mcp) + allowlist file = 2 groups.
-        assert_eq!(results.len(), 2, "Hermes surfaces group by file: {results:?}");
+        assert_eq!(
+            results.len(),
+            2,
+            "Hermes surfaces group by file: {results:?}"
+        );
         let yaml_group = results
             .iter()
             .find(|(f, _, _)| f == &paths.hermes_config_yaml)
@@ -820,7 +822,10 @@ mod tests {
         };
         assert!(text.contains("post_llm_call"), "hooks present: {text}");
         assert!(text.contains("mcp_servers"), "mcp present: {text}");
-        assert!(!paths.hermes_config_yaml.exists(), "print-only never writes");
+        assert!(
+            !paths.hermes_config_yaml.exists(),
+            "print-only never writes"
+        );
     }
 
     /// Count `.bak.` siblings (prove steady-state reconcile creates none).

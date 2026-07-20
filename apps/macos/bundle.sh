@@ -33,7 +33,7 @@ _bin_dir="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 "$_bin_dir/dontspeak" wire --reconcile \
   || echo "   !! wire --reconcile failed; run '$_bin_dir/dontspeak wire --reconcile' manually" >&2
 
-echo "==> 1. build (Rust staticlib + swift build)"
+echo "==> 1. build (Rust staticlib + Swift app)"
 "$DIR/build.sh" >/dev/null
 EXE="$DIR/.build/release/DontSpeak"
 [ -x "$EXE" ] || { echo "build did not produce $EXE" >&2; exit 1; }
@@ -45,8 +45,8 @@ compile_icon "$ICONOUT"
 echo "==> 3. assemble + sign $APP"
 SIGN="$(resolve_sign_identity)"
 # Shim arch from built app binary (not uname — Rosetta).
-DONTSPEAK_DSKOKORO_DYLIB="$(build_dskokoro_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
-export DONTSPEAK_DSKOKORO_DYLIB
+DONTSPEAK_MLX_DYLIB="$(build_dontspeak_mlx_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
+export DONTSPEAK_MLX_DYLIB
 # Helper from install-engine dir; menubar svg at repo assets/.
 assemble_app "$APP" "$EXE" "$_bin_dir/ds-helper" \
   "$ICONOUT/Assets.car" "$ICONOUT/AppIcon.icns" "$DIR/Bundle/Info.plist" \

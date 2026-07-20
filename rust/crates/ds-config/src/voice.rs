@@ -11,11 +11,12 @@ use crate::enums::{
     default_stt_engine_ladder, default_tray, default_tts_engine_ladder, se_stt_engine_pref,
     se_tts_engine_pref,
 };
+use crate::tts_model::de_tts_model;
 use ds_log::{LogLevel, log};
 
 use crate::{
     CancelSpeechScope, ClientSource, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider,
-    SttEngine, TrayKind, TtsEngine,
+    SttEngine, TrayKind, TtsEngine, TtsModel, TtsModelDescriptor,
 };
 
 /// Hands-free phrases. START fuzzy; submit/cancel exact. Shelved (STT quality).
@@ -37,15 +38,59 @@ impl Default for HandsFreePhrases {
     }
 }
 
+/// Voice pools keyed by the engine/model that consumes them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TtsVoicePools {
+    /// Empty selects the operating-system default voice.
+    pub system: Vec<String>,
+    pub kokoro: Vec<String>,
+    pub chatterbox: Vec<String>,
+    pub qwen: Vec<String>,
+    pub omnivoice: Vec<String>,
+}
+
+impl Default for TtsVoicePools {
+    fn default() -> Self {
+        Self {
+            system: Vec::new(),
+            kokoro: default_model_voices(TtsModel::Kokoro),
+            chatterbox: default_model_voices(TtsModel::Chatterbox),
+            qwen: default_model_voices(TtsModel::Qwen),
+            omnivoice: default_model_voices(TtsModel::OmniVoice),
+        }
+    }
+}
+
+impl TtsVoicePools {
+    pub fn for_model(&self, model: TtsModel) -> &[String] {
+        match model {
+            TtsModel::Kokoro => &self.kokoro,
+            TtsModel::Chatterbox => &self.chatterbox,
+            TtsModel::Qwen => &self.qwen,
+            TtsModel::OmniVoice => &self.omnivoice,
+        }
+    }
+
+    pub fn for_model_mut(&mut self, model: TtsModel) -> &mut Vec<String> {
+        match model {
+            TtsModel::Kokoro => &mut self.kokoro,
+            TtsModel::Chatterbox => &mut self.chatterbox,
+            TtsModel::Qwen => &mut self.qwen,
+            TtsModel::OmniVoice => &mut self.omnivoice,
+        }
+    }
+}
+
 /// Speech config from `config.toml`. CC voice is read-only. Absent field = default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
-    /// Built-in TTS pool (stable per-agent). Brand: Kokoro.
-    #[serde(default = "default_voices")]
-    pub tts_voices: Vec<String>,
-    /// System voice name; empty = OS default.
+    /// Per-engine/model voice pools (stable per-agent).
     #[serde(default)]
-    pub tts_system_voice: String,
+    pub tts_voices: TtsVoicePools,
+    /// Model hosted by the built-in engine.
+    #[serde(default, deserialize_with = "de_tts_model")]
+    pub tts_model: TtsModel,
     /// SessionStart greet (default on).
     #[serde(default = "default_enabled")]
     pub greet: bool,
@@ -76,9 +121,9 @@ pub struct VoiceConfig {
     /// Diarizer ladder; empty = off.
     #[serde(default = "default_diarizer", deserialize_with = "de_diarizer")]
     pub diarizer: Vec<DiarizerProvider>,
-    /// Clustering 0.5–0.9 (lower = more speakers). Default 0.7.
-    #[serde(default = "default_cluster_threshold")]
-    pub cluster_threshold: f32,
+    /// Sortformer speaker-activity cutoff 0.1–0.9. Default 0.5.
+    #[serde(default = "default_activity_threshold")]
+    pub activity_threshold: f32,
     /// Enrolled-voiceprint cosine cutoff. Default 0.65.
     #[serde(default = "default_match_threshold")]
     pub match_threshold: f32,
@@ -103,7 +148,7 @@ pub struct VoiceConfig {
     /// 0.5–2.0; 1.0 = normal.
     #[serde(default = "default_rate")]
     pub rate: f32,
-    /// Compute ladder (default ane→cuda→cpu). Always has a backend.
+    /// Compute ladder (default MLX→CUDA→CPU). Always has a backend.
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
 
@@ -226,10 +271,13 @@ fn default_earcon_reply() -> String {
         String::new()
     }
 }
-fn default_voices() -> Vec<String> {
-    // Two-voice pool out of box (no separate default slot). Empty invalid — set_config
-    // rejects; clamp restores this on load.
-    vec!["af_sarah".to_string(), "bf_emma".to_string()]
+fn default_model_voices(model: TtsModel) -> Vec<String> {
+    model
+        .descriptor()
+        .default_voices
+        .iter()
+        .map(|voice| (*voice).to_string())
+        .collect()
 }
 fn default_long_press_ms() -> u64 {
     600
@@ -237,8 +285,8 @@ fn default_long_press_ms() -> u64 {
 fn default_rate() -> f32 {
     1.0
 }
-fn default_cluster_threshold() -> f32 {
-    0.7
+fn default_activity_threshold() -> f32 {
+    0.5
 }
 fn default_match_threshold() -> f32 {
     0.65
@@ -306,15 +354,15 @@ impl<'de> serde::Deserialize<'de> for CaptureGain {
 impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
-            tts_voices: default_voices(),
-            tts_system_voice: String::new(),
+            tts_voices: TtsVoicePools::default(),
+            tts_model: TtsModel::default(),
             greet: true,
             narrate: default_narrate(),
             long_press_ms: default_long_press_ms(),
             stt_engine: None,
             stt_engine_ladder: default_stt_engine_ladder(),
             diarizer: default_diarizer(),
-            cluster_threshold: default_cluster_threshold(),
+            activity_threshold: default_activity_threshold(),
             match_threshold: default_match_threshold(),
             speaker_lock: false,
             tts_engine: None,
@@ -384,7 +432,8 @@ impl VoiceConfig {
         ConfigChange {
             caps_toggled: self.caps != prev.caps,
             // Resolved TTS (not raw ladder) so reorder-only is no-op.
-            tts_toggled: self.resolved_tts() != prev.resolved_tts(),
+            tts_toggled: self.resolved_tts() != prev.resolved_tts()
+                || self.tts_model != prev.tts_model,
             stt_changed: self.resolved_stt() != prev.resolved_stt()
                 || self.provider != prev.provider,
             listen_mode_changed: self.listen_mode != prev.listen_mode,
@@ -488,7 +537,7 @@ impl VoiceConfig {
     /// Clamp numerics so hand-edits can't feed the engine bad values.
     fn clamp(&mut self) {
         self.rate = self.rate.clamp(0.5, 2.0);
-        self.cluster_threshold = self.cluster_threshold.clamp(0.5, 0.9);
+        self.activity_threshold = self.activity_threshold.clamp(0.1, 0.9);
         self.match_threshold = self.match_threshold.clamp(0.0, 1.0);
         // Same 0..5000 as set_config.
         self.paste_delay_ms = self.paste_delay_ms.clamp(0, 5000);
@@ -496,17 +545,24 @@ impl VoiceConfig {
         if self.long_press_ms != 0 {
             self.long_press_ms = self.long_press_ms.clamp(100, 5000);
         }
-        // Empty pool invalid; hand-edit fails open so loaded config always has voices.
-        if self.tts_voices.is_empty() {
-            self.tts_voices = default_voices();
+        for model in TtsModel::ALL.iter().copied() {
+            if model != TtsModel::Kokoro {
+                let descriptor = model.descriptor();
+                self.tts_voices
+                    .for_model_mut(model)
+                    .retain(|voice| descriptor.voices.contains(&voice.as_str()));
+            }
+            if self.tts_voices.for_model(model).is_empty() {
+                *self.tts_voices.for_model_mut(model) = default_model_voices(model);
+            }
         }
     }
 
-    /// Built-in TTS + Ane provider (architecture only; runtime gates assets/shim).
-    pub fn uses_apple_native_model(&self) -> bool {
+    /// Built-in model + MLX provider (architecture only; runtime gates assets/shim).
+    pub fn uses_mlx_model(&self) -> bool {
         self.resolved_tts() == Some(TtsEngine::BuiltIn)
             && cfg!(target_os = "macos")
-            && self.resolved_tts_provider() == Provider::Ane
+            && self.resolved_tts_provider() == Provider::Mlx
     }
 
     /// First STT-usable provider rung, else CPU. Preference only — loader still falls back.
@@ -518,12 +574,13 @@ impl VoiceConfig {
             .unwrap_or(Provider::OrtCpu)
     }
 
-    /// First TTS-usable provider rung, else CPU.
+    /// First provider supported by the selected model and platform, else CPU.
     pub fn resolved_tts_provider(&self) -> Provider {
+        let descriptor = self.tts_model.descriptor();
         self.provider
             .iter()
             .copied()
-            .find(|p| p.is_tts_usable())
+            .find(|p| p.is_tts_usable() && descriptor.supports_provider(*p))
             .unwrap_or(Provider::OrtCpu)
     }
 
@@ -537,18 +594,33 @@ impl VoiceConfig {
         !self.diarizer.is_empty()
     }
 
-    /// First platform-usable diarizer rung, else `apple_native`.
+    /// First platform-usable diarizer rung, else `mlx`.
     pub fn resolved_diarizer(&self) -> DiarizerProvider {
         self.diarizer
             .iter()
             .copied()
             .find(|p| p.is_diarizer_usable())
-            .unwrap_or(DiarizerProvider::AppleNative)
+            .unwrap_or(DiarizerProvider::Mlx)
     }
 
-    /// Shared Kokoro voice pool (ONNX + ANE from `voices-v1.0.bin`; no separate default slot).
+    /// Selected built-in model descriptor.
+    pub fn tts_model_descriptor(&self) -> &'static TtsModelDescriptor {
+        self.tts_model.descriptor()
+    }
+
+    /// Configured voice pool for a built-in model.
+    pub fn voices_for(&self, model: TtsModel) -> &[String] {
+        self.tts_voices.for_model(model)
+    }
+
+    /// Mutable configured voice pool for a built-in model.
+    pub fn voices_for_mut(&mut self, model: TtsModel) -> &mut Vec<String> {
+        self.tts_voices.for_model_mut(model)
+    }
+
+    /// Selected model's voice IDs; each backend loads its pinned representation.
     pub fn active_voices(&self) -> &[String] {
-        &self.tts_voices
+        self.voices_for(self.tts_model)
     }
 
     /// `Digests` gates blockquotes + injected spec; `Shorts` gates short whole replies.
@@ -610,20 +682,18 @@ pub(crate) mod tests {
     #[test]
     fn voice_defaults_when_absent() {
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
-        // Default pool: two voices out of the box so agent types differ by ear. No
-        // separate default/fallback voice exists — everything speaks a pool entry.
-        assert_eq!(v.tts_voices, vec!["af_sarah", "bf_emma"]);
-        assert!(v.tts_system_voice.is_empty());
+        assert!(v.tts_voices.system.is_empty());
+        assert_eq!(v.tts_voices.kokoro, vec!["af_sarah", "bf_emma"]);
+        assert_eq!(v.tts_voices.chatterbox, vec!["default"]);
+        assert_eq!(v.tts_voices.qwen, vec!["sohee"]);
+        assert_eq!(v.tts_voices.omnivoice, vec!["warm, clear female voice"]);
+        assert_eq!(v.tts_model, TtsModel::Kokoro);
         assert!(v.greet);
-        // Default narration: shorts first, then digests — both on out of the box.
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert!(v.narrates(NarrateKind::Digests) && v.narrates(NarrateKind::Shorts));
         assert_eq!(v.long_press_ms, 600);
-        // The preference fields are unset by default (defer to the ladder).
         assert_eq!(v.tts_engine, None);
         assert_eq!(v.stt_engine, None);
-        // Default ladders: TTS prefers Kokoro then the system synth; STT prefers
-        // SpeechAnalyzer, then Parakeet, then claude_code (always-usable, LAST).
         assert_eq!(
             v.tts_engine_ladder,
             vec![TtsEngine::BuiltIn, TtsEngine::System]
@@ -633,12 +703,11 @@ pub(crate) mod tests {
             vec![SttEngine::System, SttEngine::BuiltIn, SttEngine::ClaudeCode]
         );
         assert!(v.diarizer.is_empty());
-        assert_eq!(v.cluster_threshold, 0.7);
+        assert_eq!(v.activity_threshold, 0.5);
         assert_eq!(v.match_threshold, 0.65);
         assert!(!v.speaker_lock);
         assert_eq!(v.rate, 1.0);
         assert!(v.caps);
-        // Always-listening defaults: unset == today (record-and-submit PTT).
         assert_eq!(v.listen_mode, ListenMode::RecordSubmit);
         assert_eq!(v.hands_free.start, "computer");
         assert_eq!(v.hands_free.submit, "submit");
@@ -662,7 +731,7 @@ pub(crate) mod tests {
         assert!(v.earcon_input.is_empty());
         assert_eq!(
             v.provider,
-            vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
+            vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]
         );
         assert_eq!(v.tray, vec![TrayKind::Stt, TrayKind::TtsAnimated]);
         assert!(v.codex_stream);
@@ -673,6 +742,37 @@ pub(crate) mod tests {
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_editors.is_empty());
         assert!(v.exclude_clients.is_none());
+    }
+
+    #[test]
+    fn default_voice_pools_match_the_registry() {
+        let cfg = VoiceConfig::default();
+        for model in TtsModel::ALL.iter().copied() {
+            assert_eq!(cfg.voices_for(model), model.descriptor().default_voices);
+        }
+    }
+
+    #[test]
+    fn removed_cluster_threshold_is_not_an_alias() {
+        let v: VoiceConfig = serde_json::from_str(r#"{"cluster_threshold":0.9}"#).unwrap();
+        assert_eq!(v.activity_threshold, 0.5);
+        assert!(!VoiceConfig::known_keys().contains("cluster_threshold"));
+    }
+
+    #[test]
+    fn removed_voice_shapes_are_not_compatibility_aliases() {
+        assert!(serde_json::from_str::<VoiceConfig>(r#"{"tts_voices":["af_sarah"]}"#).is_err());
+        let keys = VoiceConfig::known_keys();
+        for removed in [
+            "tts_language",
+            "tts_system_voice",
+            "kokoro_voices",
+            "chatterbox_voices",
+            "qwen_voices",
+            "omnivoice_voices",
+        ] {
+            assert!(!keys.contains(removed), "{removed} must stay removed");
+        }
     }
 
     #[test]
@@ -839,21 +939,23 @@ pub(crate) mod tests {
     #[test]
     fn provider_is_an_ordered_ladder_failing_open_to_default() {
         let prov = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().provider;
-        let default = vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu];
+        let default = vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
         // An explicit ordered ladder keeps its order (deduped); known tokens only.
         assert_eq!(
-            prov(r#"{"provider":["cuda","ane","cpu"]}"#),
-            vec![Provider::OrtCuda, Provider::Ane, Provider::OrtCpu]
+            prov(r#"{"provider":["cuda","mlx","cpu"]}"#),
+            vec![Provider::OrtCuda, Provider::Mlx, Provider::OrtCpu]
         );
         assert_eq!(prov(r#"{"provider":["cpu"]}"#), vec![Provider::OrtCpu]);
-        // Unknown tokens dropped; `auto` and the old prefixed `ort_cpu`/`ort_cuda`/`ort_coreml`
-        // tokens are now unknown (renamed to bare cpu/cuda/coreml, no back-compat) — left with
-        // nothing → falls back to the default ladder.
-        assert_eq!(prov(r#"{"provider":["ort_coreml","auto"]}"#), default);
+        // Core ML remains an explicit ONNX TTS provider; legacy `ane` migrates to the MLX
+        // rung; `ort_coreml`/`auto` stay unknown and drop.
+        assert_eq!(
+            prov(r#"{"provider":["coreml","ort_coreml","ane","auto"]}"#),
+            vec![Provider::OrtCoreMl, Provider::Mlx]
+        );
         // Empty array, all-unknown, and any non-array all fall open to the default ladder
         // (compute is never "off").
         assert_eq!(prov(r#"{"provider":[]}"#), default);
-        assert_eq!(prov(r#"{"provider":"ane"}"#), default);
+        assert_eq!(prov(r#"{"provider":"mlx"}"#), default);
         assert_eq!(prov(r#"{"provider":42}"#), default);
 
         // Canonical tokens round-trip through as_str().
@@ -861,7 +963,7 @@ pub(crate) mod tests {
             Provider::OrtCpu,
             Provider::OrtCuda,
             Provider::OrtCoreMl,
-            Provider::Ane,
+            Provider::Mlx,
         ] {
             assert_eq!(Provider::parse(p.as_str()), Some(p));
         }
@@ -872,7 +974,7 @@ pub(crate) mod tests {
 
     #[test]
     fn provider_resolution_walks_the_ladder_per_platform() {
-        // Only the macOS arm below exercises the resolver (Core ML / ANE rungs); other
+        // Only the macOS arm below exercises the native MLX rung; other
         // platforms have nothing platform-specific to assert here, so the helper is gated
         // with them to avoid an unused-closure warning off macOS.
         #[cfg(target_os = "macos")]
@@ -880,38 +982,29 @@ pub(crate) mod tests {
             provider: rungs,
             ..VoiceConfig::default()
         };
-        // STT resolution: first STT-usable rung, else CPU. CoreML is never STT-usable.
+        // STT resolution: first STT-usable rung, else CPU.
         #[cfg(target_os = "macos")]
         {
-            // ANE is STT-usable only on Apple Silicon (no Neural Engine on Intel), so an
-            // `[ane, cpu]` ladder wins on ANE on arm64 but falls through to `cpu` on x86_64 —
-            // the fix that gives Intel Macs the streaming ONNX path instead of the ANE fallback.
+            // MLX is STT-usable only on Apple Silicon, so an
+            // `[mlx, cpu]` wins on Apple Silicon but falls through to `cpu` on x86_64 —
+            // Intel Mac gets the streaming ONNX path.
             #[cfg(target_arch = "aarch64")]
             assert_eq!(
-                cfg(vec![Provider::Ane, Provider::OrtCpu]).resolved_stt_provider(),
-                Provider::Ane
+                cfg(vec![Provider::Mlx, Provider::OrtCpu]).resolved_stt_provider(),
+                Provider::Mlx
             );
             #[cfg(target_arch = "x86_64")]
             assert_eq!(
-                cfg(vec![Provider::Ane, Provider::OrtCpu]).resolved_stt_provider(),
+                cfg(vec![Provider::Mlx, Provider::OrtCpu]).resolved_stt_provider(),
                 Provider::OrtCpu
             );
-            assert_eq!(
-                cfg(vec![Provider::OrtCoreMl, Provider::OrtCpu]).resolved_stt_provider(),
-                Provider::OrtCpu
-            );
-            // TTS may resolve to the CoreML EP when it's the first TTS-usable rung.
-            assert_eq!(
-                cfg(vec![Provider::OrtCoreMl, Provider::OrtCpu]).resolved_tts_provider(),
-                Provider::OrtCoreMl
-            );
-            // `uses_apple_native_model` needs the Kokoro engine to actually RESOLVE, which only
+            // `uses_mlx_model` needs the Kokoro engine to actually RESOLVE, which only
             // happens where the built-in stack is usable (arm64 macOS) — on x86_64 macOS the
             // default TTS ladder falls through to `system`, so Kokoro never runs.
             #[cfg(target_arch = "aarch64")]
             {
-                assert!(cfg(vec![Provider::Ane]).uses_apple_native_model());
-                assert!(!cfg(vec![Provider::OrtCpu]).uses_apple_native_model());
+                assert!(cfg(vec![Provider::Mlx]).uses_mlx_model());
+                assert!(!cfg(vec![Provider::OrtCpu]).uses_mlx_model());
             }
         }
         // Default ladder always resolves to a concrete usable rung (never panics).
@@ -926,25 +1019,27 @@ pub(crate) mod tests {
         assert!(VoiceConfig::default().diarizer.is_empty());
         assert!(!VoiceConfig::default().is_diarization_on());
         // A non-empty ladder keeps its order (deduped) and turns diarization ON.
-        let on = diar(r#"{"diarizer":["apple_native"]}"#);
-        assert_eq!(on, vec![DiarizerProvider::AppleNative]);
+        let on = diar(r#"{"diarizer":["mlx"]}"#);
+        assert_eq!(on, vec![DiarizerProvider::Mlx]);
         // Empty, all-unknown (old `auto`/`onnx`), and non-array all read as OFF (empty).
         assert!(diar(r#"{"diarizer":["auto"]}"#).is_empty());
         assert!(diar(r#"{"diarizer":["onnx"]}"#).is_empty());
+        // Legacy pre-MLX `apple_native` migrates to the MLX rung rather than reading as off.
+        assert_eq!(
+            diar(r#"{"diarizer":["apple_native"]}"#),
+            vec![DiarizerProvider::Mlx]
+        );
         assert!(diar(r#"{"diarizer":[]}"#).is_empty());
-        assert!(diar(r#"{"diarizer":"apple_native"}"#).is_empty());
+        assert!(diar(r#"{"diarizer":"mlx"}"#).is_empty());
 
         // is_diarization_on() = non-empty; resolution walks to the first platform-usable rung.
         let cfg = |r: Vec<DiarizerProvider>| VoiceConfig {
             diarizer: r,
             ..VoiceConfig::default()
         };
-        assert!(cfg(vec![DiarizerProvider::AppleNative]).is_diarization_on());
-        let ladder = vec![DiarizerProvider::AppleNative];
-        assert_eq!(
-            cfg(ladder).resolved_diarizer(),
-            DiarizerProvider::AppleNative
-        );
+        assert!(cfg(vec![DiarizerProvider::Mlx]).is_diarization_on());
+        let ladder = vec![DiarizerProvider::Mlx];
+        assert_eq!(cfg(ladder).resolved_diarizer(), DiarizerProvider::Mlx);
     }
 
     #[test]
@@ -1229,6 +1324,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn built_in_model_parse() {
+        let selected: VoiceConfig = serde_json::from_str(
+            r#"{"tts_engine":"built_in","tts_model":"chatterbox","tts_voices":{"chatterbox":["default"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(selected.tts_engine, Some(vec![TtsEngine::BuiltIn]));
+        assert_eq!(selected.tts_model, TtsModel::Chatterbox);
+        let expected_provider = if Provider::Mlx.is_tts_usable() {
+            Provider::Mlx
+        } else if Provider::OrtCuda.is_tts_usable() {
+            Provider::OrtCuda
+        } else {
+            Provider::OrtCpu
+        };
+        assert_eq!(selected.resolved_tts_provider(), expected_provider);
+        assert!(VoiceConfig::known_keys().contains("tts_model"));
+        assert!(!VoiceConfig::known_keys().contains("tts_language"));
+
+        let changed = VoiceConfig {
+            tts_model: TtsModel::Qwen,
+            tts_voices: TtsVoicePools {
+                qwen: vec!["ono_anna".into()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        assert!(changed.changes_since(&VoiceConfig::default()).tts_toggled);
+    }
+
+    #[test]
     fn resolved_stt_preference_wins_over_ladder_with_no_substitution() {
         // Unset preference (None) defers to the ladder.
         let deferring = VoiceConfig {
@@ -1345,18 +1470,24 @@ pub(crate) mod tests {
     /// A non-default config so the merge is observably distinct from defaults.
     pub(crate) fn sample_voice() -> VoiceConfig {
         VoiceConfig {
-            tts_voices: vec!["am_michael".into(), "am_adam".into()],
-            tts_system_voice: "Samantha (Enhanced)".into(),
+            tts_voices: TtsVoicePools {
+                system: vec!["Samantha (Enhanced)".into()],
+                kokoro: vec!["am_michael".into(), "am_adam".into()],
+                chatterbox: vec!["default".into()],
+                qwen: vec!["sohee".into()],
+                omnivoice: vec!["warm, clear female voice".into()],
+            },
+            tts_model: TtsModel::Kokoro,
             greet: true,
             stt_engine: None,
             stt_engine_ladder: vec![SttEngine::BuiltIn],
-            diarizer: vec![DiarizerProvider::AppleNative],
-            cluster_threshold: 0.55,
+            diarizer: vec![DiarizerProvider::Mlx],
+            activity_threshold: 0.55,
             match_threshold: 0.7,
             speaker_lock: false,
             tts_engine: None,
             tts_engine_ladder: vec![TtsEngine::System],
-            provider: vec![Provider::OrtCoreMl],
+            provider: vec![Provider::OrtCpu],
             rate: 1.25,
             narrate: vec![NarrateKind::Digests],
             long_press_ms: 750,
@@ -1394,7 +1525,10 @@ pub(crate) mod tests {
 
         // A per-call-only change (voice/rate) flags nothing warm.
         let only_voice = VoiceConfig {
-            tts_voices: vec!["am_michael".into()],
+            tts_voices: TtsVoicePools {
+                kokoro: vec!["am_michael".into()],
+                ..Default::default()
+            },
             rate: 1.5,
             ..base.clone()
         };
@@ -1451,7 +1585,7 @@ pub(crate) mod tests {
 
         // And load() reconstructs the written config.
         let lv = VoiceConfig::load(&paths);
-        assert_eq!(lv.active_voices(), v.tts_voices);
+        assert_eq!(lv.tts_voices, v.tts_voices);
         assert_eq!(lv.extra_terminals, v.extra_terminals);
         assert_eq!(lv.extra_editors, v.extra_editors);
     }
@@ -1488,7 +1622,10 @@ pub(crate) mod tests {
             full_duplex: true,
             rate: 1.25,
             capture_gain: CaptureGain::Manual(3.5),
-            tts_voices: vec!["am_adam".into(), "af_bella".into()],
+            tts_voices: TtsVoicePools {
+                kokoro: vec!["am_adam".into(), "af_bella".into()],
+                ..Default::default()
+            },
             ..VoiceConfig::default()
         };
         write_settings(&paths, &v).unwrap();
@@ -1539,8 +1676,29 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
-        std::fs::write(&paths.config_toml, "tts_voices = []\n").unwrap();
-        assert_eq!(VoiceConfig::load(&paths).tts_voices, default_voices());
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nsystem = []\nkokoro = []\nchatterbox = []\nqwen = []\nomnivoice = []\n",
+        )
+        .unwrap();
+        let cfg = VoiceConfig::load(&paths);
+        for model in TtsModel::ALL.iter().copied() {
+            assert_eq!(cfg.voices_for(model), model.descriptor().default_voices);
+        }
+    }
+
+    #[test]
+    fn load_normalizes_language_and_removes_invalid_fixed_voices() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+        std::fs::write(
+            &paths.config_toml,
+            "tts_model = \"qwen\"\n[tts_voices]\nqwen = [\"bogus\", \"ono_anna\"]\n",
+        )
+        .unwrap();
+        let cfg = VoiceConfig::load(&paths);
+        assert_eq!(cfg.tts_voices.qwen, ["ono_anna"]);
     }
 
     #[test]

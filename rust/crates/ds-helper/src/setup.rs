@@ -31,13 +31,55 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
         Some(DownloadTarget::KokoroModel) => {
-            ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, &p).map(|_| ())
         }
         Some(DownloadTarget::KokoroFrontend) => {
             ds_model::run_setup_kokoro_frontend_with_progress(&p).map(|_| ())
         }
         Some(DownloadTarget::ParakeetModel) => {
             ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
+        }
+        Some(DownloadTarget::ChatterboxModel) => {
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Chatterbox, &p)
+                .map(|_| ())
+        }
+        Some(DownloadTarget::QwenModel) => {
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Qwen, &p).map(|_| ())
+        }
+        Some(DownloadTarget::OmniVoiceModel) => {
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::OmniVoice, &p)
+                .map(|_| ())
+        }
+        Some(
+            target @ (DownloadTarget::KokoroMlx
+            | DownloadTarget::ChatterboxMlx
+            | DownloadTarget::QwenMlx
+            | DownloadTarget::OmniVoiceMlx),
+        ) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                ds_model::mlx_repo::ensure_mlx_repos(
+                    ds_model::mlx_repo::tts_mlx_set(
+                        target.tts_model().expect("MLX TTS target has a model"),
+                    ),
+                    &p,
+                )
+            } else {
+                Ok(())
+            }
+        }
+        Some(DownloadTarget::ParakeetMlx) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                ds_model::mlx_repo::ensure_mlx_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET, &p)
+            } else {
+                Ok(())
+            }
+        }
+        Some(DownloadTarget::DiarizationMlx) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                ds_model::mlx_repo::ensure_mlx_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET, &p)
+            } else {
+                Ok(())
+            }
         }
         // Off-macOS quiet skip (installer semantics; mirrors `is_supported_on_this_host`).
         Some(DownloadTarget::SepformerModel) => {
@@ -53,7 +95,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         // unpinned and removed. No-ops for older installer invocations.
         Some(DownloadTarget::Dotnet) | Some(DownloadTarget::Winapp) => Ok(()),
         // Unknown (incl. no-arg "all") ⇒ models + CUDA, historical installer default.
-        _ => models().and_then(|_| cuda()),
+        None => models().and_then(|_| cuda()),
     };
     match r {
         Ok(()) => {

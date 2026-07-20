@@ -2,15 +2,17 @@
 
 use ds_aec::DuplexAudio;
 use ds_helper_proto as proto;
-use ds_tts::g2p::{self, PhonemeBatchesOutcome};
 use ds_tts::sink::IncrementalSink;
 use serde::Deserialize;
 use std::time::{Duration, Instant};
 
 use crate::_exit;
 use crate::listen::{ListenSig, concurrent_listen_loop, run_listen};
-use crate::oneshot::{Backend, load_backend};
-use crate::prepare::{PrepareOutcome, PreparedAudio, prepare_audio};
+use crate::oneshot::{
+    FrontendOutcome, SynthesisRequest, frontend_batches_with_cancel, load_backend,
+    prepare_backend_audio, tts_model,
+};
+use crate::prepare::{PrepareOutcome, PreparedAudio};
 
 const TTS_OUTPUT_UNAVAILABLE: &str = "helper started without TTS output; restart required";
 
@@ -225,6 +227,8 @@ struct ServeReq {
     rate: f32,
     #[serde(default)]
     text: String,
+    #[serde(default)]
+    language: String,
     /// `unload`/`load` target.
     #[serde(default)]
     engine: Option<ds_helper_proto::HelperModel>,
@@ -269,17 +273,17 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     Ok(pcm)
 }
 
-/// Gate via [`ds_stt::diarize::ensure_coreml_backend`] (sole provider→backend mapping).
+/// Gate via [`ds_stt::diarize::ensure_mlx_backend`] (sole provider-to-backend mapping).
 #[cfg(target_os = "macos")]
-fn ensure_coreml_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
-    ds_stt::diarize::ensure_coreml_backend(cfg.resolved_diarizer())
+fn ensure_mlx_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
+    ds_stt::diarize::ensure_mlx_backend(cfg.resolved_diarizer())
 }
 
 /// One-shot diarize: record → cluster (config threshold). Emits `DIAR`/`DIARERR` + `DDONE`.
-/// Engine does enrolled-name matching. Requires diarization on + Core ML-resolvable provider.
+/// Engine does enrolled-name matching. Requires diarization on and the MLX provider.
 #[cfg(target_os = "macos")]
 fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
-    use ds_stt::diarize::{CoremlDiarizer, Diarizer};
+    use ds_stt::diarize::{Diarizer, MlxDiarizer};
     use std::io::Write as _;
 
     let emit_err = |msg: &str| {
@@ -296,7 +300,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     if !cfg.is_diarization_on() {
         return emit_err("diarization is disabled (set diarizer to a non-empty ladder)");
     }
-    if let Err(e) = ensure_coreml_diarizer(&cfg) {
+    if let Err(e) = ensure_mlx_diarizer(&cfg) {
         return emit_err(&e);
     }
 
@@ -304,7 +308,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         Ok(p) => p,
         Err(e) => return emit_err(&e),
     };
-    let mut diarizer = CoremlDiarizer::with_threshold(cfg.cluster_threshold);
+    let mut diarizer = MlxDiarizer::with_threshold(cfg.activity_threshold);
     match diarizer.diarize_pcm_16k_full(&pcm) {
         Ok(out) => {
             let segments: Vec<_> = out
@@ -327,7 +331,7 @@ fn run_diarize(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
 /// the engine. Same gate as diarize so enroll can't fetch models while diarization is off.
 #[cfg(target_os = "macos")]
 fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
-    use ds_stt::diarize::{CoremlDiarizer, Diarizer};
+    use ds_stt::diarize::{Diarizer, MlxDiarizer};
     use std::io::Write as _;
 
     let emit_err = |msg: &str| {
@@ -343,7 +347,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     if !cfg.is_diarization_on() {
         return emit_err("diarization is disabled (set diarizer to a non-empty ladder)");
     }
-    if let Err(e) = ensure_coreml_diarizer(&cfg) {
+    if let Err(e) = ensure_mlx_diarizer(&cfg) {
         return emit_err(&e);
     }
 
@@ -351,7 +355,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
         Ok(p) => p,
         Err(e) => return emit_err(&e),
     };
-    let mut diarizer = CoremlDiarizer::new();
+    let mut diarizer = MlxDiarizer::new();
     match diarizer.embed(&pcm) {
         Ok(emb) => {
             let json = serde_json::json!(emb);
@@ -363,7 +367,7 @@ fn run_enroll(seconds: u64, cancel: &std::sync::atomic::AtomicBool) {
     }
 }
 
-// Helper never downloads: FluidAudio offlineMode; engine single-flight download manager
+// Helper never downloads; the engine's single-flight download manager
 // owns fetch + warm-child restart. Absent files → load fails; engine restarts after fetch.
 
 /// 100 ms source-rate chunks: cancel-responsive + fine-grained backpressure.
@@ -409,11 +413,6 @@ fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: im
     }
 }
 
-/// Remainder after `ServeReq::skip` (clamped; oversized skip → empty, never panic).
-fn batches_after_skip<T>(batches: &[T], skip: usize) -> &[T] {
-    &batches[skip.min(batches.len())..]
-}
-
 /// Full-duplex: wait until concurrent listen releases the mic (or `capture_cancel`).
 /// Diarize/enroll open their own cpal stream; half-duplex serializes on one thread for free.
 /// `false` if shutdown already set — skip open rather than race process exit.
@@ -440,7 +439,7 @@ pub(crate) fn serve() -> ! {
     let tts_wanted = std::env::var_os("DONTSPEAK_TTS_PRELOAD").is_some();
 
     // STT preloads on its own thread in parallel with TTS. ORT_DYLIB_PATH write is Once-
-    // serialized in ds-model. DONTSPEAK_STT_PROVIDER: system|ane|cuda|cpu. Shared Arc for preload +
+    // serialized in ds-model. DONTSPEAK_STT_PROVIDER: system|mlx|cuda|cpu. Shared Arc for preload +
     // concurrent-listen + request loop.
     let parakeet_dir = ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE)
         .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
@@ -450,6 +449,15 @@ pub(crate) fn serve() -> ! {
         &stt_provider,
         parakeet_dir,
     )));
+
+    // Single ORT bootstrap before the STT preload thread and the TTS load can race:
+    // set_ort_dylib_path is first-wins, so pick GPU-or-not once from BOTH provider
+    // prefs (the GPU dylib serves the CPU EP fine; the reverse loses CUDA). Err is
+    // ignored — each loader's own ensure_ort still reports it.
+    let tts_provider = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
+    let want_gpu = tts_model().descriptor().wants_cuda(&tts_provider)
+        || ds_config::provider_pref_wants_gpu(&stt_provider);
+    let _ = ds_model::ensure_ort_dylib_gpu(want_gpu);
     // Offline `transcriber` cache for non-streaming; streaming uses `backend_cell` in
     // listen.rs. `unload stt` drives both. STTLOADED/STT_PROVIDER from whichever loaded.
     // Claim at load start so preload and `load stt` can't both load — see SttResidencySlot.
@@ -494,7 +502,7 @@ pub(crate) fn serve() -> ! {
         println!("{}tts", proto::WARMING_PREFIX);
         let _ = std::io::stdout().flush();
     }
-    // Option so unload tts frees Kokoro while STT stays warm; next speak reloads.
+    // Option so unload tts frees the selected model while STT stays warm; next speak reloads.
     let mut synth = if tts_wanted {
         match load_backend() {
             Ok(s) => {
@@ -516,6 +524,7 @@ pub(crate) fn serve() -> ! {
 
     struct PlayReq {
         voice: String,
+        language: String,
         rate: f32,
         text: String,
         /// Already-played batches (see `ServeReq::skip`).
@@ -833,10 +842,17 @@ pub(crate) fn serve() -> ! {
                             let _ = std::io::stdout().flush();
                             continue;
                         }
+                        if req.language.trim().is_empty() {
+                            use std::io::Write as _;
+                            println!("{} language required", proto::ERR);
+                            let _ = std::io::stdout().flush();
+                            continue;
+                        }
                         let text = req.text;
                         barge_then_publish(&shared, cancel_current, |state| {
                             state.req = Some(PlayReq {
                                 voice,
+                                language: req.language,
                                 rate: req.rate,
                                 text,
                                 skip: req.skip,
@@ -1051,6 +1067,7 @@ pub(crate) fn serve() -> ! {
         // STT job: capture + stream partials + final, then back to waiting.
         let PlayReq {
             voice,
+            language,
             rate,
             text,
             skip,
@@ -1069,8 +1086,8 @@ pub(crate) fn serve() -> ! {
                 continue;
             }
             Job::Diarize(secs) => {
-                // One-shot: record `secs` of mic, then diarize. macOS-only (FluidAudio
-                // Core ML); off macOS the cross-platform ONNX backend isn't wired yet.
+                // One-shot: record `secs` of mic, then diarize. macOS-only (MLX);
+                // off macOS the cross-platform ONNX backend isn't wired yet.
                 // Uses `capture_cancel` so a TTS barge can't abort the recording.
                 #[cfg(target_os = "macos")]
                 {
@@ -1125,14 +1142,14 @@ pub(crate) fn serve() -> ! {
                 continue;
             }
             Job::UnloadTts => {
-                // Drop the cached Kokoro model; the next speak lazily reloads it.
+                // Drop the cached TTS model; the next speak lazily reloads it.
                 let freed = synth.take().is_some();
-                log::info!(target: "helper", "unloaded tts (kokoro), freed={freed}");
+                log::info!(target: "helper", "unloaded tts, freed={freed}");
                 continue;
             }
             Job::UnloadStt => {
                 // Free BOTH caches: `transcriber` (constructed in `serve()` above) and, for
-                // streaming-capable providers (cpu/cuda/ane), the SEPARATE resident model a
+                // streaming-capable providers (cpu/cuda/mlx), the separate resident model a
                 // real listen actually runs on (listen.rs's `backend_cell`) — otherwise that
                 // one stayed loaded, roughly doubling STT memory after the first listen.
                 let mut t = transcriber.lock().unwrap_or_else(|e| e.into_inner());
@@ -1155,7 +1172,7 @@ pub(crate) fn serve() -> ! {
                 continue;
             }
             Job::LoadTts => {
-                // Mirror Job::LoadStt: (re)load Kokoro if a prior `unload tts` freed it, then
+                // Mirror Job::LoadStt: reload the selected model after `unload tts`, then
                 // CONFIRM residency with `TTSLOADED` so the engine greens the dot only after the
                 // model is truly resident — never on the mere `load` request (the old optimistic
                 // green). Already-resident ⇒ still confirm, so a reconcile after startup keeps the
@@ -1234,26 +1251,38 @@ pub(crate) fn serve() -> ! {
             continue;
         }
 
-        // Run the frontend before touching the backend. Empty/image/emoji/punctuation-only
-        // requests are successful no-ops even after `unload tts`; they must not pay for a model
-        // reload or turn a missing model into TTSLOADERR + ERR when no synthesis was requested.
-        let phoneme_batches = match g2p::phoneme_batches_for_cancellable(&text, &voice, || {
-            cancel.load(Ordering::SeqCst)
-        }) {
-            Ok(PhonemeBatchesOutcome::Finished(batches)) => batches,
-            Ok(PhonemeBatchesOutcome::Cancelled) => {
-                println!("{}", proto::DONE);
-                let _ = std::io::stdout().flush();
-                continue;
-            }
-            Err(e) => {
-                log::warn!(target: "helper", "Kokoro frontend failed: {e}");
-                println!("{} {}", proto::ERR, one_line(&e));
-                let _ = std::io::stdout().flush();
-                continue;
-            }
-        };
-        if phoneme_batches.is_empty() {
+        // Run the registry-selected frontend before touching the backend. Empty/image/emoji/
+        // punctuation-only requests are successful no-ops even after `unload tts`; they must
+        // not pay for a model reload or turn a missing model into TTSLOADERR + ERR when no
+        // synthesis was requested. Model-specific representation stays behind one shared
+        // outcome, so all platforms use the same lifecycle and cancellation contract.
+        let model = tts_model();
+        if !model.descriptor().accepts_detected_language(&language) {
+            println!(
+                "{} detected language `{language}` is not supported by {}",
+                proto::ERR,
+                model.as_str()
+            );
+            let _ = std::io::stdout().flush();
+            continue;
+        }
+        let cancelled = || cancel.load(Ordering::SeqCst);
+        let batches =
+            match frontend_batches_with_cancel(model, &text, &voice, &language, &cancelled) {
+                Ok(FrontendOutcome::Finished(batches)) => batches,
+                Ok(FrontendOutcome::Cancelled) => {
+                    println!("{}", proto::DONE);
+                    let _ = std::io::stdout().flush();
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(target: "helper", "TTS frontend failed: {e}");
+                    println!("{} {}", proto::ERR, one_line(&e));
+                    let _ = std::io::stdout().flush();
+                    continue;
+                }
+            };
+        if batches.len() == 0 {
             println!("{}", proto::DONE);
             let _ = std::io::stdout().flush();
             continue;
@@ -1272,14 +1301,14 @@ pub(crate) fn serve() -> ! {
         // item + deterministic frontend ⇒ stable batch indices across runs. Applied
         // AFTER the frontend/empty/frontend-cancel checks and BEFORE the lazy synth
         // reload, so a fully-played remainder is a cheap no-op (no reload, no PROGRESS).
-        let remainder = batches_after_skip(&phoneme_batches, skip);
-        if remainder.is_empty() {
+        let remainder_len = batches.len().saturating_sub(skip.min(batches.len()));
+        if remainder_len == 0 {
             println!("{}", proto::DONE);
             let _ = std::io::stdout().flush();
             continue;
         }
 
-        // Lazily (re)load the Kokoro synth if a prior `unload tts` freed it.
+        // Lazily reload the selected TTS model after `unload tts` freed it.
         if synth.is_none() {
             match load_backend() {
                 Ok(s) => {
@@ -1303,7 +1332,7 @@ pub(crate) fn serve() -> ! {
         let synth = synth.as_mut().expect("synth loaded above");
 
         // ONE Rust frontend normalizes, phonemizes, and bounds the request before the backend
-        // split. ONNX and Core ML consume these exact IPA batches. Each complete IPA batch is
+        // split. ONNX and MLX consume these exact IPA batches. Each complete IPA batch is
         // synthesized and validated before it is committed, then playback can overlap inference
         // for the remaining batches — see `prepare`.
         let t_req = std::time::Instant::now();
@@ -1397,21 +1426,18 @@ pub(crate) fn serve() -> ! {
             }
             Ok(())
         };
-        let outcome = match synth {
-            Backend::Ort(synth) => prepare_audio(
-                remainder,
-                || cancel.load(Ordering::SeqCst),
-                |batch| synth.synthesize(batch.as_str(), &voice, rate),
-                &mut commit,
-            ),
-            #[cfg(target_os = "macos")]
-            Backend::Coreml(c) => prepare_audio(
-                remainder,
-                || cancel.load(Ordering::SeqCst),
-                |batch| c.synthesize_phonemes(batch.as_str(), &voice, rate),
-                &mut commit,
-            ),
-        };
+        let outcome = prepare_backend_audio(
+            synth,
+            &batches,
+            &SynthesisRequest {
+                skip,
+                voice: &voice,
+                language: &language,
+                rate,
+            },
+            &cancelled,
+            &mut commit,
+        );
         if outcome.is_err() {
             // ERR does NOT set `cancel`; without this abort the feeder would keep feeding
             // the committed prefix into the ring the Err arm is about to clear — audibly
@@ -1523,7 +1549,7 @@ pub(crate) fn serve() -> ! {
                 // Finished uncancelled: the whole remainder played — publish the
                 // absolute high-water mark so a LATER barge of a requeued item can't
                 // fall back to the top.
-                emit_progress(skip + remainder.len());
+                emit_progress(skip + remainder_len);
             }
             // STATS covers the RESUMED TAIL only: synth_ms/audio_ms/first_ms account
             // solely for the post-`skip` batches this request actually synthesized.
@@ -1668,24 +1694,6 @@ mod audio_tests {
             offered.set(offered.get() + 1);
         });
         assert_eq!(offered.get(), 4, "every queued batch must still be offered");
-    }
-}
-
-#[cfg(test)]
-mod skip_tests {
-    use super::batches_after_skip;
-
-    /// The batch-granular resume slice: 0 = the whole request, a mid value drops the
-    /// played prefix, and an at/over-length skip (voice/rate change shifted batch
-    /// counts between runs) CLAMPS to an empty remainder instead of panicking.
-    #[test]
-    fn batches_after_skip_slices_and_clamps() {
-        let batches = ["a", "b", "c"];
-        assert_eq!(batches_after_skip(&batches, 0), &["a", "b", "c"]);
-        assert_eq!(batches_after_skip(&batches, 2), &["c"]);
-        assert!(batches_after_skip(&batches, 3).is_empty());
-        assert!(batches_after_skip(&batches, usize::MAX).is_empty());
-        assert!(batches_after_skip::<&str>(&[], 1).is_empty());
     }
 }
 

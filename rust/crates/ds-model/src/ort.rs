@@ -44,7 +44,7 @@ pub(crate) struct OrtDist {
 /// (verified on-device). We moved OFF 1.24.2 because its model loader DEADLOCKS while
 /// loading the SepFormer speaker-separation graph (the dictation speaker-lock); 1.27 loads
 /// it in <1 s. Kokoro/Parakeet are unaffected (backward-compatible; on Apple Silicon they
-/// run on Core ML / ANE, not this dylib, anyway).
+/// run through MLX, not this dylib, anyway).
 pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     // Official Microsoft dynamic ORT only (pyke ships static `.a` — load-dynamic can't dlopen).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -263,7 +263,7 @@ fn preload_cuda_libs(dir: &std::path::Path) {
     });
 }
 
-/// Shared CUDA session builder for Kokoro TTS + Parakeet STT (single EP + CPU fallback).
+/// Shared CUDA session builder for ONNX TTS + Parakeet STT (single EP + CPU fallback).
 ///
 /// Attempts CUDA only when `want_gpu` and runtime + driver present (same gate as
 /// [`ensure_ort_dylib_gpu`]). Static preference alone would report `Cuda` on CPU-only
@@ -435,7 +435,7 @@ fn ensure_onnxruntime_at(
 
 // ── CUDA GPU runtime (download-on-demand) — Windows + Linux x86_64 ────────────
 //
-// The warm Kokoro child (and Parakeet STT) can run on an NVIDIA GPU (2.8-4.6x faster than
+// Kokoro TTS and Parakeet STT can run on an NVIDIA GPU (2.8-4.6x faster than
 // CPU, validated on Pascal). The CUDA execution provider needs a separate, larger runtime
 // than the CPU dylib: the GPU onnxruntime + CUDA 12.6 + cuDNN 9.5 libs. We fetch them ON
 // DEMAND (only when GPU is selected) from the pinned PyPI wheels (`urls::CUDA_WHEELS`) into

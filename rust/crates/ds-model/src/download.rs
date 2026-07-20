@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crate::hash::verify_sha256;
+use crate::hash::{sha256_hex, verify_sha256};
 use crate::model_path;
 use crate::spec::ModelSpec;
 
@@ -33,25 +33,37 @@ pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
     .max_redirections(MAX_CDN_REDIRECTIONS)
 }
 
-// Installer: local dir keyed by url_basename (no network).
+// Installer: local dir keyed by prefetch_key (no network).
 static PREFETCH_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-/// Prefetch dir (`None` = off). Keyed by [`url_basename`].
+/// Prefetch dir (`None` = off). Keyed by [`prefetch_key`].
 pub fn set_prefetch_source(dir: Option<PathBuf>) {
     *PREFETCH_DIR.lock().unwrap() = dir;
 }
 
-/// Last path segment (query/fragment stripped) — installer save key.
+/// Last path segment (query/fragment stripped).
 pub fn url_basename(url: &str) -> &str {
     let no_query = url.split(['?', '#']).next().unwrap_or(url);
     let trimmed = no_query.trim_end_matches('/');
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
+/// Installer staging key: URL-hash prefix + basename. Several assets deliberately share
+/// an on-disk basename (`config.json`, `tokenizer.json`, … across per-model subdirs), so
+/// staging by bare basename would cross-wire them. `prefetch_items` manifests save under
+/// this key and [`set_prefetch_source`] lookups match it — the two must stay identical.
+pub fn prefetch_key(url: &str) -> String {
+    format!(
+        "{}-{}",
+        &sha256_hex(url.as_bytes())[..12],
+        url_basename(url)
+    )
+}
+
 fn prefetch_local(url: &str) -> Option<PathBuf> {
     let guard = PREFETCH_DIR.lock().unwrap();
     let dir = guard.as_ref()?;
-    let p = dir.join(url_basename(url));
+    let p = dir.join(prefetch_key(url));
     p.is_file().then_some(p)
 }
 
@@ -110,6 +122,20 @@ fn ensure_with_retries(
     Ok(final_path)
 }
 
+/// [`ensure`] into an EXPLICIT directory instead of the flat `model_dir()` — the
+/// per-model subdirectory assets. Same flight-lock /
+/// Range-resume / sha-verify / atomic-rename path; creates `dir`. This is also the
+/// httpmock seam: tests point a spec's URL at a mock server and `dir` at a tempdir.
+pub fn ensure_in_dir(
+    dir: &Path,
+    spec: &ModelSpec,
+    progress: &dyn Fn(u64, u64),
+) -> std::io::Result<PathBuf> {
+    let final_path = dir.join(&spec.file_name);
+    ensure_at(&final_path, spec, DEFAULT_RETRIES, progress)?;
+    Ok(final_path)
+}
+
 /// Explicit dest; serialized by [`file_flight`].
 fn ensure_at(
     final_path: &Path,
@@ -117,8 +143,8 @@ fn ensure_at(
     retries: u32,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    if let Some(dir) = final_path.parent() {
-        sweep_orphans_once(dir);
+    if let Some(sweep_root) = orphan_sweep_root(final_path, ds_config::model_dir()) {
+        sweep_orphans_once(&sweep_root);
     }
 
     let flight = file_flight(final_path);
@@ -184,6 +210,15 @@ fn ensure_at(
         }
     }
     Err(last_err.unwrap_or_else(|| std::io::Error::other("download failed")))
+}
+
+fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<PathBuf> {
+    let parent = final_path.parent()?.to_path_buf();
+    Some(
+        model_root
+            .filter(|root| final_path.starts_with(root))
+            .unwrap_or(parent),
+    )
 }
 
 /// 4xx → permanent `NotFound`; other non-success → transient `TimedOut`.
@@ -549,7 +584,7 @@ fn download_to_network(
 }
 
 // Orphan `.tmp*` sweep: tempfile default prefix; Drop skips SIGKILL. Once per process
-// from ensure_at (covers nested Core ML/CUDA dirs under model_dir).
+// from ensure_at (covers nested MLX/CUDA dirs under model_dir).
 
 /// Only age ≥ this is swept (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -703,6 +738,57 @@ mod tests {
             t.join().unwrap().expect("both callers succeed");
         }
         mock.assert_calls(1);
+        assert_eq!(std::fs::read(&final_path).unwrap(), body);
+    }
+
+    /// Two URLs sharing a basename must stage under DISTINCT prefetch keys, and the key
+    /// must be stable + carry the basename (human-debuggable staging dirs).
+    #[test]
+    fn prefetch_key_disambiguates_shared_basenames() {
+        let a = prefetch_key("https://example.com/qwen3-tts/resolve/rev1/config.json");
+        let b = prefetch_key("https://example.com/omnivoice/resolve/rev2/config.json");
+        assert_ne!(a, b, "same basename, different URL ⇒ different key");
+        for key in [&a, &b] {
+            assert!(
+                key.ends_with("-config.json"),
+                "key keeps the basename: {key}"
+            );
+            assert!(
+                key.len() == "config.json".len() + 13
+                    && key.bytes().take(12).all(|c| c.is_ascii_hexdigit()),
+                "12-hex-prefix shape: {key}"
+            );
+        }
+        assert_eq!(
+            a,
+            prefetch_key("https://example.com/qwen3-tts/resolve/rev1/config.json"),
+            "key is a pure function of the URL"
+        );
+    }
+
+    /// `ensure_at` must consume a file staged under `prefetch_key(url)` WITHOUT any
+    /// network fetch — the URL points at a dead loopback port, so a keying regression
+    /// (e.g. staging by bare basename again) fails instead of silently downloading.
+    #[test]
+    fn ensure_consumes_a_prefetched_file_staged_under_the_prefetch_key() {
+        let body = b"prefetched model bytes".to_vec();
+        let sha = crate::hash::sha256_hex(&body);
+        let url = "http://127.0.0.1:9/never-dialed/config.json";
+
+        let staging = tempfile::tempdir().unwrap();
+        std::fs::write(staging.path().join(prefetch_key(url)), &body).unwrap();
+        set_prefetch_source(Some(staging.path().to_path_buf()));
+
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("config.json");
+        let spec = ModelSpec {
+            file_name: "config.json".into(),
+            url: url.into(),
+            sha256: sha,
+        };
+        let result = ensure_at(&final_path, &spec, 1, &|_, _| {});
+        set_prefetch_source(None);
+        result.expect("the staged copy satisfies the download with no network");
         assert_eq!(std::fs::read(&final_path).unwrap(), body);
     }
 
@@ -1124,21 +1210,8 @@ mod tests {
         assert_eq!(std::fs::read(dest).unwrap(), body);
     }
 
-    /// The truncation guard's whole reason to exist: a server that DECLARES a
-    /// `Content-Length` larger than the body it actually sends (then closes the
-    /// connection) simulates a CDN that truncates mid-stream — the historical "succeeds
-    /// on the 2nd/3rd attempt" bug. A naive implementation reaches the sha check on the
-    /// short `.part` file, mismatches, and mis-classifies it as a PERMANENT `InvalidData`
-    /// (no retry). `download_once` must instead classify this as TRANSIENT (`TimedOut`)
-    /// BEFORE the sha check, so `ensure_at`'s retry loop resumes it. A regression that
-    /// reclassifies truncation as permanent would pass every OTHER test in this suite
-    /// (every fixture server's Content-Length matches its body exactly) and silently
-    /// reintroduce the original bug — this is the one test that would catch it.
-    ///
-    /// Kept as a hand-rolled `TcpListener` rather than `httpmock` (unlike its siblings above):
-    /// `httpmock` always writes a well-formed response whose `Content-Length` matches the body
-    /// it sends, so it has no way to declare a length larger than the bytes actually put on the
-    /// wire — exactly the mismatch this test needs to construct.
+    /// Truncation (Content-Length > body) must be transient, not permanent InvalidData.
+    /// Hand-rolled TcpListener: httpmock always matches Content-Length to body.
     #[test]
     fn download_once_classifies_truncated_body_as_transient_not_permanent() {
         let full_body =
@@ -1153,17 +1226,13 @@ mod tests {
             if let Ok((mut stream, _)) = listener.accept() {
                 let mut req = [0u8; 1024];
                 let _ = stream.read(&mut req);
-                // Declare the FULL length in the header but only send HALF the bytes, then
-                // drop the connection — a truncated response with no transport-level error,
-                // exactly like a CDN that resets mid-transfer.
+                // Content-Length = full body; only half the bytes, then close (clean EOF).
                 let header = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {full_len}\r\nConnection: close\r\n\r\n"
                 );
                 let _ = stream.write_all(header.as_bytes());
                 let _ = stream.write_all(&full_body[..truncated_len]);
                 let _ = stream.flush();
-                // Dropping `stream` here closes it early; the client's next `read` sees a
-                // clean EOF (0) well short of the declared Content-Length.
             }
         });
 
@@ -1190,7 +1259,7 @@ mod tests {
     }
 
     /// Same truncation-guard coverage for `download_to` — used by the onnxruntime archive
-    /// fetch and, after the coreml plain-blob integrity fix, effectively every Core ML
+    /// fetch and, after the plain-blob integrity fix, effectively every MLX
     /// download too. A regression here would silently reintroduce the same bug on that path.
     #[test]
     fn download_to_classifies_truncated_body_as_transient_not_permanent() {
@@ -1228,11 +1297,21 @@ mod tests {
         assert!(!is_permanent_error(&err));
     }
 
-    /// Hermetic coverage for the orphan sweep: an OLD `.tmp*` file (simulating a prior run
-    /// killed mid-download) is removed; a RECENT `.tmp*` file (could be a genuinely in-flight
-    /// download) survives; a normal, non-`.tmp` file is never touched regardless of age; and
-    /// the sweep recurses into subdirectories (the Core ML repos nest their downloads under
-    /// per-file subpaths).
+    /// The process-wide once guard must cover every per-model subdirectory.
+    #[test]
+    fn orphan_sweep_starts_at_the_model_root_for_nested_assets() {
+        let root = std::path::PathBuf::from("models");
+        let nested = root.join("qwen3-tts").join("model.safetensors");
+        assert_eq!(orphan_sweep_root(&nested, Some(root.clone())), Some(root));
+
+        let isolated = std::path::PathBuf::from("fixture").join("model.onnx");
+        assert_eq!(
+            orphan_sweep_root(&isolated, Some(std::path::PathBuf::from("models"))),
+            Some(std::path::PathBuf::from("fixture"))
+        );
+    }
+
+    /// Old orphaned temp files are removed recursively; recent temps and final files survive.
     #[test]
     fn sweep_removes_old_orphaned_temp_files_but_spares_recent_and_non_temp() {
         let dir = tempfile::tempdir().unwrap();
@@ -1259,7 +1338,7 @@ mod tests {
             .set_modified(old_time)
             .unwrap();
 
-        let sub = dir.path().join("ANE");
+        let sub = dir.path().join("mlx");
         std::fs::create_dir_all(&sub).unwrap();
         let nested_tmp = sub.join(".tmpNESTED");
         std::fs::write(&nested_tmp, b"partial, nested").unwrap();

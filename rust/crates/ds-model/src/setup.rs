@@ -128,7 +128,7 @@ pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     })
 }
 
-/// Shared Kokoro frontend assets (voices + OOV G2P + ORT); not the 310 MB synth graph.
+/// Shared Kokoro text frontend assets (OOV G2P + ORT); not synthesis weights or voices.
 pub fn run_setup_kokoro_frontend_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
@@ -137,13 +137,12 @@ pub fn run_setup_kokoro_frontend_with_progress(
         progress,
         total,
         vec![
-            Box::new(|p| ensure_with_progress(&kokoro_voices_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_g2p_encoder_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_g2p_decoder_spec(), p).map(|_| ())),
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;
-    model_path(&kokoro_voices_spec().file_name).ok_or_else(|| {
+    model_path(&kokoro_g2p_encoder_spec().file_name).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
     })
 }

@@ -22,8 +22,8 @@ final class EngineStatsTests: XCTestCase {
             from: Data(
                 """
                 {"status":{"state":"idle","progress":0,"error":null},
-                 "enabled":true,"provider":"coreml_ane","speakers":["alex"],
-                 "cluster_threshold":0.6,"future_detail":true}
+                 "enabled":true,"provider":"mlx","speakers":["alex"],
+                 "activity_threshold":0.6,"future_detail":true}
                 """.utf8))
 
         let s = EngineStats.from(stats)
@@ -35,8 +35,8 @@ final class EngineStatsTests: XCTestCase {
         XCTAssertEqual(s.stt.failures, 1)
         XCTAssertTrue(diarization.enabled)
         XCTAssertEqual(diarization.speakers, ["alex"])
-        XCTAssertEqual(diarization.clusteringThreshold, 0.6)
-        XCTAssertEqual(diarization.provider, "coreml_ane")
+        XCTAssertEqual(diarization.activityThreshold, 0.6)
+        XCTAssertEqual(diarization.provider, "mlx")
         XCTAssertEqual(s.lifetime.ttsSecs, 100)
         XCTAssertEqual(s.lifetime.sttSecs, 50)
     }

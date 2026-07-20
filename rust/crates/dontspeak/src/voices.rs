@@ -1,27 +1,42 @@
-//! Voice / language enumeration (Kokoro voices bin + `say` directly; no engine). Used by
-//! `voices` (MCP).
+//! Voice and language enumeration used by the `voices` MCP tool.
 
-use ds_config::TtsEngine;
+use ds_config::{TtsEngine, TtsModel};
 use ds_voices::enumerate;
 use serde_json::{Value, json};
 
-/// Voice groups for `engine`, filtered to one `language` primary subtag. Empty groups dropped.
-/// Voices carry no own `language` field — the group's subtag is the language. Build is
-/// English-only; sole caller passes `"en"`.
-pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Vec<Value>)> {
+/// Voice groups for `engine` and an OPTIONAL language filter (`None` = System only:
+/// every subtag present). Empty groups are dropped; voices carry no own language field
+/// because the group identifies it.
+pub(crate) fn voice_groups(
+    engine: TtsEngine,
+    model: TtsModel,
+    language: Option<&str>,
+) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
         TtsEngine::BuiltIn => {
-            let ids = enumerate::kokoro_voice_ids();
-            let voices: Vec<Value> = enumerate::kokoro_choices_from(&ids, language)
+            let language = language.unwrap_or(model.descriptor().default_language);
+            let voices: Vec<Value> = enumerate::built_in_choices(model, language)
                 .into_iter()
                 .map(|c| {
+                    let (language_tag, gender) = if model == TtsModel::Kokoro {
+                        (
+                            Value::String(enumerate::kokoro_language_tag(&c.id)),
+                            serde_json::to_value(enumerate::gender_str(enumerate::kokoro_gender(
+                                &c.id,
+                            )))
+                            .unwrap_or(Value::Null),
+                        )
+                    } else {
+                        (Value::String(language.to_string()), Value::Null)
+                    };
                     json!({
                         "id": c.id,
                         "label": c.label,
-                        "language_tag": enumerate::kokoro_language_tag(&c.id),
-                        "gender": enumerate::gender_str(enumerate::kokoro_gender(&c.id)),
+                        "language_tag": language_tag,
+                        "gender": gender,
                         "engine": "built_in",
+                        "model": model.as_str(),
                     })
                 })
                 .collect();
@@ -31,27 +46,47 @@ pub(crate) fn voice_groups(engine: TtsEngine, language: &str) -> Vec<(String, Ve
         }
         TtsEngine::System => {
             let sys = enumerate::system_voices();
-            let voices: Vec<Value> = enumerate::system_choices_from(&sys, language)
-                .into_iter()
-                .map(|c| {
-                    let voice = sys.iter().find(|v| v.id == c.id);
-                    let gender = voice.and_then(|v| enumerate::gender_str(v.gender));
-                    let language_tag = voice.map(|v| v.language_tag.clone());
-                    json!({
-                        "id": c.id,
-                        "label": c.label,
-                        "language_tag": language_tag,
-                        "gender": gender,
-                        "engine": "system",
+            for subtag in system_group_subtags(&sys, language) {
+                let voices: Vec<Value> = enumerate::system_choices_from(&sys, &subtag)
+                    .into_iter()
+                    .map(|c| {
+                        let voice = sys.iter().find(|v| v.id == c.id);
+                        let gender = voice.and_then(|v| enumerate::gender_str(v.gender));
+                        let language_tag = voice.map(|v| v.language_tag.clone());
+                        json!({
+                            "id": c.id,
+                            "label": c.label,
+                            "language_tag": language_tag,
+                            "gender": gender,
+                            "engine": "system",
+                        })
                     })
-                })
-                .collect();
-            if !voices.is_empty() {
-                groups.push((language.to_string(), voices));
+                    .collect();
+                if !voices.is_empty() {
+                    groups.push((subtag, voices));
+                }
             }
         }
     }
     groups
+}
+
+/// Subtag groups the System engine renders: an explicit filter yields that single group;
+/// `None` yields every distinct subtag present. The catalog never inherits a built-in
+/// model default here — OmniVoice's "auto" would filter every system voice out.
+fn system_group_subtags(voices: &[ds_voices::SpeakerVoice], language: Option<&str>) -> Vec<String> {
+    match language {
+        Some(want) => vec![want.to_string()],
+        None => {
+            let mut tags: Vec<String> = voices
+                .iter()
+                .map(|v| enumerate::primary_subtag(&v.language_tag))
+                .collect();
+            tags.sort_unstable();
+            tags.dedup();
+            tags
+        }
+    }
 }
 
 #[cfg(test)]
@@ -66,6 +101,29 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert!(enumerate::kokoro_choices_from(&ids, "xx").is_empty());
+    }
+
+    #[test]
+    fn system_without_a_language_filter_lists_every_subtag() {
+        // Injected fixture — never call real `system_voices()` (shells out to `say -v ?`).
+        let mk = |id: &str, tag: &str| ds_voices::SpeakerVoice {
+            id: id.into(),
+            name: id.into(),
+            language_tag: tag.into(),
+            downloadable: false,
+            gender: None,
+            quality: None,
+        };
+        let voices = vec![
+            mk("Samantha", "en-US"),
+            mk("Daniel", "en-GB"),
+            mk("Anna", "de-DE"),
+        ];
+        // No filter: every distinct primary subtag, deduped + sorted.
+        assert_eq!(system_group_subtags(&voices, None), ["de", "en"]);
+        // Explicit filter: exactly that one group.
+        assert_eq!(system_group_subtags(&voices, Some("en")), ["en"]);
+        assert!(system_group_subtags(&[], None).is_empty());
     }
 
     #[test]

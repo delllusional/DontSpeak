@@ -85,7 +85,7 @@ fn auto_gain(buf: &[f32]) -> f32 {
     (AUTO_GAIN_TARGET_PEAK / peak).clamp(AUTO_GAIN_MIN, AUTO_GAIN_MAX)
 }
 
-/// Min 16 kHz segment length (0.3 s = FluidAudio `minimumAudioDurationSeconds` / Parakeet guard).
+/// Minimum 16 kHz segment length (0.3 s Parakeet guard).
 const MIN_TRANSCRIBE_SAMPLES_16K: usize = 4800;
 
 /// Live-preview open-tail budget = VAD force-split ([`ds_stt::boundary::MAX_SEGMENT_SECS`]).
@@ -240,7 +240,7 @@ fn transcribe_loop(
         let pcm = filter_final(&pcm); // speaker lock (identity when off)
         let pcm = trim_silence_16k(&pcm);
         // Below the model's minimum input length there's nothing to transcribe — and FEEDING it
-        // is actively harmful: FluidAudio's Parakeet REJECTS clips under `minimumAudioDurationSeconds`
+        // is actively harmful: Parakeet rejects clips under the minimum duration
         // (0.3 s) with `invalidAudioData`, so a short/silence-heavy tail re-pass would just log an
         // error and waste the pass (no overlay update → choppier blur). Skip it. 0.3 s @ 16 kHz.
         if pcm.len() < MIN_TRANSCRIBE_SAMPLES_16K {
@@ -489,7 +489,7 @@ pub(crate) fn run_listen(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Process-wide cache of the loaded streaming backend, keyed by the provider it was built for
-/// (`cpu`/`cuda` → ONNX, `ane` → Core ML). One mic / one listen at a time, so a single
+/// (`cpu`/`cuda` → ONNX, `mlx` → MLX). One mic / one listen at a time, so a single
 /// cached instance is fine; the heavy model stays resident and each listen just `reset`s it.
 ///
 /// `TtsManager` holds an exclusive listen lease for the helper's untagged output stream, while
@@ -512,7 +512,7 @@ fn backend_cell() -> &'static Mutex<BackendCache> {
 /// Build + cache the streaming backend for `provider` right now instead of waiting for the
 /// first real listen to build it lazily — so `serve.rs`'s STT preload / `load stt` can warm the
 /// SAME cache a real listen actually uses for the streaming-capable providers (`cpu`/`cuda`
-/// ONNX, macOS `ane`), not just the separate offline `LocalTranscriber` cache it also warms.
+/// ONNX, macOS `mlx`), not just the separate offline `LocalTranscriber` cache it also warms.
 /// Returns the realized provider if the cache now holds a resident instance for `provider`
 /// (already did, or just built one); `None` if this provider doesn't stream or its assets are missing
 /// ([`build_backend`] returned `None`).
@@ -556,7 +556,7 @@ pub(crate) fn unload_streaming() -> bool {
 
 /// Build the streaming backend for `provider`, or `None` when this provider doesn't stream / its
 /// assets are missing (→ caller falls back to the offline `transcribe_loop`). ONNX
-/// (`cpu`/`cuda`) → [`OnnxStreamer`]; macOS `ane` → the FluidAudio Core ML streamer. Both
+/// (`cpu`/`cuda`) → [`OnnxStreamer`]; macOS `mlx` → the MLX Audio streamer. Both
 /// implement [`StreamingStt`], so everything downstream is shared.
 fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
     if provider.eq_ignore_ascii_case("cpu") || provider.eq_ignore_ascii_case("cuda") {
@@ -573,11 +573,11 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
         };
     }
     #[cfg(target_os = "macos")]
-    if provider.eq_ignore_ascii_case("ane") {
-        return match ds_stt::coreml::CoremlStreamer::new() {
+    if provider.eq_ignore_ascii_case("mlx") {
+        return match ds_stt::mlx::MlxStreamer::new() {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
-                log::warn!(target: "helper", "streaming: Core ML streamer unavailable, using offline: {e}");
+                log::warn!(target: "helper", "streaming: MLX streamer unavailable, using offline: {e}");
                 None
             }
         };
@@ -775,7 +775,7 @@ fn separator_model_path(paths: &ds_config::Paths) -> Option<std::path::PathBuf> 
     ds_model::model_path(ds_model::SEPFORMER_FILE).filter(|p| p.exists())
 }
 
-// The cached per-thread separator (the CoreML/ANE model compiles once on first load, which
+// The cached per-thread separator (the model compiles once on first load, which
 // is slow — keep it resident across dictations instead of reloading per utterance). Holds
 // the resolved model path too, so a changed `DONTSPEAK_SEPARATOR_PATH` reloads.
 #[cfg(target_os = "macos")]
@@ -796,7 +796,7 @@ thread_local! {
 /// failed" bug); the worst case degrades to transcribing everything, exactly as lock-off.
 #[cfg(target_os = "macos")]
 fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
-    use ds_stt::diarize::{CoremlDiarizer, Diarizer, cosine};
+    use ds_stt::diarize::{Diarizer, MlxDiarizer, cosine};
 
     let Some(paths) = ds_config::Paths::resolve() else {
         return pcm.to_vec();
@@ -846,7 +846,7 @@ fn speaker_locked_pcm(pcm: &[f32]) -> Vec<f32> {
 
     // Embed each separated stream with the SAME WeSpeaker model used for enrollment, and
     // score it against the enrolled voiceprint(s).
-    let mut diar = CoremlDiarizer::new();
+    let mut diar = MlxDiarizer::new();
     let mut scored: Vec<(usize, f32)> = Vec::with_capacity(streams.len());
     for (i, s) in streams.iter().enumerate() {
         let Ok(emb) = diar.embed(s) else { continue };

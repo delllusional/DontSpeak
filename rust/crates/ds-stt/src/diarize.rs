@@ -1,8 +1,8 @@
 //! Speaker diarization — "who spoke when", optionally labelled by enrolled NAME.
 //!
 //! Mirrors the [`crate::Stt`] split: ONE platform-agnostic [`Diarizer`](crate::diarize::Diarizer)
-//! trait with a Core ML / ANE backend now (`CoremlDiarizer`,
-//! macOS only) and room for a cross-platform ONNX backend later (Pyannote + WeSpeaker over
+//! trait with an MLX backend now (`MlxDiarizer`,
+//! macOS only) and room for a cross-platform ONNX backend later (Sortformer + WeSpeaker over
 //! `ort`). Diarization runs on the FULL utterance buffer at end-of-capture, one-shot (not
 //! streamed).
 //!
@@ -23,7 +23,7 @@ use ds_config::speakers::SpeakerStore;
 
 /// One contiguous span attributed to a single speaker. Times are seconds from the start
 /// of the diarized buffer. `speaker` is the within-utterance cluster id assigned by the
-/// backend (FluidAudio's `speakerId`) — the SAME string used as the key in
+/// backend — the same string used as the key in
 /// [`DiarizationOutput::speakers`], which is how the engine joins a segment to its
 /// embedding to relabel it. `name` is the enrolled person the engine matched it to, if any.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -105,146 +105,112 @@ pub fn match_speaker(embedding: &[f32], store: &SpeakerStore, threshold: f32) ->
 /// A speaker-diarization backend. Object-safe so a factory can hand back
 /// `Box<dyn Diarizer>` once a second (ONNX) backend exists.
 pub trait Diarizer {
-    /// Download (first use) + load the segmentation/embedding models so the first
-    /// diarization doesn't pay the load cost. The eager counterpart to [`unload`](Self::unload).
     fn preload(&mut self) -> Result<(), String>;
 
-    /// Diarize 16 kHz mono f32 PCM → segments + per-speaker embeddings. Empty input →
-    /// an empty output.
     fn diarize_pcm_16k_full(&mut self, pcm: &[f32]) -> Result<DiarizationOutput, String>;
 
-    /// Extract one WeSpeaker voiceprint from 16 kHz mono f32 PCM (the enrollment
-    /// primitive). Empty input → an error.
     fn embed(&mut self, pcm: &[f32]) -> Result<Vec<f32>, String>;
 
-    /// Download the diarization models if absent (explicit, e.g. the Settings button).
     fn download(&mut self) -> Result<(), String>;
 
-    /// Free the loaded models; the next diarization lazily reloads them. Returns whether
-    /// anything was loaded.
     fn unload(&mut self) -> bool;
 
-    /// Diarize → just the segments (convenience over [`diarize_pcm_16k_full`](Self::diarize_pcm_16k_full)).
     fn diarize_pcm_16k(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerSegment>, String> {
         Ok(self.diarize_pcm_16k_full(pcm)?.segments)
     }
 
-    /// Whether this backend is usable right now (models present, supported platform).
     fn is_available(&self) -> bool {
         true
     }
 }
 
-/// THE `diarizer` → backend gate — the single place a provider rung is mapped to
-/// (the availability of) a diarizer backend; every diarize entry point (the warm helper's
-/// `diarize`/`enroll` ops) delegates here rather than re-deriving the mapping. Takes an
-/// ALREADY-RESOLVED rung (callers walk the ladder via
-/// `VoiceConfig::resolved_diarizer`): `Ok` ⇒ the Core ML / ANE backend
-/// (`CoremlDiarizer`, the only diarizer wired today) is the right backend for it. `Err` (a
-/// user-facing message) for any other provider — and for EVERY provider off macOS — so
-/// `diarizer` is honored instead of silently falling through to Core ML.
-pub fn ensure_coreml_backend(provider: DiarizerProvider) -> Result<(), String> {
+/// Map resolved diarizer rung → backend. Only MLX is wired (macOS); else user-facing `Err`.
+pub fn ensure_mlx_backend(provider: DiarizerProvider) -> Result<(), String> {
     match provider {
         #[cfg(target_os = "macos")]
-        DiarizerProvider::AppleNative => Ok(()),
-        // Defensive: `AppleNative` is the only variant today (so on macOS this arm is
-        // unreachable), but keep the rejection so adding an unwired provider can't silently
-        // fall through. Off macOS this arm rejects every provider, `AppleNative` included.
+        DiarizerProvider::Mlx => Ok(()),
+        // Reject unwired providers (and every provider off macOS) so config is honored.
         #[allow(unreachable_patterns)]
         other => Err(format!(
-            "diarizer={} is not available on this platform (only apple-native is wired)",
+            "diarizer={} is not available on this platform (only MLX is wired)",
             other.as_str()
         )),
     }
 }
 
 #[cfg(target_os = "macos")]
-pub use coreml_impl::CoremlDiarizer;
+pub use mlx_impl::MlxDiarizer;
 
-/// FluidAudio's offline diarizer behind the `libdskokoro.dylib` C ABI (the SAME shim
-/// as the apple-native Kokoro TTS + Parakeet STT backends). macOS only.
+/// MLX Sortformer + WeSpeaker via `libdontspeak_mlx` (macOS). Rust owns downloads.
 #[cfg(target_os = "macos")]
-mod coreml_impl {
+mod mlx_impl {
     use std::ffi::{c_char, c_void};
 
     use libloading::{Library, Symbol};
 
     use super::{DiarizationOutput, Diarizer, parse_output};
-    use ds_model::shim::{PcmCb, StrCb};
+    use ds_model::mlx_shim::{PcmCb, StrCb};
 
-    // diarize/embed still BLOCK and return their status; the JSON / embedding comes back through a
-    // borrowed callback (copied out by `ds_model::shim::collect_{str,pcm}`), so there's no out-param
-    // and no `dsk_free_str` / `dsk_free`. init/download/shutdown carry no buffer → plain int32.
+    // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
     type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
     type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
-    type DownloadFn = unsafe extern "C" fn() -> i32;
     type DiarShutdownFn = unsafe extern "C" fn();
 
-    /// Pyannote + WeSpeaker diarization over Core ML / ANE. Models download on first
-    /// `preload`/diarize. Mirrors [`crate::coreml::CoremlTranscriber`]'s lazy-load shape.
-    pub struct CoremlDiarizer {
+    pub struct MlxDiarizer {
         lib: Option<Library>,
         loaded: bool,
-        /// Clustering threshold passed to `dsk_diar_init` (0.5–0.9, lower = more
-        /// speakers); 0.0 = use FluidAudio's default (0.7).
-        threshold: f32,
+        /// Sortformer activity cutoff for `ds_mlx_diar_init` (0.1–0.9; 0.0 → shim 0.5).
+        activity_threshold: f32,
     }
 
-    impl CoremlDiarizer {
-        /// Not loaded until the first [`preload`](Diarizer::preload) / diarization.
-        /// Uses FluidAudio's default clustering threshold.
+    impl MlxDiarizer {
         pub fn new() -> Self {
-            CoremlDiarizer {
+            MlxDiarizer {
                 lib: None,
                 loaded: false,
-                threshold: 0.0,
+                activity_threshold: 0.0,
             }
         }
 
-        /// Like [`new`](Self::new) but with an explicit clustering threshold (0.5–0.9,
-        /// lower = more speakers). `0.0` keeps FluidAudio's default.
+        /// `0.0` keeps shim default; positive values clamp to 0.1–0.9.
         pub fn with_threshold(threshold: f32) -> Self {
-            CoremlDiarizer {
+            MlxDiarizer {
                 lib: None,
                 loaded: false,
-                threshold: if threshold.is_finite() {
-                    threshold.clamp(0.0, 1.0)
+                activity_threshold: if threshold.is_finite() && threshold > 0.0 {
+                    threshold.clamp(0.1, 0.9)
                 } else {
                     0.0
                 },
             }
         }
 
-        /// Ensure the shim dylib is open (resolves `DSKOKORO_DYLIB_PATH`).
         fn ensure_lib(&mut self) -> Result<(), String> {
             if self.lib.is_none() {
-                self.lib = Some(ds_model::shim::open()?);
+                self.lib = Some(ds_model::mlx_shim::open()?);
             }
             Ok(())
         }
     }
 
-    impl Diarizer for CoremlDiarizer {
+    impl Diarizer for MlxDiarizer {
         fn preload(&mut self) -> Result<(), String> {
             if self.loaded {
                 return Ok(());
             }
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: `dsk_diar_init` is looked up by NUL-terminated name from the
-            // app-signed shim and has exactly `DiarInitFn`'s signature (dskokoro.h); the
-            // Symbol borrows `lib`, and `dir` is a live CString across the blocking call.
+            // SAFETY: symbol matches `DiarInitFn`; `dir` lives across the blocking call.
             let rc = unsafe {
                 let init: Symbol<DiarInitFn> = lib
-                    .get(b"dsk_diar_init\0")
-                    .map_err(|e| format!("dsk_diar_init symbol: {e}"))?;
-                // Our DontSpeak-controlled Core ML cache dir (not "" → FluidAudio's default).
-                let dir = ds_model::shim::model_dir_arg();
-                init(dir.as_ptr(), self.threshold)
+                    .get(b"ds_mlx_diar_init\0")
+                    .map_err(|e| format!("ds_mlx_diar_init symbol: {e}"))?;
+                let dir = ds_model::mlx_shim::mlx_model_root_arg();
+                init(dir.as_ptr(), self.activity_threshold)
             };
             if rc != 0 {
-                return Err(format!("dsk_diar_init failed (rc={rc})"));
+                return Err(format!("ds_mlx_diar_init failed (rc={rc})"));
             }
             self.loaded = true;
             Ok(())
@@ -256,19 +222,14 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: `dsk_diarize` in the app-signed shim has exactly `DiarizeFn`'s
-            // signature (dskokoro.h); the returned Symbol borrows `lib`.
-            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"dsk_diarize\0") }
-                .map_err(|e| format!("dsk_diarize symbol: {e}"))?;
-            // The shim borrows the JSON to our sink, which copies it out (no dsk_free_str).
-            // The call blocks; `pcm` lives across it.
-            // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
-            // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_str`
-            // supplies, fired synchronously per dskokoro.h's callback contract.
-            let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
+            // SAFETY: the shim exports this name with the `DiarizeFn` C ABI.
+            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_mlx_diarize\0") }
+                .map_err(|e| format!("ds_mlx_diarize symbol: {e}"))?;
+            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
+            let json = ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
-            .map_err(|rc| format!("dsk_diarize failed (rc={rc})"))?;
+            .map_err(|rc| format!("ds_mlx_diarize failed (rc={rc})"))?;
             parse_output(&json)
         }
 
@@ -278,19 +239,14 @@ mod coreml_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: `dsk_diar_embed` in the app-signed shim has exactly `EmbedFn`'s
-            // signature (dskokoro.h); the returned Symbol borrows `lib`.
-            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"dsk_diar_embed\0") }
-                .map_err(|e| format!("dsk_diar_embed symbol: {e}"))?;
-            // The shim borrows the embedding to our sink, which copies it out (no dsk_free).
-            // The call blocks; `pcm` lives across it.
-            // SAFETY: `pcm.as_ptr()`/`len()` describe a live buffer that outlives the
-            // blocking call, and `ctx`/`cb` are the borrowed-result pair `collect_pcm`
-            // supplies, fired synchronously per dskokoro.h's callback contract.
-            let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
+            // SAFETY: the shim exports this name with the `EmbedFn` C ABI.
+            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_mlx_diar_embed\0") }
+                .map_err(|e| format!("ds_mlx_diar_embed symbol: {e}"))?;
+            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
+            let emb = ds_model::mlx_shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
-            .map_err(|rc| format!("dsk_diar_embed failed (rc={rc})"))?;
+            .map_err(|rc| format!("ds_mlx_diar_embed failed (rc={rc})"))?;
             if emb.is_empty() {
                 return Err("embed: empty embedding".into());
             }
@@ -298,21 +254,11 @@ mod coreml_impl {
         }
 
         fn download(&mut self) -> Result<(), String> {
-            self.ensure_lib()?;
-            let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: `dsk_diar_download` is looked up by NUL-terminated name from the
-            // app-signed shim and has exactly `DownloadFn`'s signature (dskokoro.h — no
-            // arguments); the Symbol borrows `lib`.
-            let rc = unsafe {
-                let dl: Symbol<DownloadFn> = lib
-                    .get(b"dsk_diar_download\0")
-                    .map_err(|e| format!("dsk_diar_download symbol: {e}"))?;
-                dl()
-            };
-            if rc != 0 {
-                return Err(format!("dsk_diar_download failed (rc={rc})"));
-            }
-            Ok(())
+            ds_model::mlx_repo::ensure_mlx_repos(
+                &ds_model::mlx_repo::DIARIZATION_MLX_SET,
+                &|_, _| {},
+            )
+            .map_err(|e| format!("download MLX diarization models: {e}"))
         }
 
         fn unload(&mut self) -> bool {
@@ -322,7 +268,7 @@ mod coreml_impl {
             if let Some(lib) = &self.lib {
                 // SAFETY: idempotent shim shutdown.
                 unsafe {
-                    if let Ok(sd) = lib.get::<DiarShutdownFn>(b"dsk_diar_shutdown\0") {
+                    if let Ok(sd) = lib.get::<DiarShutdownFn>(b"ds_mlx_diar_shutdown\0") {
                         sd();
                     }
                 }
@@ -332,13 +278,13 @@ mod coreml_impl {
         }
     }
 
-    impl Default for CoremlDiarizer {
+    impl Default for MlxDiarizer {
         fn default() -> Self {
             Self::new()
         }
     }
 
-    impl Drop for CoremlDiarizer {
+    impl Drop for MlxDiarizer {
         fn drop(&mut self) {
             self.unload();
         }
@@ -384,18 +330,18 @@ mod tests {
     }
 
     #[test]
-    fn ensure_coreml_backend_gates_provider_per_platform() {
-        // AppleNative is the one provider rung today: Ok (Core ML is the backend) on macOS,
+    fn ensure_mlx_backend_gates_provider_per_platform() {
+        // Mlx is the one provider rung today: Ok (MLX is the backend) on macOS,
         // Err on every other OS. The Err message is the exact user-facing string the warm
         // helper's diarize/enroll ops emit — keep it byte-stable.
-        let res = ensure_coreml_backend(DiarizerProvider::AppleNative);
+        let res = ensure_mlx_backend(DiarizerProvider::Mlx);
         #[cfg(target_os = "macos")]
         assert_eq!(res, Ok(()));
         #[cfg(not(target_os = "macos"))]
         assert_eq!(
             res.unwrap_err(),
-            "diarizer=apple_native is not available on this platform \
-             (only apple-native is wired)"
+            "diarizer=mlx is not available on this platform \
+             (only MLX is wired)"
         );
     }
 

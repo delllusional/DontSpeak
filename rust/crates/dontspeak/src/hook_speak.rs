@@ -227,11 +227,7 @@ mod tests {
     fn ordinary_empty_and_malformed_prompts_are_not_synthetic() {
         assert!(!is_synthetic_continuation("fix the bug in foo.rs"));
         assert!(!is_synthetic_continuation(""));
-        for payload in [
-            r#"{"session_id":"s1"}"#,
-            "not json at all",
-            "{unterminated",
-        ] {
+        for payload in [r#"{"session_id":"s1"}"#, "not json at all", "{unterminated"] {
             assert_eq!(prompt_from_payload(payload), "");
             assert!(!is_synthetic_continuation(&prompt_from_payload(payload)));
         }

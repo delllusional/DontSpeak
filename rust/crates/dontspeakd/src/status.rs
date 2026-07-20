@@ -7,9 +7,8 @@ use std::time::Duration;
 use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
-    apple_native_shim_available, apple_native_tts_active, caps_loop_enabled,
-    kokoro_g2p_files_present, kokoro_onnx_files_present, kokoro_present_for, parakeet_available,
-    parakeet_onnx_files_present, stt_uses_onnx_runtime,
+    caps_loop_enabled, mlx_shim_available, mlx_tts_active, parakeet_available,
+    parakeet_onnx_files_present, stt_uses_onnx_runtime, tts_model_files_present,
 };
 use crate::downloads::{DownloadProg, TargetState};
 use crate::engine::{PasteState, dictation_preview};
@@ -18,7 +17,7 @@ use crate::tts::TtsManager;
 use ds_model::DownloadTarget;
 use ds_status::{
     Activity, DiarizationStatus, Dictation, DictationState, EngineState, EngineStatus, ModelStatus,
-    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, SttStatus, TtsStatus,
+    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, StatusTtsModel, SttStatus, TtsStatus,
 };
 
 /// Status seq + condvar for `WaitModelStatus`. Bump after every status flip.
@@ -114,34 +113,15 @@ pub(crate) fn model_status_json(
     let resolved_stt = cfg.resolved_stt();
     // CHEAP presence: file existence only — NO sha256. model_status is polled to
     // drive the UI's status dots, so it must be fast; full sha verification over
-    // the 325MB Kokoro onnx + the Parakeet ONNX files would delay the dots by
+    // large TTS and Parakeet ONNX files would delay the dots by
     // many seconds. Correctness-critical sha checks stay in the load path
     // (load_synth / ParakeetModel::load), not here.
-    // The Kokoro row reflects the ACTIVE TTS backend (mirrors the Parakeet row below):
-    //   * apple-native → gated on the shim (the loader) + the downloaded Core ML sets (the
-    //                    engine's download manager fetches them — target `kokoro_coreml` —
-    //                    and FluidAudio only LOADS in `offlineMode`). Presence reads the SAME
-    //                    revision-pinned completion markers the downloader writes, so a
-    //                    partial fetch reads MISSING here exactly as it does to the fetcher.
-    //   * onnx (cpu/coreml/cuda) → gated on synth, voices, G2P graphs, and ORT.
-    // `uses_apple_native_model()` / `resolved_stt_provider()` resolve to `Ane` as a STATIC
-    // preference on ANY macOS, but the ANE (FluidAudio Core ML) backend only actually serves when
-    // its shim dylib is present; without it the warm child DOWNGRADES to the ONNX-CPU path (e.g.
-    // Intel macOS — see the realized `tts_provider`/`stt_provider` below, and the identical
-    // `ane_active` guard in `downloads::auto_download_missing`). So gate the ROW's apple-native-ness
-    // on the SAME runtime truth (shim present), else the ONNX-CPU path's row reads "missing" (no
-    // Core ML files) even though the model loaded and is actively running on CPU.
-    let shim = apple_native_shim_available();
-    let tts_uses_apple_native = apple_native_tts_active(&cfg);
-    let kokoro_files = if tts_uses_apple_native {
-        ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
-            && kokoro_g2p_files_present()
-    } else {
-        kokoro_onnx_files_present()
-    };
-    let kokoro_present = kokoro_present_for(tts_uses_apple_native, shim, kokoro_files);
+    // The TTS row reflects the active backend (mirrors the Parakeet row below).
+    let shim = mlx_shim_available();
+    let tts_uses_mlx = mlx_tts_active(&cfg);
+    let tts_present = tts_model_files_present(&cfg);
     let parakeet_onnx_files = parakeet_onnx_files_present();
-    // Same shim-aware ONNX downgrade as Kokoro.
+    // Same shim-aware ONNX downgrade as TTS.
     let stt_uses_onnx = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), shim);
     let parakeet_present = if stt_uses_onnx {
         parakeet_onnx_files
@@ -218,13 +198,12 @@ pub(crate) fn model_status_json(
         Some(TargetState::Failed(e)) => Some(e.clone()),
         _ => None,
     };
-    let kokoro_enabled = resolved_tts == Some(ds_config::TtsEngine::BuiltIn);
-    // Load error only while present (clean install "not downloaded" is missing, not failed).
-    let kokoro_error = combined_error(
-        kokoro_present,
-        dl_err_for(DownloadTarget::KokoroModel)
-            .or_else(|| dl_err_for(DownloadTarget::KokoroCoreml))
-            .or_else(|| dl_err_for(DownloadTarget::KokoroFrontend)),
+    let tts_enabled = resolved_tts == Some(ds_config::TtsEngine::BuiltIn);
+    let tts_targets = tts_download_targets(&cfg);
+    let tts_download_error = tts_targets.iter().find_map(|target| dl_err_for(*target));
+    let tts_error = combined_error(
+        tts_present,
+        tts_download_error,
         tts.tts_load_error().or_else(|| tts.last_error()),
     );
 
@@ -243,37 +222,25 @@ pub(crate) fn model_status_json(
     let tts_loaded = tts.is_tts_loaded();
     let stt_loaded = tts.is_stt_loaded();
     let cuda_downloading = downloading(DownloadTarget::Cuda);
-    let kokoro_own_downloading = downloading(DownloadTarget::KokoroModel)
-        || downloading(DownloadTarget::KokoroCoreml)
-        || downloading(DownloadTarget::KokoroFrontend);
-    let kokoro_downloading = row_downloading(
-        kokoro_own_downloading,
-        cuda_downloading,
+    let tts_own_downloading = tts_targets.iter().any(|target| downloading(*target));
+    let tts_downloading = row_downloading(
+        tts_own_downloading,
+        cuda_downloading && cfg.resolved_tts_provider() == ds_config::Provider::OrtCuda,
         tts_loaded,
-        tts_uses_apple_native,
+        tts_uses_mlx,
     );
     let parakeet_own_downloading = (stt_uses_onnx && downloading(DownloadTarget::ParakeetModel))
-        || downloading(DownloadTarget::ParakeetCoreml);
+        || downloading(DownloadTarget::ParakeetMlx);
     let parakeet_downloading = row_downloading(
         parakeet_own_downloading,
         cuda_downloading,
         stt_loaded,
         !stt_uses_onnx,
     );
-    let kokoro_frac = row_download_frac(
-        &dl,
-        &[
-            DownloadTarget::KokoroModel,
-            DownloadTarget::KokoroCoreml,
-            DownloadTarget::KokoroFrontend,
-        ],
-    );
+    let tts_frac = row_download_frac(&dl, &tts_targets);
     let parakeet_frac = row_download_frac(
         &dl,
-        &[
-            DownloadTarget::ParakeetModel,
-            DownloadTarget::ParakeetCoreml,
-        ],
+        &[DownloadTarget::ParakeetModel, DownloadTarget::ParakeetMlx],
     );
 
     // One load each — avoid tear across recording/prompt_glow/state.
@@ -283,13 +250,13 @@ pub(crate) fn model_status_json(
     let tts_status = match resolved_tts {
         Some(ds_config::TtsEngine::BuiltIn) => Some(engine_status(
             RowState {
-                present: kokoro_present,
-                downloading: kokoro_downloading,
-                error: kokoro_error,
+                present: tts_present,
+                downloading: tts_downloading,
+                error: tts_error,
                 running: tts_loaded,
-                enabled: kokoro_enabled,
+                enabled: tts_enabled,
             },
-            kokoro_frac,
+            tts_frac,
         )),
         Some(ds_config::TtsEngine::System) => Some(engine_status(
             RowState {
@@ -315,7 +282,7 @@ pub(crate) fn model_status_json(
                     if stt_uses_onnx {
                         dl_err_for(DownloadTarget::ParakeetModel)
                     } else {
-                        dl_err_for(DownloadTarget::ParakeetCoreml)
+                        dl_err_for(DownloadTarget::ParakeetMlx)
                     },
                     tts.stt_load_error(),
                 ),
@@ -351,9 +318,9 @@ pub(crate) fn model_status_json(
     let diarization_status = engine_status(
         RowState {
             present: diar_present,
-            downloading: downloading(DownloadTarget::DiarizationCoreml)
+            downloading: downloading(DownloadTarget::DiarizationMlx)
                 || downloading(DownloadTarget::SepformerModel),
-            error: dl_err_for(DownloadTarget::DiarizationCoreml)
+            error: dl_err_for(DownloadTarget::DiarizationMlx)
                 .or_else(|| dl_err_for(DownloadTarget::SepformerModel)),
             running: cfg.speaker_lock
                 && cfg.is_diarization_on()
@@ -361,7 +328,7 @@ pub(crate) fn model_status_json(
                 && sepformer_present,
             enabled: cfg.speaker_lock,
         },
-        frac_for(DownloadTarget::DiarizationCoreml).max(frac_for(DownloadTarget::SepformerModel)),
+        frac_for(DownloadTarget::DiarizationMlx).max(frac_for(DownloadTarget::SepformerModel)),
     );
 
     let status = ModelStatus {
@@ -376,6 +343,10 @@ pub(crate) fn model_status_json(
         },
         tts: TtsStatus {
             engine: status_tts_engine(resolved_tts),
+            model: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
+                .then(|| status_tts_model(cfg.tts_model)),
+            language: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
+                .then(|| "auto".to_string()),
             provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
             status: tts_status,
         },
@@ -388,10 +359,10 @@ pub(crate) fn model_status_json(
         diarization: DiarizationStatus {
             status: diarization_status,
             enabled: cfg.is_diarization_on(),
-            // Realized compute token hosts pass to `ds_runtime_label` (ANE for AppleNative).
-            provider: ds_config::Provider::Ane.as_str().to_string(),
+            // Realized compute token hosts pass to `ds_runtime_label`.
+            provider: ds_config::Provider::Mlx.as_str().to_string(),
             speakers: ds_config::SpeakerStore::load(&paths.speakers_json).names(),
-            cluster_threshold: cfg.cluster_threshold as f64,
+            activity_threshold: cfg.activity_threshold as f64,
         },
         dictation: Dictation {
             state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
@@ -409,7 +380,7 @@ pub(crate) fn model_status_json(
 }
 
 /// Child realized-EP → config Provider (shared STT/TTS; drift guard in tests).
-fn realized_ort_token(child_provider: &str) -> ds_config::Provider {
+fn realized_provider_token(child_provider: &str) -> ds_config::Provider {
     ds_config::RealizedProvider::parse(child_provider).to_provider()
 }
 
@@ -420,28 +391,40 @@ fn stt_provider_token(
 ) -> Option<String> {
     match resolved_stt {
         Some(ds_config::SttEngine::BuiltIn) => {
-            Some(realized_ort_token(child_provider).as_str().to_string())
+            Some(realized_provider_token(child_provider).as_str().to_string())
         }
         _ => None,
     }
 }
 
-/// Realized TTS EP token (Kokoro only).
+/// Realized TTS provider token (local engines only; child reports honest backend).
 fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
     child_provider: &str,
 ) -> Option<String> {
     match resolved_tts {
         Some(ds_config::TtsEngine::BuiltIn) => {
-            Some(realized_ort_token(child_provider).as_str().to_string())
+            Some(realized_provider_token(child_provider).as_str().to_string())
         }
         _ => None,
     }
 }
 
-/// Diarization Core ML present — same completion markers as downloader.
+fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
+    if mlx_tts_active(cfg) {
+        let mut targets = vec![DownloadTarget::mlx_for_tts(cfg.tts_model)];
+        if cfg.tts_model == ds_config::TtsModel::Kokoro {
+            targets.push(DownloadTarget::KokoroFrontend);
+        }
+        targets
+    } else {
+        vec![DownloadTarget::portable_for_tts(cfg.tts_model)]
+    }
+}
+
+/// MLX diarization present — same completion markers as downloader.
 fn diarization_present() -> bool {
-    ds_model::coreml_repo::is_coreml_repo_present(&ds_model::coreml_repo::DIARIZATION_COREML)
+    ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
 }
 
 /// Row "downloading": own fetch, or Cuda while `!engine_loaded` on ONNX path.
@@ -450,9 +433,9 @@ fn row_downloading(
     own_downloading: bool,
     cuda_downloading: bool,
     engine_loaded: bool,
-    uses_apple_native: bool,
+    uses_mlx: bool,
 ) -> bool {
-    own_downloading || (!uses_apple_native && cuda_downloading && !engine_loaded)
+    own_downloading || (!uses_mlx && cuda_downloading && !engine_loaded)
 }
 
 /// dl_err always; load_err only while present (absent → missing, not stale failed).
@@ -529,6 +512,15 @@ fn status_tts_engine(resolved: Option<ds_config::TtsEngine>) -> StatusTtsEngine 
     }
 }
 
+fn status_tts_model(model: ds_config::TtsModel) -> StatusTtsModel {
+    match model {
+        ds_config::TtsModel::Kokoro => StatusTtsModel::Kokoro,
+        ds_config::TtsModel::Chatterbox => StatusTtsModel::Chatterbox,
+        ds_config::TtsModel::Qwen => StatusTtsModel::Qwen,
+        ds_config::TtsModel::OmniVoice => StatusTtsModel::OmniVoice,
+    }
+}
+
 fn status_tray_kind(k: ds_config::TrayKind) -> StatusTrayKind {
     match k {
         ds_config::TrayKind::Stt => StatusTrayKind::Stt,
@@ -589,8 +581,8 @@ pub(crate) fn dictation_state(
 mod tests {
     use super::{
         EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
-        engine_state, model_status_json, realized_ort_token, row_download_frac, row_downloading,
-        stt_provider_token, tts_provider_token,
+        engine_state, model_status_json, realized_provider_token, row_download_frac,
+        row_downloading, stt_provider_token, tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -614,7 +606,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
         let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let previous_shim = std::env::var_os("DSKOKORO_DYLIB_PATH");
+        let previous_shim = std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH");
 
         let temp = tempfile::tempdir().unwrap();
         let model_dir = tempfile::tempdir().unwrap();
@@ -630,7 +622,7 @@ mod tests {
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
             std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("DSKOKORO_DYLIB_PATH");
+            std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH");
         }
 
         let tts_stats = Arc::new(TtsStats::new());
@@ -694,8 +686,8 @@ mod tests {
                 None => std::env::remove_var("ORT_DYLIB_PATH"),
             }
             match previous_shim {
-                Some(value) => std::env::set_var("DSKOKORO_DYLIB_PATH", value),
-                None => std::env::remove_var("DSKOKORO_DYLIB_PATH"),
+                Some(value) => std::env::set_var("DONTSPEAK_MLX_DYLIB_PATH", value),
+                None => std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH"),
             }
         }
 
@@ -793,7 +785,7 @@ mod tests {
     }
 
     /// Each model row picks ITS OWN target's fraction from the parallel-download map:
-    /// the model fetch wins over the Core ML set, which wins over the shared CUDA
+    /// the model fetch wins over the MLX set, which wins over the shared CUDA
     /// runtime; a foreign target's progress never bleeds into the row; idle rows read 0.
     /// Also: a just-FINISHED target's `Done` progress wins over the (unrelated) live Cuda
     /// fetch, so a completed row's ring reads its final % instead of snapping to the
@@ -815,12 +807,9 @@ mod tests {
         .into_iter()
         .collect();
         // Each row shows its OWN model %, not the other row's and not CUDA's.
+        assert_eq!(row_download_frac(&active, &[KokoroModel, KokoroMlx]), 0.10);
         assert_eq!(
-            row_download_frac(&active, &[KokoroModel, KokoroCoreml]),
-            0.10
-        );
-        assert_eq!(
-            row_download_frac(&active, &[ParakeetModel, ParakeetCoreml]),
+            row_download_frac(&active, &[ParakeetModel, ParakeetMlx]),
             0.30
         );
 
@@ -829,45 +818,36 @@ mod tests {
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&cuda_only, &[KokoroModel, KokoroCoreml]),
+            row_download_frac(&cuda_only, &[KokoroModel, KokoroMlx]),
             0.5
         );
         assert_eq!(
-            row_download_frac(&cuda_only, &[ParakeetModel, ParakeetCoreml]),
+            row_download_frac(&cuda_only, &[ParakeetModel, ParakeetMlx]),
             0.5
         );
 
-        // Core ML flavor in flight → the row's second-priority target.
-        let coreml: HashMap<_, _> = [(KokoroCoreml, TargetState::Active(p(25, 100)))]
+        // MLX flavor in flight → the row's second-priority target.
+        let mlx: HashMap<_, _> = [(KokoroMlx, TargetState::Active(p(25, 100)))]
             .into_iter()
             .collect();
-        assert_eq!(
-            row_download_frac(&coreml, &[KokoroModel, KokoroCoreml]),
-            0.25
-        );
+        assert_eq!(row_download_frac(&mlx, &[KokoroModel, KokoroMlx]), 0.25);
         // ...and it does NOT bleed into the Parakeet row.
-        assert_eq!(
-            row_download_frac(&coreml, &[ParakeetModel, ParakeetCoreml]),
-            0.0
-        );
+        assert_eq!(row_download_frac(&mlx, &[ParakeetModel, ParakeetMlx]), 0.0);
 
-        // The Apple-native adjunct target now carries required frontend graphs, so it is one
+        // The MLX adjunct target now carries required frontend graphs, so it is one
         // of Kokoro's own targets and feeds that row's ring.
         let frontend: HashMap<_, _> = [(KokoroFrontend, TargetState::Active(p(3, 4)))]
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&frontend, &[KokoroModel, KokoroCoreml, KokoroFrontend]),
+            row_download_frac(&frontend, &[KokoroModel, KokoroMlx, KokoroFrontend]),
             0.75
         );
 
         // Nothing in flight ⇒ 0.
-        assert_eq!(row_download_frac(&empty, &[KokoroModel, KokoroCoreml]), 0.0);
+        assert_eq!(row_download_frac(&empty, &[KokoroModel, KokoroMlx]), 0.0);
 
-        // THE FIX: Kokoro's own fetch just finished (retired into `Done`) while Cuda is
-        // STILL live for some unrelated reason — the row must show its own finished %,
-        // never fall back to Cuda's, and must NOT bleed into the Parakeet row (which has
-        // nothing of its own, so it falls through to Cuda).
+        // Done own-target % beats live Cuda fallback.
         let kokoro_done_cuda_live: HashMap<_, _> = [
             (KokoroModel, TargetState::Done(p(100, 100))),
             (Cuda, TargetState::Active(p(50, 100))),
@@ -875,61 +855,48 @@ mod tests {
         .into_iter()
         .collect();
         assert_eq!(
-            row_download_frac(&kokoro_done_cuda_live, &[KokoroModel, KokoroCoreml]),
+            row_download_frac(&kokoro_done_cuda_live, &[KokoroModel, KokoroMlx]),
             1.0,
             "a finished own-target download wins over a still-live Cuda fetch"
         );
         assert_eq!(
-            row_download_frac(&kokoro_done_cuda_live, &[ParakeetModel, ParakeetCoreml]),
+            row_download_frac(&kokoro_done_cuda_live, &[ParakeetModel, ParakeetMlx]),
             0.5,
             "Parakeet has nothing of its own, so it still falls back to Cuda"
         );
 
-        // The Cuda fallback is LIVE-only: a FINISHED Cuda entry must not keep feeding
-        // rows' rings (today's `active`-map-only read, pinned).
+        // Done Cuda must not keep feeding row rings.
         let cuda_done: HashMap<_, _> = [(Cuda, TargetState::Done(p(100, 100)))]
             .into_iter()
             .collect();
         assert_eq!(
-            row_download_frac(&cuda_done, &[KokoroModel, KokoroCoreml]),
+            row_download_frac(&cuda_done, &[KokoroModel, KokoroMlx]),
             0.0,
             "a Done Cuda entry must not feed the fallback"
         );
     }
 
-    /// THE REGRESSION GUARD for the Kokoro-status bug: a fully-loaded, working row must
-    /// never read "downloading" just because the shared Cuda runtime is (still, or again)
-    /// in flight for some unrelated reason. Cuda alone can only force "downloading" while
-    /// the row's own engine has NOT yet loaded — the exact first-boot intent from the
-    /// comment above `row_downloading`'s call sites.
+    /// Cuda alone forces downloading only while the row engine is not yet loaded.
     #[test]
     fn row_downloading_gates_cuda_on_engine_loaded() {
-        // THE BUG: Cuda still downloading, the row's OWN target is NOT downloading, but the
-        // row's engine has ALREADY loaded (fully downloaded, verified, warm, working) ⇒ the
-        // row must read NOT downloading — Cuda mustn't flash it back to a progress ring.
         assert!(
             !row_downloading(false, true, true, false),
             "an already-loaded engine must not be forced back into 'downloading' by Cuda"
         );
 
-        // First-boot intent (preserved): engine not yet loaded + Cuda downloading ⇒ the row
-        // DOES read downloading (the shared runtime gates both ONNX engines before it lands).
+        // First boot: Cuda-in-flight still gates not-yet-loaded ONNX row.
         assert!(
             row_downloading(false, true, false, false),
             "on first boot, Cuda-in-flight must still gate a not-yet-loaded ONNX row"
         );
 
-        // The row's OWN target downloading always wins, regardless of Cuda or load state.
         assert!(row_downloading(true, false, true, false));
         assert!(row_downloading(true, true, true, false));
 
-        // Nothing downloading at all ⇒ false.
         assert!(!row_downloading(false, false, false, false));
         assert!(!row_downloading(false, false, true, false));
 
-        // The apple-native path never lets Cuda gate the row (the shared runtime doesn't
-        // exist there and `Cuda` is never a download target on that path) — own-target
-        // still wins, but Cuda-in-flight alone never does, loaded or not.
+        // MLX path: Cuda never gates the row.
         assert!(!row_downloading(false, true, false, true));
         assert!(!row_downloading(false, true, true, true));
         assert!(row_downloading(true, true, false, true));
@@ -937,13 +904,10 @@ mod tests {
 
     #[test]
     fn tts_and_stt_report_the_same_realized_runtime() {
-        // DRIFT GUARD: both status rows relabel the child's realized-provider string through the ONE
-        // shared `realized_ort_token`, so for the SAME reported runtime they MUST yield the SAME
-        // token. TTS and STT can never drift into different labels for the same EP — the whole point
-        // of routing both through one mapper (and one `ds_model::cuda_session_builder`).
+        // TTS and STT map realized EP through one `realized_provider_token`.
         let k = Some(TtsEngine::BuiltIn);
         let b = Some(SttEngine::BuiltIn);
-        for realized in ["CUDA", "CPU", "CoreML-ANE", "CoreML", "System", "surprise"] {
+        for realized in ["CUDA", "CPU", "MLX", "System", "CoreML", "surprise"] {
             assert_eq!(
                 tts_provider_token(k, realized),
                 stt_provider_token(b, realized),
@@ -960,13 +924,14 @@ mod tests {
         assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
         assert_eq!(stt_provider_token(b, "CUDA").as_deref(), Some("cuda"));
         assert_eq!(stt_provider_token(b, "CPU").as_deref(), Some("cpu"));
-        assert_eq!(stt_provider_token(b, "CoreML-ANE").as_deref(), Some("ane"));
+        assert_eq!(stt_provider_token(b, "MLX").as_deref(), Some("mlx"));
         // Anything unrecognized (or "System") is CPU, never a wrong GPU claim.
         assert_eq!(stt_provider_token(b, "System").as_deref(), Some("cpu"));
         // The shared mapper's own table.
-        assert_eq!(realized_ort_token("CUDA"), Provider::OrtCuda);
-        assert_eq!(realized_ort_token("CoreML"), Provider::OrtCoreMl);
-        assert_eq!(realized_ort_token("nonsense"), Provider::OrtCpu);
+        assert_eq!(realized_provider_token("CUDA"), Provider::OrtCuda);
+        assert_eq!(realized_provider_token("MLX"), Provider::Mlx);
+        assert_eq!(realized_provider_token("CoreML"), Provider::OrtCoreMl);
+        assert_eq!(realized_provider_token("nonsense"), Provider::OrtCpu);
         // No local runtime token for the delegate/OS engines or when the engine is off.
         assert_eq!(
             stt_provider_token(Some(SttEngine::ClaudeCode), "CUDA"),

@@ -343,7 +343,10 @@ fn yaml_text_body<E: std::fmt::Display>(
                 &WriteBody::Str(&merged),
                 write_action(remove),
             );
-            if code == 0 && !remove && let Some(hint) = load_hint {
+            if code == 0
+                && !remove
+                && let Some(hint) = load_hint
+            {
                 eprintln!("wire: {hint}");
             }
             code
@@ -405,9 +408,7 @@ pub(crate) fn hermes_yaml_mcp(
         capture,
         paths,
         "hermes_yaml_mcp",
-        |existing, bin| {
-            ds_config::merge_hermes_mcp(existing, crate::SERVER_NAME, bin, &[])
-        },
+        |existing, bin| ds_config::merge_hermes_mcp(existing, crate::SERVER_NAME, bin, &[]),
         |existing| ds_config::strip_hermes_mcp(existing, crate::SERVER_NAME),
         |rm| {
             if rm {

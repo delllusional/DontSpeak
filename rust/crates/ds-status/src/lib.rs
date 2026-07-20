@@ -7,10 +7,12 @@ mod dictation_state;
 mod engines;
 mod state;
 mod tray;
+mod tts_model;
 pub use dictation_state::DictationState;
 pub use engines::{StatusSttEngine, StatusTtsEngine};
 pub use state::EngineState;
 pub use tray::{StatusTrayKind, TrayIconKind, tray_icon_kind};
+pub use tts_model::StatusTtsModel;
 
 /// NaN/Infinity → 0.0 (non-optional float DTOs).
 mod finite_f64_or_zero {
@@ -37,6 +39,10 @@ pub struct EngineStatus {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsStatus {
     pub engine: StatusTtsEngine,
+    /// Selected built-in model; `null` for system/off.
+    pub model: Option<StatusTtsModel>,
+    /// Resolved built-in model language; `null` for system/off.
+    pub language: Option<String>,
     /// `null` for system (`say`) / off engines.
     pub provider: Option<String>,
     /// `null` when speech is off.
@@ -63,7 +69,7 @@ pub struct DiarizationStatus {
     pub provider: String,
     pub speakers: Vec<String>,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
-    pub cluster_threshold: f64,
+    pub activity_threshold: f64,
 }
 
 /// Live app activity; names match what hosts render instead of implementation details.
@@ -178,6 +184,8 @@ mod tests {
             },
             tts: TtsStatus {
                 engine: StatusTtsEngine::System,
+                model: None,
+                language: None,
                 provider: None,
                 status: Some(engine_none()),
             },
@@ -190,9 +198,9 @@ mod tests {
             diarization: DiarizationStatus {
                 status: engine_none(),
                 enabled: false,
-                provider: "ane".to_string(),
+                provider: "mlx".to_string(),
                 speakers: vec![],
-                cluster_threshold: 0.7,
+                activity_threshold: 0.5,
             },
             dictation: Dictation {
                 state: DictationState::Hidden,
@@ -228,7 +236,7 @@ mod tests {
             assert!(root.contains_key(key), "missing root field {key}");
         }
         assert_eq!(v["activity"].as_object().unwrap().len(), 6);
-        assert_eq!(v["tts"].as_object().unwrap().len(), 3);
+        assert_eq!(v["tts"].as_object().unwrap().len(), 5);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
         assert_eq!(v["dictation"].as_object().unwrap().len(), 3);
@@ -241,6 +249,8 @@ mod tests {
         assert_eq!(v["diarization"]["status"]["state"], "missing");
         assert_eq!(v["tts"]["engine"], "system");
         assert_eq!(v["stt"]["engine"], "built_in");
+        assert!(v["tts"]["model"].is_null());
+        assert!(v["tts"]["language"].is_null());
         assert!(v["tts"]["provider"].is_null());
         assert!(v["stt"]["provider"].is_null());
         assert!(v["stt"]["voice_key"].is_null());
@@ -313,6 +323,10 @@ mod tests {
         prop::sample::select(StatusTtsEngine::ALL.to_vec())
     }
 
+    fn status_tts_model_strategy() -> impl Strategy<Value = StatusTtsModel> {
+        prop::sample::select(StatusTtsModel::ALL.to_vec())
+    }
+
     fn dictation_state_strategy() -> impl Strategy<Value = DictationState> {
         prop::sample::select(DictationState::ALL.to_vec())
     }
@@ -381,10 +395,12 @@ mod tests {
     prop_compose! {
         fn tts_status_strategy()(
             engine in status_tts_strategy(),
+            model in prop::option::of(status_tts_model_strategy()),
+            language in opt_short_string(),
             provider in opt_short_string(),
             status in prop::option::of(engine_status_strategy()),
         ) -> TtsStatus {
-            TtsStatus { engine, provider, status }
+            TtsStatus { engine, model, language, provider, status }
         }
     }
 
@@ -405,14 +421,14 @@ mod tests {
             enabled in any::<bool>(),
             provider in short_string(),
             speakers in short_string_vec(),
-            cluster_threshold in unit_f64(),
+            activity_threshold in unit_f64(),
         ) -> DiarizationStatus {
             DiarizationStatus {
                 status,
                 enabled,
                 provider,
                 speakers,
-                cluster_threshold,
+                activity_threshold,
             }
         }
     }

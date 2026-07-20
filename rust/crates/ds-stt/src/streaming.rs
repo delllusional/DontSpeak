@@ -48,7 +48,7 @@ pub struct StreamingModel {
     dec_in_names: Vec<String>,
     meta: Meta,
     tokens: Vec<String>,
-    /// REALIZED EP (incl. CPU fallback). Same [`ds_model::cuda_session_builder`] path as TTS
+    /// REALIZED EP (incl. CPU fallback). Same [`ds_model::cuda_session_builder`] path as ONNX TTS
     /// so STT/TTS status tokens can't drift.
     provider: ds_config::RealizedProvider,
 }
@@ -478,7 +478,7 @@ fn parse_tokens(text: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
-// ── Shared streaming layer (ONNX here; Core ML in `crate::coreml`) ────────────
+// ── Shared streaming layer (ONNX here; MLX in `crate::mlx`) ──────────────────
 // Only per-backend inference differs (`StreamingStt`); resampling, tail-withholding,
 // StreamSession accounting, helper drain→partial→finalize + STTSTATS are common.
 
@@ -501,8 +501,7 @@ pub trait StreamingStt: Send {
 }
 
 /// Wall-clock ms alongside `call`'s result. Shared by FFI-backed [`StreamingStt`]
-/// impls (STTSTATS `transcribe_ms`). Relocated from coreml so sysspeech reuses the
-/// same helper. Callers accumulate only on success (mirrors early `?` skip in
+/// impls (STTSTATS `transcribe_ms`). Callers accumulate only on success (mirrors early `?` skip in
 /// `OnnxStreamer::run_encoder_step`).
 pub fn timed<T>(call: impl FnOnce() -> Result<T, String>) -> (Result<T, String>, f64) {
     let t0 = Instant::now();
@@ -718,7 +717,7 @@ impl IncrementalResampler {
 
 /// SHARED capture-to-backend plumbing: owns a [`StreamingStt`] backend plus a persistent
 /// device-rate -> 16 kHz resampler and `audio_ms` accounting. Both the ONNX and macOS
-/// Core ML/System backends run behind this, so only inference differs.
+/// MLX/System backends run behind this, so only inference differs.
 pub struct StreamSession {
     backend: Box<dyn StreamingStt>,
     resampler: IncrementalResampler,
@@ -748,9 +747,9 @@ impl StreamSession {
 
     /// Flush the withheld tail + the backend, returning the final transcript.
     ///
-    /// The tail-flush `accept_16k` is BEST-EFFORT: on the Core ML/system backends,
+    /// The tail-flush `accept_16k` is best-effort: on the MLX/system backends,
     /// `backend.finalize()` is what tears down the Swift-side session
-    /// (`dsk_asr_stream_finish`/`dsk_sys_stream_finish`) — skipping it after a failed tail
+    /// (`ds_mlx_asr_stream_finish`/`ds_mlx_sys_stream_finish`) — skipping it after a failed tail
     /// flush used to leak that session, since nothing else ever finishes it and the next
     /// utterance's `reset()` would then clobber the reference with no cleanup. So a tail-flush
     /// error is logged, not propagated, and `finalize()` always runs. `OnnxStreamer::finalize`
@@ -852,8 +851,6 @@ mod tests {
         assert_eq!(v[5], "\u{2581}the");
         assert_eq!(v[1024], "<blk>");
     }
-
-    // `timed` relocated from `coreml.rs` (see its doc comment) — coverage moves with it.
 
     #[test]
     fn timed_reports_elapsed_ms_and_preserves_ok() {

@@ -81,10 +81,7 @@ mod tests {
         assert!(hermes.get("hookSpecificOutput").is_none());
 
         let claude = provide_shape(ClientSource::ClaudeCode, "SPEC".into());
-        assert_eq!(
-            claude["hookSpecificOutput"]["additionalContext"],
-            "SPEC"
-        );
+        assert_eq!(claude["hookSpecificOutput"]["additionalContext"], "SPEC");
         assert!(claude.get("context").is_none());
     }
 }

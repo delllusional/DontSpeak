@@ -234,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         registerLoginItem()
         useBundledOnnxRuntimeIfPresent()
-        useBundledKokoroCoreMLIfPresent()
+        useBundledMLXIfPresent()
         useBundledSeparatorIfPresent()
         // In-process: caps loop + RPC + TTS on a bg thread. Accessibility / Input-Monitoring /
         // Mic all grant to this one signed bundle. MCP/hooks hit the socket we serve.
@@ -260,12 +260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setenv("ORT_DYLIB_PATH", dylib.path, 1)
     }
 
-    /// FluidAudio Core ML shim for `tts_provider=apple-native`. Absent (e.g. Intel) → ONNX path.
-    private func useBundledKokoroCoreMLIfPresent() {
-        guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libdskokoro.dylib"),
+    /// MLX Audio shim for the MLX provider. Absent (for example Intel) → ONNX path.
+    private func useBundledMLXIfPresent() {
+        guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libdontspeak_mlx.dylib"),
             FileManager.default.fileExists(atPath: dylib.path)
         else { return }
-        setenv("DSKOKORO_DYLIB_PATH", dylib.path, 1)
+        setenv("DONTSPEAK_MLX_DYLIB_PATH", dylib.path, 1)
     }
 
     /// Speaker-lock sepformer model. Absent → fail open (unfiltered STT).

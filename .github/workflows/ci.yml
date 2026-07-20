@@ -1,7 +1,7 @@
 name: CI
 
 # Run the project's ACTUAL test suite. The bulk lives in the Rust workspace
-# (cargo test --workspace); the macOS SwiftPM packages add app and DsKokoro tests, and
+# (cargo test --workspace); the macOS SwiftPM packages add app and DontSpeakMLX tests, and
 # the WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
@@ -9,7 +9,7 @@ name: CI
 #     covers the platform-agnostic majority).
 #   • Release pipeline → clippy + tests on the FULL ubuntu + windows-2025 + macos-26
 #     matrix, PLUS the hygiene gate (rustfmt + rustdoc) AND cargo-deny
-#     (advisories/bans/licenses/sources), so the macOS Core ML/ANE and Windows CUDA paths
+#     (advisories/bans/licenses/sources), so the macOS MLX and Windows CUDA paths
 #     are compiled, linted, and tested on their own OS — and format/doc drift +
 #     dependency-graph issues are cleaned up — before anything is built or published.
 #     release.yml calls this with full-matrix: true.
@@ -159,6 +159,8 @@ jobs:
         run: node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
       - name: python script tests
         run: python3 scripts/release/release-stats.test.py
+      - name: macOS bundle script tests
+        run: bash apps/macos/bundle-lib.test.sh
 
   # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
   # full-matrix is requested (the release gate). push/PR events have no `inputs`, so
@@ -214,7 +216,7 @@ jobs:
             exit 1
           fi
 
-      # cfg-gated platform code (macOS Core ML / ANE, Windows CUDA EP) compiles on its
+      # cfg-gated platform code (macOS MLX, Windows CUDA EP) compiles on its
       # own OS via the matrix, so on the full-matrix release run every test executes
       # somewhere. --locked: build exactly the committed Cargo.lock, fail on drift.
       - name: fetch Rust dependencies
@@ -271,11 +273,11 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
-      - name: swift test (macOS DsKokoro shim)
+      - name: swift test (macOS DontSpeakMLX shim)
         if: runner.os == 'macOS'
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
-        working-directory: apps/macos/DsKokoro
+        working-directory: apps/macos/DontSpeakMLX
         run: swift test
 
       # WinUI xunit tests; the composite is shared with csharp.yml.

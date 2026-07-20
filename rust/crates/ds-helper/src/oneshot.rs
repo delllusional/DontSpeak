@@ -1,105 +1,438 @@
-//! One-shot (non-serve) mode: load the backend once, synth + play, then exit.
-//! Owns the [`Backend`] enum and its loaders ([`load_synth`], [`load_backend`]),
-//! which the warm serve loop also uses.
+//! One-shot synthesis and the backend factory shared with warm serve mode.
 
+use ds_tts::chatterbox::synth::ChatterboxSynth;
 use ds_tts::g2p;
+use ds_tts::omnivoice::OmniVoiceSynth;
 use ds_tts::play::AudioPlayer;
+use ds_tts::qwen::QwenSynth;
 use ds_tts::synth::KokoroSynth;
 
-use crate::prepare::prepare_audio;
+use crate::prepare::{PrepareOutcome, PreparedAudio, prepare_audio};
 
-/// Point ort at the dylib and build the session once. Does not download.
-fn load_synth() -> Result<KokoroSynth, String> {
+pub(crate) fn tts_model() -> ds_config::TtsModel {
+    model_from(std::env::var("DONTSPEAK_TTS_MODEL").ok().as_deref())
+}
+
+fn model_from(token: Option<&str>) -> ds_config::TtsModel {
+    token
+        .and_then(ds_config::TtsModel::parse)
+        .unwrap_or(ds_config::TtsModel::Kokoro)
+}
+
+fn load_kokoro() -> Result<KokoroSynth, String> {
     let model_path =
         ds_model::model_path(ds_model::KOKORO_ONNX_FILE).ok_or("cannot resolve model_dir()")?;
     let voices_path =
         ds_model::model_path(ds_model::KOKORO_VOICES_FILE).ok_or("cannot resolve model_dir()")?;
-    // Never auto-fetch here — missing model must FAIL (red UI), not download on enable.
-    if !ds_model::is_kokoro_present() {
+    if !ds_model::is_tts_model_present(ds_config::TtsModel::Kokoro) {
         return Err("kokoro model not downloaded".into());
     }
-    // Shared GPU-aware bootstrap with Parakeet STT (one ort runtime in-process).
-    let want_gpu = ds_config::provider_pref_wants_gpu(
-        &std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into()),
-    );
-    ds_model::ensure_ort_dylib_gpu(want_gpu)?;
+    ensure_ort(ds_config::TtsModel::Kokoro)?;
     let model_bytes = ds_model::read_model_file(&model_path)?;
     let voices_bytes = ds_model::read_model_file(&voices_path)?;
     KokoroSynth::load(&model_bytes, &voices_bytes)
 }
 
-/// Active TTS backend. ONNX default/fallback; macOS `apple_native` → FluidAudio Core ML.
-/// Both take the same validated Rust frontend phoneme chunks (no Apple-side G2P).
+fn ensure_ort(model: ds_config::TtsModel) -> Result<(), String> {
+    if !ds_model::is_tts_model_present(model) {
+        return Err(format!("{} model not downloaded", model.as_str()));
+    }
+    let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());
+    let want_gpu = model.descriptor().wants_cuda(&pref);
+    ds_model::ensure_ort_dylib_gpu(want_gpu).map(|_| ())
+}
+
 pub(crate) enum Backend {
-    Ort(KokoroSynth),
+    KokoroOrt(KokoroSynth),
+    Chatterbox(Box<ChatterboxSynth>),
+    Qwen(Box<QwenSynth>),
+    OmniVoice(Box<OmniVoiceSynth>),
     #[cfg(target_os = "macos")]
-    Coreml(ds_tts::synth_coreml::KokoroCoremlTts),
+    Mlx {
+        model: ds_config::TtsModel,
+        synth: ds_tts::synth_mlx::MlxTts,
+    },
 }
 
 impl Backend {
-    /// Realized EP for engine stats / `PROVIDER` line.
     pub(crate) fn provider(&self) -> ds_config::RealizedProvider {
         match self {
-            Backend::Ort(s) => s.provider(),
+            Self::KokoroOrt(synth) => synth.provider(),
+            Self::Chatterbox(synth) => synth.provider(),
+            Self::Qwen(synth) => synth.provider(),
+            Self::OmniVoice(synth) => synth.provider(),
             #[cfg(target_os = "macos")]
-            Backend::Coreml(c) => c.provider(),
+            Self::Mlx { synth, .. } => synth.provider(),
+        }
+    }
+
+    fn model(&self) -> ds_config::TtsModel {
+        match self {
+            Self::KokoroOrt(_) => ds_config::TtsModel::Kokoro,
+            Self::Chatterbox(_) => ds_config::TtsModel::Chatterbox,
+            Self::Qwen(_) => ds_config::TtsModel::Qwen,
+            Self::OmniVoice(_) => ds_config::TtsModel::OmniVoice,
+            #[cfg(target_os = "macos")]
+            Self::Mlx { model, .. } => *model,
+        }
+    }
+
+    fn synthesize_batch(
+        &mut self,
+        batch: &FrontendBatch,
+        voice: &str,
+        language: &str,
+        rate: f32,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<f32>, String> {
+        match (self, batch) {
+            (Self::KokoroOrt(synth), FrontendBatch::Kokoro(batch)) => {
+                synth.synthesize(batch.as_str(), voice, rate)
+            }
+            (Self::Chatterbox(synth), FrontendBatch::Text(chunk)) => {
+                synth.synthesize(chunk, voice, language, cancelled)
+            }
+            (Self::Qwen(synth), FrontendBatch::Text(chunk)) => {
+                synth.synthesize(chunk, voice, language, cancelled)
+            }
+            (Self::OmniVoice(synth), FrontendBatch::Text(chunk)) => {
+                synth.synthesize(chunk, language, cancelled)
+            }
+            #[cfg(target_os = "macos")]
+            (Self::Mlx { synth, .. }, FrontendBatch::Kokoro(batch)) => {
+                synth.synthesize(batch.as_str(), voice, language, rate)
+            }
+            #[cfg(target_os = "macos")]
+            (Self::Mlx { synth, .. }, FrontendBatch::Text(chunk)) => {
+                synth.synthesize(chunk, voice, language, rate)
+            }
+            _ => Err("frontend/backend model mismatch".to_string()),
+        }
+    }
+
+    /// Discarded batch before READY (all providers); warm-up failure is best-effort.
+    fn warm_up(&mut self) {
+        let model = self.model();
+        let (text, voice, language) = warmup_request(model);
+        let batches = match frontend_batches_with_cancel(model, text, voice, language, &|| false) {
+            Ok(FrontendOutcome::Finished(batches)) if batches.len() > 0 => batches,
+            Ok(_) => return,
+            Err(error) => {
+                log::warn!(target: "helper", "{} frontend warm-up failed: {error}", model.as_str());
+                return;
+            }
+        };
+        if let Err(error) = prepare_backend_audio(
+            self,
+            &batches,
+            &SynthesisRequest {
+                skip: 0,
+                voice,
+                language,
+                rate: 1.0,
+            },
+            &|| false,
+            |_| Ok(()),
+        ) {
+            log::warn!(target: "helper", "{} inference warm-up failed: {error}", model.as_str());
         }
     }
 }
 
-/// From `DONTSPEAK_PROVIDER`. On macOS, `ane`/`auto` try FluidAudio Core ML first; fall back to ONNX.
-pub(crate) fn load_backend() -> Result<Backend, String> {
+fn load_backend_unwarmed(model: ds_config::TtsModel) -> Result<Backend, String> {
     #[cfg(target_os = "macos")]
+    if model
+        .descriptor()
+        .supports_provider(ds_config::Provider::Mlx)
     {
         let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_default();
-        if pref.eq_ignore_ascii_case("ane") || pref.eq_ignore_ascii_case("auto") {
-            match ds_tts::synth_coreml::KokoroCoremlTts::load() {
-                Ok(c) => return Ok(Backend::Coreml(c)),
-                Err(e) => log::warn!(
+        if pref.eq_ignore_ascii_case("mlx") || pref.eq_ignore_ascii_case("auto") {
+            match ds_tts::synth_mlx::MlxTts::load(model) {
+                Ok(synth) => return Ok(Backend::Mlx { model, synth }),
+                Err(error) => log::warn!(
                     target: "helper",
-                    "ANE (FluidAudio) TTS unavailable ({e}); falling back to ONNX"
+                    "MLX Audio TTS unavailable ({error}); falling back to ONNX"
                 ),
             }
         }
     }
-    Ok(Backend::Ort(load_synth()?))
+    match model {
+        ds_config::TtsModel::Kokoro => Ok(Backend::KokoroOrt(load_kokoro()?)),
+        ds_config::TtsModel::Chatterbox => {
+            ensure_ort(model)?;
+            Ok(Backend::Chatterbox(Box::new(ChatterboxSynth::load()?)))
+        }
+        ds_config::TtsModel::Qwen => {
+            ensure_ort(model)?;
+            Ok(Backend::Qwen(Box::new(QwenSynth::load()?)))
+        }
+        ds_config::TtsModel::OmniVoice => {
+            ensure_ort(model)?;
+            Ok(Backend::OmniVoice(Box::new(OmniVoiceSynth::load()?)))
+        }
+    }
 }
 
-/// One-shot: commit each validated batch to `AudioPlayer` (see `ds_tts::play`).
+pub(crate) fn load_backend() -> Result<Backend, String> {
+    let mut backend = load_backend_unwarmed(tts_model())?;
+    backend.warm_up();
+    Ok(backend)
+}
+
+fn warmup_request(model: ds_config::TtsModel) -> (&'static str, &'static str, &'static str) {
+    let descriptor = model.descriptor();
+    (
+        "Ready.",
+        descriptor.warmup_voice,
+        descriptor.default_language,
+    )
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FrontendBatch {
+    Kokoro(g2p::KokoroPhonemeChunk),
+    Text(String),
+}
+
+pub(crate) struct FrontendBatches {
+    model: ds_config::TtsModel,
+    batches: Vec<FrontendBatch>,
+}
+
+impl FrontendBatches {
+    pub(crate) fn len(&self) -> usize {
+        self.batches.len()
+    }
+
+    pub(crate) fn after_skip(&self, skip: usize) -> &[FrontendBatch] {
+        &self.batches[skip.min(self.batches.len())..]
+    }
+}
+
+pub(crate) enum FrontendOutcome {
+    Finished(FrontendBatches),
+    Cancelled,
+}
+
+/// One registry-driven frontend path for warm and one-shot synthesis. The representation
+/// differs only at the model boundary (Kokoro consumes IPA; the added models consume text).
+pub(crate) fn frontend_batches(
+    model: ds_config::TtsModel,
+    text: &str,
+    voice: &str,
+    language: &str,
+) -> Result<FrontendOutcome, String> {
+    frontend_batches_with_cancel(model, text, voice, language, &|| false)
+}
+
+pub(crate) fn frontend_batches_with_cancel(
+    model: ds_config::TtsModel,
+    text: &str,
+    voice: &str,
+    language: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<FrontendOutcome, String> {
+    let batches = match model.descriptor().frontend {
+        ds_config::TtsFrontend::EnglishPhonemes => {
+            match g2p::phoneme_batches_for_cancellable(text, voice, cancelled)? {
+                g2p::PhonemeBatchesOutcome::Finished(batches) => {
+                    batches.into_iter().map(FrontendBatch::Kokoro).collect()
+                }
+                g2p::PhonemeBatchesOutcome::Cancelled => return Ok(FrontendOutcome::Cancelled),
+            }
+        }
+        ds_config::TtsFrontend::PlainText => {
+            if cancelled() {
+                return Ok(FrontendOutcome::Cancelled);
+            }
+            let batches = ds_tts::chatterbox::frontend::text_chunks(text, language)
+                .into_iter()
+                .map(FrontendBatch::Text)
+                .collect();
+            if cancelled() {
+                return Ok(FrontendOutcome::Cancelled);
+            }
+            batches
+        }
+    };
+    Ok(FrontendOutcome::Finished(FrontendBatches {
+        model,
+        batches,
+    }))
+}
+
+/// Shared prepare/commit fields for the first playable batch.
+pub(crate) struct SynthesisRequest<'a> {
+    pub(crate) skip: usize,
+    pub(crate) voice: &'a str,
+    pub(crate) language: &'a str,
+    pub(crate) rate: f32,
+}
+
+pub(crate) fn prepare_backend_audio(
+    backend: &mut Backend,
+    batches: &FrontendBatches,
+    request: &SynthesisRequest<'_>,
+    cancelled: &dyn Fn() -> bool,
+    mut commit: impl FnMut(PreparedAudio) -> Result<(), String>,
+) -> Result<PrepareOutcome, String> {
+    if backend.model() != batches.model {
+        return Err("frontend/backend model mismatch".to_string());
+    }
+    prepare_audio(
+        batches.after_skip(request.skip),
+        cancelled,
+        |batch| {
+            backend.synthesize_batch(
+                batch,
+                request.voice,
+                request.language,
+                request.rate,
+                cancelled,
+            )
+        },
+        &mut commit,
+    )
+}
+
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
-    // Same normalized phoneme batches as `serve` (cold path aligned with warm).
-    let phoneme_batches = g2p::phoneme_batches_for(text, voice)?;
-    // Nothing speakable → successful no-op (not Err — `ds-helper "🎉"` must exit 0).
-    if phoneme_batches.is_empty() {
+    let language = ds_tts::detect_language(text);
+    let model = tts_model();
+    if !model.descriptor().accepts_detected_language(&language) {
+        return Err(format!(
+            "detected language `{language}` is not supported by {}",
+            model.as_str()
+        ));
+    }
+    let FrontendOutcome::Finished(batches) = frontend_batches(model, text, voice, &language)?
+    else {
+        unreachable!("the one-shot frontend cannot cancel")
+    };
+    if batches.len() == 0 {
         return Ok(());
     }
-    // Open the player only after the first full batch succeeds (silent first-batch failure).
     let mut player: Option<AudioPlayer> = None;
     let mut commit = |audio: crate::prepare::PreparedAudio| -> Result<(), String> {
         if player.is_none() {
             player = Some(AudioPlayer::open()?);
         }
-        let player = player.as_ref().expect("opened above");
-        player.enqueue(audio.pcm);
+        player.as_ref().expect("opened above").enqueue(audio.pcm);
         Ok(())
     };
-    match load_backend()? {
-        Backend::Ort(mut synth) => prepare_audio(
-            &phoneme_batches,
-            || false,
-            |batch| synth.synthesize(batch.as_str(), voice, rate),
-            &mut commit,
-        )?,
-        #[cfg(target_os = "macos")]
-        Backend::Coreml(c) => prepare_audio(
-            &phoneme_batches,
-            || false,
-            |batch| c.synthesize_phonemes(batch.as_str(), voice, rate),
-            &mut commit,
-        )?,
-    };
+    let mut backend = load_backend()?;
+    prepare_backend_audio(
+        &mut backend,
+        &batches,
+        &SynthesisRequest {
+            skip: 0,
+            voice,
+            language: &language,
+            rate,
+        },
+        &|| false,
+        &mut commit,
+    )?;
     if let Some(player) = player {
         player.wait();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_token_is_case_insensitive_and_defaults_to_kokoro() {
+        assert_eq!(
+            model_from(Some("chatterbox")),
+            ds_config::TtsModel::Chatterbox
+        );
+        assert_eq!(model_from(Some("qwen")), ds_config::TtsModel::Qwen);
+        assert_eq!(
+            model_from(Some("omnivoice")),
+            ds_config::TtsModel::OmniVoice
+        );
+        // TtsModel::parse normalizes like every other config-token enum.
+        assert_eq!(
+            model_from(Some("Chatterbox")),
+            ds_config::TtsModel::Chatterbox
+        );
+        assert_eq!(model_from(Some("bogus")), ds_config::TtsModel::Kokoro);
+        assert_eq!(model_from(None), ds_config::TtsModel::Kokoro);
+    }
+
+    #[test]
+    fn every_model_frontend_is_selected_by_the_registry() {
+        for model in ds_config::TtsModel::ALL.iter().copied() {
+            assert_eq!(
+                model.descriptor().frontend == ds_config::TtsFrontend::EnglishPhonemes,
+                model == ds_config::TtsModel::Kokoro,
+                "{model:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_batch_resume_slices_and_clamps_for_every_backend() {
+        let batches = FrontendBatches {
+            model: ds_config::TtsModel::Qwen,
+            batches: ["a", "b", "c"]
+                .into_iter()
+                .map(|text| FrontendBatch::Text(text.to_string()))
+                .collect(),
+        };
+        assert_eq!(batches.after_skip(0).len(), 3);
+        assert_eq!(batches.after_skip(2).len(), 1);
+        assert!(batches.after_skip(3).is_empty());
+        assert!(batches.after_skip(usize::MAX).is_empty());
+    }
+
+    #[test]
+    fn every_added_model_uses_the_same_ramped_text_frontend() {
+        let text = "x".repeat(ds_tts::chatterbox::frontend::MAX_CHUNK_CHARS);
+        for model in [
+            ds_config::TtsModel::Chatterbox,
+            ds_config::TtsModel::Qwen,
+            ds_config::TtsModel::OmniVoice,
+        ] {
+            let outcome = frontend_batches_with_cancel(
+                model,
+                &text,
+                model.descriptor().voices[0],
+                model.descriptor().default_language,
+                &|| false,
+            )
+            .unwrap();
+            let FrontendOutcome::Finished(batches) = outcome else {
+                panic!("a non-cancelled frontend must finish")
+            };
+            assert_eq!(batches.model, model);
+            assert!(batches.len() > 1, "{model:?} must use ramped chunks");
+            assert!(
+                batches
+                    .batches
+                    .iter()
+                    .all(|batch| matches!(batch, FrontendBatch::Text(_))),
+                "{model:?} must use the registry-selected plain-text representation"
+            );
+            let FrontendBatch::Text(first) = &batches.batches[0] else {
+                unreachable!()
+            };
+            assert_eq!(first.chars().count(), ds_tts::batch::STREAM_FIRST_BUDGET);
+        }
+    }
+
+    #[test]
+    fn every_model_has_one_registry_driven_warmup_request() {
+        for model in ds_config::TtsModel::ALL.iter().copied() {
+            let (text, voice, language) = warmup_request(model);
+            let descriptor = model.descriptor();
+            assert_eq!(text, "Ready.");
+            assert_eq!(voice, descriptor.warmup_voice);
+            assert!(!voice.is_empty());
+            assert_eq!(language, descriptor.default_language);
+            assert!(descriptor.supports_language(language));
+        }
+    }
 }

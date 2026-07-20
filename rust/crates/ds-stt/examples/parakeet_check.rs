@@ -3,8 +3,8 @@
 //!
 //!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cpu
 //!   cargo run -p ds-stt --example parakeet_check -- some_16k.wav cuda /path/to/models
-//!   DSKOKORO_DYLIB_PATH=/path/to/libdskokoro.dylib \
-//!     cargo run -p ds-stt --example parakeet_check -- some_16k.wav ane
+//!   DONTSPEAK_MLX_DYLIB_PATH=/path/to/libdontspeak_mlx.dylib \
+//!     cargo run -p ds-stt --example parakeet_check -- some_16k.wav mlx
 use std::path::PathBuf;
 
 fn load_wav_16k(path: &str) -> Vec<f32> {

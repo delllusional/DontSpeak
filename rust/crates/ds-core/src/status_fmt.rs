@@ -16,7 +16,7 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 /// `state` is a model-status token via [`ds_status::EngineState`] (note for
 /// `Missing`/`Warming`/`Blocked`/`Downloading`/`Failed`); ready/unrecognized → "".
 /// `progress` is the overall 0..1 byte-weighted download fraction (not per-file; see
-/// `ds_model::coreml_repo::ensure_coreml_repos`). `why` is the failure reason (empty →
+/// `ds_model::mlx_repo::ensure_mlx_repos`). `why` is the failure reason (empty →
 /// generic default). ONE cross-platform path via [`crate::ffi::ds_engine_state_word`].
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     use ds_status::EngineState;
@@ -27,7 +27,7 @@ pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
         Some(EngineState::Downloading) => {
             let pct = (progress * 100.0).round() as i64;
             if pct <= 0 {
-                // FluidAudio ANE/Core ML fetches often report no fraction — avoid "0%".
+                // Some model fetches report no fraction — avoid "0%".
                 ds_i18n::t("status.engine.status.downloading_indeterminate")
             } else {
                 fill(
@@ -161,12 +161,11 @@ fn duration_live_no_seconds(secs: f64) -> String {
     }
 }
 
-/// Runtime label for a provider token: `ane` → Core ML/ANE; `coreml`/`cuda`/`cpu` →
-/// ORT label; else verbatim. ONE mapping (was duplicated in Swift + C#).
+/// Runtime label for a provider token. ONE mapping (was duplicated in Swift + C#).
 pub fn runtime_label(provider: &str) -> String {
     use ds_config::Provider;
-    let key = if provider == Provider::Ane.as_str() {
-        "status.engine.coreml_ane"
+    let key = if provider == Provider::Mlx.as_str() {
+        "status.engine.mlx"
     } else if provider == Provider::OrtCoreMl.as_str() {
         "status.engine.coreml"
     } else if provider == Provider::OrtCuda.as_str() {
@@ -331,8 +330,8 @@ mod tests {
     fn runtime_label_maps_known_providers() {
         assert_eq!(runtime_label("cpu"), "ORT CPU");
         assert_eq!(runtime_label("cuda"), "ORT CUDA");
+        assert_eq!(runtime_label("mlx"), "MLX Audio");
         assert_eq!(runtime_label("coreml"), "ORT Core ML");
-        assert_eq!(runtime_label("ane"), "FluidAudio ANE");
         assert_eq!(runtime_label("whatever"), "whatever");
     }
 

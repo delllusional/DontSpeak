@@ -56,6 +56,9 @@ Speech config and runtime state.
 
 With `detail=true`, nested model lifecycle/stats land under the `status` key
 (not `models`). Engine tokens are config tokens (`built_in` / `system` / `off`).
+Concise `model` is the configured built-in model and `language` is `auto` (both non-null by
+schema even when the engine resolves to `system`/`off`); the `detail` `status` section uses resolved
+`ModelStatus` semantics and nulls them when no built-in model is active.
 
 ## usage
 
@@ -67,11 +70,13 @@ Coding-agent subscription usage shown in the Agents tab.
 
 ## voices
 
-List English voices by engine and language.
+List selectable models, languages, and voices.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `tts_engine` | enum: `built_in`, `system` | no | Engine to inspect. Defaults to configured speech engine, or built-in when speech is off. |
+| `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | no | Built-in model to inspect. Defaults to the configured model. |
+| `language` | string | no | Language to inspect. Defaults to the model's catalog default. |
 
 ## diarize
 
@@ -100,9 +105,9 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
-| `tts_voices` | array of strings | Built-in voice IDs — the per-agent pool; each agent claims a stable voice. |
-| `tts_system_voice` | string | System voice name; empty = OS default. System engine only. |
-| `rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. |
+| `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | Built-in model: "kokoro", "chatterbox", "qwen", or "omnivoice". |
+| `tts_voices` | object | Voice arrays keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. |
+| `rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. Model support is validated. |
 
 **Narration**
 
@@ -130,14 +135,14 @@ Atomically update and reload persistent settings.
 | `double_tap_submit` | boolean | Double-tap submits; single-tap inserts only. Default false (swaps those). |
 | `paste_delay_ms` | integer 0–5000 | Paste→submit delay (ms). Default 100; 0 = immediate. |
 | `full_duplex` | boolean | Mic open during replies (platform AEC). Default false; built-in STT+TTS only. |
-| `provider` | array of `ane`, `cuda`, `coreml`, `cpu` | Compute provider preference order. Default ["ane","cuda","cpu"]. |
+| `provider` | array of `mlx`, `cuda`, `coreml`, `cpu` | Compute provider preference order. Core ML is macOS TTS-only; default ["mlx","cuda","cpu"]. |
 
 **Diarization** (hidden while `DIARIZATION_ENABLED` is false)
 
 | Param | Type | Description |
 |---|---|---|
-| `diarizer` | array of `apple_native` | Diarization: ["apple_native"] on, [] = off (default). macOS only. |
-| `cluster_threshold` | number 0.5–0.9 | Diarization sensitivity; lower → more speakers. Default 0.7. |
+| `diarizer` | array of `mlx` | Diarization: ["mlx"] on, [] = off (default). macOS only. |
+| `activity_threshold` | number 0.1–0.9 | Sortformer speaker-activity cutoff; lower detects quieter speech. Default 0.5. |
 | `match_threshold` | number 0.0–1.0 | Min voiceprint match; higher → stricter. Default 0.65. |
 | `speaker_lock` | boolean | Transcribe enrolled speakers only. Needs diarization + ≥1 voice. Built-in STT only. Default off. |
 

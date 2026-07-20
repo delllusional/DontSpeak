@@ -1,6 +1,6 @@
 //! Parakeet — portable local STT: mic (cpal) → mono → 16 kHz (rubato) → cache-aware
 //! streaming FastConformer ([`crate::streaming`]) over shared `ort`. Cross-platform
-//! sibling of the macOS Core ML / ANE backend.
+//! sibling of the macOS MLX Audio backend.
 //!
 //! This file owns mic [`Capture`] + [`resample`] and [`ParakeetTranscriber`] (one-shot
 //! whole-buffer adapter). Live helper dictation drives [`StreamingModel`] INCREMENTALLY.

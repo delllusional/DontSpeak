@@ -10,9 +10,8 @@ use ds_platform::Platform;
 use crate::barge::spawn_mic_barge_watcher;
 use crate::config_gate::{
     build_stt, config_mtime, debug_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
-    helper_uses_stt, helper_uses_tts, local_stt_available, normalize_long_press,
-    reconcile_helper_models, reload_watermark, should_reload_on_mtime,
-    system_stt_needs_authorization,
+    helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
+    reload_watermark, should_reload_on_mtime, system_stt_needs_authorization,
 };
 use crate::downloads::{
     DownloadFlags, DownloadState, apply_provider_and_autofetch, auto_download_missing, wire,
@@ -155,7 +154,8 @@ pub fn engine_run(
     tts.set_stt_provider_pref(helper_stt_provider(&cfg));
     // STT preload only for built_in (provider token is "cpu" even for Off/ClaudeCode).
     tts.set_stt_wanted(helper_uses_stt(&cfg));
-    tts.set_tts_wanted(helper_uses_tts(&cfg));
+    tts.set_tts_wanted(crate::config_gate::helper_preloads_tts(&cfg));
+    tts.set_tts_selection(cfg.tts_model);
     tts.set_provider(cfg.resolved_tts_provider().as_str());
     let ttsq = TtsQueue::start(
         tts.clone(),

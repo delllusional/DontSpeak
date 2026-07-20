@@ -1,6 +1,6 @@
 # dontspeak — Rust workspace
 
-In-process Kokoro TTS (`ort` + `voice-g2p` + `rodio`); no Python runtime.
+In-process built-in TTS (`ort` + model pipelines + `rodio`); no Python runtime.
 `dontspeakd::engine_run` is a library each OS app hosts via `ds-core` C ABI — no
 standalone daemon. Hooks and MCP are the `dontspeak` binary over `dontspeak.sock`
 (NDJSON); they never load models. Design: [../ARCHITECTURE.md](../ARCHITECTURE.md).
@@ -26,9 +26,9 @@ rust/crates/
   ds-platform/     # KeyInjector / FrontmostWindow / CapsKeyMonitor per OS
   ds-http/         # bounded blocking HTTP + native trust roots
   ds-agent-usage/  # read-only weekly/monthly coding-agent quotas
-  ds-model/        # download + checksum; ORT session; FluidAudio shim loader
+  ds-model/        # download + checksum; ORT session; MLX Audio shim loader
   ds-voices/       # voice/language enum (no full synth stack)
-  ds-tts/          # Kokoro TTS (Tts trait)
+  ds-tts/          # built-in TTS pipelines: Kokoro, Chatterbox, Qwen, OmniVoice
   ds-stt/          # Parakeet / ClaudeNative / SystemStt
   ds-aec/          # echo-cancelled duplex (VPIO / WASAPI / Pulse)
   ds-helper/       # warm TTS+STT child (one-shot + --serve)
@@ -70,7 +70,7 @@ Comment style: [../AGENTS.md](../AGENTS.md) § Code comments. Hosting:
 
 ## Synthesis
 
-Dynamic `ort` (`ORT_DYLIB_PATH`); shared by Kokoro + Parakeet. G2P: released
-`voice-g2p` (eSpeak fallback disabled; BART ONNX for misses — Core ML path needs ORT
-dylib too). OOV phonemes dropped with warning. Batches ≤ 509 IPA chars. Playback:
-`rodio` 24 kHz mono. `ds-helper` process group for barge-in/pidfile takeover.
+Dynamic `ort` (`ORT_DYLIB_PATH`); shared by built-in ORT TTS + Parakeet. Kokoro
+English frontend: released `voice-g2p` (eSpeak fallback disabled; BART ONNX for
+misses — MLX Kokoro still needs the ORT dylib). Other models use plain-text chunks.
+Playback: `rodio` 24 kHz mono. `ds-helper` process group for barge-in/pidfile takeover.

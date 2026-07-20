@@ -72,17 +72,22 @@ Always-listening does not use Caps Lock.
 
 ## Models & runtimes
 
-- **TTS** — Kokoro-82M or OS voice
-- **STT** — streaming FastConformer (1040 ms) on Windows/Linux; Parakeet via Core ML,
+- **TTS** — Kokoro-82M, Chatterbox Multilingual, Qwen3-TTS, or OmniVoice
+  (`tts_model`), or OS voice
+- **STT** — streaming FastConformer (1040 ms) on Windows/Linux; Parakeet via MLX Audio,
   plus System Speech on macOS; Claude Code dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
-- Diarization (pyannote / WeSpeaker / SepFormer) — issue #77
+- Diarization — Sortformer, with WeSpeaker speaker identity and SepFormer
+  speaker-lock separation — issue #77
 
-`provider` ladder default `["ane", "cuda", "cpu"]`:
+`provider` ladder default `["mlx", "cuda", "cpu"]`:
 
 | Platform | Backend |
 |---|---|
-| macOS Apple Silicon | ANE (FluidAudio Core ML) → ORT CPU |
+| macOS Apple Silicon | MLX Audio → ORT CPU |
+| macOS Intel | ORT CPU |
 | Windows / Linux x86_64 | ORT CUDA → CPU |
+
+`coreml` remains available as an explicit macOS TTS provider through ONNX Runtime.
 
 ## MCP tools
 

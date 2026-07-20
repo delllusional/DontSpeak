@@ -1,5 +1,5 @@
 //! Best-effort OS scheduling boost for ds-helper's own latency-critical threads
-//! (Kokoro synth/decode, Parakeet capture+inference) — NOT the cpal-owned audio
+//! (built-in TTS synth/decode, Parakeet capture+inference) — NOT the cpal-owned audio
 //! render/capture callback thread, which this doesn't reach (cpal's own
 //! `realtime`/`realtime-dbus` features cover that thread, but published rodio
 //! (0.22.x) still pins cpal 0.17, which predates them — revisit once rodio ships

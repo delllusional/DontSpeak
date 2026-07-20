@@ -180,7 +180,7 @@ char *ds_duration_live(double secs);
 // See [`crate::status_fmt::usage_resets_in`]. Owned `char*`.
 char *ds_usage_resets_in(int64_t resets_at_unix);
 
-// Runtime label for provider token (ane|coreml|cuda|cpu; unknown verbatim). Owned
+// Runtime label for provider token (mlx|coreml|cuda|cpu; unknown verbatim). Owned
 // `char*`. HANDLE-FREE.
 char *ds_runtime_label(const char *provider);
 
@@ -201,9 +201,9 @@ char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray
 // HANDLE-FREE.
 uint8_t ds_diarization_ui_enabled(void);
 
-// Session TTS provider: "cpu"|"cuda"|"coreml"|"ane"|"auto" (NULL/unknown → "auto").
-// Restarts warm Kokoro + resets TTS stats only if provider actually changes. 1 if
-// delivered; new provider/stats via `ds_model_status_json`.
+// Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
+// Restarts the warm helper + resets TTS stats only if the realized provider changes.
+// 1 if delivered; new provider/stats via `ds_model_status_json`.
 uint8_t ds_set_provider(const char *provider);
 
 // Free a `char*` from any ds_* function. NULL no-op.

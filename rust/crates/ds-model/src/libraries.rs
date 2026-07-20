@@ -1,5 +1,5 @@
 //! Libraries catalog — collects every third-party project the app DOWNLOADS at runtime
-//! (the Kokoro + Parakeet models, the ONNX Runtime, and the optional CUDA/cuDNN GPU
+//! (built-in TTS + Parakeet models, the ONNX Runtime, and the optional CUDA/cuDNN GPU
 //! runtime) with its license, homepage, and the files it fetches.
 //!
 //! The license metadata lives WITH the files in [`crate::urls`] — each
@@ -44,12 +44,25 @@ fn project_obj(p: &Project, files: Vec<Value>) -> Value {
     })
 }
 
-/// One JSON entry for an Apple-native Core ML model set (the FluidAudio repos we self-fetch
-/// on Apple Silicon). The license lives WITH the files on [`CoremlRepo`], so this can't drift
+/// Add the shared runtime language contract to a TTS project. The descriptor remains the
+/// source of truth used by config validation and synthesis; the Libraries wire only shapes it.
+fn with_tts_languages(mut project: Value, model: ds_config::TtsModel) -> Value {
+    let descriptor = model.descriptor();
+    project["languages"] = json!(descriptor.languages);
+    project["language_count"] = json!(descriptor.supported_language_count());
+    project["automatic_language_detection"] = json!(descriptor.detects_language_automatically());
+    if let Some(url) = descriptor.language_list_url() {
+        project["language_list_url"] = json!(url);
+    }
+    project
+}
+
+/// One JSON entry for an MLX model set. The license lives with the files on
+/// [`MlxRepo`](crate::mlx_repo::MlxRepo), so this can't drift
 /// from what's downloaded. The set's files are a whole pinned HuggingFace revision (fetched
 /// via the tree API), so the single "file" we list is that pinned revision — `name` is the
 /// repo, `url` links the exact tree the download reads.
-fn coreml_project_obj(r: &crate::coreml_repo::CoremlRepo) -> Value {
+fn mlx_project_obj(r: &crate::mlx_repo::MlxRepo) -> Value {
     let homepage = format!("https://huggingface.co/{}", r.repo);
     let tree_url = format!("{homepage}/tree/{}", r.revision);
     json!({
@@ -63,16 +76,31 @@ fn coreml_project_obj(r: &crate::coreml_repo::CoremlRepo) -> Value {
     })
 }
 
+fn tts_project_obj(set: &crate::tts_assets::TtsOrtAssetSet) -> Value {
+    with_tts_languages(
+        json!({
+            "name": set.display_name,
+            "usage": "Built-in text-to-speech model",
+            "homepage": set.homepage,
+            "license": set.license,
+            "license_url": set.license_url,
+            "files": set.files.iter().map(download_file).collect::<Vec<_>>(),
+        }),
+        set.model,
+    )
+}
+
 /// The libraries catalog for the UI's Libraries tab, FILTERED to the platform this build runs
 /// on ([`urls::current_platform`]): a JSON array of `{name, usage, homepage, license,
-/// license_url, files:[{name, url, size_bytes?}]}`, in display order — system libraries (CUDA,
-/// cuDNN) → runtime (ONNX Runtime) → portable models (Kokoro, Parakeet) → Apple-native Core ML
+/// license_url, files:[{name, url, size_bytes?}], languages?, language_count?,
+/// automatic_language_detection?, language_list_url?}`, in display order — system libraries (CUDA,
+/// cuDNN) → runtime (ONNX Runtime) → portable models (Kokoro, Parakeet) → MLX
 /// sets, lowest-level first. The per-platform rule is DATA: each [`Project`] declares its
-/// `platforms` and the Core ML sets are [`Platform::APPLE_NATIVE`](urls::Platform::APPLE_NATIVE),
+/// `platforms` and the MLX sets are [`Platform::APPLE_MLX`](urls::Platform::APPLE_MLX),
 /// so the collector just filters — no scattered `#[cfg]` deciding what to show. (The CUDA
 /// file *URLs* live in the
 /// cfg-gated `CUDA_WHEELS`, so only their file-assembly stays cfg-gated; the applicability
-/// decision is the data above.) Built entirely from the [`crate::urls`] / [`crate::coreml_repo`]
+/// decision is the data above.) Built entirely from the [`crate::urls`] / [`crate::mlx_repo`]
 /// registries, so it can never drift from what's actually fetched.
 pub fn catalog() -> Value {
     let plat = urls::current_platform();
@@ -119,7 +147,7 @@ pub fn catalog() -> Value {
     )))]
     let (cuda_files, cudnn_files): (Vec<Value>, Vec<Value>) = (Vec::new(), Vec::new());
 
-    // CUDA/cuDNN then ORT, then models by function (TTS→STT→diarize); ONNX before Core ML.
+    // CUDA/cuDNN then ORT, then models by function (TTS→STT→diarize); ONNX before MLX.
     if urls::NVIDIA_CUDA.runs_on(plat) && !cuda_files.is_empty() {
         projects.push(project_obj(&urls::NVIDIA_CUDA, cuda_files));
     }
@@ -131,25 +159,41 @@ pub fn catalog() -> Value {
         projects.push(project_obj(&urls::ONNX_RUNTIME, onnx_files));
     }
 
-    let apple = urls::Platform::APPLE_NATIVE.contains(&plat);
+    let apple = urls::Platform::APPLE_MLX.contains(&plat);
     let push_portable = |projects: &mut Vec<Value>, p: &Project| {
         if p.runs_on(plat) {
             let files = p.files.iter().map(download_file).collect();
             projects.push(project_obj(p, files));
         }
     };
-    let push_coreml = |projects: &mut Vec<Value>, r: &crate::coreml_repo::CoremlRepo| {
+    let push_mlx = |projects: &mut Vec<Value>, r: &crate::mlx_repo::MlxRepo| {
         if apple && !r.display_name.is_empty() {
-            projects.push(coreml_project_obj(r));
+            projects.push(mlx_project_obj(r));
         }
     };
 
+    // Kokoro stays two [`Project`] entries: the ONNX set includes the two PeterReid G2P
+    // graphs, and listing them under "Kokoro" would mis-attribute them.
+    if urls::KOKORO.runs_on(plat) {
+        projects.push(with_tts_languages(
+            project_obj(
+                &urls::KOKORO,
+                urls::KOKORO.files.iter().map(download_file).collect(),
+            ),
+            ds_config::TtsModel::Kokoro,
+        ));
+    }
     push_portable(&mut projects, &urls::KOKORO_G2P);
-    push_portable(&mut projects, &urls::KOKORO);
-    push_coreml(&mut projects, &crate::coreml_repo::KOKORO_COREML);
+    projects.extend(
+        crate::tts_assets::TTS_ORT_ASSETS
+            .iter()
+            .filter(|set| set.model != ds_config::TtsModel::Kokoro)
+            .map(tts_project_obj),
+    );
     push_portable(&mut projects, &urls::PARAKEET);
-    push_coreml(&mut projects, &crate::coreml_repo::PARAKEET_COREML);
-    push_coreml(&mut projects, &crate::coreml_repo::DIARIZATION_COREML);
+    for repo in crate::mlx_repo::all_mlx_repos() {
+        push_mlx(&mut projects, repo);
+    }
     push_portable(&mut projects, &urls::SEPFORMER_PROJECT);
 
     Value::Array(projects)
@@ -174,6 +218,13 @@ mod tests {
                     "project field `{key}` is empty in {p}"
                 );
             }
+            // A homepage equal to the license URL is the URL-heuristic fallback bug: the
+            // attribution must always link a real project page.
+            assert_ne!(
+                p["homepage"], p["license_url"],
+                "project `{}` uses its license URL as homepage",
+                p["name"]
+            );
             assert!(
                 p["files"].as_array().is_some_and(|f| !f.is_empty()),
                 "project `{}` has no files",
@@ -182,7 +233,7 @@ mod tests {
         }
     }
 
-    /// Every MODEL download in the registry (Kokoro + Parakeet, which are present on every
+    /// Every model download in the registry (built-in TTS + Parakeet, present on every
     /// platform) must appear in the catalog. Add a model file without putting it under a
     /// licensed [`Project`] and this fails — the file/license sync guarantee the UI relies on.
     #[test]
@@ -195,21 +246,48 @@ mod tests {
             .flat_map(|p| p["files"].as_array().unwrap().iter())
             .map(|f| f["name"].as_str().unwrap().to_string())
             .collect();
-        for d in [
-            urls::KOKORO_ONNX,
-            urls::KOKORO_VOICES,
-            urls::KOKORO_G2P_ENCODER,
-            urls::KOKORO_G2P_DECODER,
-            urls::PARAKEET_ENCODER,
-            urls::PARAKEET_DECODER,
-            urls::PARAKEET_JOINER,
-            urls::PARAKEET_TOKENS,
-        ] {
+        let downloads = crate::tts_assets::TTS_ORT_ASSETS
+            .iter()
+            .flat_map(|set| set.files.iter())
+            .copied()
+            .chain([
+                urls::PARAKEET_ENCODER,
+                urls::PARAKEET_DECODER,
+                urls::PARAKEET_JOINER,
+                urls::PARAKEET_TOKENS,
+            ]);
+        for d in downloads {
             assert!(
                 names.iter().any(|n| n == d.file_name),
                 "download `{}` is missing from the libraries catalog",
                 d.file_name
             );
+        }
+    }
+
+    #[test]
+    fn tts_projects_expose_the_runtime_language_contract() {
+        let cat = catalog();
+        let projects = cat.as_array().unwrap();
+        for model in ds_config::TtsModel::ALL.iter().copied() {
+            let descriptor = model.descriptor();
+            let project = projects
+                .iter()
+                .find(|project| project["name"].as_str() == Some(descriptor.display_name))
+                .unwrap_or_else(|| panic!("missing TTS project {}", descriptor.display_name));
+            assert_eq!(project["languages"], json!(descriptor.languages));
+            assert_eq!(
+                project["language_count"],
+                descriptor.supported_language_count()
+            );
+            assert_eq!(
+                project["automatic_language_detection"],
+                descriptor.detects_language_automatically()
+            );
+            match descriptor.language_list_url() {
+                Some(url) => assert_eq!(project["language_list_url"], url),
+                None => assert!(project.get("language_list_url").is_none()),
+            }
         }
     }
 
@@ -246,44 +324,31 @@ mod tests {
         }
     }
 
-    /// The Apple-native Core ML sets are Apple-Silicon only, and the folded sub-component
-    /// (Kokoro G2P, empty `display_name`) is never listed as its own library.
+    /// MLX sets are Apple-Silicon only and every downloaded set is cataloged.
     #[test]
-    fn coreml_sets_are_apple_silicon_only_and_g2p_is_folded() {
-        use crate::coreml_repo;
+    fn mlx_sets_are_apple_silicon_only_and_fully_licensed() {
+        use crate::mlx_repo;
 
         assert_eq!(
-            urls::Platform::APPLE_NATIVE,
+            urls::Platform::APPLE_MLX,
             &[urls::Platform::MacArm64],
-            "Core ML / FluidAudio sets run only on Apple Silicon"
+            "MLX Audio sets run only on Apple Silicon"
         );
-        // The G2P sub-models share the Kokoro repo and must be folded (no standalone entry).
-        assert!(
-            coreml_repo::KOKORO_G2P_COREML.display_name.is_empty(),
-            "the Kokoro G2P set must be folded into the Kokoro entry"
-        );
-        // Every LISTED Core ML set carries a full license record (the can't-drift guard for
+        // Every listed MLX set carries a full license record (the can't-drift guard for
         // the macOS additions, independent of which platform the test runs on).
-        for r in coreml_repo::all_coreml_repos() {
-            if r.display_name.is_empty() {
-                continue;
-            }
+        for r in mlx_repo::all_mlx_repos() {
             for (field, val) in [
                 ("usage", r.usage),
                 ("license", r.license),
                 ("license_url", r.license_url),
             ] {
-                assert!(
-                    !val.is_empty(),
-                    "Core ML set `{}` has empty {field}",
-                    r.name
-                );
+                assert!(!val.is_empty(), "MLX set `{}` has empty {field}", r.name);
             }
         }
     }
 
     /// On THIS build's platform the catalog matches `current_platform()` exactly: it's
-    /// non-empty, every entry's `platforms` includes us, and the Apple-native sets are present
+    /// non-empty, every entry's `platforms` includes us, and the MLX sets are present
     /// iff we're on Apple Silicon. Runs on whatever target `cargo test` is invoked on.
     #[test]
     fn catalog_matches_the_current_platform() {
@@ -306,12 +371,12 @@ mod tests {
                 "no GPU libraries on {plat:?}, got {names:?}"
             );
         }
-        // Apple-native Core ML sets show iff Apple Silicon.
-        let has_coreml = names.iter().any(|n| n.contains("Core ML"));
+        // MLX sets show only on Apple Silicon.
+        let has_mlx = names.iter().any(|n| n.contains("MLX"));
         assert_eq!(
-            has_coreml,
-            urls::Platform::APPLE_NATIVE.contains(&plat),
-            "Core ML presence must track Apple Silicon on {plat:?}, got {names:?}"
+            has_mlx,
+            urls::Platform::APPLE_MLX.contains(&plat),
+            "MLX presence must track Apple Silicon on {plat:?}, got {names:?}"
         );
     }
 

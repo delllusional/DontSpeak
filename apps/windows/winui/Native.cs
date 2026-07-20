@@ -162,6 +162,8 @@ internal static class Native
 }
 
 public enum EngineState { Missing, Idle, Downloading, Warming, Blocked, Running, Failed }
+[JsonConverter(typeof(JsonStringEnumConverter<TtsModel>))]
+public enum TtsModel { Kokoro, Chatterbox, Qwen, OmniVoice }
 
 // Word from shared Rust formatter at parse time — one state→word map for all platforms.
 public readonly record struct EngineInfo(EngineState State, double Progress, string Word);
@@ -183,6 +185,8 @@ public sealed record Activity
 public sealed record TtsEngineStatus
 {
     public string Engine = "off";
+    public TtsModel? Model;
+    public string Language = "";
     public string Provider = "";
     public EngineInfo Status;
 }
@@ -233,7 +237,7 @@ public sealed record DiarizationStatus
     public bool Enabled;
     public string Runtime = "";
     public string[] Speakers = Array.Empty<string>();
-    public double ClusteringThreshold;
+    public double ActivityThreshold;
 }
 
 /// <summary>Parsed model-status snapshot (macOS HealthSnapshot parity).</summary>
@@ -264,7 +268,7 @@ internal sealed class HealthSnapshot
 
     public static HealthSnapshot Probe() => FromJson(Native.ModelStatusJson());
 
-    // Case-insensitive + ignore unknown so a grown Rust schema never throws here.
+    // Case-insensitive property names; a grown schema may add object members.
     private static readonly JsonSerializerOptions ModelStatusJsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -307,6 +311,8 @@ internal sealed class HealthSnapshot
             if (dto.Tts is { } ttsStatus)
             {
                 s.TtsEngine.Engine = ttsStatus.Engine ?? "off";
+                s.TtsEngine.Model = ttsStatus.Model;
+                s.TtsEngine.Language = ttsStatus.Language ?? "";
                 s.TtsEngine.Provider = ttsStatus.Provider ?? "";
                 s.TtsEngine.Status = ToEngine(ttsStatus.Status, stateWord);
             }
@@ -323,7 +329,7 @@ internal sealed class HealthSnapshot
                 s.Diarization.Enabled = diarization.Enabled;
                 s.Diarization.Runtime = diarization.Provider ?? "";
                 s.Diarization.Speakers = diarization.Speakers?.Where(x => x is not null).Cast<string>().ToArray() ?? Array.Empty<string>();
-                s.Diarization.ClusteringThreshold = diarization.ClusteringThreshold;
+                s.Diarization.ActivityThreshold = diarization.ActivityThreshold;
             }
             if (dto.Stats is { } stats)
             {
@@ -370,6 +376,7 @@ internal sealed class HealthSnapshot
         };
         return new EngineInfo(es, pct, stateWord(state, pct, why));
     }
+
 }
 
 // Hand mirror of ds-status model_status JSON. No codegen — round-trip test keeps lockstep.
@@ -407,6 +414,8 @@ internal sealed record ActivityDto
 internal sealed record TtsStatusDto
 {
     [JsonPropertyName("engine")] public string? Engine { get; init; }
+    [JsonPropertyName("model")] public required TtsModel? Model { get; init; }
+    [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("status")] public EngineStatusDto? Status { get; init; }
 }
@@ -468,6 +477,6 @@ internal sealed record DiarizationStatusDto
     [JsonPropertyName("enabled")] public bool Enabled { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("speakers")] public string?[]? Speakers { get; init; }
-    [JsonPropertyName("cluster_threshold")] public double ClusteringThreshold { get; init; }
+    [JsonPropertyName("activity_threshold")] public double ActivityThreshold { get; init; }
 }
 

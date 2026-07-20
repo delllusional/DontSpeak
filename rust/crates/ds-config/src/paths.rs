@@ -311,14 +311,13 @@ fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// FluidAudio Core ML cache under [`model_dir`]/coreml` — explicit so downloads aren't
-/// scattered; uninstaller removes the whole DontSpeak cache.
-pub fn coreml_dir() -> Option<PathBuf> {
-    Some(model_dir()?.join("coreml"))
+/// MLX model cache under [`model_dir`]/mlx — explicit so downloads stay together.
+pub fn mlx_dir() -> Option<PathBuf> {
+    Some(model_dir()?.join("mlx"))
 }
 
 /// Non-empty subdir whose name contains `needle`? Pure; shared by helper + status.
-pub fn coreml_model_present_in(dir: &Path, needle: &str) -> bool {
+pub fn mlx_model_present_in(dir: &Path, needle: &str) -> bool {
     let needle = needle.to_ascii_lowercase();
     let nonempty = |p: &Path| {
         std::fs::read_dir(p)
@@ -339,33 +338,32 @@ pub fn coreml_model_present_in(dir: &Path, needle: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// As `coreml_model_present_in`, probing [`coreml_dir`] — the ONE folder every Core ML
-/// model now downloads to. `false` if the cache dir can't resolve.
-pub fn coreml_model_present(needle: &str) -> bool {
-    coreml_dir()
-        .map(|d| coreml_model_present_in(&d, needle))
+/// As `mlx_model_present_in`, probing [`mlx_dir`]. `false` if the cache dir can't resolve.
+pub fn mlx_model_present(needle: &str) -> bool {
+    mlx_dir()
+        .map(|d| mlx_model_present_in(&d, needle))
         .unwrap_or(false)
 }
 
 #[cfg(test)]
-mod coreml_present_tests {
-    use super::coreml_model_present_in;
+mod mlx_present_tests {
+    use super::mlx_model_present_in;
 
     #[test]
     fn present_only_for_a_nonempty_matching_subdir() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         // Nothing yet → not present (clean install ⇒ the dot reads "downloading").
-        assert!(!coreml_model_present_in(dir, "kokoro"));
+        assert!(!mlx_model_present_in(dir, "kokoro"));
         // An EMPTY matching subdir (mid-download / partial) → still not present.
-        std::fs::create_dir_all(dir.join("kokoro-82m-coreml")).unwrap();
-        assert!(!coreml_model_present_in(dir, "kokoro"));
+        std::fs::create_dir_all(dir.join("kokoro-82m")).unwrap();
+        assert!(!mlx_model_present_in(dir, "kokoro"));
         // A NON-EMPTY matching subdir → present.
-        std::fs::write(dir.join("kokoro-82m-coreml/model.mlmodelc"), b"x").unwrap();
-        assert!(coreml_model_present_in(dir, "kokoro"));
+        std::fs::write(dir.join("kokoro-82m/model.safetensors"), b"x").unwrap();
+        assert!(mlx_model_present_in(dir, "kokoro"));
         // Case-insensitive substring; a non-matching needle doesn't count.
-        assert!(coreml_model_present_in(dir, "KOKORO"));
-        assert!(!coreml_model_present_in(dir, "parakeet"));
+        assert!(mlx_model_present_in(dir, "KOKORO"));
+        assert!(!mlx_model_present_in(dir, "parakeet"));
     }
 }
 
@@ -433,7 +431,10 @@ mod tests {
     fn hermes_paths_follow_the_hermes_home_layout() {
         let paths = Paths::rooted_at(Path::new("home"));
         assert_eq!(paths.hermes_dir, Path::new("home").join(".hermes"));
-        assert_eq!(paths.hermes_config_yaml, paths.hermes_dir.join("config.yaml"));
+        assert_eq!(
+            paths.hermes_config_yaml,
+            paths.hermes_dir.join("config.yaml")
+        );
         assert_eq!(
             paths.hermes_shell_hooks_allowlist,
             paths.hermes_dir.join("shell-hooks-allowlist.json")

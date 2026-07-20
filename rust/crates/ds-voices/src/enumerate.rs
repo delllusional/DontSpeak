@@ -1,8 +1,8 @@
 //! Voice list for selected engine + language (host picker + MCP). Kokoro ids from
-//! `voices-v1.0.bin` (never downloads) or static fallback; system via `say -v ?`.
+//! the active ONNX/MLX model files (never downloads) or static fallback; system via `say -v ?`.
 //! Pure filter/label except disk/`say`.
 
-use ds_config::TtsEngine;
+use ds_config::{TtsEngine, TtsModel};
 
 use crate::{Gender, Quality, SpeakerVoice, say, voices};
 
@@ -28,6 +28,8 @@ pub const KOKORO_FALLBACK_IDS: &[&str] = &[
 /// Filename only — download pin stays `ds_model::KOKORO_VOICES_FILE` (issue #5: no ds-model dep).
 /// Drift: `kokoro_voices_filename_matches_ds_model_registry`.
 const KOKORO_VOICES_FILE: &str = "voices-v1.0.bin";
+/// Directory name only; drift-guarded against ds-model without adding it as a runtime dependency.
+const KOKORO_MLX_DIR_NAME: &str = "kokoro-82m";
 
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────
 
@@ -120,18 +122,49 @@ pub fn gender_str(g: Option<Gender>) -> Option<&'static str> {
 
 // ── Engine voice id sources (disk / shell — the only impure bits) ────────────
 
-/// Kokoro voice ids from `voices-v1.0.bin` if present; else static fallback.
-/// NEVER downloads. Probes disk only.
-pub fn kokoro_voice_ids() -> Vec<String> {
+fn mlx_voice_ids_from_dir(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            (path.extension().and_then(|s| s.to_str()) == Some("safetensors"))
+                .then(|| path.file_stem()?.to_str().map(str::to_owned))
+                .flatten()
+        })
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Kokoro voice ids actually on disk — the active ONNX voices bin, else the MLX voices
+/// dir. `None` when neither source yields names (fresh install: validation must fall back
+/// to shape rules, not the static list). NEVER downloads. Probes disk only.
+pub fn kokoro_disk_voice_ids() -> Option<Vec<String>> {
     if let Some(path) = ds_config::model_dir().map(|d| d.join(KOKORO_VOICES_FILE))
         && path.is_file()
         && let Ok(bytes) = std::fs::read(&path)
         && let Ok(names) = voices::voice_names(&bytes)
         && !names.is_empty()
     {
-        return names;
+        return Some(names);
     }
-    KOKORO_FALLBACK_IDS.iter().map(|s| s.to_string()).collect()
+    if let Some(dir) = ds_config::mlx_dir().map(|d| d.join(KOKORO_MLX_DIR_NAME).join("voices")) {
+        let names = mlx_voice_ids_from_dir(&dir);
+        if !names.is_empty() {
+            return Some(names);
+        }
+    }
+    None
+}
+
+/// [`kokoro_disk_voice_ids`] with the static fallback, so a display list is never empty.
+pub fn kokoro_voice_ids() -> Vec<String> {
+    kokoro_disk_voice_ids()
+        .unwrap_or_else(|| KOKORO_FALLBACK_IDS.iter().map(|s| s.to_string()).collect())
 }
 
 /// System voices via `say -v ?` (macOS) — empty off-host. No network.
@@ -174,7 +207,13 @@ pub fn kokoro_choices_from(ids: &[String], language: &str) -> Vec<VoiceChoice> {
     let want = language.to_ascii_lowercase();
     let mut out: Vec<VoiceChoice> = ids
         .iter()
-        .filter(|id| kokoro_language(id) == want)
+        .filter(|id| {
+            if want.contains('-') {
+                kokoro_language_tag(id).eq_ignore_ascii_case(&want)
+            } else {
+                kokoro_language(id) == want
+            }
+        })
         .map(|id| VoiceChoice {
             label: kokoro_label(id),
             id: id.clone(),
@@ -214,6 +253,43 @@ fn system_label(v: &SpeakerVoice) -> String {
     }
 }
 
+/// Built-in voices for a model and language.
+pub fn built_in_choices(model: TtsModel, language: &str) -> Vec<VoiceChoice> {
+    if model == TtsModel::Kokoro {
+        return kokoro_choices(&primary_subtag(language));
+    }
+    model
+        .descriptor()
+        .voices
+        .iter()
+        .map(|voice| VoiceChoice {
+            id: (*voice).to_string(),
+            label: model_voice_label(model, voice),
+        })
+        .collect()
+}
+
+fn model_voice_label(model: TtsModel, voice: &str) -> String {
+    if voice == "default" {
+        return "Default".to_string();
+    }
+    if model == TtsModel::Kokoro {
+        return kokoro_display_name(voice);
+    }
+    voice
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 // ── Current voice NAME for the active engine (single cross-platform resolver) ─
 
 /// Tidy a raw System-TTS name for greeting/UI: drop `"Microsoft "` prefix,
@@ -227,14 +303,20 @@ pub fn friendly_system_name(raw: &str) -> String {
     s.trim().to_string()
 }
 
-/// DISPLAY name of a resolved `(engine, voice)` — the ONE place that turns "what
+/// DISPLAY name of a resolved `(engine, model, voice)` — the ONE place that turns "what
 /// is speaking" into a short speakable name (greeting + UI):
 /// * Kokoro → friendly name (`af_sarah` → "Sarah").
+/// * Other built-in models → registry voice label.
 /// * System → configured voice tidied, or — when empty — OS DEFAULT voice tidied.
 ///   `None` if the default can't be read.
-pub fn voice_display_name(engine: TtsEngine, voice: &str) -> Option<String> {
+pub fn voice_display_name(engine: TtsEngine, model: TtsModel, voice: &str) -> Option<String> {
     match engine {
-        TtsEngine::BuiltIn => Some(kokoro_display_name(voice)),
+        TtsEngine::BuiltIn => model
+            .descriptor()
+            .voices
+            .contains(&voice)
+            .then(|| model_voice_label(model, voice))
+            .or_else(|| (model == TtsModel::Kokoro).then(|| kokoro_display_name(voice))),
         TtsEngine::System => {
             let raw = if voice.trim().is_empty() {
                 crate::system::default_voice_name()?
@@ -256,6 +338,19 @@ mod tests {
         // Drift guard (see KOKORO_VOICES_FILE): keep the local duplicate in sync
         // without making ds-model a real dependency.
         assert_eq!(KOKORO_VOICES_FILE, ds_model::KOKORO_VOICES_FILE);
+        assert_eq!(KOKORO_MLX_DIR_NAME, ds_model::mlx_repo::KOKORO_MLX_DIR_NAME);
+    }
+
+    #[test]
+    fn mlx_voice_ids_are_read_from_safetensors_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("bf_emma.safetensors"), b"").unwrap();
+        std::fs::write(tmp.path().join("af_heart.safetensors"), b"").unwrap();
+        std::fs::write(tmp.path().join("ignored.pt"), b"").unwrap();
+        assert_eq!(
+            mlx_voice_ids_from_dir(tmp.path()),
+            vec!["af_heart".to_string(), "bf_emma".to_string()]
+        );
     }
 
     #[test]
@@ -394,14 +489,34 @@ mod tests {
     }
 
     #[test]
+    fn built_in_choices_follow_the_model_registry() {
+        let choices = built_in_choices(TtsModel::Qwen, "ja");
+        assert_eq!(choices.len(), TtsModel::Qwen.descriptor().voices.len());
+        assert_eq!(choices[5].label, "Ono Anna");
+    }
+
+    #[test]
     fn voice_display_name_per_engine() {
         assert_eq!(
-            voice_display_name(TtsEngine::BuiltIn, "af_sarah").as_deref(),
+            voice_display_name(TtsEngine::BuiltIn, TtsModel::Kokoro, "af_sarah").as_deref(),
             Some("Sarah")
+        );
+        assert_eq!(
+            voice_display_name(TtsEngine::BuiltIn, TtsModel::Chatterbox, "default").as_deref(),
+            Some("Default")
+        );
+        assert_eq!(
+            voice_display_name(TtsEngine::BuiltIn, TtsModel::Chatterbox, "bogus"),
+            None
         );
         // Explicit System voice tidies without the OS-default query path.
         assert_eq!(
-            voice_display_name(TtsEngine::System, "Microsoft Zira Desktop").as_deref(),
+            voice_display_name(
+                TtsEngine::System,
+                TtsModel::Kokoro,
+                "Microsoft Zira Desktop"
+            )
+            .as_deref(),
             Some("Zira")
         );
     }

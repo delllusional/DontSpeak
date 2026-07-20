@@ -23,6 +23,8 @@ serde_json = "1"
 [dev-dependencies]
 # Drift gate: every wireable client token must have a `usage.provider.*` label.
 ds-client = { workspace = true }
+# Drift gate: every explicit TTS language code must have a user-facing name.
+ds-config = { workspace = true }
 
 [lints]
 workspace = true

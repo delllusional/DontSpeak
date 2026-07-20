@@ -255,7 +255,7 @@ mod tests {
             Request::TestRecognitionStart,
             Request::ModelStatus,
             Request::SetProvider {
-                provider: "coreml".into(),
+                provider: "mlx".into(),
             },
             Request::AuthorizeSystemStt,
             Request::Earcon {

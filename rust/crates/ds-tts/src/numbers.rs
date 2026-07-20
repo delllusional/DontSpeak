@@ -1,7 +1,7 @@
 //! English number → words for TTS.
 //!
 //! WHY: neither G2P expands digits — ONNX/misaki drops them at vocab (silent);
-//! ANE BART (alpha-only) turns `12` into garbage ("X"). Lexicons never have `"12"`.
+//! The BART G2P frontend is alphabetic; lexicons never contain numeric tokens such as `"12"`.
 //!
 //! Runs via [`crate::normalize_kokoro_text`] before split/phonemize. English-only.
 //!

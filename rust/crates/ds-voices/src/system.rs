@@ -3,7 +3,7 @@
 //! it without a `ds-proc`/synth dependency. Spawn/synth paths stay in `ds-tts`.
 
 /// DEFAULT system-TTS voice name as the OS reports it — what System speaks with
-/// when `tts_system_voice` is empty. Used to NAME "who is speaking" for the
+/// when `tts_voices.system` is empty. Used to NAME "who is speaking" for the
 /// greeting. Returns the raw OS name (e.g. Windows `"Microsoft Hazel Desktop"`);
 /// the caller tidies for display. `None` if unresolved.
 /// * Windows → `System.Speech` current voice (same engine `ds_tts::system::speech_command`

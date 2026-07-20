@@ -36,9 +36,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 kaldi-native-fbank = "0.1.0"
 
-# ── Parakeet local STT (the `parakeet` engine, macOS Core ML / ANE) ──────────
-# dlopen libdskokoro.dylib (the FluidAudio Core ML / ANE shim) at runtime, like
-# the apple-native TTS backend. Resolved via DSKOKORO_DYLIB_PATH.
+# ── Parakeet local STT (the `parakeet` engine, macOS MLX Audio) ──────────────
+# dlopen libdontspeak_mlx.dylib (the MLX Audio shim) at runtime, like
+# the MLX TTS backend. Resolved via DONTSPEAK_MLX_DYLIB_PATH.
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = { workspace = true }
 

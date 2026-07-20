@@ -12,7 +12,7 @@ mod descriptions;
 mod set_config;
 use descriptions::*;
 
-pub use set_config::SetConfigArgs;
+pub use set_config::{SetConfigArgs, TtsVoiceUpdates};
 
 /// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
 pub const DIARIZATION_ENABLED: bool = false;
@@ -20,7 +20,7 @@ pub const DIARIZATION_ENABLED: bool = false;
 const HIDDEN_TOOLS: &[&str] = &["diarize", "manage_speakers"];
 const HIDDEN_SET_CONFIG_PARAMS: &[&str] = &[
     "diarizer",
-    "cluster_threshold",
+    "activity_threshold",
     "match_threshold",
     "speaker_lock",
 ];
@@ -31,8 +31,9 @@ enum PType {
     Num(f64, f64),
     Int(i64, i64),
     Bool,
-    StrArray,
     EnumArray(&'static [&'static str]),
+    /// Nested per-engine/model string-array voice pools.
+    VoicePools,
     /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
     Gain,
 }
@@ -149,12 +150,21 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "voices",
         description: VOICES,
-        params: &[p(
-            "tts_engine",
-            PType::Enum(&["built_in", "system"]),
-            false,
-            VOICES_ENGINE,
-        )],
+        params: &[
+            p(
+                "tts_engine",
+                PType::Enum(&["built_in", "system"]),
+                false,
+                VOICES_ENGINE,
+            ),
+            p(
+                "tts_model",
+                PType::Enum(&["kokoro", "chatterbox", "qwen", "omnivoice"]),
+                false,
+                VOICES_MODEL,
+            ),
+            p("language", PType::Str, false, VOICES_LANGUAGE),
+        ],
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Voices),
@@ -196,12 +206,17 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_ENGINE,
             ),
-            p("tts_voices", PType::StrArray, false, SET_CONFIG_TTS_VOICES),
             p(
-                "tts_system_voice",
-                PType::Str,
+                "tts_model",
+                PType::Enum(&["kokoro", "chatterbox", "qwen", "omnivoice"]),
                 false,
-                SET_CONFIG_TTS_SYSTEM_VOICE,
+                SET_CONFIG_TTS_MODEL,
+            ),
+            p(
+                "tts_voices",
+                PType::VoicePools,
+                false,
+                SET_CONFIG_TTS_VOICES,
             ),
             p("rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
             p(
@@ -243,22 +258,22 @@ static TOOLS: &[Tool] = &[
             p("full_duplex", PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
             p(
                 "provider",
-                PType::EnumArray(&["ane", "cuda", "coreml", "cpu"]),
+                PType::EnumArray(&["mlx", "cuda", "coreml", "cpu"]),
                 false,
                 SET_CONFIG_PROVIDER,
             ),
             // Diarization (hidden when gate off).
             p(
                 "diarizer",
-                PType::EnumArray(&["apple_native"]),
+                PType::EnumArray(&["mlx"]),
                 false,
                 SET_CONFIG_DIARIZER,
             ),
             p(
-                "cluster_threshold",
-                PType::Num(0.5, 0.9),
+                "activity_threshold",
+                PType::Num(0.1, 0.9),
                 false,
-                SET_CONFIG_CLUSTERING,
+                SET_CONFIG_ACTIVITY_THRESHOLD,
             ),
             p(
                 "match_threshold",
@@ -364,14 +379,6 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
         PType::Int(min, max) => Err(format!("must be an integer from {min} to {max}")),
         PType::Bool if value.is_boolean() => Ok(()),
         PType::Bool => Err("must be a boolean".into()),
-        PType::StrArray
-            if value
-                .as_array()
-                .is_some_and(|items| items.iter().all(Value::is_string)) =>
-        {
-            Ok(())
-        }
-        PType::StrArray => Err("must be an array of strings".into()),
         PType::EnumArray(values)
             if value
                 .as_array()
@@ -383,9 +390,35 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
             "must be an array containing only: {}",
             values.join(", ")
         )),
+        PType::VoicePools if voice_pools_valid(value) => Ok(()),
+        PType::VoicePools => Err(
+            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice string arrays"
+                .into(),
+        ),
         PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
         PType::Gain => Err("must be `auto` or a number from 0.5 to 20".into()),
     }
+}
+
+fn voice_pools_valid(value: &Value) -> bool {
+    let Some(pools) = value.as_object().filter(|pools| !pools.is_empty()) else {
+        return false;
+    };
+    pools.iter().all(|(name, voices)| {
+        let Some(voices) = voices.as_array() else {
+            return false;
+        };
+        let known = matches!(
+            name.as_str(),
+            "system" | "kokoro" | "chatterbox" | "qwen" | "omnivoice"
+        );
+        let allowed_empty = name == "system";
+        known
+            && (allowed_empty || !voices.is_empty())
+            && voices
+                .iter()
+                .all(|voice| voice.as_str().is_some_and(|voice| !voice.trim().is_empty()))
+    })
 }
 
 /// Visible primary tool definitions for MCP `tools/list`.
@@ -423,6 +456,8 @@ fn output_schema_for(output: Output) -> Value {
             "type": "object",
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system", "off"] },
+                "model": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
+                "language": { "type": "string" },
                 "voices": { "type": "array", "items": { "type": "string" } },
                 "rate": { "type": "number" },
                 "state": {
@@ -440,7 +475,7 @@ fn output_schema_for(output: Output) -> Value {
                 },
                 "status": { "type": "object" }
             },
-            "required": ["engine", "voices", "rate", "state"],
+            "required": ["engine", "model", "language", "voices", "rate", "state"],
             "additionalProperties": false
         }),
         Output::Usage => json!({
@@ -495,7 +530,8 @@ fn output_schema_for(output: Output) -> Value {
             "type": "object",
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system"] },
-                "language": { "type": "string", "enum": ["en"] },
+                "model": { "type": ["string", "null"], "enum": ["kokoro", "chatterbox", "qwen", "omnivoice", null] },
+                "language": { "type": "string" },
                 "languages": {
                     "type": "array",
                     "items": {
@@ -512,6 +548,7 @@ fn output_schema_for(output: Output) -> Value {
                                         "language_tag": { "type": ["string", "null"] },
                                         "gender": { "type": ["string", "null"] },
                                         "engine": { "type": "string", "enum": ["built_in", "system"] },
+                                        "model": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
                                         "active": { "type": "boolean" }
                                     },
                                     "required": ["id", "label", "language_tag", "gender", "engine", "active"],
@@ -522,9 +559,26 @@ fn output_schema_for(output: Output) -> Value {
                         "required": ["language", "voices"],
                         "additionalProperties": false
                     }
+                },
+                "models": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
+                            "name": { "type": "string" },
+                            "default_language": { "type": "string" },
+                            "languages": { "type": "array", "items": { "type": "string" } },
+                            "providers": { "type": "array", "items": { "type": "string", "enum": ["mlx", "cuda", "coreml", "cpu"] } },
+                            "supports_rate": { "type": "boolean" },
+                            "supports_full_duplex": { "type": "boolean" }
+                        },
+                        "required": ["id", "name", "default_language", "languages", "providers", "supports_rate", "supports_full_duplex"],
+                        "additionalProperties": false
+                    }
                 }
             },
-            "required": ["engine", "language", "languages"],
+            "required": ["engine", "model", "language", "languages", "models"],
             "additionalProperties": false
         }),
     }
@@ -597,12 +651,22 @@ fn param_schema(param: &Param) -> Value {
             json!({ "type": "integer", "minimum": lo, "maximum": hi, "description": d })
         }
         PType::Bool => json!({ "type": "boolean", "description": d }),
-        PType::StrArray => {
-            json!({ "type": "array", "items": { "type": "string" }, "description": d })
-        }
         PType::EnumArray(vals) => {
             json!({ "type": "array", "items": { "type": "string", "enum": vals }, "description": d })
         }
+        PType::VoicePools => json!({
+            "type": "object",
+            "description": d,
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+                "system": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                "kokoro": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+                "chatterbox": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+                "qwen": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+                "omnivoice": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+            }
+        }),
         // No top-level `type` — `oneOf` of the two accepted shapes.
         PType::Gain => json!({
             "description": d,
@@ -637,12 +701,12 @@ fn param_ui(param: &Param) -> Value {
         PType::Bool => {
             o.insert("type".into(), json!("boolean"));
         }
-        PType::StrArray => {
-            o.insert("type".into(), json!("array"));
-        }
         PType::EnumArray(vals) => {
             o.insert("type".into(), json!("array"));
             o.insert("enum".into(), json!(vals));
+        }
+        PType::VoicePools => {
+            o.insert("type".into(), json!("object"));
         }
         PType::Gain => {
             o.insert("type".into(), json!("number_or_enum"));
@@ -674,8 +738,19 @@ mod tests {
             ("voices", json!({"tts_engine": "off"}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
-            ("set_config", json!({"tts_voices": ["af_sarah"]}), true),
-            ("set_config", json!({"tts_voices": [7]}), false),
+            (
+                "set_config",
+                json!({"tts_voices": {"kokoro": ["af_sarah"]}}),
+                true,
+            ),
+            ("set_config", json!({"tts_voices": {"kokoro": [7]}}), false),
+            ("set_config", json!({"tts_voices": {"system": []}}), true),
+            (
+                "set_config",
+                json!({"tts_voices": {"legacy": ["voice"]}}),
+                false,
+            ),
+            ("set_config", json!({"tts_language": "ru"}), false),
             ("set_config", json!({"rate": 0.49}), false),
             ("set_config", json!({"capture_gain": "auto"}), true),
             ("set_config", json!({"capture_gain": 20.1}), false),
@@ -750,11 +825,11 @@ mod tests {
             "Omit to keep the automatic preference",
             "tts_engine",
         );
-        assert!(v.tts_system_voice.is_empty());
+        assert!(v.tts_voices.system.is_empty());
         mentions(
-            SET_CONFIG_TTS_SYSTEM_VOICE,
-            "empty = OS default",
-            "tts_system_voice",
+            SET_CONFIG_TTS_VOICES,
+            "system: []` uses the OS default",
+            "tts_voices.system",
         );
         mentions(
             SET_CONFIG_TTS_RATE,
@@ -827,7 +902,7 @@ mod tests {
 
         assert_eq!(
             v.provider,
-            vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
+            vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]
         );
         mentions(
             SET_CONFIG_PROVIDER,
@@ -837,9 +912,9 @@ mod tests {
         assert!(v.diarizer.is_empty());
         mentions(SET_CONFIG_DIARIZER, "[] = off (default)", "diarizer");
         mentions(
-            SET_CONFIG_CLUSTERING,
-            &format!("Default {}", v.cluster_threshold),
-            "cluster_threshold",
+            SET_CONFIG_ACTIVITY_THRESHOLD,
+            &format!("Default {}", v.activity_threshold),
+            "activity_threshold",
         );
         mentions(
             SET_CONFIG_SPEAKER_THRESH,
@@ -1054,21 +1129,27 @@ mod tests {
     /// field breaks this at COMPILE time; the names come from serde, so this can't go stale.
     #[test]
     fn set_config_schema_matches_args() {
-        use crate::SetConfigArgs;
+        use crate::{SetConfigArgs, TtsVoiceUpdates};
         use ds_config::{
             CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SttEngine, TrayKind,
-            TtsEngine,
+            TtsEngine, TtsModel,
         };
 
         let populated = SetConfigArgs {
             rate: Some(1.25),
-            tts_voices: Some(vec!["af_sarah".to_string()]),
-            tts_system_voice: Some("Samantha".to_string()),
+            tts_voices: Some(TtsVoiceUpdates {
+                system: Some(vec!["Samantha".to_string()]),
+                kokoro: Some(vec!["af_sarah".to_string()]),
+                chatterbox: Some(vec!["default".to_string()]),
+                qwen: Some(vec!["sohee".to_string()]),
+                omnivoice: Some(vec!["warm, clear female voice".to_string()]),
+            }),
+            tts_model: Some(TtsModel::Kokoro),
             tts_engine: Some(vec![TtsEngine::BuiltIn]),
             stt_engine: Some(vec![SttEngine::ClaudeCode]),
-            provider: Some(vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]),
-            diarizer: Some(vec![DiarizerProvider::AppleNative]),
-            cluster_threshold: Some(0.7),
+            provider: Some(vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]),
+            diarizer: Some(vec![DiarizerProvider::Mlx]),
+            activity_threshold: Some(0.5),
             match_threshold: Some(0.65),
             speaker_lock: Some(false),
             full_duplex: Some(true),

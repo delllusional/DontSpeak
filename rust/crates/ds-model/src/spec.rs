@@ -5,11 +5,12 @@
 
 use std::path::PathBuf;
 
-use crate::download::url_basename;
+use crate::download::prefetch_key;
 use crate::hash::verify_sha256_cached;
 use crate::model_path;
 use crate::ort::{onnxruntime_dist, onnxruntime_dylib_file, onnxruntime_dylib_path};
 use crate::target::DownloadTarget;
+use crate::urls::Download;
 
 /// On-disk name + URL + pinned SHA-256. Size labels come from manifest `size_bytes` at display.
 #[derive(Debug, Clone)]
@@ -66,13 +67,9 @@ pub fn is_kokoro_g2p_present() -> bool {
     graphs_ok && crate::ort::is_onnxruntime_dylib_version_ok()
 }
 
-/// Shared Kokoro frontend assets (voices + G2P + version-checked ORT).
+/// Shared Kokoro text frontend assets (G2P + version-checked ORT).
 pub fn is_kokoro_frontend_present() -> bool {
-    let voices = kokoro_voices_spec();
-    let voices_ok = model_path(&voices.file_name)
-        .map(|p| verify_sha256_cached(&p, &voices.sha256))
-        .unwrap_or(false);
-    voices_ok && is_kokoro_g2p_present()
+    is_kokoro_g2p_present()
 }
 
 /// Full portable Kokoro set present (SHA + ORT version-gate). TTS factory fail-quiet probe.
@@ -81,15 +78,17 @@ pub fn is_kokoro_present() -> bool {
     let model_ok = model_path(&onnx.file_name)
         .map(|p| verify_sha256_cached(&p, &onnx.sha256))
         .unwrap_or(false);
-    model_ok && is_kokoro_frontend_present()
+    let voices = kokoro_voices_spec();
+    let voices_ok = model_path(&voices.file_name)
+        .map(|p| verify_sha256_cached(&p, &voices.sha256))
+        .unwrap_or(false);
+    model_ok && voices_ok && is_kokoro_frontend_present()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parakeet STT model — the cache-aware STREAMING FastConformer transducer (int8 ONNX:
-// encoder + decoder LSTM + joiner + tokens), run in-process by `ds-stt::streaming` over the
-// SAME shared `ort` (load-dynamic) runtime as Kokoro, so the onnxruntime dylib is shared.
-// This REPLACED the old whole-buffer transcribe-rs Parakeet TDT model; the `built_in` STT
-// engine keeps the "parakeet" name. All four files load flat from `model_dir()`.
+// Parakeet STT — streaming FastConformer transducer (int8 ONNX: encoder + decoder LSTM +
+// joiner + tokens) via `ds-stt::streaming` on the shared `ort` runtime as Kokoro.
+// All four files load flat from `model_dir()`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// [`ModelSpec`] for the encoder (`encoder.int8.onnx`, ~132 MB).
@@ -202,10 +201,9 @@ fn onnxruntime_dylib_file_entry() -> Option<DownloadFile> {
     })
 }
 
-/// Assets shared by both Kokoro synthesis backends: voices, unknown-word G2P graphs, and ORT.
+/// Text frontend shared by both Kokoro synthesis backends: unknown-word G2P graphs and ORT.
 pub fn kokoro_frontend_files() -> Vec<DownloadFile> {
     let mut v = vec![
-        DownloadFile::of(crate::urls::KOKORO_VOICES),
         DownloadFile::of(crate::urls::KOKORO_G2P_ENCODER),
         DownloadFile::of(crate::urls::KOKORO_G2P_DECODER),
     ];
@@ -214,9 +212,12 @@ pub fn kokoro_frontend_files() -> Vec<DownloadFile> {
 }
 
 /// The files the full portable Kokoro download fetches, in fetch order. All URLs/sizes come
-/// from the registry; the frontend subset is also used by the Apple-native backend.
+/// from the registry; the text-frontend subset is also used by the MLX backend.
 pub fn kokoro_files() -> Vec<DownloadFile> {
-    let mut v = vec![DownloadFile::of(crate::urls::KOKORO_ONNX)];
+    let mut v = vec![
+        DownloadFile::of(crate::urls::KOKORO_ONNX),
+        DownloadFile::of(crate::urls::KOKORO_VOICES),
+    ];
     v.extend(kokoro_frontend_files());
     v
 }
@@ -235,8 +236,9 @@ pub fn parakeet_files() -> Vec<DownloadFile> {
 }
 
 /// One asset the installer should download for a component, with its pinned digest.
-/// `file_name` is BOTH the name to save the download as AND the key
-/// `crate::download::prefetch_local` matches — they must stay identical.
+/// `file_name` is BOTH the name to save the download as AND the staging key the
+/// downloader's prefetch lookup matches — always [`prefetch_key`]`(url)`, never the bare
+/// basename (several assets share one).
 #[derive(Debug, Clone)]
 pub struct PrefetchItem {
     pub url: String,
@@ -248,15 +250,14 @@ pub struct PrefetchItem {
 /// are omitted, so re-running the installer downloads nothing. Takes the TYPED
 /// [`DownloadTarget`] — wire tokens are parsed once at the
 /// CLI edge (`ds-helper --print-manifest`), never inside the library. Only
-/// [`Onnxruntime`](DownloadTarget::Onnxruntime) | [`KokoroModel`](DownloadTarget::KokoroModel) |
-/// [`KokoroFrontend`](DownloadTarget::KokoroFrontend) | [`ParakeetModel`](DownloadTarget::ParakeetModel) |
-/// [`Cuda`](DownloadTarget::Cuda) produce items; every other target yields `vec![]`.
+/// ORT runtime, named ONNX model, Kokoro frontend, SepFormer, and CUDA targets produce items;
+/// repository-based MLX and installer-group targets yield `vec![]`.
 /// This is the SINGLE source of the installer's download list; the URLs/SHAs never
 /// leave ds-model.
 pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
     let item = |url: &str, sha: &str| PrefetchItem {
         url: url.to_string(),
-        file_name: url_basename(url).to_string(),
+        file_name: prefetch_key(url),
         sha256: sha.to_string(),
     };
     let spec_item = |spec: &ModelSpec| -> Option<PrefetchItem> {
@@ -284,23 +285,26 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 None => vec![],
             }
         }
-        DownloadTarget::KokoroModel => [
-            kokoro_onnx_spec(),
-            kokoro_voices_spec(),
-            kokoro_g2p_encoder_spec(),
-            kokoro_g2p_decoder_spec(),
-        ]
-        .iter()
-        .filter_map(&spec_item)
-        .collect(),
-        DownloadTarget::KokoroFrontend => [
-            kokoro_voices_spec(),
-            kokoro_g2p_encoder_spec(),
-            kokoro_g2p_decoder_spec(),
-        ]
-        .iter()
-        .filter_map(&spec_item)
-        .collect(),
+        // Per-file, sha-gated, subdir-aware: one missing/stale file re-lists only itself,
+        // never the whole multi-GB set. The ORT dylib is `DownloadTarget::Onnxruntime`'s
+        // concern, not a condition here. (`spec_item` can't be reused: it resolves through
+        // the flat `model_path`, wrong for the per-model subdirectory sets.)
+        DownloadTarget::KokoroModel
+        | DownloadTarget::ChatterboxModel
+        | DownloadTarget::QwenModel
+        | DownloadTarget::OmniVoiceModel => {
+            let model = target.tts_model().expect("matched TTS target");
+            let dir = crate::tts_assets::tts_model_dir(model);
+            tts_prefetch_items(crate::tts_assets::tts_ort_asset_set(model).files, |file| {
+                dir.as_deref()
+                    .map(|d| verify_sha256_cached(&d.join(file.file_name), file.sha256))
+                    .unwrap_or(false)
+            })
+        }
+        DownloadTarget::KokoroFrontend => [kokoro_g2p_encoder_spec(), kokoro_g2p_decoder_spec()]
+            .iter()
+            .filter_map(&spec_item)
+            .collect(),
         DownloadTarget::ParakeetModel => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),
@@ -328,10 +332,28 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         }
         // The portable Windows bundle is self-contained. Dotnet/Winapp deliberately have no
         // prefetch manifest because their aka.ms redirects are mutable and cannot be pinned to
-        // the SHA required by the downloader. Models / Core ML sets (and off-x86_64 Cuda) also
-        // have no dedicated arm and return vec![] via the `_` default.
+        // the SHA required by the downloader. MLX sets and off-x86_64 CUDA have no static
+        // manifest because MLX downloads a pinned repository tree rather than named files.
         _ => vec![],
     }
+}
+
+/// The TTS half of [`prefetch_items`]: list only the files `present` denies, keyed by
+/// [`prefetch_key`]. `present` is injected so partial-install filtering is unit-testable
+/// without model bytes (`verify_sha256_cached` has no fakeable sidecar).
+fn tts_prefetch_items(
+    files: &[Download],
+    present: impl Fn(&Download) -> bool,
+) -> Vec<PrefetchItem> {
+    files
+        .iter()
+        .filter(|file| !present(file))
+        .map(|file| PrefetchItem {
+            url: file.url.to_string(),
+            file_name: prefetch_key(file.url),
+            sha256: file.sha256.to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -341,31 +363,37 @@ mod tests {
     // Serializes the tests below that mutate the process-wide `DONTSPEAK_MODEL_DIR` env
     // var: without this, the default parallel test runner can interleave two such tests'
     // set/read/restore windows so one observes the other's temp dir instead of its own.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Crate-level (`crate::TEST_ENV_LOCK`) so tts_assets.rs's hermetic tests serialize on
+    // the SAME lock — two module-local locks would not serialize against each other.
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
-    // The installer keys each prefetched file by url_basename(url): the manifest
-    // saves the download under that name and prefetch_local() looks it up by it.
-    // That stays consistent automatically when a source URL changes — UNLESS two
-    // URLs collide on the same basename, which would cross-wire two assets. Guard
-    // that here so a future URL edit can't silently break the installer path.
+    // The installer stages each prefetched file under prefetch_key(url): the manifest
+    // saves the download under that key and prefetch_local() looks it up by it. Several
+    // TTS assets intentionally SHARE a basename (`config.json`, `tokenizer.json`,
+    // `tokenizer_config.json` across per-model subdirs), so uniqueness must hold on the
+    // URL and its prefetch key — a collision would cross-wire two staged assets. Guard
+    // EVERY registered download so a future URL edit can't silently break the installer.
     #[test]
-    fn prefetch_basenames_are_unique_and_nonempty() {
-        let mut urls: Vec<String> = vec![
-            kokoro_onnx_spec().url,
-            kokoro_voices_spec().url,
-            kokoro_g2p_encoder_spec().url,
-            kokoro_g2p_decoder_spec().url,
+    fn prefetch_keys_are_unique_and_nonempty() {
+        // TTS_ORT_ASSETS covers the full Kokoro set (onnx, voices, both G2P graphs) plus
+        // the Chatterbox/Qwen/OmniVoice sets — no separate kokoro_*_spec() pushes.
+        let mut urls: Vec<String> = crate::tts_assets::TTS_ORT_ASSETS
+            .iter()
+            .flat_map(|set| set.files.iter())
+            .map(|file| file.url.to_string())
+            .collect();
+        urls.extend([
             parakeet_encoder_spec().url,
             parakeet_decoder_spec().url,
             parakeet_joiner_spec().url,
             parakeet_tokens_spec().url,
             sepformer_spec().url,
-        ];
+        ]);
         if let Some(d) = onnxruntime_dist() {
             urls.push(d.url.to_string());
         }
         // Same platform gate as the `prefetch_items` Cuda arm (x86_64 Windows AND Linux) —
-        // this was windows-only, silently skipping the CUDA basenames on the Linux leg.
+        // this was windows-only, silently skipping the CUDA wheels on the Linux leg.
         #[cfg(all(
             any(target_os = "windows", target_os = "linux"),
             target_arch = "x86_64"
@@ -373,20 +401,87 @@ mod tests {
         for (u, _) in crate::ort::CUDA_WHEELS {
             urls.push(u.to_string());
         }
-        let mut names: Vec<&str> = urls.iter().map(|u| url_basename(u)).collect();
-        assert!(
-            names.iter().all(|n| !n.is_empty()),
-            "a source URL has no basename"
-        );
-        let total = names.len();
-        names.sort_unstable();
-        names.dedup();
+
+        let total = urls.len();
+        let mut unique_urls = urls.clone();
+        unique_urls.sort_unstable();
+        unique_urls.dedup();
         assert_eq!(
             total,
-            names.len(),
-            "two source URLs share a basename — the installer's prefetch keying \
-             (url_basename) would cross-wire them; rename one or key by URL hash"
+            unique_urls.len(),
+            "two registered downloads share a URL — one asset would shadow the other"
         );
+
+        let mut keys: Vec<String> = Vec::with_capacity(urls.len());
+        for u in &urls {
+            assert!(
+                !crate::download::url_basename(u).is_empty(),
+                "a source URL has no basename: {u}"
+            );
+            keys.push(prefetch_key(u));
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            total,
+            keys.len(),
+            "two source URLs share a prefetch key — the installer staging would \
+             cross-wire them"
+        );
+    }
+
+    /// Partial-install filtering is PURE over the injected presence probe: only absent
+    /// files are listed, each keyed by `prefetch_key(url)` — one stale file must never
+    /// re-list the whole set.
+    #[test]
+    fn tts_prefetch_items_list_only_absent_files_with_prefetch_keys() {
+        let files = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::Chatterbox).files;
+        let present_name = files[0].file_name;
+
+        let partial = tts_prefetch_items(files, |file| file.file_name == present_name);
+        assert_eq!(partial.len(), files.len() - 1);
+        assert!(
+            partial.iter().all(|i| i.url != files[0].url),
+            "the present file must be omitted"
+        );
+        for item in &partial {
+            assert_eq!(item.file_name, prefetch_key(&item.url));
+            assert!(!item.sha256.is_empty());
+        }
+
+        assert!(
+            tts_prefetch_items(files, |_| true).is_empty(),
+            "a fully present set downloads nothing"
+        );
+        assert_eq!(tts_prefetch_items(files, |_| false).len(), files.len());
+    }
+
+    /// Empty model dir: subdirectory model lists every file under prefetch keys.
+    #[test]
+    fn tts_model_prefetch_lists_every_file_for_an_empty_model_dir() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
+        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
+
+        let items = prefetch_items(DownloadTarget::QwenModel);
+
+        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+        }
+
+        let files = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::Qwen).files;
+        assert_eq!(items.len(), files.len());
+        for (item, file) in items.iter().zip(files) {
+            assert_eq!(item.url, file.url);
+            assert_eq!(item.file_name, prefetch_key(file.url));
+            assert_eq!(item.sha256, file.sha256);
+        }
     }
 
     #[test]
@@ -407,8 +502,7 @@ mod tests {
 
     #[test]
     fn kokoro_specs_pin_real_digests() {
-        // The Kokoro pins are now the real release digests (64-hex lowercase),
-        // not empty — so `ensure`/`is_kokoro_present` actually verify bytes.
+        // Pins are 64-hex lowercase release digests (empty would skip verify).
         let onnx = kokoro_onnx_spec();
         let voices = kokoro_voices_spec();
         for spec in [&onnx, &voices] {
@@ -453,14 +547,7 @@ mod tests {
 
     #[test]
     fn is_kokoro_present_returns_a_bool_without_panicking() {
-        // Hermetic: point `model_dir()` at a FRESH, EMPTY temp dir for the duration of this
-        // test via `DONTSPEAK_MODEL_DIR` — the same override `ds_config::model_dir()` already
-        // respects for portable/bundled builds, so no new plumbing is needed. Without this the
-        // test read whatever the REAL ambient cache dir held: on a machine with the models
-        // already downloaded, `is_kokoro_present()` streams + sha256-hashes the ~310 MB onnx PLUS
-        // the ~28 MB voices file (and scans the onnxruntime dylib), ballooning this test from
-        // milliseconds to 20-60+s. An empty dir also lets us assert a DEFINITE value instead of
-        // just "doesn't panic".
+        // Hermetic empty model dir (ambient cache would hash hundreds of MB).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
@@ -528,9 +615,7 @@ mod tests {
 
     #[test]
     fn is_parakeet_present_returns_a_bool_without_panicking() {
-        // Hermetic: same `DONTSPEAK_MODEL_DIR` override as `is_kokoro_present_returns_a_bool_
-        // without_panicking` above — on a dev box with the real parakeet assets already
-        // downloaded, `is_parakeet_present()` would otherwise sha256-hash them for real.
+        // Hermetic empty model dir (same ambient-cache trap as kokoro present test).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
@@ -570,9 +655,7 @@ mod tests {
             "sha256 must be lowercase hex: {}",
             spec.sha256
         );
-        // Hermetic: same `DONTSPEAK_MODEL_DIR` override as `is_kokoro_present_returns_a_bool_
-        // without_panicking` above — on a dev box with the real sepformer asset already
-        // downloaded, `is_sepformer_present()` would otherwise sha256-hash it for real.
+        // Hermetic empty model dir (same ambient-cache trap as kokoro present test).
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");

@@ -13,7 +13,8 @@
 /// A single downloadable file: everything needed to fetch, verify, and size it.
 #[derive(Debug, Clone, Copy)]
 pub struct Download {
-    /// On-disk name (saved flat under `model_dir()`); also the installer's prefetch key.
+    /// On-disk name (saved flat under `model_dir()`). The installer stages by
+    /// `download::prefetch_key(url)`, not this name — basenames may repeat across sets.
     pub file_name: &'static str,
     /// Source URL.
     pub url: &'static str,
@@ -93,8 +94,8 @@ pub const PARAKEET_TOKENS: Download = Download {
 // ── SepFormer speech separator — int8 ONNX export of SpeechBrain's sepformer-wsj02mix ──
 // Powers the macOS dictation speaker-lock (`ds-stt::separate`): splits a single-mic mixture
 // into its constituent voices so the enrolled user's stream can be isolated before
-// transcription. 8 kHz mono, 2 sources, dynamic time axis (CPU EP only — CoreML recompiles
-// per input length). Published by this project (the one-off export predates the repo);
+// transcription. 8 kHz mono, 2 sources, dynamic time axis (CPU EP). Published by this
+// project (the one-off export predates the repo);
 // pinned by sha like every other model.
 
 pub const SEPFORMER: Download = Download {
@@ -118,7 +119,7 @@ pub const PARAKEET_TOKENS_FILE: &str = PARAKEET_TOKENS.file_name;
 pub const SEPFORMER_FILE: &str = SEPFORMER.file_name;
 
 // ── ONNX Runtime 1.27.0 — microsoft/onnxruntime releases ─────────────────────
-// The shared `load-dynamic` inference dylib (Kokoro + Parakeet ONNX paths). The per-OS
+// The shared `load-dynamic` inference dylib (built-in ORT TTS + Parakeet paths). The per-OS
 // SELECTION + extraction lives in `ort.rs`; this holds the pinned dist URL + digest. Pins
 // are 1.27.0 (a NEWER runtime serves the workspace's api-24 request; 1.24.2's loader
 // deadlocks on the SepFormer graph). No dist for Intel macOS — Microsoft ships arm64-only
@@ -313,17 +314,17 @@ pub const CUDA_WHEEL_SIZES: &[u64] = &[
 /// `crate::libraries::catalog` filters to [`current_platform`] — so the Libraries tab on each
 /// platform shows only what that platform actually downloads, with no scattered `#[cfg]` in
 /// the collector. The variants are exactly the targets the app distributes; an unrecognized
-/// target resolves to the closest generic one (no GPU/Apple-native extras).
+/// target resolves to the closest generic one (no GPU/MLX extras).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Platform {
     WindowsX64,
     WindowsArm64,
     LinuxX64,
     LinuxArm64,
-    /// Apple Silicon — the only macOS target with the Core ML / ANE (FluidAudio) path and a
+    /// Apple Silicon — the only macOS target with the native MLX Audio path and a
     /// bundled ONNX Runtime dist.
     MacArm64,
-    /// Intel macOS — no Apple-native (FluidAudio) path and no downloadable ONNX Runtime
+    /// Intel macOS — no MLX path and no downloadable ONNX Runtime
     /// dist (Microsoft ships arm64-only; `ort.rs` falls back to a Homebrew-installed
     /// runtime there); only the portable model assets apply to the catalog.
     MacX64,
@@ -356,11 +357,11 @@ impl Platform {
     /// never Windows-on-ARM or any Mac). Mirrors the `CUDA_WHEELS` cfg gate.
     pub const WITH_CUDA: &'static [Platform] = &[Platform::WindowsX64, Platform::LinuxX64];
 
-    /// The lone target with the Apple-native Core ML / ANE (FluidAudio) model sets.
-    pub const APPLE_NATIVE: &'static [Platform] = &[Platform::MacArm64];
+    /// The lone target with the MLX Audio model sets.
+    pub const APPLE_MLX: &'static [Platform] = &[Platform::MacArm64];
 
     /// Both macOS targets — assets the mac app uses regardless of arch (the SepFormer
-    /// speaker-lock separator; the lock code is macOS-only, but not ANE-bound).
+    /// speaker-lock separator; the lock code is macOS-only, but not MLX-bound).
     pub const MACS: &'static [Platform] = &[Platform::MacArm64, Platform::MacX64];
 }
 
@@ -392,7 +393,7 @@ pub const fn current_platform() -> Platform {
         Platform::MacX64
     }
     // Any target the app doesn't ship: treat as a generic portable target — only the
-    // all-platform model assets apply (the GPU/Apple-native lists exclude it, and the
+    // all-platform model assets apply (the GPU/MLX lists exclude it, and the
     // file-assembly cfg gates below never materialize CUDA/ONNX files there anyway).
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),

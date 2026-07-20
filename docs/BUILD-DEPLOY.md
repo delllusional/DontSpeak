@@ -132,11 +132,13 @@ Missing hook field: log raw stdin at top of `notify` in `main.rs` before
 → default-on still "works", opt-in stays silent. Log `cfg.<field>` and
 `paths.config_toml` before debugging feature logic.
 
-## TTS phoneme cap
+## TTS frontend (Kokoro vs plain-text)
 
-Route text through `ds_tts::g2p::phoneme_batches_for` before backend selection. It
-parses spoken prose (GFM Markdown), normalizes English numbers, runs G2P once, drops
-out-of-vocab phonemes (warn; don't fail the utterance), returns batches ≤ 509 phoneme
-chars. Empty list = successful no-op. Cap is 509 (not 510) because style table rows
-are `0..=509` indexed by token count. Both ONNX and Core ML consume those IPA batches
-— no backend-local G2P/splitter.
+Kokoro only: `ds_tts::g2p::phoneme_batches_for` before backend selection — GFM prose,
+English number expansion, G2P once, drop OOV phonemes (warn), batches ≤ 509 IPA chars.
+Empty list = successful no-op. Cap is 509 (not 510) because style table rows are
+`0..=509` by token count. Both ONNX and MLX Kokoro consume those IPA batches.
+
+Chatterbox / Qwen / OmniVoice: shared markdown→prose then plain-text chunks
+(`ds_tts::chatterbox::frontend`); model-side tokenization stays in each pipeline.
+See [TTS-PIPELINE.md](TTS-PIPELINE.md).

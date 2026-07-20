@@ -35,7 +35,7 @@ fn sinkless_helper_rejects_tts_load_and_speak() {
     let load = recv();
     writeln!(
         stdin,
-        r#"{{"op":"speak","voice":"af_sarah","rate":1.0,"text":"hello"}}"#
+        r#"{{"op":"speak","voice":"af_sarah","language":"en","rate":1.0,"text":"hello"}}"#
     )
     .unwrap();
     let speak = recv();

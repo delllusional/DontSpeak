@@ -51,13 +51,23 @@ fn helper_command() -> std::ffi::OsString {
 /// Spawn `ds-helper <txt> <voice> <rate>` in own process group; record pgid.
 /// Shared by speak / ds-speak / ds-narrate (single spawn site).
 pub fn spawn(paths: &Paths, txt: &str, voice: &str, rate: f32) -> std::io::Result<(Child, i32)> {
+    // Mirror the warm helper's set-or-remove env contract (dontspeakd child_env): set
+    // the config-resolved provider, clear the serve-mode vars — a one-shot helper must
+    // not inherit STT/duplex/preload behavior from an ambient environment.
+    let cfg = ds_config::VoiceConfig::load(paths);
     let mut cmd = Command::new(helper_command());
     cmd.arg(txt)
         .arg(voice)
         .arg(format!("{rate}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        .env("DONTSPEAK_TTS_MODEL", "kokoro")
+        .env("DONTSPEAK_PROVIDER", cfg.tts_provider_token())
+        .env_remove("DONTSPEAK_STT_PROVIDER")
+        .env_remove("DONTSPEAK_FULL_DUPLEX")
+        .env_remove("DONTSPEAK_STT_PRELOAD")
+        .env_remove("DONTSPEAK_TTS_PRELOAD");
 
     #[cfg(unix)]
     crate::system::set_new_pgroup(&mut cmd);

@@ -17,12 +17,12 @@
 /// Live utterance segmentation (speech→silence) for streaming dictation.
 pub mod boundary;
 pub mod claude_native;
-/// FluidAudio Parakeet Core ML / ANE STT. macOS only.
-#[cfg(target_os = "macos")]
-pub mod coreml;
-/// Speaker diarization ("who spoke when") — trait + Core ML backend (macOS).
+/// Speaker diarization ("who spoke when") — trait + MLX backend (macOS).
 pub mod diarize;
 pub mod local;
+/// MLX Audio Parakeet STT. macOS only.
+#[cfg(target_os = "macos")]
+pub mod mlx;
 pub mod parakeet;
 pub mod separate;
 /// Cache-aware STREAMING FastConformer over `ort` (each frame encoded once).

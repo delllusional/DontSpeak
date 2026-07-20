@@ -8,7 +8,7 @@ use super::cmdline::command_is_ours;
 use serde_json::{Map, Value, json};
 
 /// `(event, command)` pairs Hermes consent needs for our wired shell hooks.
-/// Delegates to [`super::hermes_hooks::desired_hook_commands`] so allowlist and
+/// Delegates to `hermes_hooks::desired_hook_commands` so allowlist and
 /// `hooks:` cannot drift (exact match is Hermes' non-TTY registration key).
 pub fn desired_approvals(bin: &str, client: ds_client::ClientSource) -> Vec<(String, String)> {
     super::hermes_hooks::desired_hook_commands(bin, client)
@@ -64,10 +64,7 @@ pub fn merge_hermes_allowlist(
     arr.retain(|e| !approval_is_ours(e));
     for (event, command) in desired {
         // Avoid duplicating an identical user-approved entry we already left.
-        if arr
-            .iter()
-            .any(|e| approval_matches(e, &event, &command))
-        {
+        if arr.iter().any(|e| approval_matches(e, &event, &command)) {
             continue;
         }
         arr.push(json!({ "event": event, "command": command }));

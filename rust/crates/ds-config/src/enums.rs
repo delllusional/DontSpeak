@@ -46,7 +46,7 @@ impl SttEngine {
     }
 
     /// Usable on this build/platform? Ladder predicate ([`crate::VoiceConfig::resolved_stt`]).
-    /// Static only — runtime model/auth still apply. `built_in` needs ONNX/Core-ML; `system`
+    /// Static only — runtime model/auth still apply. `built_in` needs MLX or ONNX; `system`
     /// macOS-only; `claude_code` always.
     pub fn is_stt_usable(self) -> bool {
         // Intel mac: built-in ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
@@ -83,7 +83,7 @@ impl SttEngine {
     }
 }
 
-/// TTS backend. Config token `built_in`; brand `kokoro` only via [`brand`](TtsEngine::brand).
+/// TTS backend. `built_in` hosts the model selected by [`crate::TtsModel`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TtsEngine {
     #[default]
@@ -103,7 +103,7 @@ impl TtsEngine {
         }
     }
 
-    /// Config TOKEN (`built_in` / `system`); brand name is [`brand`](TtsEngine::brand).
+    /// Config token (`built_in` / `system`).
     pub fn as_str(self) -> &'static str {
         match self {
             TtsEngine::BuiltIn => "built_in",
@@ -112,9 +112,9 @@ impl TtsEngine {
     }
 
     /// Usable on this build/platform? ([`crate::VoiceConfig::resolved_tts`]).
-    /// `built_in` needs ONNX/Core-ML; `system` macOS+Windows only.
+    /// `built_in` needs MLX or ONNX; `system` macOS+Windows only.
     pub fn is_tts_usable(self) -> bool {
-        // Intel mac: Kokoro ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
+        // Intel mac: ONNX synth availability is runtime (Homebrew/ORT_DYLIB_PATH).
         let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
             && matches!(self, TtsEngine::BuiltIn)
             && intel_mac_builtin_ort_available();
@@ -143,14 +143,6 @@ impl TtsEngine {
         match self {
             TtsEngine::BuiltIn => built_in_usable_on(os, arch),
             TtsEngine::System => system_tts_buildable_on(os),
-        }
-    }
-
-    /// Brand/model for listings/status (`kokoro`/`system`); config token is [`Self::as_str`].
-    pub fn brand(self) -> &'static str {
-        match self {
-            TtsEngine::BuiltIn => "kokoro",
-            TtsEngine::System => "system",
         }
     }
 }
@@ -186,18 +178,20 @@ impl ListenMode {
 /// usable rung wins ([`crate::VoiceConfig::resolved_diarizer`]). macOS-only today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiarizerProvider {
-    /// FluidAudio Core ML / ANE (macOS only).
+    /// MLX Audio on Apple Silicon (macOS only).
     #[default]
-    AppleNative,
+    Mlx,
 }
 
 impl DiarizerProvider {
     /// All variants — catalog parity single source.
-    pub const ALL: &'static [DiarizerProvider] = &[DiarizerProvider::AppleNative];
+    pub const ALL: &'static [DiarizerProvider] = &[DiarizerProvider::Mlx];
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "apple_native" => Some(DiarizerProvider::AppleNative),
+            "mlx" => Some(DiarizerProvider::Mlx),
+            // Legacy pre-MLX persisted token: parse-only alias, never emitted.
+            "apple_native" => Some(DiarizerProvider::Mlx),
             _ => None,
         }
     }
@@ -205,20 +199,19 @@ impl DiarizerProvider {
     /// Canonical token (round-trips through `parse()`).
     pub fn as_str(self) -> &'static str {
         match self {
-            DiarizerProvider::AppleNative => "apple_native",
+            DiarizerProvider::Mlx => "mlx",
         }
     }
 
-    /// Platform usable? (`apple_native` = macOS only.)
+    /// Platform usable? (`mlx` = Apple-Silicon macOS only.)
     pub(crate) fn is_diarizer_usable(self) -> bool {
         match self {
-            DiarizerProvider::AppleNative => cfg!(target_os = "macos"),
+            DiarizerProvider::Mlx => cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }
     }
 }
 
-/// Shared compute rung (TTS+STT). Ladder default ANE→CUDA→CPU. `Ort*` = ORT EPs;
-/// `Ane` = FluidAudio native ANE.
+/// Shared compute rung (TTS+STT). Ladder default MLX→CUDA→CPU. `Ort*` = ORT EPs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Provider {
     /// ORT CPU EP — always available.
@@ -226,16 +219,16 @@ pub enum Provider {
     OrtCpu,
     /// ORT CUDA (NVIDIA). May download GPU runtime; STT int8 may fall back per-op.
     OrtCuda,
-    /// ORT CoreML (macOS). TTS only; explicit (often slower than CPU for Kokoro).
+    /// ORT Core ML execution provider (macOS TTS only).
     OrtCoreMl,
-    /// FluidAudio native ANE (distinct from `OrtCoreMl`). Both engines on macOS.
-    Ane,
+    /// Native MLX Metal/CPU backend. Both engines on Apple Silicon.
+    Mlx,
 }
 
 impl Provider {
     /// All variants — catalog parity single source.
     pub const ALL: &'static [Provider] = &[
-        Provider::Ane,
+        Provider::Mlx,
         Provider::OrtCuda,
         Provider::OrtCoreMl,
         Provider::OrtCpu,
@@ -246,7 +239,9 @@ impl Provider {
             "cpu" => Some(Provider::OrtCpu),
             "cuda" => Some(Provider::OrtCuda),
             "coreml" => Some(Provider::OrtCoreMl),
-            "ane" => Some(Provider::Ane),
+            "mlx" => Some(Provider::Mlx),
+            // Legacy pre-MLX persisted token: parse-only alias, never emitted.
+            "ane" => Some(Provider::Mlx),
             _ => None,
         }
     }
@@ -257,20 +252,20 @@ impl Provider {
             Provider::OrtCpu => "cpu",
             Provider::OrtCuda => "cuda",
             Provider::OrtCoreMl => "coreml",
-            Provider::Ane => "ane",
+            Provider::Mlx => "mlx",
         }
     }
 
-    /// STT usable on this platform? (`OrtCoreMl` never STT.) See `resolved_stt_provider`.
+    /// STT usable on this platform? See `resolved_stt_provider`.
     pub(crate) fn is_stt_usable(self) -> bool {
         self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// Pure `(os, arch)` form of STT usability — shares [`ane_usable_on`] with TTS.
+    /// Pure `(os, arch)` form of STT usability — shares [`mlx_usable_on`] with TTS.
     pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             Provider::OrtCpu => true,
-            Provider::Ane => ane_usable_on(os, arch),
+            Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => matches!(os, "windows" | "linux"),
             Provider::OrtCoreMl => false,
         }
@@ -281,19 +276,19 @@ impl Provider {
         self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// Pure `(os, arch)` form of TTS usability (incl. macOS `OrtCoreMl`).
+    /// Pure `(os, arch)` form of TTS usability.
     pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             Provider::OrtCpu => true,
-            Provider::Ane => ane_usable_on(os, arch),
+            Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => matches!(os, "windows" | "linux"),
             Provider::OrtCoreMl => os == "macos",
         }
     }
 }
 
-/// ANE = Apple Silicon only. Shared STT/TTS predicate (diverged ladders left dead `ane` on Intel).
-fn ane_usable_on(os: &str, arch: &str) -> bool {
+/// MLX Audio = Apple Silicon only. Shared STT/TTS predicate.
+fn mlx_usable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
 
@@ -309,9 +304,10 @@ pub enum RealizedProvider {
     Cuda,
     /// Universal fallback.
     Cpu,
+    /// ONNX Runtime Core ML execution provider.
     CoreMl,
-    /// FluidAudio native ANE (macOS).
-    CoreMlAne,
+    /// MLX Audio on Apple Silicon.
+    Mlx,
     /// System STT (no ort).
     System,
 }
@@ -323,7 +319,7 @@ impl RealizedProvider {
             RealizedProvider::Cuda => "CUDA",
             RealizedProvider::Cpu => "CPU",
             RealizedProvider::CoreMl => "CoreML",
-            RealizedProvider::CoreMlAne => "CoreML-ANE",
+            RealizedProvider::Mlx => "MLX",
             RealizedProvider::System => "System",
         }
     }
@@ -333,7 +329,7 @@ impl RealizedProvider {
         match s {
             "CUDA" => RealizedProvider::Cuda,
             "CoreML" => RealizedProvider::CoreMl,
-            "CoreML-ANE" => RealizedProvider::CoreMlAne,
+            "MLX" => RealizedProvider::Mlx,
             "System" => RealizedProvider::System,
             _ => RealizedProvider::Cpu,
         }
@@ -344,7 +340,7 @@ impl RealizedProvider {
         match self {
             RealizedProvider::Cuda => Provider::OrtCuda,
             RealizedProvider::CoreMl => Provider::OrtCoreMl,
-            RealizedProvider::CoreMlAne => Provider::Ane,
+            RealizedProvider::Mlx => Provider::Mlx,
             RealizedProvider::Cpu | RealizedProvider::System => Provider::OrtCpu,
         }
     }
@@ -601,10 +597,10 @@ macro_rules! strict_de {
 strict_de!(SttEngine, "built_in|system|claude_code");
 strict_de!(TtsEngine, "built_in|system");
 strict_de!(ListenMode, "record_submit|always");
-strict_de!(Provider, "cpu|cuda|coreml|ane");
+strict_de!(Provider, "cpu|cuda|coreml|mlx");
 strict_de!(TrayKind, "stt|tts|stt_animated|tts_animated");
 strict_de!(CancelSpeechScope, "current|other");
-strict_de!(DiarizerProvider, "apple_native");
+strict_de!(DiarizerProvider, "mlx");
 strict_de!(NarrateKind, "digests|shorts");
 
 /// Default narrate: shorts + digests. Empty array opts out.
@@ -637,9 +633,9 @@ where
     Ok(normalize_tray(parsed))
 }
 
-/// Default provider ladder: ANE → CUDA → CPU. `OrtCoreMl` explicit-only (not default).
+/// Default provider ladder: MLX → CUDA → CPU.
 pub fn default_provider() -> Vec<Provider> {
-    vec![Provider::Ane, Provider::OrtCuda, Provider::OrtCpu]
+    vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]
 }
 
 /// Fail-open `provider` ladder. Empty/unknown/non-array → [`default_provider`] (always a backend).
@@ -837,7 +833,7 @@ mod tests {
     fn realized_provider_vocabulary_is_stable() {
         use RealizedProvider::*;
         // Exhaustive round-trip (the match forces every variant to be considered).
-        for rp in [Cuda, Cpu, CoreMl, CoreMlAne, System] {
+        for rp in [Cuda, Cpu, CoreMl, Mlx, System] {
             assert_eq!(
                 RealizedProvider::parse(rp.as_str()),
                 rp,
@@ -848,9 +844,20 @@ mod tests {
         assert_eq!(Cuda.as_str(), "CUDA");
         assert_eq!(Cpu.as_str(), "CPU");
         assert_eq!(CoreMl.as_str(), "CoreML");
-        assert_eq!(CoreMlAne.as_str(), "CoreML-ANE");
+        assert_eq!(Mlx.as_str(), "MLX");
+        assert_eq!(RealizedProvider::parse("CoreML-ANE"), Cpu);
         assert_eq!(System.as_str(), "System");
-        // Unknown / casing drift → CPU, never a spurious GPU/ANE claim.
+        // Legacy pre-MLX config tokens parse as MLX aliases but never round-trip: the
+        // canonical token is emitted (asymmetric on purpose — a migration, not a rename).
+        assert_eq!(Provider::parse("ane"), Some(Provider::Mlx));
+        assert_eq!(Provider::Mlx.as_str(), "mlx");
+        assert_eq!(
+            DiarizerProvider::parse("apple_native"),
+            Some(DiarizerProvider::Mlx)
+        );
+        assert_eq!(DiarizerProvider::Mlx.as_str(), "mlx");
+        assert_eq!(Provider::parse("coreml"), Some(Provider::OrtCoreMl));
+        // Unknown / casing drift → CPU, never a spurious accelerated-provider claim.
         assert_eq!(RealizedProvider::parse("cuda"), Cpu);
         assert_eq!(RealizedProvider::parse("Cuda"), Cpu);
         assert_eq!(RealizedProvider::parse(""), Cpu);
@@ -858,7 +865,7 @@ mod tests {
         // Mapping to the config Provider vocabulary (System has no ort rung → CPU).
         assert_eq!(Cuda.to_provider(), Provider::OrtCuda);
         assert_eq!(CoreMl.to_provider(), Provider::OrtCoreMl);
-        assert_eq!(CoreMlAne.to_provider(), Provider::Ane);
+        assert_eq!(Mlx.to_provider(), Provider::Mlx);
         assert_eq!(Cpu.to_provider(), Provider::OrtCpu);
         assert_eq!(System.to_provider(), Provider::OrtCpu);
     }
@@ -911,8 +918,8 @@ mod tests {
         // resolves. This is the whole point of the ladder: Windows / Linux run the built-in
         // (Parakeet) engines for both TTS and STT; macOS (any arch) prefers the OS recognizer
         // for STT (`system` is macOS-only-usable and now sits first in the STT ladder) while
-        // still preferring Kokoro for TTS on Apple Silicon — an x86_64 mac (no ONNX, no arm64
-        // Core-ML stack) falls through to `say` for TTS too.
+        // still preferring Kokoro for TTS on Apple Silicon — an x86_64 mac (no ONNX, no MLX
+        // stack) falls through to `say` for TTS too.
         let resolve_tts = |os: &str, arch: &str| -> Option<TtsEngine> {
             default_tts_engine_ladder()
                 .into_iter()
@@ -984,18 +991,26 @@ mod tests {
     }
 
     #[test]
+    fn legacy_model_token_is_not_an_engine() {
+        assert_eq!(TtsEngine::parse("chatterbox"), None);
+        assert_eq!(
+            parse_tts_ladder(&arr(&["chatterbox", "system"])),
+            vec![TtsEngine::System]
+        );
+    }
+
+    #[test]
     fn provider_usability_matches_across_stt_and_tts() {
         // ONE per-provider usability matrix, asserted for BOTH the STT and TTS ladders, so the
-        // rules can't silently diverge — that divergence (ANE usable for the STT ladder but
-        // meaningless on Intel) is what routed Intel dictation to the dead `ane` rung and its
-        // slow fallback. Columns: expected (is_stt_usable, is_tts_usable) at that (os, arch).
+        // rules can't silently diverge. Columns: expected (is_stt_usable, is_tts_usable)
+        // at that (os, arch).
         use Provider::*;
         let cases = [
-            // ANE — Apple Silicon ONLY, identically for STT and TTS (the shared rule).
-            (Ane, "macos", "aarch64", true, true),
-            (Ane, "macos", "x86_64", false, false),
-            (Ane, "windows", "x86_64", false, false),
-            (Ane, "linux", "aarch64", false, false),
+            // MLX — Apple Silicon only, identically for STT and TTS.
+            (Mlx, "macos", "aarch64", true, true),
+            (Mlx, "macos", "x86_64", false, false),
+            (Mlx, "windows", "x86_64", false, false),
+            (Mlx, "linux", "aarch64", false, false),
             // CPU — the universal rung, every platform, both axes.
             (OrtCpu, "macos", "x86_64", true, true),
             (OrtCpu, "macos", "aarch64", true, true),
@@ -1005,7 +1020,7 @@ mod tests {
             (OrtCuda, "windows", "x86_64", true, true),
             (OrtCuda, "linux", "x86_64", true, true),
             (OrtCuda, "macos", "aarch64", false, false),
-            // CoreML EP — macOS-only AND TTS-only (never STT).
+            // Core ML is an explicit macOS TTS-only ONNX Runtime provider.
             (OrtCoreMl, "macos", "aarch64", false, true),
             (OrtCoreMl, "macos", "x86_64", false, true),
             (OrtCoreMl, "windows", "x86_64", false, false),
@@ -1024,7 +1039,7 @@ mod tests {
         // `cuda` first item degrades gracefully instead of dead-ending. This is the
         // cross-platform analogue of the live `model_status` check (which showed `cpu` on macOS).
         let ladder = [Provider::OrtCuda, Provider::OrtCpu];
-        // arch is irrelevant for CUDA/CPU; pin one for the walk (Ane arch-gating is tested below).
+        // arch is irrelevant for CUDA/CPU; pin one for the walk (MLX arch-gating is tested below).
         let resolve_tts = |os: &str| {
             ladder
                 .iter()
@@ -1056,7 +1071,7 @@ mod tests {
                 .find(|p| p.tts_usable_on("macos", "aarch64")),
             None
         );
-        // (The ANE Apple-Silicon rule and full per-provider matrix live in
+        // (The MLX Apple-Silicon rule and full per-provider matrix live in
         // `provider_usability_matches_across_stt_and_tts` — one table, both axes.)
         // Host agreement: the cfg-gated host fns must match the pure `_on` for THIS (os, arch),
         // so the two never drift (the live engine walks the host fns).

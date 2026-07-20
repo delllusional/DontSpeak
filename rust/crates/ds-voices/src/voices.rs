@@ -54,45 +54,6 @@ pub fn voice_names(bytes: &[u8]) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// Raw little-endian f32 bytes of ONE voice's pack — no float decode, without
-/// parsing the other 53 voices. Npz stores each voice UNCOMPRESSED as contiguous
-/// `<f4` C-order payload, so this is a byte-for-byte slice (verified against
-/// shipped `af_heart.bin`) and what FluidAudio's ANE backend expects in
-/// `<voice>.bin`. Errors if voice absent or npz malformed.
-pub fn voice_pack_bytes(npz: &[u8], voice: &str) -> Result<Vec<u8>, String> {
-    let target = format!("{voice}.npy");
-    let eocd = find_eocd(npz)?;
-    let count = u16(npz, eocd + 10)? as usize;
-    let mut offset = u32(npz, eocd + 16)? as usize;
-    for _ in 0..count {
-        if u32(npz, offset)? != 0x0201_4b50 {
-            return Err("bad central directory entry".into());
-        }
-        let method = u16(npz, offset + 10)?;
-        let size = u32(npz, offset + 24)? as usize;
-        let name_len = u16(npz, offset + 28)? as usize;
-        let extra_len = u16(npz, offset + 30)? as usize;
-        let comment_len = u16(npz, offset + 32)? as usize;
-        let local_offset = u32(npz, offset + 42)? as usize;
-        let name = decode_str(npz, offset + 46, offset + 46 + name_len)?;
-        if name == target {
-            if method != 0 {
-                return Err(format!(
-                    "voices npz entry {name} is compressed; expected stored"
-                ));
-            }
-            // Local header sizes may be 0 (streaming); trust the central directory.
-            let local_name_len = u16(npz, local_offset + 26)? as usize;
-            let local_extra_len = u16(npz, local_offset + 28)? as usize;
-            let data_start = local_offset + 30 + local_name_len + local_extra_len;
-            let (from, to) = npy_payload_range(npz, data_start, size)?;
-            return Ok(npz[from..to].to_vec());
-        }
-        offset += 46 + name_len + extra_len + comment_len;
-    }
-    Err(format!("voice {voice:?} not found in voices npz"))
-}
-
 /// 256-float style row for a token count (port of Kokoro
 /// `style.copyOfRange(tokens.size * 256, (tokens.size + 1) * 256)` /
 /// kokoro-onnx `_create_audio`). `style` is the 510*256 per-voice array;
@@ -132,7 +93,7 @@ fn find_eocd(bytes: &[u8]) -> Result<usize, String> {
 
 /// Validate npy header at `start` and return `[from, to)` of the LE f32 payload.
 /// `size` is the stored entry size from the zip central directory. Shared by
-/// float-decoding [`parse_npy_floats`] and zero-decode [`voice_pack_bytes`].
+/// float-decoding [`parse_npy_floats`].
 fn npy_payload_range(bytes: &[u8], start: usize, size: usize) -> Result<(usize, usize), String> {
     if start + 10 > bytes.len() {
         return Err("npy entry truncated".into());
@@ -328,40 +289,5 @@ mod tests {
     fn rejects_non_zip() {
         assert!(parse_voices_npz(b"not a zip at all").is_err());
         assert!(parse_voices_npz(&[]).is_err());
-    }
-
-    #[test]
-    fn voice_pack_bytes_extracts_exact_le_f32_payload() {
-        // Distinct value per float so the slice is checkable byte-for-byte
-        // (what `ane_voices::materialize` writes as `<voice>.bin`).
-        let n = 510 * 256;
-        let floats: Vec<f32> = (0..n).map(|i| i as f32).collect();
-        let npz = build_npz("af_nicole", &floats);
-
-        let pack = voice_pack_bytes(&npz, "af_nicole").expect("voice extracted");
-        // 510*256 LE f32 = 522_240 bytes — FluidAudio ANE `.bin` layout.
-        assert_eq!(pack.len(), 510 * 256 * 4);
-        let mut expected = Vec::with_capacity(pack.len());
-        for f in &floats {
-            expected.extend_from_slice(&f.to_le_bytes());
-        }
-        assert_eq!(
-            pack, expected,
-            "extracted bytes must equal the LE f32 payload"
-        );
-        let row3 = 3 * 256 * 4;
-        assert_eq!(
-            f32::from_le_bytes([pack[row3], pack[row3 + 1], pack[row3 + 2], pack[row3 + 3]]),
-            (3 * 256) as f32
-        );
-    }
-
-    #[test]
-    fn voice_pack_bytes_unknown_voice_errs() {
-        let npz = build_npz("af_sarah", &vec![0.0f32; 510 * 256]);
-        assert!(
-            voice_pack_bytes(&npz, "af_nicole").is_err(),
-            "a voice absent from the npz must error, not silently succeed"
-        );
     }
 }

@@ -12,8 +12,7 @@ use ds_stt::Stt;
 
 use crate::config_gate::{
     build_stt, caps_loop_enabled, full_duplex_wanted, helper_needed, helper_stt_provider,
-    helper_uses_stt, helper_uses_tts, local_stt_available, normalize_long_press,
-    reconcile_helper_models,
+    helper_uses_stt, local_stt_available, normalize_long_press, reconcile_helper_models,
 };
 use crate::listener;
 use crate::status::StatusGate;
@@ -578,7 +577,8 @@ impl<P: Platform + 'static> Engine<P> {
             tts.set_full_duplex_pref(full_duplex_wanted(cfg));
             tts.set_stt_provider_pref(helper_stt_provider(cfg));
             tts.set_stt_wanted(helper_uses_stt(cfg));
-            tts.set_tts_wanted(helper_uses_tts(cfg));
+            tts.set_tts_wanted(crate::config_gate::helper_preloads_tts(cfg));
+            tts.set_tts_selection(cfg.tts_model);
             // Seed provider before first `set_enabled` — autofetch applies resolved EP only
             // after `daemon.reload` returns (`boot::engine_run` / ReloadTick). Same as boot.
             tts.set_provider(cfg.resolved_tts_provider().as_str());
@@ -2622,7 +2622,10 @@ mod tests {
         d.gesture = GestureState::Recording;
 
         let cfg = VoiceConfig {
-            tts_voices: vec!["am_michael".into()],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["am_michael".into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
         d.reload(&cfg);
@@ -3114,16 +3117,16 @@ mod tests {
         // `change.stt_changed` as the one thing that differs from the first reload. `OrtCuda`
         // is a no-op ladder switch on macOS (`Provider::stt_usable_on` gates it to
         // windows/linux, so it silently re-resolves to `OrtCpu` there — caught on real macOS
-        // hardware, see #31); `Ane` is the macOS-genuine transition instead (gated to
+        // hardware, see #31); `Mlx` is the macOS-genuine transition instead (gated to
         // macOS+aarch64, which is this crate's macOS CI/dev floor). On Intel macOS neither
-        // rung is STT-usable (`ane_usable_on` is arm64-only, see ds-config), so there is no
+        // rung is STT-usable (`mlx_usable_on` is arm64-only, see ds-config), so there is no
         // other provider to switch to — skip there rather than assert a transition that can't
         // happen, matching how ds-config's own `provider_resolution_walks_the_ladder_per_platform`
         // test gates its Apple-Silicon-only assertions.
         #[cfg(any(not(target_os = "macos"), target_arch = "aarch64"))]
         {
             #[cfg(target_os = "macos")]
-            let (new_provider, want_token) = (ds_config::Provider::Ane, "ane");
+            let (new_provider, want_token) = (ds_config::Provider::Mlx, "mlx");
             #[cfg(not(target_os = "macos"))]
             let (new_provider, want_token) = (ds_config::Provider::OrtCuda, "cuda");
             cfg.provider = vec![new_provider];

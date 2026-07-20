@@ -3,7 +3,7 @@ build-portable.ps1 — produce the SELF-CONTAINED, no-install DontSpeak portable
 
 Bundles EVERYTHING needed to run with zero install: the WinUI app + the .NET 10 runtime +
 the Windows App SDK (all self-contained) + the native engine DLL/helper + the merged
-dontspeak bin + canonical uninstaller + ALL voice models (Kokoro + Parakeet + onnxruntime)
+dontspeak bin + canonical uninstaller + default speech models (Kokoro + Parakeet + onnxruntime)
 under a sibling `models\` dir. The app auto-detects that dir on launch (App.EnablePortableModelDir → DONTSPEAK_MODEL_DIR),
 so an EXTRACTED copy runs fully offline — no .NET / Windows App Runtime install, no model
 download.
@@ -70,7 +70,7 @@ Copy-Item "$repo\NOTICE.md" "$stage\NOTICE.md" -Force
 New-Item -ItemType Directory -Force "$stage\licenses" | Out-Null
 Copy-Item "$repo\licenses\*" "$stage\licenses\" -Force
 
-Write-Host "==> 3/4  prefetch ALL models → $stage\models (Kokoro + Parakeet + onnxruntime, no CUDA)" -ForegroundColor Cyan
+Write-Host "==> 3/4  prefetch default models → $stage\models (Kokoro + Parakeet + onnxruntime, no CUDA)" -ForegroundColor Cyan
 $models = "$stage\models"
 New-Item -ItemType Directory -Force $models | Out-Null
 if ($SkipModels) {

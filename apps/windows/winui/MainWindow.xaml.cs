@@ -732,8 +732,14 @@ public sealed partial class MainWindow : Window
             case "system":
                 TtsDetail.Text = Loc.T("status.engine.system");
                 ApplyEngine(s.TtsEngine.Status, TtsDot, TtsRing); break;
-            case "built_in":
-                TtsDetail.Text = Loc.T("status.engine.kokoro");
+            case "built_in" when s.TtsEngine.Model is { } model:
+                TtsDetail.Text = model switch
+                {
+                    TtsModel.Chatterbox => Loc.T("status.engine.chatterbox"),
+                    TtsModel.Qwen => Loc.T("status.engine.qwen"),
+                    TtsModel.OmniVoice => Loc.T("status.engine.omnivoice"),
+                    _ => Loc.T("status.engine.kokoro"),
+                };
                 ApplyEngine(s.TtsEngine.Status, TtsDot, TtsRing); break;
             default: // "off" and anything unexpected
                 TtsDetail.Text = "";
@@ -819,7 +825,7 @@ public sealed partial class MainWindow : Window
                 DiarRuntimeRow.Visibility = s.Diarization.Runtime.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
                 if (s.Diarization.Runtime.Length > 0) DiarRuntimeText.Text = Native.RuntimeLabel(s.Diarization.Runtime);
                 DiarEnrolled.Text = string.Join(", ", s.Diarization.Speakers);
-                DiarSensitivity.Text = s.Diarization.ClusteringThreshold.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+                DiarSensitivity.Text = s.Diarization.ActivityThreshold.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
             }
         }
 
@@ -1111,6 +1117,35 @@ public sealed partial class MainWindow : Window
             if (usage.Length > 0)
                 body.Children.Add(new TextBlock { Text = usage, TextWrapping = TextWrapping.Wrap, Opacity = 0.75 });
 
+            var languages = p.Languages ?? new List<string>();
+            if (languages.Count > 0 || p.LanguageCount is not null)
+            {
+                body.Children.Add(new TextBlock
+                {
+                    Text = Loc.T("libraries.languages").ToUpperInvariant(),
+                    FontSize = 11,
+                    FontWeight = FontWeights.SemiBold,
+                    Opacity = 0.5,
+                    CharacterSpacing = 60,
+                });
+                var languageSummary = p.AutomaticLanguageDetection && p.LanguageCount is long count
+                    ? Loc.T("libraries.automatic_languages", new Dictionary<string, string>
+                    {
+                        ["count"] = count.ToString("N0", CultureInfo.CurrentCulture),
+                    })
+                    : string.Join(", ", languages
+                        .Where(code => !string.Equals(code, "auto", StringComparison.Ordinal))
+                        .Select(code => Loc.T($"language.{code}")));
+                body.Children.Add(new TextBlock
+                {
+                    Text = languageSummary,
+                    TextWrapping = TextWrapping.Wrap,
+                    Opacity = 0.75,
+                });
+                if (!string.IsNullOrEmpty(p.LanguageListUrl) && Uri.TryCreate(p.LanguageListUrl, UriKind.Absolute, out var languageList))
+                    body.Children.Add(new HyperlinkButton { Content = Loc.T("libraries.full_language_list"), NavigateUri = languageList, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
+            }
+
             var links = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 16 };
             if (!string.IsNullOrEmpty(p.Homepage) && Uri.TryCreate(p.Homepage, UriKind.Absolute, out var hp))
                 links.Children.Add(new HyperlinkButton { Content = Loc.T("libraries.homepage"), NavigateUri = hp, Padding = new Thickness(0), MinWidth = 0, MinHeight = 0 });
@@ -1173,6 +1208,10 @@ public sealed partial class MainWindow : Window
         [property: JsonPropertyName("homepage")] string? Homepage,
         [property: JsonPropertyName("license")] string? License,
         [property: JsonPropertyName("license_url")] string? LicenseUrl,
+        [property: JsonPropertyName("languages")] List<string>? Languages,
+        [property: JsonPropertyName("language_count")] long? LanguageCount,
+        [property: JsonPropertyName("automatic_language_detection")] bool AutomaticLanguageDetection,
+        [property: JsonPropertyName("language_list_url")] string? LanguageListUrl,
         [property: JsonPropertyName("files")] List<LicenseFileDto>? Files);
 
     private sealed record LicenseFileDto(

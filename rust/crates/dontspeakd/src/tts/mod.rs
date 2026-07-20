@@ -1,4 +1,4 @@
-//! Warm `ds-helper --serve` owner (Kokoro + Parakeet residency).
+//! Warm `ds-helper --serve` owner for built-in TTS and local STT residency.
 //!
 //! Enable spawns, disable kills. Full-duplex: one reader demuxes stdout into
 //! [`SpeakSlot`] / [`ListenSlot`]; `stop` needs only the brief stdin lock.
@@ -35,9 +35,13 @@ fn helper_stderr(engine_log_file: &std::path::Path) -> Stdio {
 }
 
 /// `Some` set, `None` clear (block ambient `DONTSPEAK_*` leak).
-fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
+fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 6] {
     [
         ("DONTSPEAK_PROVIDER", Some(prefs.provider.clone())),
+        (
+            "DONTSPEAK_TTS_MODEL",
+            Some(prefs.tts_model.as_str().to_string()),
+        ),
         ("DONTSPEAK_STT_PROVIDER", Some(prefs.stt_provider.clone())),
         (
             "DONTSPEAK_FULL_DUPLEX",
@@ -58,11 +62,12 @@ fn child_env(prefs: &SpawnPrefs) -> [(&'static str, Option<String>); 5] {
 #[derive(Clone)]
 struct SpawnPrefs {
     provider: String,
+    tts_model: ds_config::TtsModel,
     stt_provider: String,
     full_duplex: bool,
     /// `DONTSPEAK_STT_PRELOAD` — provider alone is not on/off.
     stt_preload: bool,
-    /// Kokoro + output open (STT-only helper skips).
+    /// Built-in TTS + output open (STT-only helper skips).
     tts_preload: bool,
 }
 
@@ -146,6 +151,7 @@ pub struct TtsManager {
     full_duplex_active: Mutex<bool>,
     stt_provider_active: Mutex<String>,
     tts_wanted_active: Mutex<bool>,
+    tts_selection_active: Mutex<Option<ds_config::TtsModel>>,
     /// Arc so reader unloads on unexpected EOF.
     tts_model: Arc<ModelSlot>,
     stt_model: Arc<ModelSlot>,
@@ -244,7 +250,8 @@ impl TtsManager {
             stt_realized: Arc::new(Mutex::new("CPU".to_string())),
             spawn_prefs: Mutex::new(SpawnPrefs {
                 provider: "auto".to_string(),
-                stt_provider: "ane".to_string(),
+                tts_model: ds_config::TtsModel::Kokoro,
+                stt_provider: "mlx".to_string(),
                 full_duplex: false,
                 stt_preload: false,
                 tts_preload: false,
@@ -252,6 +259,7 @@ impl TtsManager {
             full_duplex_active: Mutex::new(false),
             stt_provider_active: Mutex::new(String::new()),
             tts_wanted_active: Mutex::new(false),
+            tts_selection_active: Mutex::new(None),
             tts_model: Arc::new(ModelSlot::new()),
             stt_model: Arc::new(ModelSlot::new()),
             muted: AtomicBool::new(false),
@@ -319,31 +327,43 @@ impl TtsManager {
         self.provider.lock().unwrap().clone()
     }
 
-    /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"CoreML-ANE"/"System"), from
+    /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"MLX"/"System"), from
     /// its `STT_PROVIDER` line — what the STT sessions ACTUALLY loaded on, the STT counterpart to
     /// [`provider`](Self::provider). "CPU" until a child reports otherwise.
     pub fn stt_realized_provider(&self) -> String {
         self.stt_realized.lock().unwrap().clone()
     }
 
-    /// Switch the execution-provider preference ("auto"|"cpu"|"cuda"|"coreml"|"ane"). Restarts
+    pub fn selected_tts_model(&self) -> ds_config::TtsModel {
+        self.spawn_prefs.lock().unwrap().tts_model
+    }
+
+    /// Switch the execution-provider preference ("auto"|"cpu"|"cuda"|"coreml"|"mlx"). Restarts
     /// the warm child ONLY when the RESOLVED provider differs from the active one
     /// (so picking "auto" while already on CPU is a no-op). Returns true if it
     /// actually restarted — the caller then resets the TTS stats.
     pub fn set_provider(&self, which: &str) -> bool {
-        self.spawn_prefs.lock().unwrap().provider = which.to_string();
-        let resolved = Self::resolve_provider(which);
+        let (model, tts_preload) = {
+            let mut prefs = self.spawn_prefs.lock().unwrap();
+            prefs.provider = which.to_string();
+            (prefs.tts_model, prefs.tts_preload)
+        };
+        let resolved = Self::resolve_provider(which, model);
         if !self.is_running() {
             return false; // takes effect on next start; nothing active to change
         }
-        if resolved == ds_config::RealizedProvider::parse(&self.provider()) {
-            return false; // already running on this provider
+        if !provider_restart_needed(
+            tts_preload,
+            resolved,
+            ds_config::RealizedProvider::parse(&self.provider()),
+        ) {
+            return false; // same provider, or no ready TTS model is resident
         }
         self.restart_child();
         true
     }
 
-    /// Restart warm child + reset both engines' stats (shared Kokoro+Parakeet process).
+    /// Restart warm child + reset both engines' stats (shared built-in TTS+Parakeet process).
     fn restart_child(&self) {
         // Debounce rapid config churn; sleep with last_restart unlocked.
         const MIN_RESTART_GAP: std::time::Duration = std::time::Duration::from_secs(1);
@@ -433,9 +453,14 @@ impl TtsManager {
         self.spawn_prefs.lock().unwrap().stt_preload = wanted;
     }
 
-    /// Kokoro/output preload pref for next start.
+    /// Built-in TTS/output preload pref for next start.
     pub fn set_tts_wanted(&self, wanted: bool) {
         self.spawn_prefs.lock().unwrap().tts_preload = wanted;
+    }
+
+    /// Built-in model for the next child. Language is supplied per utterance.
+    pub fn set_tts_selection(&self, model: ds_config::TtsModel) {
+        self.spawn_prefs.lock().unwrap().tts_model = model;
     }
 
     /// Restart if running prefs mismatch (fd / STT provider / tts_preload). Safe every reload.
@@ -447,41 +472,83 @@ impl TtsManager {
         let prefs = self.spawn_prefs.lock().unwrap().clone();
         let fd_stale = prefs.full_duplex != *self.full_duplex_active.lock().unwrap();
         let stt_stale = prefs.stt_provider != *self.stt_provider_active.lock().unwrap();
-        let tts_stale = prefs.tts_preload != *self.tts_wanted_active.lock().unwrap();
-        if !fd_stale && !stt_stale && !tts_stale {
+        let tts_stale =
+            tts_preload_restart_needed(prefs.tts_preload, *self.tts_wanted_active.lock().unwrap());
+        let selection_stale = prefs.tts_preload
+            && Self::tts_assets_ready(&prefs)
+            && Some(prefs.tts_model) != *self.tts_selection_active.lock().unwrap();
+        if !fd_stale && !stt_stale && !tts_stale && !selection_stale {
             return;
         }
         self.restart_child();
     }
 
     /// Resolved EP the child will report (cuda only if runtime present — no restart loop).
-    fn resolve_provider(which: &str) -> ds_config::RealizedProvider {
-        use ds_config::RealizedProvider;
-        if which.eq_ignore_ascii_case("coreml") {
-            return RealizedProvider::CoreMl;
-        }
-        // ane/auto → ANE only with shim; else CPU (match child, avoid needless restart).
+    fn resolve_provider(which: &str, model: ds_config::TtsModel) -> ds_config::RealizedProvider {
         #[cfg(target_os = "macos")]
-        if which.eq_ignore_ascii_case("ane") || which.eq_ignore_ascii_case("auto") {
-            let have_dylib = std::env::var_os("DSKOKORO_DYLIB_PATH")
-                .map(|p| std::path::Path::new(&p).exists())
-                .unwrap_or(false);
-            return if have_dylib {
-                RealizedProvider::CoreMlAne
-            } else {
-                RealizedProvider::Cpu
-            };
-        }
+        let mlx_available = Some(
+            std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH")
+                .is_some_and(|path| std::path::Path::new(&path).exists()),
+        );
+        #[cfg(not(target_os = "macos"))]
+        let mlx_available = None;
+
         #[cfg(all(
             any(target_os = "windows", target_os = "linux"),
             target_arch = "x86_64"
         ))]
+        let cuda_available = ds_model::is_cuda_runtime_present();
+        #[cfg(not(all(
+            any(target_os = "windows", target_os = "linux"),
+            target_arch = "x86_64"
+        )))]
+        let cuda_available = false;
+
+        Self::resolve_provider_with_availability(which, model, mlx_available, cuda_available)
+    }
+
+    fn resolve_provider_with_availability(
+        which: &str,
+        model: ds_config::TtsModel,
+        mlx_available: Option<bool>,
+        cuda_available: bool,
+    ) -> ds_config::RealizedProvider {
+        use ds_config::RealizedProvider;
+        let descriptor = model.descriptor();
+        if which.eq_ignore_ascii_case("coreml")
+            && descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
         {
-            if ds_config::provider_pref_wants_gpu(which) && ds_model::is_cuda_runtime_present() {
-                return RealizedProvider::Cuda;
-            }
+            return RealizedProvider::CoreMl;
+        }
+        if let Some(mlx_available) = mlx_available
+            && (which.eq_ignore_ascii_case("mlx") || which.eq_ignore_ascii_case("auto"))
+            && descriptor.supports_provider(ds_config::Provider::Mlx)
+        {
+            return if mlx_available {
+                RealizedProvider::Mlx
+            } else {
+                RealizedProvider::Cpu
+            };
+        }
+        if descriptor.wants_cuda(which) && cuda_available {
+            return RealizedProvider::Cuda;
         }
         RealizedProvider::Cpu
+    }
+
+    fn tts_assets_ready(prefs: &SpawnPrefs) -> bool {
+        let model = prefs.tts_model;
+        if Self::resolve_provider(&prefs.provider, model) == ds_config::RealizedProvider::Mlx {
+            let frontend_ready = model != ds_config::TtsModel::Kokoro
+                || crate::config_gate::kokoro_g2p_files_present();
+            frontend_ready
+                && ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(model))
+        } else {
+            ds_model::tts_model_files_present(model)
+                && ds_model::onnxruntime_dylib_path()
+                    .map(|path| path.is_file())
+                    .unwrap_or(false)
+        }
     }
 
     /// True when a warm child is running.
@@ -489,32 +556,22 @@ impl TtsManager {
         self.child.is_running()
     }
 
-    /// The last warm-child start failure, if the most recent start attempt failed
-    /// and TTS is still on (cleared on a successful start or when toggled off).
     pub fn last_error(&self) -> Option<String> {
         self.last_error.lock().unwrap().clone()
     }
 
-    /// Set the last-start-failure message and, on a REAL change (a fresh error, or a
-    /// different one), bump the status-push gate — `last_error` is surfaced per-engine
-    /// in `model_status`, so without this a blocked `WaitModelStatus` never learns a
-    /// start failed until an unrelated event happens to bump the gate (same bug class
-    /// as the caps status dot going stale across an Accessibility grant; see
-    /// [`crate::engine::Engine::set_caps_gate`]).
     fn set_error(&self, msg: impl Into<String>) {
         let msg = msg.into();
         let mut guard = self.last_error.lock().unwrap();
         if guard.as_deref() != Some(msg.as_str()) {
             *guard = Some(msg);
             drop(guard);
+            // Bump status gate only when the error text changes (WaitModelStatus).
             if let Some(gate) = self.gate.get() {
                 gate.bump();
             }
         }
     }
-    /// Clear the last-start-failure message and, on a REAL change (an error WAS set),
-    /// bump the status-push gate so a resolved error reflects live — the mirror of
-    /// [`set_error`](Self::set_error).
     fn clear_error(&self) {
         let mut guard = self.last_error.lock().unwrap();
         if guard.take().is_some() {
@@ -525,8 +582,6 @@ impl TtsManager {
         }
     }
 
-    /// Apply the `tts_enabled` toggle: start the warm child (on) or kill it (off).
-    /// Idempotent — re-applying the same state is a no-op.
     pub fn set_enabled(&self, on: bool) {
         if on {
             self.ensure_started();
@@ -535,9 +590,6 @@ impl TtsManager {
         }
     }
 
-    /// Start the warm child if it isn't already running. Used by voice preview so
-    /// auditioning works even when TTS replies are toggled off (the Settings
-    /// window is actively driving it). No-op when already running.
     pub fn ensure_started(&self) {
         if !self.is_running() {
             self.start();
@@ -568,47 +620,23 @@ impl TtsManager {
         // guard must never be held across the blocking spawn+read-loop that follows.
         let prefs = self.spawn_prefs.lock().unwrap().clone();
 
-        // CHEAP, is_file()-only Kokoro presence gate, resolved per-backend from `prefs` (NOT a
-        // fresh VoiceConfig re-read — start_locked has no cfg; boot/reload keep `spawn_prefs`
-        // current, see the provider-freshness fix in boot.rs/engine.rs). Skips the spawn on a
-        // fresh install / provider switch instead of paying the guaranteed-fail transient
-        // ("kokoro model not downloaded" / "dsk_init failed") — `reload_models` (unchanged)
-        // performs the sole, successful start once the background fetch lands.
-        //
-        // Kokoro presence is checked here whenever `prefs.tts_preload` is set (mirrors
-        // serve.rs's own `tts_wanted` gate on `load_backend()`/the output device — an
-        // STT-only helper never touches either). When TTS IS wanted, a missing/mismatched
-        // Kokoro asset set is FATAL to the WHOLE child (serve.rs's `_exit(1)`), mirroring
-        // `status.rs`'s own `kokoro_present` computation. Parakeet is deliberately NOT gated
-        // here: its preload is genuinely conditional
-        // (DONTSPEAK_STT_PRELOAD) and a failed preload is non-fatal (STTLOADERR, no `_exit`) —
-        // the child boots fine either way, and the existing per-model
-        // `stt_load_error`/ModelSlot machinery already reports it correctly. Gating on Parakeet
-        // too would incorrectly block a healthy Kokoro from starting whenever only Parakeet's
-        // download is still pending.
-        let kokoro_apple_native =
-            Self::resolve_provider(&prefs.provider) == ds_config::RealizedProvider::CoreMlAne;
-        let kokoro_ready = if kokoro_apple_native {
-            ds_model::coreml_repo::is_coreml_set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
-                && crate::config_gate::kokoro_g2p_files_present()
-        } else {
-            crate::config_gate::kokoro_onnx_files_present()
-        };
-        if prefs.tts_preload && !kokoro_ready {
+        let tts_ready = Self::tts_assets_ready(&prefs);
+        if prefs.tts_preload && !tts_ready {
             // Mirrors every OTHER early-return below (spawn error, missing stdio, ERR line):
             // set_error() so `warm_child_heal_action` sees error=true and resolves to
             // `HealAction::Nothing` — a Caps-Lock-triggered `restart_if_crashed` must NOT retry
             // this doomed spawn on every tap; only the download-completion hook retries it, once,
             // when the fetch actually lands. Safe for the status UI: `combined_error` only
             // surfaces a model's `last_error` while that SAME model reads `present` — false here
-            // by construction — so the Kokoro row shows "Missing" (offer Download), never a
+            // by construction — so the TTS row shows "Missing" (offer Download), never a
             // stale "Failed".
             self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
             log::info!(
                 target: "engine",
-                "TTS/STT warm child start skipped — Kokoro model not yet present on disk \
+                "TTS/STT warm child start skipped — {} model not yet present on disk \
                  (provider={}); the background download will restart it automatically once it \
                  finishes",
+                prefs.tts_model.as_str(),
                 prefs.provider
             );
             return;
@@ -622,8 +650,9 @@ impl TtsManager {
             // barge-debug, errors) so the warm child is diagnosable; was discarded.
             .stderr(helper_stderr(&self.helper_log_file));
         // The daemon→helper env contract, resolved from the spawn prefs:
-        //   • DONTSPEAK_PROVIDER      — Kokoro TTS execution provider ("cpu"|"cuda"|…).
-        //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"ane"|…).
+        //   • DONTSPEAK_PROVIDER      — built-in TTS execution provider.
+        //   • DONTSPEAK_TTS_MODEL     — model registry id.
+        //   • DONTSPEAK_STT_PROVIDER  — local STT backend the child serves ("cpu"|"mlx"|…).
         //   • DONTSPEAK_FULL_DUPLEX   — AEC duplex mode (Parakeet+Kokoro only); off ⇒ half-duplex.
         //   • DONTSPEAK_STT_PRELOAD   — preload STT in parallel with the TTS load; only when STT
         //                               is the built-in engine (`stt_provider` alone can't tell —
@@ -677,7 +706,7 @@ impl TtsManager {
         // Wait for READY (model loaded) or ERR (fatal) — bounded by
         // `ready_handshake_timeout()`. A child that fails normally closes stdout (EOF) or
         // prints ERR, but a child that stays ALIVE without ever answering (issue #59 —
-        // ORT/CoreML provider init spinning, the model file on a stalled mount or held by
+        // ORT provider init spinning, the model file on a stalled mount or held by
         // an AV scanner) used to block this loop, and the `lifecycle` lock with it,
         // forever. A pipe read is not portably interruptible, so a dedicated handshake
         // thread owns the `BufReader` and feeds lines over a channel; the main thread
@@ -878,6 +907,7 @@ impl TtsManager {
         *self.full_duplex_active.lock().unwrap() = prefs.full_duplex;
         *self.stt_provider_active.lock().unwrap() = prefs.stt_provider;
         *self.tts_wanted_active.lock().unwrap() = prefs.tts_preload;
+        *self.tts_selection_active.lock().unwrap() = Some(prefs.tts_model);
         // Kokoro is eager-loaded by the helper before READY. STT (Parakeet) now preloads in
         // PARALLEL and reports its own STTLOADED (possibly BEFORE this READY), so we must NOT
         // reset stt_model here — it's initialized before the wait loop and set by the STT
@@ -902,7 +932,7 @@ impl TtsManager {
             })
             .to_string(),
         );
-        log::info!(target: "engine", "TTS warm Kokoro child READY");
+        log::info!(target: "engine", "TTS/STT warm helper READY");
     }
 
     /// Reset BOTH models to `Idle` (the process is gone → both models go with it). Each
@@ -941,7 +971,7 @@ impl TtsManager {
         if let Some(mut child) = self.child.reap() {
             let _ = child.kill();
             let _ = child.wait();
-            log::info!(target: "engine", "TTS warm Kokoro child stopped (model freed)");
+            log::info!(target: "engine", "TTS/STT warm helper stopped (models freed)");
         }
         // Killing the child closes its stdout → the reader EOFs and returns; join
         // it so a stale reader can't touch the next child's slots.
@@ -1025,9 +1055,9 @@ impl TtsManager {
     }
 
     /// Tell the warm helper to free a cached model it no longer needs while the
-    /// OTHER engine keeps it warm — universal: TTS → Kokoro, STT → Parakeet.
-    /// The helper lazily reloads on next use. Fire-and-forget; no-op when the helper
-    /// isn't running (nothing to free).
+    /// OTHER engine keeps it warm — universal: TTS → selected built-in model,
+    /// STT → Parakeet. The helper lazily reloads on next use. Fire-and-forget; no-op
+    /// when the helper isn't running (nothing to free).
     pub fn unload_engine(&self, engine: ds_helper_proto::HelperModel) {
         let req = serde_json::json!({
             "op": ds_helper_proto::HelperOp::Unload,
@@ -1094,8 +1124,15 @@ impl TtsManager {
     /// `skip` = frontend batches an earlier run of this exact text already played
     /// (0 = from the top); the helper clamps it, so a stale value degrades to an
     /// empty no-op request, never a panic. See [`last_speak_progress`](Self::last_speak_progress).
-    pub fn speak(&self, text: &str, voice: &str, rate: f32, skip: usize) -> std::io::Result<()> {
-        self.play(text, voice, rate, skip)
+    pub fn speak(
+        &self,
+        text: &str,
+        voice: &str,
+        language: &str,
+        rate: f32,
+        skip: usize,
+    ) -> std::io::Result<()> {
+        self.play(text, voice, language, rate, skip)
     }
 
     /// The helper's ABSOLUTE played-batch high-water mark for the most recent speak
@@ -1111,7 +1148,13 @@ impl TtsManager {
     /// [`ds_tts::system::speech_command`] owns prose cleanup, empty-input handling,
     /// voice selection, rate mapping, and platform command construction.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub fn speak_system(&self, text: &str, voice: &str, rate: f32) -> std::io::Result<()> {
+    pub fn speak_system(
+        &self,
+        text: &str,
+        voice: &str,
+        _language: &str,
+        rate: f32,
+    ) -> std::io::Result<()> {
         let Some(mut cmd) = ds_tts::system::speech_command(Some(voice), rate, text) else {
             return Ok(());
         };
@@ -1161,14 +1204,27 @@ impl TtsManager {
     /// Linux has no warm System-TTS path yet (issue #74). Return `Unsupported` so callers
     /// can fall back or record the error.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    pub fn speak_system(&self, _text: &str, _voice: &str, _rate: f32) -> std::io::Result<()> {
+    pub fn speak_system(
+        &self,
+        _text: &str,
+        _voice: &str,
+        _language: &str,
+        _rate: f32,
+    ) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "dontspeakd System (say) TTS is not yet wired up on this platform",
         ))
     }
 
-    fn play(&self, text: &str, voice: &str, rate: f32, skip: usize) -> std::io::Result<()> {
+    fn play(
+        &self,
+        text: &str,
+        voice: &str,
+        language: &str,
+        rate: f32,
+        skip: usize,
+    ) -> std::io::Result<()> {
         // Fresh request: reset the speak slot so an error before dispatch cannot expose the
         // previous request's progress to queue retry/resume accounting.
         {
@@ -1189,6 +1245,7 @@ impl TtsManager {
         let req = serde_json::json!({
             "op": ds_helper_proto::HelperOp::Speak,
             "voice": voice,
+            "language": language,
             "rate": rate,
             "text": text,
             "skip": skip,
@@ -1398,7 +1455,7 @@ impl TtsManager {
 
     /// Barge-in: cancel any in-flight playback. Fire-and-forget (no stdout read),
     /// so it can run while a `speak` is blocked awaiting its `DONE`. Stops BOTH the
-    /// Kokoro warm child's playback and any in-flight System `say`. Only the macOS/Windows
+    /// warm child's playback and any in-flight System `say`. Only the macOS/Windows
     /// `speak_system` path calls this (Linux has no System engine), so it's gated to those
     /// targets to stay dead-code-clean.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1614,7 +1671,7 @@ impl TtsManager {
         CUE_TERMINAL_TIMEOUT
     }
 
-    /// Test-only: force the Kokoro residency slot to `Loaded` without a live helper, so
+    /// Test-only: force the TTS residency slot to `Loaded` without a live helper, so
     /// `ttsq`'s gate tests can flip readiness mid-`wait_until_ready` deterministically.
     #[cfg(test)]
     pub(crate) fn set_tts_loaded_for_test(&self) {
@@ -1639,7 +1696,7 @@ impl TtsManager {
         *self.last_heal.lock().unwrap() = Some(std::time::Instant::now());
     }
 
-    /// Test-only: seed the Kokoro residency slot with a `Failed` state, simulating a
+    /// Test-only: seed the TTS residency slot with a `Failed` state, simulating a
     /// cached `TTSLOADERR` from an earlier load attempt.
     #[cfg(test)]
     pub(crate) fn set_tts_load_error_for_test(&self, msg: &str) {
@@ -1763,6 +1820,21 @@ impl TtsManager {
     }
 }
 
+fn provider_restart_needed(
+    tts_preload: bool,
+    desired: ds_config::RealizedProvider,
+    active: ds_config::RealizedProvider,
+) -> bool {
+    tts_preload && desired != active
+}
+
+/// Restart only to GAIN preload. The asymmetry is intentional: on true→false the child
+/// keeps running — dropping an idle audio sink (the rodio stream just sits paused) is
+/// not worth killing warm STT.
+fn tts_preload_restart_needed(desired: bool, active: bool) -> bool {
+    desired && desired != active
+}
+
 #[cfg(test)]
 pub(crate) mod wedge_recovery_tests {
     use super::*;
@@ -1835,7 +1907,7 @@ pub(crate) mod wedge_recovery_tests {
         let mgr = mk_mgr(&dir);
         mgr.speak_slot.0.lock().unwrap().progress = 9;
 
-        let error = mgr.speak("hello", "af_sarah", 1.0, 0).unwrap_err();
+        let error = mgr.speak("hello", "af_sarah", "en", 1.0, 0).unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
         assert_eq!(mgr.last_speak_progress(), 0);
@@ -1904,7 +1976,7 @@ pub(crate) mod wedge_recovery_tests {
         // A speak queued RIGHT BEHIND the wedge, on the same (about-to-be-reaped) child.
         let speak_mgr = mgr.clone();
         let speak_attempt_1 =
-            std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", 1.0, 0));
+            std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", "en", 1.0, 0));
 
         let t0 = std::time::Instant::now();
         let listen_result = listen.join().expect("listen thread panicked");
@@ -1927,7 +1999,7 @@ pub(crate) mod wedge_recovery_tests {
         );
 
         mgr.ensure_started();
-        let speak_2_result = mgr.speak("hello again", "af_sarah", 1.0, 0);
+        let speak_2_result = mgr.speak("hello again", "af_sarah", "en", 1.0, 0);
         assert!(
             speak_2_result.is_ok(),
             "speak after the wedge is killed must succeed: {speak_2_result:?}"
@@ -2050,6 +2122,7 @@ pub(crate) mod wedge_recovery_tests {
 #[cfg(test)]
 mod child_env_tests {
     use super::{SpawnPrefs, child_env};
+    use ds_config::TtsModel;
 
     #[test]
     fn providers_always_set_conditionals_cleared_when_off() {
@@ -2059,29 +2132,33 @@ mod child_env_tests {
         // can't leak past the config-resolved intent.
         let on = child_env(&SpawnPrefs {
             provider: "cuda".into(),
-            stt_provider: "ane".into(),
+            tts_model: TtsModel::Chatterbox,
+            stt_provider: "mlx".into(),
             full_duplex: true,
             stt_preload: true,
             tts_preload: true,
         });
         assert_eq!(on[0], ("DONTSPEAK_PROVIDER", Some("cuda".into())));
-        assert_eq!(on[1], ("DONTSPEAK_STT_PROVIDER", Some("ane".into())));
-        assert_eq!(on[2], ("DONTSPEAK_FULL_DUPLEX", Some("1".into())));
-        assert_eq!(on[3], ("DONTSPEAK_STT_PRELOAD", Some("1".into())));
-        assert_eq!(on[4], ("DONTSPEAK_TTS_PRELOAD", Some("1".into())));
+        assert_eq!(on[1], ("DONTSPEAK_TTS_MODEL", Some("chatterbox".into())));
+        assert_eq!(on[2], ("DONTSPEAK_STT_PROVIDER", Some("mlx".into())));
+        assert_eq!(on[3], ("DONTSPEAK_FULL_DUPLEX", Some("1".into())));
+        assert_eq!(on[4], ("DONTSPEAK_STT_PRELOAD", Some("1".into())));
+        assert_eq!(on[5], ("DONTSPEAK_TTS_PRELOAD", Some("1".into())));
 
         let off = child_env(&SpawnPrefs {
             provider: "cpu".into(),
+            tts_model: TtsModel::Kokoro,
             stt_provider: "cpu".into(),
             full_duplex: false,
             stt_preload: false,
             tts_preload: false,
         });
         assert_eq!(off[0], ("DONTSPEAK_PROVIDER", Some("cpu".into())));
-        assert_eq!(off[1], ("DONTSPEAK_STT_PROVIDER", Some("cpu".into())));
-        assert_eq!(off[2], ("DONTSPEAK_FULL_DUPLEX", None));
-        assert_eq!(off[3], ("DONTSPEAK_STT_PRELOAD", None));
-        assert_eq!(off[4], ("DONTSPEAK_TTS_PRELOAD", None));
+        assert_eq!(off[1], ("DONTSPEAK_TTS_MODEL", Some("kokoro".into())));
+        assert_eq!(off[2], ("DONTSPEAK_STT_PROVIDER", Some("cpu".into())));
+        assert_eq!(off[3], ("DONTSPEAK_FULL_DUPLEX", None));
+        assert_eq!(off[4], ("DONTSPEAK_STT_PRELOAD", None));
+        assert_eq!(off[5], ("DONTSPEAK_TTS_PRELOAD", None));
     }
 }
 
@@ -2293,18 +2370,63 @@ mod status_gate_tests {
     }
 
     #[test]
-    fn resolve_provider_is_deterministic_for_explicit_non_gpu_tokens() {
-        // "cpu"/"coreml" never branch on host state (unlike "cuda"/"auto", which read
-        // `ds_model::is_cuda_runtime_present()` against the real model_dir() on disk — those
-        // two are deliberately NOT covered here, see the tts.rs coverage plan).
+    fn provider_resolution_is_deterministic_for_explicit_onnx_tokens() {
         assert_eq!(
-            TtsManager::resolve_provider("cpu"),
+            TtsManager::resolve_provider_with_availability(
+                "cpu",
+                ds_config::TtsModel::Kokoro,
+                Some(true),
+                true,
+            ),
             ds_config::RealizedProvider::Cpu
         );
         assert_eq!(
-            TtsManager::resolve_provider("coreml"),
+            TtsManager::resolve_provider_with_availability(
+                "coreml",
+                ds_config::TtsModel::Kokoro,
+                None,
+                false,
+            ),
             ds_config::RealizedProvider::CoreMl
         );
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "cuda",
+                ds_config::TtsModel::Chatterbox,
+                None,
+                true,
+            ),
+            ds_config::RealizedProvider::Cuda
+        );
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "cuda",
+                ds_config::TtsModel::Chatterbox,
+                None,
+                false,
+            ),
+            ds_config::RealizedProvider::Cpu
+        );
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "cuda",
+                ds_config::TtsModel::OmniVoice,
+                None,
+                true,
+            ),
+            ds_config::RealizedProvider::Cpu
+        );
+    }
+
+    #[test]
+    fn absent_tts_assets_never_restart_the_shared_helper() {
+        use ds_config::RealizedProvider::{Cpu, Cuda};
+
+        assert!(!provider_restart_needed(false, Cpu, Cuda));
+        assert!(provider_restart_needed(true, Cpu, Cuda));
+        assert!(!provider_restart_needed(true, Cpu, Cpu));
+        assert!(!tts_preload_restart_needed(false, true));
+        assert!(tts_preload_restart_needed(true, false));
     }
 
     #[test]
@@ -2377,13 +2499,8 @@ mod status_gate_tests {
         );
     }
 
-    /// The race `listen_cancellable` closes for `HelperStt`/`TestSession`: a caller's own
-    /// `stop()` sets its flag on ANOTHER thread before the spawned `listen` call is even
-    /// guaranteed to have started — before this fix, `stop_listen()` alone would see
-    /// `active_listen_generation == 0` (nothing published yet) and silently no-op, reproducing
-    /// finding #3's "stop received before the queued start begins" bug one layer above
-    /// ds-helper. Drives the real production function end-to-end (not just field state) with
-    /// the flag already set, and never starts a helper process to do it.
+    /// `stop()` may set the cancel flag before `listen` starts; must still short-circuit
+    /// (not no-op on generation 0). End-to-end on production path; no helper process.
     #[test]
     fn listen_cancellable_honors_a_stop_that_raced_the_call_itself() {
         let (tts, _gate) = mk();
@@ -2398,7 +2515,7 @@ mod status_gate_tests {
     }
 
     /// Points `DONTSPEAK_MODEL_DIR` at a fresh EMPTY tempdir and clears
-    /// `ORT_DYLIB_PATH`/`DSKOKORO_DYLIB_PATH` — forces the new Kokoro-presence gate's ONNX
+    /// `ORT_DYLIB_PATH`/`DONTSPEAK_MLX_DYLIB_PATH` — forces the new Kokoro-presence gate's ONNX
     /// branch deterministically on every OS and guarantees "not present". Caller must hold
     /// `crate::config_gate::ENV_LOCK` and restore the returned previous values.
     fn clear_kokoro_env() -> (
@@ -2410,21 +2527,21 @@ mod status_gate_tests {
         let tmp = tempfile::tempdir().unwrap();
         let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
         let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let prev_dsk = std::env::var_os("DSKOKORO_DYLIB_PATH");
+        let previous_mlx = std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH");
         // SAFETY: test-only env mutation; the caller holds `config_gate::ENV_LOCK` (see
         // this fn's doc) and restores the returned previous values.
         unsafe {
             std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
             std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("DSKOKORO_DYLIB_PATH");
+            std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH");
         }
-        (tmp, prev_model_dir, prev_ort, prev_dsk)
+        (tmp, prev_model_dir, prev_ort, previous_mlx)
     }
 
     fn restore_kokoro_env(
         prev_model_dir: Option<std::ffi::OsString>,
         prev_ort: Option<std::ffi::OsString>,
-        prev_dsk: Option<std::ffi::OsString>,
+        previous_mlx: Option<std::ffi::OsString>,
     ) {
         // SAFETY: restore the prior values (or clear them) so later tests see the real
         // env again; the caller still holds `config_gate::ENV_LOCK`.
@@ -2437,9 +2554,9 @@ mod status_gate_tests {
                 Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
                 None => std::env::remove_var("ORT_DYLIB_PATH"),
             }
-            match prev_dsk {
-                Some(v) => std::env::set_var("DSKOKORO_DYLIB_PATH", v),
-                None => std::env::remove_var("DSKOKORO_DYLIB_PATH"),
+            match previous_mlx {
+                Some(v) => std::env::set_var("DONTSPEAK_MLX_DYLIB_PATH", v),
+                None => std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH"),
             }
         }
     }
@@ -2452,7 +2569,7 @@ mod status_gate_tests {
         let _guard = crate::config_gate::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (_tmp, prev_model_dir, prev_ort, prev_dsk) = clear_kokoro_env();
+        let (_tmp, prev_model_dir, prev_ort, previous_mlx) = clear_kokoro_env();
 
         let (tts, gate) = mk();
         tts.set_tts_wanted(true);
@@ -2475,7 +2592,7 @@ mod status_gate_tests {
             "a fresh skip must bump the status-push gate"
         );
 
-        restore_kokoro_env(prev_model_dir, prev_ort, prev_dsk);
+        restore_kokoro_env(prev_model_dir, prev_ort, previous_mlx);
     }
 
     #[test]
@@ -2489,9 +2606,12 @@ mod status_gate_tests {
         let _guard = crate::config_gate::ENV_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let (tmp, prev_model_dir, prev_ort, prev_dsk) = clear_kokoro_env();
+        let (tmp, prev_model_dir, prev_ort, previous_mlx) = clear_kokoro_env();
+        // All four KOKORO_FILES: the presence gate also requires the two G2P files.
         std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
         std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_ENCODER_FILE), b"dummy").unwrap();
+        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_DECODER_FILE), b"dummy").unwrap();
         let dylib = tmp.path().join("dummy-onnxruntime.dylib");
         std::fs::write(&dylib, b"dummy").unwrap();
         // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
@@ -2502,6 +2622,11 @@ mod status_gate_tests {
 
         let (tts, gate) = mk();
         tts.set_tts_wanted(true);
+        assert!(
+            TtsManager::tts_assets_ready(&tts.spawn_prefs.lock().unwrap().clone()),
+            "fixture must read present — a not-ready gate would divert this test onto the \
+             skip path without ever reaching Command::spawn"
+        );
         assert_eq!(tts.last_error(), None);
         let seq0 = gate.seq();
 
@@ -2518,6 +2643,6 @@ mod status_gate_tests {
             "a fresh start failure must bump the status-push gate"
         );
 
-        restore_kokoro_env(prev_model_dir, prev_ort, prev_dsk);
+        restore_kokoro_env(prev_model_dir, prev_ort, previous_mlx);
     }
 }

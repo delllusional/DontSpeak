@@ -1,15 +1,24 @@
-// libdskokoro — C ABI over FluidAudio ANE Kokoro (IPA phonemes → 24 kHz mono f32).
-// Rust owns the shared text frontend; this shim skips FluidAudio G2P so backends don't drift.
-// See dskokoro.h. 0 = success. Helper synthesizes serially; lock guards shared manager.
+// libdontspeak_mlx — C ABI over MLX Audio and Apple System STT. SYSTEM_ONLY excludes all MLX
+// code for the Intel compatibility build. Rust owns the text frontend and model downloads.
+// See dontspeak_mlx.h. 0 = success. Helper calls are serial; locks guard shared models.
 import AVFoundation
-import FluidAudio
 import Foundation
+#if !SYSTEM_ONLY
+@preconcurrency import MLX
+import MLXAudioSTT
+import MLXAudioTTS
+import MLXAudioVAD
+#endif
 import os
 import Speech
 
 // MARK: - async → blocking bridge (called from a Rust worker thread)
 
 private final class Box<T>: @unchecked Sendable { var value: Result<T, Error>? }
+private final class SendableValue<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
 
 /// Park calling thread until `op` completes. C entry from Rust worker only —
 /// never from a Swift Task (cooperative-pool deadlock risk).
@@ -21,38 +30,42 @@ private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> R
         sem.signal()
     }
     sem.wait()
-    return box.value ?? .failure(DskError.noResult)
+    return box.value ?? .failure(MlxShimError.noResult)
 }
 
-private enum DskError: Error {
+enum MlxShimError: Error {
     case noResult, notInitialized, nilText, nilDir, badAudio
     case sysUnavailable(String)
 }
 
 // MARK: - borrowed-result callbacks
 // Success path: fire cb once on this thread with borrowed buffer; Rust copies out — no free.
-// Still blocking via runBlocking; status is the C return. Types mirror dskokoro.h.
-public typealias DskPcmCb =
+// Still blocking via runBlocking; status is the C return. Types mirror dontspeak_mlx.h.
+public typealias MlxPcmCb =
     @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
-public typealias DskStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
+public typealias MlxStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
 
+private func logErr(_ s: String) {
+    FileHandle.standardError.write(Data((s + "\n").utf8))
+}
+
+#if !SYSTEM_ONLY
 // MARK: - shared state
 
+private struct PassthroughProcessor: TextProcessor {
+    func process(text: String, language: String?) throws -> String { text }
+}
+private enum TtsKind: String {
+    case kokoro, chatterbox, qwen, omnivoice
+
+    var usesManagedHubCache: Bool { self == .chatterbox || self == .omnivoice }
+}
 private final class ShimState: @unchecked Sendable {
     let lock = NSLock()
-    var manager: KokoroAneManager?
+    var tts: (any SpeechGenerationModel)?
+    var ttsKind: TtsKind?
 }
 private let state = ShimState()
-
-private func preset(_ i: Int32) -> TtsComputeUnitPreset {
-    switch i {
-    case 1: return .allAne  // every stage on the Neural Engine
-    case 2: return .cpuAndGpu  // skip the ANE (GPU)
-    case 3: return .cpuOnly
-    case 4: return .aneTailGpu
-    default: return .default  // ANE-resident RNN stages + GPU fp32 tail (recommended)
-    }
-}
 
 private func cString(_ p: UnsafePointer<CChar>?) -> String? {
     guard let p else { return nil }
@@ -60,265 +73,293 @@ private func cString(_ p: UnsafePointer<CChar>?) -> String? {
     return s.isEmpty ? nil : s
 }
 
-private func logErr(_ s: String) {
-    FileHandle.standardError.write(Data((s + "\n").utf8))
+/// MLX Audio's OmniVoice loader currently exposes only its repository API. Point its
+/// cache at the already verified DontSpeak directory; ModelUtils returns that complete
+/// local snapshot before any network operation. Chatterbox shares the root for its S3
+/// tokenizer, keeping every native model asset on the Rust-managed download path.
+private func configureManagedHubCache(for modelDir: URL) -> Bool {
+    let mlxAudioDir = modelDir.deletingLastPathComponent()
+    guard mlxAudioDir.lastPathComponent == "mlx-audio" else {
+        logErr("managed MLX model is outside the mlx-audio cache layout: \(modelDir.path)")
+        return false
+    }
+    let cacheRoot = mlxAudioDir.deletingLastPathComponent()
+    return setenv("HF_HUB_CACHE", cacheRoot.path, 1) == 0
 }
 
 // MARK: - C ABI
 
-@_cdecl("dsk_init")
-public func dsk_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
+@_cdecl("ds_mlx_tts_init")
+public func ds_mlx_tts_init(
+    _ modelName: UnsafePointer<CChar>?,
+    _ modelDir: UnsafePointer<CChar>?
+) -> Int32 {
     state.lock.lock()
     defer { state.lock.unlock() }
-    // offlineMode: load only — DontSpeak pre-downloads (integrity + % UI).
-    ModelHub.offlineMode = true
-    let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
-    let mgr = KokoroAneManager(
-        variant: .english,
-        defaultVoice: nil,
-        directory: dir,
-        computeUnits: KokoroAneComputeUnits(preset: preset(computeUnits))
-    )
-    switch runBlocking({ try await mgr.initialize() }) {
-    case .success:
-        state.manager = mgr
+    guard let name = cString(modelName) else { return 3 }
+    guard let path = cString(modelDir) else { return 3 }
+    guard let kind = TtsKind(rawValue: name) else { return 3 }
+    let dir = URL(fileURLWithPath: path)
+    state.tts = nil
+    state.ttsKind = nil
+    guard !kind.usesManagedHubCache || configureManagedHubCache(for: dir) else { return 3 }
+    let loaded: Result<any SpeechGenerationModel, Error> = switch kind {
+    case .kokoro:
+        runBlocking {
+            try await KokoroModel.fromModelDirectory(
+                dir, textProcessor: PassthroughProcessor()) as any SpeechGenerationModel
+        }
+    case .chatterbox:
+        runBlocking {
+            try await ChatterboxModel.fromModelDirectory(
+                dir, hfToken: nil) as any SpeechGenerationModel
+        }
+    case .qwen:
+        runBlocking {
+            try await Qwen3TTSModel.fromModelDirectory(dir) as any SpeechGenerationModel
+        }
+    case .omnivoice:
+        runBlocking {
+            try await OmniVoiceModel.fromPretrained(
+                "mlx-community/OmniVoice-bf16") as any SpeechGenerationModel
+        }
+    }
+    switch loaded {
+    case .success(let model):
+        state.tts = model
+        state.ttsKind = kind
         return 0
-    case .failure(let e):
-        logErr("dsk_init error: \(e)")
+    case .failure(let error):
+        logErr("ds_mlx_tts_init \(name) error: \(error)")
         return 1
     }
 }
 
-@_cdecl("dsk_synthesize_phonemes")
-public func dsk_synthesize_phonemes(
-    _ phonemes: UnsafePointer<CChar>?,
+@_cdecl("ds_mlx_tts_synthesize")
+public func ds_mlx_tts_synthesize(
+    _ text: UnsafePointer<CChar>?,
     _ voice: UnsafePointer<CChar>?,
+    _ language: UnsafePointer<CChar>?,
     _ speed: Float,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskPcmCb?
+    _ cb: MlxPcmCb?
 ) -> Int32 {
     guard let cb else { return 4 }
+    guard let text = cString(text) else { return 3 }
+    let v = cString(voice)
+    let language = cString(language)
     state.lock.lock()
-    let mgr = state.manager
-    state.lock.unlock()
-    guard let mgr else {
-        logErr("dsk_synthesize: not initialized")
+    guard let model = state.tts, let kind = state.ttsKind else {
+        state.lock.unlock()
+        logErr("ds_mlx_tts_synthesize: not initialized")
         return 2
     }
-    guard let p = cString(phonemes) else { return 3 }
-    let v = cString(voice)
-    switch runBlocking({
-        try await mgr.synthesizeFromPhonemesDetailed(p, voice: v, speed: speed)
-    }) {
-    case .success(let r):
-        // Borrow the samples to the callback (it copies them out); no ownership transfer.
-        r.samples.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
+    if kind == .kokoro, let kokoro = model as? KokoroModel {
+        kokoro.speed = speed.isFinite ? max(0.25, min(speed, 4.0)) : 1.0
+    }
+    let selectedVoice: String? = switch kind {
+    case .chatterbox: nil
+    case .omnivoice: v == "default" ? nil : v
+    case .kokoro, .qwen: v
+    }
+    let sendableModel = SendableValue(model)
+    let result: Result<(MLXArray, Int), Error> = runBlocking {
+        let model = sendableModel.value
+        let audio = try await model.generate(
+            text: text, voice: selectedVoice, refAudio: nil, refText: nil, language: language)
+        return (audio, model.sampleRate)
+    }
+    state.lock.unlock()
+    switch result {
+    case .success(let (audio, sampleRate)):
+        let samples = audio.asArray(Float.self)
+        samples.withUnsafeBufferPointer {
+            cb(ctx, $0.baseAddress, $0.count, Int32(sampleRate))
+        }
         return 0
-    case .failure(let e):
-        logErr("dsk_synthesize error: \(e)")
+    case .failure(let error):
+        logErr("ds_mlx_tts_synthesize error: \(error)")
         return 1
     }
 }
 
-@_cdecl("dsk_shutdown")
-public func dsk_shutdown() {
+@_cdecl("ds_mlx_tts_shutdown")
+public func ds_mlx_tts_shutdown() {
     state.lock.lock()
-    let mgr = state.manager
-    state.manager = nil
+    state.tts = nil
+    state.ttsKind = nil
     state.lock.unlock()
-    if let mgr {
-        _ = runBlocking({
-            await mgr.cleanup()
-            return true
-        })
-    }
 }
 
-// MARK: - ASR (Parakeet TDT v2, English, Core ML / ANE) — the apple-native STT backend
+// MARK: - ASR (Parakeet TDT v2, English, MLX)
 
 private final class AsrState: @unchecked Sendable {
     let lock = NSLock()
-    var manager: AsrManager?
+    var model: ParakeetModel?
+    var streamSamples: [Float] = []
+    var streamSamplesAtLastDecode = 0
+    var streamText = ""
 }
 private let asr = AsrState()
 
+let asrPartialMinimumSamples = 16_000
+let asrPartialDecodeIntervalSamples = 16_000
+
+func asrShouldDecodePartial(totalSamples: Int, lastDecodedSamples: Int) -> Bool {
+    totalSamples >= asrPartialMinimumSamples
+        && totalSamples - lastDecodedSamples >= asrPartialDecodeIntervalSamples
+}
+
+private func loadParakeet(_ modelDir: UnsafePointer<CChar>?) throws -> ParakeetModel {
+    guard let path = cString(modelDir) else { throw MlxShimError.nilDir }
+    return try ParakeetModel.fromDirectory(URL(fileURLWithPath: path))
+}
+
+private func transcribe(_ model: ParakeetModel, _ samples: [Float]) -> String {
+    model.generate(audio: MLXArray(samples)).text
+}
+
 /// Load Parakeet TDT v2 (English-only; mirrors ONNX — not v3 multilingual). 0 = ok.
-@_cdecl("dsk_asr_init")
-public func dsk_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
+@_cdecl("ds_mlx_asr_init")
+public func ds_mlx_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
+    _ = computeUnits
     asr.lock.lock()
     defer { asr.lock.unlock() }
-    ModelHub.offlineMode = true  // load-only: DontSpeak pre-downloads the Parakeet set
-    let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
-    switch runBlocking({ () -> AsrManager in
-        // load(from:) only — DontSpeak pre-downloads to parent/parakeet-tdt-0.6b-v2.
-        guard let dir else { throw DskError.nilDir }
-        let models = try await AsrModels.load(from: dir, version: .v2)
-        let mgr = AsrManager(config: .default)
-        try await mgr.loadModels(models)
-        return mgr
-    }) {
-    case .success(let mgr):
-        asr.manager = mgr
+    do {
+        asr.model = try loadParakeet(modelDir)
         return 0
-    case .failure(let e):
-        logErr("dsk_asr_init error: \(e)")
+    } catch {
+        logErr("ds_mlx_asr_init error: \(error)")
         return 1
     }
 }
 
 /// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty input → "" (rc 0).
-@_cdecl("dsk_transcribe")
-public func dsk_transcribe(
+@_cdecl("ds_mlx_transcribe")
+public func ds_mlx_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
+    guard let cb else { return 4 }
     asr.lock.lock()
-    let mgr = asr.manager
-    asr.lock.unlock()
-    guard let mgr else {
-        logErr("dsk_transcribe: not initialized")
+    guard let model = asr.model else {
+        asr.lock.unlock()
+        logErr("ds_mlx_transcribe: not initialized")
         return 2
     }
     guard let samples, n > 0 else {
-        "".withCString { cb?(ctx, $0) }
+        asr.lock.unlock()
+        "".withCString { cb(ctx, $0) }
         return 0
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
-    switch runBlocking({ () -> String in
-        // Fresh decoder state per utterance (stateless TDT).
-        var decoderState = TdtDecoderState.make(decoderLayers: await mgr.decoderLayerCount)
-        let result = try await mgr.transcribe(audio, decoderState: &decoderState, language: nil)
-        return result.text
-    }) {
-    case .success(let text):
-        text.withCString { cb?(ctx, $0) }
-        return 0
-    case .failure(let e):
-        logErr("dsk_transcribe error: \(e)")
-        return 1
-    }
-}
-
-@_cdecl("dsk_asr_shutdown")
-public func dsk_asr_shutdown() {
-    asr.lock.lock()
-    let mgr = asr.manager
-    asr.manager = nil
+    let text = transcribe(model, audio)
     asr.lock.unlock()
-    if let mgr {
-        _ = runBlocking({
-            await mgr.cleanup()
-            return true
-        })
-    }
+    text.withCString { cb(ctx, $0) }
+    return 0
 }
 
-// MARK: - Streaming ASR (StreamingEouAsrManager)
-// Chunk feed with encoder cache; same start/push/finish shape as ONNX CoremlStreamer.
-// process() returns "" mid-stream — use getPartialTranscript() for live overlay.
-private final class StreamAsrState: @unchecked Sendable {
-    let lock = NSLock()
-    var manager: StreamingEouAsrManager?
+@_cdecl("ds_mlx_asr_shutdown")
+public func ds_mlx_asr_shutdown() {
+    asr.lock.lock()
+    asr.model = nil
+    asr.streamSamples.removeAll(keepingCapacity: false)
+    asr.streamSamplesAtLastDecode = 0
+    asr.streamText = ""
+    asr.lock.unlock()
 }
-private let streamAsr = StreamAsrState()
+
+/// End buffered streaming state without unloading the shared warm Parakeet model.
+@_cdecl("ds_mlx_asr_stream_shutdown")
+public func ds_mlx_asr_stream_shutdown() {
+    asr.lock.lock()
+    asr.streamSamples.removeAll(keepingCapacity: false)
+    asr.streamSamplesAtLastDecode = 0
+    asr.streamText = ""
+    asr.lock.unlock()
+}
+
+// MARK: - Buffered streaming ASR
+// MLX Audio's Parakeet API consumes a complete array. Buffer chunks, periodically re-decode
+// the utterance for live partials, then run one final decode at finish.
 
 /// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
-@_cdecl("dsk_asr_stream_start")
-public func dsk_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
-    streamAsr.lock.lock()
-    defer { streamAsr.lock.unlock() }
-    ModelHub.offlineMode = true  // DontSpeak pre-downloads the streaming model set
-    let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
-    switch runBlocking({ () -> StreamingEouAsrManager in
-        if let mgr = streamAsr.manager {
-            await mgr.reset()
-            return mgr
-        }
-        guard let dir else { throw DskError.nilDir }
-        let mgr = StreamingEouAsrManager(chunkSize: .ms160)  // lowest latency (~6 partials/sec)
-        try await mgr.loadModels(from: dir)
-        await mgr.reset()
-        return mgr
-    }) {
-    case .success(let mgr):
-        streamAsr.manager = mgr
+@_cdecl("ds_mlx_asr_stream_start")
+public func ds_mlx_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
+    asr.lock.lock()
+    defer { asr.lock.unlock() }
+    do {
+        if asr.model == nil { asr.model = try loadParakeet(modelDir) }
+        asr.streamSamples.removeAll(keepingCapacity: true)
+        asr.streamSamplesAtLastDecode = 0
+        asr.streamText = ""
         return 0
-    case .failure(let e):
-        logErr("dsk_asr_stream_start error: \(e)")
+    } catch {
+        logErr("ds_mlx_asr_stream_start error: \(error)")
         return 1
     }
 }
 
-/// Push chunk; cb gets getPartialTranscript() (process returns "" mid-stream).
-@_cdecl("dsk_asr_stream_push")
-public func dsk_asr_stream_push(
+/// Push chunk; at most once per second of new 16 kHz audio, cb receives a refreshed hypothesis.
+@_cdecl("ds_mlx_asr_stream_push")
+public func ds_mlx_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
-    streamAsr.lock.lock()
-    let mgr = streamAsr.manager
-    streamAsr.lock.unlock()
-    guard let mgr else {
-        logErr("dsk_asr_stream_push: not started")
+    _ = sampleRate
+    guard let cb else { return 4 }
+    asr.lock.lock()
+    guard let model = asr.model else {
+        asr.lock.unlock()
+        logErr("ds_mlx_asr_stream_push: not started")
         return 2
     }
-    // Build non-Sendable AVAudioPCMBuffer inside the @Sendable closure (not capture it).
-    let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
-    let rate = Double(sampleRate)
-    switch runBlocking({ () -> String in
-        guard rate > 0,
-            let format = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: rate, channels: 1, interleaved: false),
-            let buffer = AVAudioPCMBuffer(
-                pcmFormat: format,
-                frameCapacity: AVAudioFrameCount(max(audio.count, 1)))
-        else { throw DskError.badAudio }
-        buffer.frameLength = AVAudioFrameCount(audio.count)
-        if !audio.isEmpty, let dst = buffer.floatChannelData {
-            audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
-        }
-        // process() yields "" until finish/EOU — pull partial via getPartialTranscript().
-        _ = try await mgr.process(audioBuffer: buffer)
-        return await mgr.getPartialTranscript()
-    }) {
-    case .success(let text):
-        text.withCString { cb?(ctx, $0) }
-        return 0
-    case .failure(let e):
-        logErr("dsk_asr_stream_push error: \(e)")
-        return 1
+    if let samples, n > 0 {
+        asr.streamSamples.append(contentsOf: UnsafeBufferPointer(start: samples, count: n))
     }
+    if asrShouldDecodePartial(
+        totalSamples: asr.streamSamples.count,
+        lastDecodedSamples: asr.streamSamplesAtLastDecode
+    ) {
+        asr.streamText = transcribe(model, asr.streamSamples)
+        asr.streamSamplesAtLastDecode = asr.streamSamples.count
+    }
+    let text = asr.streamText
+    asr.lock.unlock()
+    text.withCString { cb(ctx, $0) }
+    return 0
 }
 
 /// Finish stream; cb borrows final transcript.
-@_cdecl("dsk_asr_stream_finish")
-public func dsk_asr_stream_finish(
+@_cdecl("ds_mlx_asr_stream_finish")
+public func ds_mlx_asr_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
-    streamAsr.lock.lock()
-    let mgr = streamAsr.manager
-    streamAsr.lock.unlock()
-    guard let mgr else {
-        "".withCString { cb?(ctx, $0) }
+    guard let cb else { return 4 }
+    asr.lock.lock()
+    guard let model = asr.model else {
+        asr.lock.unlock()
+        "".withCString { cb(ctx, $0) }
         return 0
     }
-    switch runBlocking({ () -> String in try await mgr.finish() }) {
-    case .success(let text):
-        text.withCString { cb?(ctx, $0) }
-        return 0
-    case .failure(let e):
-        logErr("dsk_asr_stream_finish error: \(e)")
-        return 1
+    if !asr.streamSamples.isEmpty {
+        asr.streamText = transcribe(model, asr.streamSamples)
     }
+    let text = asr.streamText
+    asr.streamSamples.removeAll(keepingCapacity: true)
+    asr.streamSamplesAtLastDecode = 0
+    asr.lock.unlock()
+    text.withCString { cb(ctx, $0) }
+    return 0
 }
+#endif
 
 // MARK: - System STT (on-device en-US)
 // macOS 26+: SpeechAnalyzer (async, no run loop, no Speech-Rec TCC; model download on enable).
@@ -368,7 +409,7 @@ private func sysEnsureModel(_ transcriber: SpeechTranscriber) async throws {
 /// Legacy callbacks — never main queue (historical deadlock).
 private let legacyQueue: OperationQueue = {
     let q = OperationQueue()
-    q.name = "dskokoro.sysstt.legacy"
+    q.name = "dontspeak_mlx.sysstt.legacy"
     q.maxConcurrentOperationCount = 1
     return q
 }()
@@ -422,7 +463,7 @@ private let legacyResetLog = Logger(subsystem: "app.dontspeak.org", category: "l
 /// recognizer+task. finish is single-shot (trailing errors must not clobber).
 /// Streaming fields live on the run (not SysStreamState) so a replaced run can't
 /// corrupt another's committed/partial text; isFinal can still read after shared
-/// pointers clear (finding #2).
+/// pointers clear.
 final class LegacyRun: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
@@ -435,7 +476,7 @@ final class LegacyRun: @unchecked Sendable {
     private let textLock = NSLock()
     private var committedText: String = ""
     private var latestPartial: String = ""
-    /// Popup/final candidate; protected from empty-callback regressions (#84).
+    /// Popup/final candidate; ignore empty non-final callbacks.
     private var settledPartial: String = ""
     private var lastPartialChangedAt: TimeInterval?
 
@@ -460,9 +501,9 @@ final class LegacyRun: @unchecked Sendable {
         finish(text: finalJoined("", preserveStrictPrefix: false), error: nil)
     }
 
-    /// Non-final partial: on phrase reset, commit settled segment (finding #7).
+    /// Non-final partial: on phrase reset, commit settled segment.
     func recordPartial(_ newText: String) {
-        // #84: empty non-final between hypotheses — ignore (keeps timing).
+        // Empty non-final between hypotheses — ignore (keeps timing).
         guard !newText.isEmpty else { return }
 
         textLock.lock()
@@ -474,11 +515,14 @@ final class LegacyRun: @unchecked Sendable {
             lastChangedAt: lastPartialChangedAt,
             now: now)
         let gap = timing.gapSeconds
-        if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap), !latestPartial.isEmpty {
+        if legacySegmentDidReset(previous: latestPartial, new: newText, gapSeconds: gap),
+            !latestPartial.isEmpty
+        {
             // Numeric only (.public); never dictated text.
             if let gap {
                 legacyResetLog.debug(
-                    "legacy STT phrase reset: gapSeconds=\(gap, format: .fixed(precision: 3), privacy: .public)")
+                    "legacy STT phrase reset: gapSeconds=\(gap, format: .fixed(precision: 3), privacy: .public)"
+                )
             } else {
                 legacyResetLog.debug("legacy STT phrase reset: gapSeconds=nil")
             }
@@ -511,16 +555,16 @@ private func legacyIsNoSpeech(_ error: Error) -> Bool {
     return e.domain == "kAFAssistantErrorDomain" && e.code == 1110
 }
 
-/// Shared auth+recognizer gate for batch + streaming legacy (finding #6).
+/// Shared auth+recognizer gate for batch + streaming legacy.
 private func legacyEnsureAuthorizedRecognizer() -> Result<SFSpeechRecognizer, Error> {
     if SFSpeechRecognizer.authorizationStatus() == .notDetermined {
         _ = legacyAuthorize()
     }
     guard SFSpeechRecognizer.authorizationStatus() == .authorized else {
-        return .failure(DskError.sysUnavailable("speech recognition permission not granted"))
+        return .failure(MlxShimError.sysUnavailable("speech recognition permission not granted"))
     }
     guard let recognizer = legacyRecognizer(), recognizer.supportsOnDeviceRecognition else {
-        return .failure(DskError.sysUnavailable("no on-device recognition for en-US"))
+        return .failure(MlxShimError.sysUnavailable("no on-device recognition for en-US"))
     }
     return .success(recognizer)
 }
@@ -533,7 +577,7 @@ private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<
     case .failure(let e): return .failure(e)
     }
     guard sampleRate > 0, let buffer = sysMakeBuffer(samples, sampleRate: sampleRate) else {
-        return .failure(DskError.badAudio)
+        return .failure(MlxShimError.badAudio)
     }
 
     let request = SFSpeechAudioBufferRecognitionRequest()
@@ -556,17 +600,17 @@ private func legacyTranscribe(_ samples: [Float], sampleRate: Double) -> Result<
     let margin = Int(Double(samples.count) / sampleRate) + 30
     if run.sem.wait(timeout: .now() + .seconds(margin)) == .timedOut {
         run.task?.cancel()
-        run.finish(text: nil, error: DskError.sysUnavailable("recognition timed out"))
+        run.finish(text: nil, error: MlxShimError.sysUnavailable("recognition timed out"))
     }
     if let text = run.text { return .success(text) }
-    return .failure(run.error ?? DskError.noResult)
+    return .failure(run.error ?? MlxShimError.noResult)
 }
 
 // MARK: C entry points (both tiers)
 
 /// Non-prompting availability for model-status poll (1 → preparing orange).
-@_cdecl("dsk_sys_available")
-public func dsk_sys_available() -> Int32 {
+@_cdecl("ds_mlx_sys_available")
+public func ds_mlx_sys_available() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAvailable() }
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 2 }
@@ -578,8 +622,8 @@ public func dsk_sys_available() -> Int32 {
 }
 
 /// Blocking enable: 26+ model download; <26 Speech-Rec TCC. 0 = ready.
-@_cdecl("dsk_sys_authorize")
-public func dsk_sys_authorize() -> Int32 {
+@_cdecl("ds_mlx_sys_authorize")
+public func ds_mlx_sys_authorize() -> Int32 {
     guard #available(macOS 26, *) else { return legacyAuthorize() }
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 2 }
@@ -589,22 +633,23 @@ public func dsk_sys_authorize() -> Int32 {
     }) {
     case .success(let code): return code
     case .failure(let e):
-        logErr("dsk_sys_authorize error: \(e)")
+        logErr("ds_mlx_sys_authorize error: \(e)")
         return 2
     }
 }
 
 /// On-device batch transcribe; cb borrows text. Empty → "".
-@_cdecl("dsk_sys_transcribe")
-public func dsk_sys_transcribe(
+@_cdecl("ds_mlx_sys_transcribe")
+public func ds_mlx_sys_transcribe(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
+    guard let cb else { return 4 }
     guard let samples, n > 0 else {
-        "".withCString { cb?(ctx, $0) }
+        "".withCString { cb(ctx, $0) }
         return 0
     }
     let pcm = Array(UnsafeBufferPointer(start: samples, count: n))
@@ -616,10 +661,10 @@ public func dsk_sys_transcribe(
     }
     switch outcome {
     case .success(let text):
-        text.withCString { cb?(ctx, $0) }
+        text.withCString { cb(ctx, $0) }
         return 0
     case .failure(let e):
-        logErr("dsk_sys_transcribe error: \(e)")
+        logErr("ds_mlx_sys_transcribe error: \(e)")
         return 1
     }
 }
@@ -680,7 +725,7 @@ private func sysConvert(_ input: AVAudioPCMBuffer, to format: AVAudioFormat) thr
     return output
 }
 
-// MARK: - System STT streaming (start/push/finish like dsk_asr_stream_*)
+// MARK: - System STT streaming (start/push/finish like ds_mlx_asr_stream_*)
 // Incremental hyp vs full-tail re-transcribe. Per tier:
 //   26+: persistent SpeechAnalyzer; drain volatile + final results into committed/latest.
 //   <26: one request/task for the utterance with partials=true. No phrase-boundary signal —
@@ -780,7 +825,7 @@ private func sysStreamSetModern(_ session: SysModernSession) {
     sysStream.modern = session
 }
 
-/// Pop modern session (finding #1 self-heal before replace — avoid leak if finish skipped).
+/// Pop modern session (tear down before replace if finish was skipped).
 @available(macOS 26, *)
 private func sysStreamTakeModern() -> SysModernSession? {
     sysStream.lock.lock()
@@ -790,25 +835,26 @@ private func sysStreamTakeModern() -> SysModernSession? {
     return prior
 }
 
-/// Modern finish timeout (finding #4 — mirror legacy 30s bound).
+/// Modern finish timeout (mirror legacy 30s bound).
 private let sysStreamModernFinishTimeoutSeconds: Double = 30
 
 /// Resume CheckedContinuation once (finish vs timeout race). Extra resumes dropped.
 private final class SingleShotContinuation<T: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var done = false
-    func resumeOnce(_ continuation: CheckedContinuation<T, Never>, with value: T) {
+    /// True iff this call performed the resume (the loser must not log/act).
+    func resumeOnce(_ continuation: CheckedContinuation<T, Never>, with value: T) -> Bool {
         lock.lock()
         let already = done
         done = true
         lock.unlock()
         if !already { continuation.resume(returning: value) }
+        return !already
     }
 }
 
-/// Finish + drain modern session, bounded (finding #4). Race finish vs timer — TaskGroup
-/// can't bound cancel-ignoring work. On timeout return partial hypothesis. Also used by
-/// finding #1 self-heal (return discarded).
+/// Finish + drain modern session, bounded. Race finish vs timer (TaskGroup can't bound
+/// cancel-ignoring work). On timeout return partial hypothesis.
 @available(macOS 26, *)
 private func sysStreamTeardownModern(_ session: SysModernSession) async -> String {
     session.continuation.finish()
@@ -821,20 +867,20 @@ private func sysStreamTeardownModern(_ session: SysModernSession) async -> Strin
                 logErr("sysStreamTeardownModern: finalize failed: \(error)")
             }
             _ = await session.drainTask?.value
-            gate.resumeOnce(cont, with: session.hypothesis())
+            _ = gate.resumeOnce(cont, with: session.hypothesis())
         }
         Task.detached {
             try? await Task.sleep(for: .seconds(sysStreamModernFinishTimeoutSeconds))
-            logErr("sysStreamTeardownModern: timed out after \(sysStreamModernFinishTimeoutSeconds)s")
-            gate.resumeOnce(cont, with: session.hypothesis())
+            if gate.resumeOnce(cont, with: session.hypothesis()) {
+                logErr("sysStreamTeardownModern: timed out after \(sysStreamModernFinishTimeoutSeconds)s")
+            }
         }
     }
 }
 
 private final class SysStreamState: @unchecked Sendable {
     let lock = NSLock()
-    // Legacy tier (<26). The committed/current-segment split (finding #2 follow-up) lives
-    // ON `legacyRun` itself now, not here — see `LegacyRun`'s doc comment for why.
+    // Legacy tier (<26). Committed/current-segment split lives on `legacyRun` (see its doc).
     var legacyRun: LegacyRun?
     var legacyRequest: SFSpeechAudioBufferRecognitionRequest?
     // Modern tier (26+): type-erased `SysModernSession` (see its doc comment for why).
@@ -872,8 +918,8 @@ func legacySegmentDidReset(previous: String, new: String, gapSeconds: TimeInterv
 }
 
 /// Begin a new system-STT utterance (per-tier). Returns 0 on success.
-@_cdecl("dsk_sys_stream_start")
-public func dsk_sys_stream_start() -> Int32 {
+@_cdecl("ds_mlx_sys_stream_start")
+public func ds_mlx_sys_stream_start() -> Int32 {
     if #available(macOS 26, *) {
         return sysStreamStartModern()
     }
@@ -884,9 +930,9 @@ public func dsk_sys_stream_start() -> Int32 {
 private func sysStreamStartModern() -> Int32 {
     switch runBlocking({ () -> Int32 in
         guard await sysLocaleSupported() else { return 1 }
-        // Finding #1: tear down prior session before replace (finish may have been skipped).
+        // Tear down prior session before replace (finish may have been skipped).
         if let prior = sysStreamTakeModern() {
-            logErr("dsk_sys_stream_start: tearing down a leaked prior session")
+            logErr("ds_mlx_sys_stream_start: tearing down a leaked prior session")
             _ = await sysStreamTeardownModern(prior)
         }
         // Need volatile partials; union preset with volatile+fastResults (~6/sec cadence).
@@ -901,21 +947,19 @@ private func sysStreamStartModern() -> Int32 {
         let analyzer = SpeechAnalyzer(modules: [transcriber])
         let (stream, cont) = AsyncStream<AnalyzerInput>.makeStream()
         try await analyzer.start(inputSequence: stream)
-        // Finding #5: resolve format once, cache on session.
+        // Resolve format once; cache on session.
         let targetFormat = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber])
 
         let session = SysModernSession(
             analyzer: analyzer, transcriber: transcriber, continuation: cont, targetFormat: targetFormat)
-        // Drain `transcriber.results` on its own detached task — independent of whichever
-        // thread is inside `push`/`finish`, per the section doc comment. Naturally ends once
-        // `finalizeAndFinishThroughEndOfInput()` completes the results sequence.
+        // Drain results on a detached task (independent of push/finish). Ends when finalize completes.
         session.drainTask = Task.detached {
             do {
                 for try await result in transcriber.results {
                     session.recordResult(String(result.text.characters), isFinal: result.isFinal)
                 }
             } catch {
-                logErr("dsk_sys_stream: results drain error: \(error)")
+                logErr("ds_mlx_sys_stream: results drain error: \(error)")
             }
         }
 
@@ -924,12 +968,12 @@ private func sysStreamStartModern() -> Int32 {
     }) {
     case .success(let code): return code
     case .failure(let e):
-        logErr("dsk_sys_stream_start error: \(e)")
+        logErr("ds_mlx_sys_stream_start error: \(e)")
         return 1
     }
 }
 
-/// Finding #1 legacy teardown (counterpart of modern take+teardown); stragglers via #3.
+/// Legacy teardown before replace; identity check drops straggler callbacks.
 private func sysStreamTeardownLegacy() {
     sysStream.lock.lock()
     let priorRequest = sysStream.legacyRequest
@@ -947,7 +991,7 @@ private func sysStreamStartLegacy() -> Int32 {
     switch legacyEnsureAuthorizedRecognizer() {
     case .success(let r): recognizer = r
     case .failure(let e):
-        logErr("dsk_sys_stream_start: \(e)")
+        logErr("ds_mlx_sys_stream_start: \(e)")
         return 1
     }
 
@@ -955,9 +999,9 @@ private func sysStreamStartLegacy() -> Int32 {
 
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true
-    request.shouldReportPartialResults = true  // the core fix vs. legacyTranscribe's batch request
-    // .dictation = long continuous input hint (finding #2: does NOT auto-isFinal on pause;
-    // phrase resets handled by legacySegmentDidReset). Streaming only — batch is one-shot.
+    request.shouldReportPartialResults = true  // vs. batch request in legacyTranscribe
+    // .dictation hints continuous input (no auto-isFinal on pause; phrase resets via
+    // legacySegmentDidReset). Streaming only — batch is one-shot.
     request.taskHint = .dictation
 
     let run = LegacyRun()
@@ -978,7 +1022,7 @@ private func sysStreamStartLegacy() -> Int32 {
                         preserveStrictPrefix: legacyNeedsStrictPrefixFinalWorkaround),
                     error: nil)
             } else {
-                // Finding #3: skip straggler callbacks from replaced runs (identity check).
+                // Skip straggler callbacks from replaced runs (identity check).
                 sysStream.lock.lock()
                 let isCurrent = sysStream.legacyRun === run
                 sysStream.lock.unlock()
@@ -999,30 +1043,32 @@ private func sysStreamStartLegacy() -> Int32 {
     return 0
 }
 
-/// Convert to session.targetFormat if needed; nil = use as-is (finding #5).
+/// Convert to session.targetFormat if needed; nil = use as-is.
 @available(macOS 26, *)
-private func sysStreamConvert(_ buffer: AVAudioPCMBuffer, for session: SysModernSession) -> AVAudioPCMBuffer? {
+private func sysStreamConvert(_ buffer: AVAudioPCMBuffer, for session: SysModernSession) -> AVAudioPCMBuffer?
+{
     guard let target = session.targetFormat, target != buffer.format else { return nil }
     do {
         return try sysConvert(buffer, to: target)
     } catch {
-        logErr("dsk_sys_stream_push: convert failed, using raw buffer: \(error)")
+        logErr("ds_mlx_sys_stream_push: convert failed, using raw buffer: \(error)")
         return nil
     }
 }
 
 /// Feed a 16 kHz mono chunk; hand back the running hypothesis-so-far.
-@_cdecl("dsk_sys_stream_push")
-public func dsk_sys_stream_push(
+@_cdecl("ds_mlx_sys_stream_push")
+public func ds_mlx_sys_stream_push(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
+    guard let cb else { return 4 }
     let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
     guard sampleRate > 0, let buffer = sysMakeBuffer(audio, sampleRate: Double(sampleRate)) else {
-        logErr("dsk_sys_stream_push: bad audio")
+        logErr("ds_mlx_sys_stream_push: bad audio")
         return 1
     }
 
@@ -1031,13 +1077,13 @@ public func dsk_sys_stream_push(
         let session = sysStream.modern as? SysModernSession
         sysStream.lock.unlock()
         guard let session else {
-            logErr("dsk_sys_stream_push: not started")
+            logErr("ds_mlx_sys_stream_push: not started")
             return 2
         }
         let toYield = sysStreamConvert(buffer, for: session) ?? buffer
         session.continuation.yield(AnalyzerInput(buffer: toYield))
         let text = session.hypothesis()
-        text.withCString { cb?(ctx, $0) }
+        text.withCString { cb(ctx, $0) }
         return 0
     }
 
@@ -1046,37 +1092,34 @@ public func dsk_sys_stream_push(
     let run = sysStream.legacyRun
     sysStream.lock.unlock()
     guard let request, let run else {
-        logErr("dsk_sys_stream_push: not started")
+        logErr("ds_mlx_sys_stream_push: not started")
         return 2
     }
     let text = run.hypothesis()
     request.append(buffer)  // NOT endAudio() yet — that's finish()'s job
-    text.withCString { cb?(ctx, $0) }
+    text.withCString { cb(ctx, $0) }
     return 0
 }
 
 /// Flush the stream and return the final transcript.
-@_cdecl("dsk_sys_stream_finish")
-public func dsk_sys_stream_finish(
+@_cdecl("ds_mlx_sys_stream_finish")
+public func ds_mlx_sys_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
+    guard let cb else { return 4 }
     if #available(macOS 26, *) {
         sysStream.lock.lock()
         let session = sysStream.modern as? SysModernSession
         sysStream.modern = nil
         sysStream.lock.unlock()
         guard let session else {
-            "".withCString { cb?(ctx, $0) }
+            "".withCString { cb(ctx, $0) }
             return 0
         }
-        // `sysStreamTeardownModern` (finding #4) finalizes the analyzer, drains any results
-        // still in flight (including the final one), and bounds the whole thing with a timeout
-        // so a wedged `SpeechAnalyzer` can't hang the helper forever — mirroring the legacy
-        // tier's explicit 30s bound just below. The closure never throws, so this is always
-        // `.success`; `?? ""` is just defense against a stdlib-mandated `Result` shape.
+        // Bounded finish+drain (30s); timeout returns partial hypothesis.
         let text = (try? runBlocking({ await sysStreamTeardownModern(session) }).get()) ?? ""
-        text.withCString { cb?(ctx, $0) }
+        text.withCString { cb(ctx, $0) }
         return 0
     }
 
@@ -1087,176 +1130,204 @@ public func dsk_sys_stream_finish(
     sysStream.legacyRun = nil
     sysStream.lock.unlock()
     guard let request, let run else {
-        "".withCString { cb?(ctx, $0) }
+        "".withCString { cb(ctx, $0) }
         return 0
     }
     request.endAudio()
-    // All audio was already fed incrementally as it arrived, so by `endAudio()` there's little
-    // left for the recognizer to catch up on — a flat, generous bound plays the same role as
-    // `legacyTranscribe`'s duration-based margin without needing a tracked utterance length here.
+    // Flat 30s bound (audio already fed incrementally).
     if run.sem.wait(timeout: .now() + .seconds(30)) == .timedOut {
         run.task?.cancel()
-        // Timeout fallback: hand back whatever committed+current-segment concatenation `run`
-        // has accumulated so far rather than nothing — mirrors `sysStreamTeardownModern`'s
-        // timeout path returning `session.hypothesis()`.
+        // Timeout: return committed+current hypothesis rather than empty.
         run.finish(text: run.hypothesis(), error: nil)
     }
     if let text = run.text {
-        text.withCString { cb?(ctx, $0) }
+        text.withCString { cb(ctx, $0) }
         return 0
     }
-    logErr("dsk_sys_stream_finish error: \(run.error ?? DskError.noResult)")
+    logErr("ds_mlx_sys_stream_finish error: \(run.error ?? MlxShimError.noResult)")
     return 1
 }
 
-// MARK: - Diarization (Pyannote + WeSpeaker Core ML)
+#if !SYSTEM_ONLY
+// MARK: - Diarization (Sortformer + WeSpeaker MLX)
 // Own manager+lock; JSON out for C ABI. Models pre-downloaded by DontSpeak.
 
 private final class DiarState: @unchecked Sendable {
     let lock = NSLock()
-    var manager: DiarizerManager?
+    var model: SortformerModel?
+    var encoder: SpeakerEncoder?
+    var threshold: Float = 0.5
 }
 private let diar = DiarState()
 
-/// Load diarizer. clustering_threshold ≤0 → FluidAudio default 0.7 (lower = more speakers).
-@_cdecl("dsk_diar_init")
-public func dsk_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
-    diar.lock.lock()
-    defer { diar.lock.unlock() }
-    // debugMode → speakerDatabase embeddings for enrollment match. let for @Sendable capture.
-    let config: DiarizerConfig = {
-        var c =
-            clusteringThreshold > 0
-            ? DiarizerConfig(clusteringThreshold: clusteringThreshold)
-            : DiarizerConfig()
-        c.debugMode = true
-        return c
-    }()
-    // Offline load from model_dir/speaker-diarization-coreml. CONTRACT: basenames match
-    // ds-model coreml_repo.rs DIARIZATION_* consts (Rust test pins the other half).
-    ModelHub.offlineMode = true
-    let dir = cString(modelDir).map { URL(fileURLWithPath: $0) }
-    switch runBlocking({ () -> DiarizerManager in
-        guard let dir else { throw DskError.nilDir }
-        let base = dir.appendingPathComponent("speaker-diarization-coreml")
-        let models = try DiarizerModels.load(
-            localSegmentationModel: base.appendingPathComponent("pyannote_segmentation.mlmodelc"),
-            localEmbeddingModel: base.appendingPathComponent("wespeaker_v2.mlmodelc")
-        )
-        let mgr = DiarizerManager(config: config)
-        mgr.initialize(models: models)
-        return mgr
-    }) {
-    case .success(let mgr):
-        diar.manager = mgr
+struct LabeledSampleRange {
+    let speaker: String
+    let start: Int
+    let end: Int
+}
+
+func exclusiveRanges(
+    for speaker: String, in ranges: [LabeledSampleRange]
+) -> [Range<Int>] {
+    let blockers = ranges.filter { $0.speaker != speaker && $0.start < $0.end }
+    return ranges.filter { $0.speaker == speaker && $0.start < $0.end }.flatMap { own in
+        blockers.reduce([own.start..<own.end]) { fragments, blocker in
+            fragments.flatMap { fragment in
+                guard blocker.start < fragment.upperBound, blocker.end > fragment.lowerBound else {
+                    return [fragment]
+                }
+                var remaining: [Range<Int>] = []
+                if fragment.lowerBound < blocker.start {
+                    remaining.append(fragment.lowerBound..<min(fragment.upperBound, blocker.start))
+                }
+                if blocker.end < fragment.upperBound {
+                    remaining.append(max(fragment.lowerBound, blocker.end)..<fragment.upperBound)
+                }
+                return remaining
+            }
+        }
+    }
+}
+
+/// Load diarizer and publish both models atomically after successful initialization.
+@_cdecl("ds_mlx_diar_init")
+public func ds_mlx_diar_init(_ modelDir: UnsafePointer<CChar>?, _ activityThreshold: Float) -> Int32 {
+    guard let path = cString(modelDir) else { return 3 }
+    let root = URL(fileURLWithPath: path)
+    do {
+        let model = try SortformerModel.fromModelDirectory(
+            root.appendingPathComponent("sortformer"))
+        let encoder = try SpeakerEncoder.load(
+            from: root.appendingPathComponent("wespeaker"))
+        let threshold =
+            activityThreshold > 0
+            ? min(max(activityThreshold, 0.1), 0.9) : 0.5
+        diar.lock.lock()
+        diar.model = model
+        diar.encoder = encoder
+        diar.threshold = threshold
+        diar.lock.unlock()
         return 0
-    case .failure(let e):
-        logErr("dsk_diar_init error: \(e)")
+    } catch {
+        logErr("ds_mlx_diar_init error: \(error)")
         return 1
     }
 }
 
 /// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for join. Empty → {"segments":[]}.
-@_cdecl("dsk_diarize")
-public func dsk_diarize(
+@_cdecl("ds_mlx_diarize")
+public func ds_mlx_diarize(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskStrCb?
+    _ cb: MlxStrCb?
 ) -> Int32 {
-    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
-    // Full-call lock: DiarizerManager is not an actor (races if concurrent).
+    _ = sampleRate
+    guard let cb else { return 4 }
     diar.lock.lock()
-    defer { diar.lock.unlock() }
-    guard let mgr = diar.manager else {
-        logErr("dsk_diarize: not initialized")
+    guard let model = diar.model, let encoder = diar.encoder else {
+        diar.lock.unlock()
+        logErr("ds_mlx_diarize: not initialized")
         return 2
     }
     guard let samples, n > 0 else {
-        "{\"segments\":[]}".withCString { cb?(ctx, $0) }
+        diar.lock.unlock()
+        "{\"segments\":[]}".withCString { cb(ctx, $0) }
         return 0
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
-    // performCompleteDiarization is synchronous (throwing) — no async bridge needed.
-    do {
-        let result = try mgr.performCompleteDiarization(audio)
+    let modelBox = SendableValue(model)
+    let threshold = diar.threshold
+    switch runBlocking({
+        try await modelBox.value.generate(
+            audio: MLXArray(audio), sampleRate: 16_000,
+            threshold: threshold, minDuration: 0.2, mergeGap: 0.15)
+    }) {
+    case .success(let result):
         let segs: [[String: Any]] = result.segments.map { seg in
             [
-                "speaker": seg.speakerId,
-                "start": seg.startTimeSeconds,
-                "end": seg.endTimeSeconds,
+                "speaker": String(seg.speaker),
+                "start": seg.start,
+                "end": seg.end,
             ]
         }
-        // Embeddings keyed by segment speakerId (same id-space for engine join).
+        let ranges = result.segments.map { segment in
+            LabeledSampleRange(
+                speaker: String(segment.speaker),
+                start: min(audio.count, max(0, Int(segment.start * 16_000))),
+                end: min(audio.count, max(0, Int(segment.end * 16_000))))
+        }
         var speakers: [String: [Float]] = [:]
-        let db = result.speakerDatabase ?? [:]
-        for seg in result.segments {
-            let id = seg.speakerId
-            if speakers[id] == nil, let emb = db[id] {
-                speakers[id] = emb
+        for speaker in Set(result.segments.map(\.speaker)) {
+            var speakerAudio: [Float] = []
+            for range in exclusiveRanges(for: String(speaker), in: ranges) {
+                speakerAudio.append(contentsOf: audio[range])
+            }
+            if let embedding = try? encoder.embed(speakerAudio) {
+                speakers[String(speaker)] = embedding
             }
         }
-        let data = try JSONSerialization.data(withJSONObject: [
-            "segments": segs,
-            "speakers": speakers,
-        ])
-        String(decoding: data, as: UTF8.self).withCString { cb?(ctx, $0) }
-        return 0
-    } catch {
-        logErr("dsk_diarize error: \(error)")
+        do {
+            let data = try JSONSerialization.data(withJSONObject: [
+                "segments": segs,
+                "speakers": speakers,
+            ])
+            let json = String(decoding: data, as: UTF8.self)
+            diar.lock.unlock()
+            json.withCString { cb(ctx, $0) }
+            return 0
+        } catch {
+            diar.lock.unlock()
+            logErr("ds_mlx_diarize JSON error: \(error)")
+            return 1
+        }
+    case .failure(let error):
+        diar.lock.unlock()
+        logErr("ds_mlx_diarize error: \(error)")
         return 1
     }
 }
 
-@_cdecl("dsk_diar_shutdown")
-public func dsk_diar_shutdown() {
+@_cdecl("ds_mlx_diar_shutdown")
+public func ds_mlx_diar_shutdown() {
     diar.lock.lock()
-    diar.manager = nil
+    diar.model = nil
+    diar.encoder = nil
     diar.lock.unlock()
 }
 
-/// WeSpeaker embedding for enrollment. Needs dsk_diar_init. Empty → rc 3.
-@_cdecl("dsk_diar_embed")
-public func dsk_diar_embed(
+/// WeSpeaker embedding for enrollment. Needs `ds_mlx_diar_init`. Empty → rc 3.
+@_cdecl("ds_mlx_diar_embed")
+public func ds_mlx_diar_embed(
     _ samples: UnsafePointer<Float>?,
     _ n: Int,
     _ sampleRate: Int32,
     _ ctx: UnsafeMutableRawPointer?,
-    _ cb: DskPcmCb?
+    _ cb: MlxPcmCb?
 ) -> Int32 {
-    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
-    // Full-call lock (non-actor manager).
+    _ = sampleRate
+    guard let cb else { return 4 }
     diar.lock.lock()
-    defer { diar.lock.unlock() }
-    guard let mgr = diar.manager else {
-        logErr("dsk_diar_embed: not initialized")
+    guard let encoder = diar.encoder else {
+        diar.lock.unlock()
+        logErr("ds_mlx_diar_embed: not initialized")
         return 2
     }
-    guard let samples, n > 0 else { return 3 }
+    guard let samples, n > 0 else {
+        diar.lock.unlock()
+        return 3
+    }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
     do {
-        let emb = try mgr.extractSpeakerEmbedding(from: audio)
-        // Borrow the embedding to the callback (sample_rate is irrelevant for an embedding).
-        emb.withUnsafeBufferPointer { cb?(ctx, $0.baseAddress, $0.count, 0) }
+        let emb = try encoder.embed(audio)
+        diar.lock.unlock()
+        emb.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, 0) }
         return 0
     } catch {
-        logErr("dsk_diar_embed error: \(error)")
+        diar.lock.unlock()
+        logErr("ds_mlx_diar_embed error: \(error)")
         return 1
     }
 }
-
-/// Pre-download diarization models only (no manager).
-@_cdecl("dsk_diar_download")
-public func dsk_diar_download() -> Int32 {
-    switch runBlocking({ () -> Bool in
-        _ = try await DiarizerModels.downloadIfNeeded()
-        return true
-    }) {
-    case .success:
-        return 0
-    case .failure(let e):
-        logErr("dsk_diar_download error: \(e)")
-        return 1
-    }
-}
+#endif

@@ -24,6 +24,7 @@ mod narration;
 mod paths;
 mod pidfile;
 pub mod speakers;
+mod tts_model;
 mod voice;
 mod wire;
 
@@ -47,24 +48,21 @@ pub use grok_sessions::{
     resolve_grok_chat_history, resolve_grok_session_dir, resolve_grok_updates_jsonl,
     scan_grok_chat_history_by_mtime,
 };
-pub use narration::{
-    DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state,
-};
-pub use paths::{
-    Paths, brew_onnxruntime_dylib, coreml_dir, coreml_model_present, data_dir, model_dir,
-};
+pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
+pub use paths::{Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, mlx_model_present, model_dir};
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};
-pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, VoiceConfig};
+pub use tts_model::{TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, tts_model_descriptor};
+pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, TtsVoicePools, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::grok_hooks::grok_hooks_value;
-pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
-pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::hermes_allowlist::{
     desired_approvals as hermes_desired_approvals, merge_hermes_allowlist, strip_hermes_allowlist,
 };
 pub use wire::hermes_hooks::{HermesMergeError, merge_hermes_hooks, strip_hermes_hooks};
 pub use wire::hermes_mcp::{merge_hermes_mcp, strip_hermes_mcp};
+pub use wire::hooks::{HookSpec, HooksMergeError, INSTALLED_BINS, merge_hooks, strip_hooks};
+pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
 pub use wire::kimi_hooks::{KimiMergeError, merge_kimi_hooks, strip_kimi_hooks};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, LaunchMode, LaunchSpec,

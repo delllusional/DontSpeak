@@ -2,7 +2,7 @@
 //!
 //! `voice-g2p` (Misaki tokenizer/tagger/lexicon) with espeak-ng disabled; ONNX BART
 //! only for unresolved words. Final stage drops unsupported chars, emits model-bounded
-//! [`KokoroPhonemeChunk`]s shared by ONNX and Core ML.
+//! [`KokoroPhonemeChunk`]s shared by ONNX and MLX.
 
 mod bart;
 
@@ -318,7 +318,7 @@ pub fn phonemize_for(text: &str, _voice: &str) -> String {
     phonemize(text)
 }
 
-/// Backend-ready IPA chunk: vocab-safe chars, token count within ONNX style table + FluidAudio.
+/// Backend-ready IPA chunk: vocab-safe chars within Kokoro's token limit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KokoroPhonemeChunk(String);
 

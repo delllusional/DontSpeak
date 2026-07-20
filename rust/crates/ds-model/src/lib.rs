@@ -34,23 +34,26 @@
 use std::path::{Path, PathBuf};
 
 mod archive;
-pub mod coreml_repo;
 pub mod download;
 pub mod hash;
 pub mod libraries;
+pub mod mlx_repo;
+/// MLX Audio shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
+#[cfg(target_os = "macos")]
+pub mod mlx_shim;
 pub mod ort;
 mod read_retry;
 pub mod setup;
-/// FluidAudio Core ML shim loader for `ds-stt` + `ds-tts` (no cross-crate dep).
-#[cfg(target_os = "macos")]
-pub mod shim;
 pub mod spec;
 pub mod target;
+pub mod tts_assets;
 pub mod update_check;
 pub mod urls;
 
 // Flat facade — stable `ds_model::<item>` paths.
-pub use download::{ensure, ensure_with_progress, set_prefetch_source, url_basename};
+pub use download::{
+    ensure, ensure_in_dir, ensure_with_progress, prefetch_key, set_prefetch_source, url_basename,
+};
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use ort::{
     ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime,
@@ -74,6 +77,10 @@ pub use spec::{
     parakeet_tokens_spec, prefetch_items, sepformer_spec,
 };
 pub use target::DownloadTarget;
+pub use tts_assets::{
+    TTS_ORT_ASSETS, TtsOrtAssetSet, is_tts_model_present, run_setup_tts_model_with_progress,
+    tts_model_dir, tts_model_file_path, tts_model_files_present, tts_ort_asset_set,
+};
 pub use update_check::{UpdateInfo, check_for_update};
 
 #[cfg(all(
@@ -84,6 +91,13 @@ pub use ort::{
     cuda_onnxruntime_path, cuda_runtime_dir, ensure_cuda_runtime_with_progress,
     is_cuda_driver_present, is_cuda_runtime_present,
 };
+
+/// Serializes every in-crate test that mutates the process-wide `DONTSPEAK_MODEL_DIR` /
+/// `ORT_DYLIB_PATH` env vars. ONE crate-level lock — a second module-local lock would NOT
+/// serialize against this one, reintroducing the interleaving race the parallel test
+/// runner makes possible (spec.rs and tts_assets.rs tests share it).
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Resolve a file name to its full path under [`ds_config::model_dir`].
 /// `None` only if the per-OS data dir cannot be resolved.

@@ -1,24 +1,26 @@
-//! Manual on-device check for the Core ML diarizer: feed a WAV file straight into
-//! [`ds_stt::diarize::CoremlDiarizer`] (bypassing the mic) and print the speaker
-//! segments. macOS only — needs `DSKOKORO_DYLIB_PATH` pointing at a built
-//! `libdskokoro.dylib`; the Pyannote + WeSpeaker models download on first run.
+//! Manual on-device check for the MLX diarizer: feed a WAV file straight into
+//! [`ds_stt::diarize::MlxDiarizer`] (bypassing the mic) and print the speaker
+//! segments. macOS only — needs `DONTSPEAK_MLX_DYLIB_PATH` pointing at a built
+//! `libdontspeak_mlx.dylib`; the Sortformer + WeSpeaker models download on first run.
 //!
-//!   DSKOKORO_DYLIB_PATH=…/libdskokoro.dylib \
+//!   DONTSPEAK_MLX_DYLIB_PATH=…/libdontspeak_mlx.dylib \
 //!     cargo run -p ds-stt --example diarize_wav -- /path/to/two-speakers.wav
 
 #[cfg(target_os = "macos")]
 fn main() {
-    use ds_stt::diarize::{CoremlDiarizer, Diarizer};
+    use ds_stt::diarize::{Diarizer, MlxDiarizer};
 
     let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("usage: diarize_wav <file.wav>  (needs DSKOKORO_DYLIB_PATH)");
+        eprintln!("usage: diarize_wav <file.wav>  (needs DONTSPEAK_MLX_DYLIB_PATH)");
         std::process::exit(2);
     });
-    if std::env::var_os("DSKOKORO_DYLIB_PATH").is_none() {
-        eprintln!("DSKOKORO_DYLIB_PATH is not set — point it at a built libdskokoro.dylib");
+    if std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH").is_none() {
+        eprintln!(
+            "DONTSPEAK_MLX_DYLIB_PATH is not set — point it at a built libdontspeak_mlx.dylib"
+        );
         std::process::exit(2);
     }
-    // Optional 2nd arg: clustering threshold (0.5–0.9, lower = more speakers); 0 = default.
+    // Optional 2nd arg: speaker-activity cutoff (0.1–0.9); 0 = default.
     let threshold: f32 = std::env::args()
         .nth(2)
         .and_then(|s| s.parse().ok())
@@ -49,11 +51,11 @@ fn main() {
     );
 
     let mut diarizer = if threshold > 0.0 {
-        eprintln!("clustering threshold: {threshold}");
-        CoremlDiarizer::with_threshold(threshold)
+        eprintln!("speaker activity threshold: {threshold}");
+        MlxDiarizer::with_threshold(threshold)
     } else {
-        eprintln!("clustering threshold: FluidAudio default (0.7)");
-        CoremlDiarizer::new()
+        eprintln!("speaker activity threshold: MLX shim default (0.5)");
+        MlxDiarizer::new()
     };
 
     // Time model-load (preload) and inference separately so the per-call cost is clear.
@@ -119,5 +121,5 @@ fn read_mono_f32(
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("diarize_wav is macOS-only (Core ML diarizer).");
+    eprintln!("diarize_wav is macOS-only (MLX diarizer).");
 }

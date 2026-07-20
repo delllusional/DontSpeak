@@ -165,10 +165,7 @@ pub fn merge_hermes_hooks(
 }
 
 /// Compare ours per-event (map iteration order is not load-bearing).
-fn ours_match_desired(
-    hooks_obj: &Map<String, Value>,
-    desired: &[(String, String, i64)],
-) -> bool {
+fn ours_match_desired(hooks_obj: &Map<String, Value>, desired: &[(String, String, i64)]) -> bool {
     use std::collections::BTreeMap;
     let mut current: BTreeMap<&str, Vec<(&str, i64)>> = BTreeMap::new();
     for (event, entries) in hooks_obj {
@@ -236,8 +233,8 @@ pub fn strip_hermes_hooks(existing: &str) -> Result<String, HermesMergeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::cmdline::{InlineFlavor, ShellOverride, inline_command};
+    use super::*;
 
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
@@ -330,7 +327,10 @@ hooks:
 "#;
         let once = merged(existing);
         assert!(once.contains("theme"), "unrelated key preserved: {once}");
-        assert!(once.contains("/usr/bin/true"), "user's hook preserved: {once}");
+        assert!(
+            once.contains("/usr/bin/true"),
+            "user's hook preserved: {once}"
+        );
         let twice = merged(&once);
         // Idempotent content (YAML key order may vary across re-emit — compare parsed).
         assert_eq!(parse(&once), parse(&twice), "idempotent");
@@ -396,9 +396,7 @@ hooks:
         assert!(stripped.contains("/usr/bin/true"), "user hook kept");
         assert!(!stripped.contains("dontspeak"), "all ours removed");
         let root = parse(&stripped);
-        assert!(
-            root["hooks"]["post_tool_call"].as_array().unwrap().len() == 1
-        );
+        assert!(root["hooks"]["post_tool_call"].as_array().unwrap().len() == 1);
 
         let stripped = strip_hermes_hooks(&merged("")).unwrap();
         assert!(

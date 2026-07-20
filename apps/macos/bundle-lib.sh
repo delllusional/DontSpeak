@@ -62,26 +62,127 @@ compile_icon() {
   legacy_icns "$out"
 }
 
-# build_dskokoro_dylib SWARCH — both arches (System STT on Intel). Path on stdout or empty.
-build_dskokoro_dylib() {
+# mlx_shim_missing WHY — dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
+# DONTSPEAK_ALLOW_MISSING_MLX=1; dev builds warn and continue (rc 0).
+mlx_shim_missing() {
+  if [ "${DONTSPEAK_DIST:-0}" = "1" ] && [ -z "${DONTSPEAK_ALLOW_MISSING_MLX:-}" ]; then
+    echo "   ERROR: libdontspeak_mlx $1 — dist build would ship without MLX backends" >&2
+    echo "          (BuiltIn TTS/STT silently degrade to ONNX-CPU on Apple Silicon)." >&2
+    echo "          Set DONTSPEAK_ALLOW_MISSING_MLX=1 to waive." >&2
+    return 1
+  fi
+  echo "   WARN: libdontspeak_mlx $1 — MLX backends unavailable in this build" >&2
+  echo "         (BuiltIn TTS/STT degrade to ONNX-CPU)" >&2
+}
+
+# build_dontspeak_mlx_dylib SWARCH — MLX on arm64; system-speech-only compatibility shim on Intel.
+# Built-in Intel models stay on ORT CPU. The small Intel dylib retains System STT without linking
+# MLX. MLX's Metal shaders are Xcode resources, so build the arm64 product through Xcode.
+build_dontspeak_mlx_dylib() {
   local swarch="$1"
-  local pkg="$BUNDLE_LIB_DIR/DsKokoro"
-  if ! swift_build_resilient "$pkg" -c release --arch "$swarch" --product dskokoro >&2; then
-    echo "   WARN: libdskokoro build failed — apple-native backends unavailable in this build" >&2
+  case "$swarch" in
+    arm64) ;;
+    x86_64)
+      local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
+      local source="$pkg/Sources/DontSpeakMLX/shim.swift"
+      local out="$pkg/.build/system-$swarch/libdontspeak_mlx.dylib"
+      mkdir -p "${out%/*}"
+      if ! xcrun swiftc -parse-as-library -O -whole-module-optimization -D SYSTEM_ONLY \
+          -target x86_64-apple-macosx14.0 -emit-library "$source" -o "$out" >&2; then
+        echo "   ERROR: Intel system-speech shim build failed" >&2
+        return 1
+      fi
+      [ -f "$out" ] || {
+        echo "   ERROR: Intel system-speech shim produced no dylib" >&2
+        return 1
+      }
+      echo "   Intel built-in models use ONNX CPU; bundled shim provides System STT" >&2
+      echo "$out"
+      return 0
+      ;;
+    *)
+      echo "   ERROR: unsupported Swift architecture '$swarch' for libdontspeak_mlx" >&2
+      return 2
+      ;;
+  esac
+  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
+  local derived="$pkg/.build/xcode-$swarch"
+  if ! (cd "$pkg" && xcodebuild -scheme dontspeak_mlx -destination 'generic/platform=macOS' \
+      -configuration Release -derivedDataPath "$derived" ARCHS="$swarch" ONLY_ACTIVE_ARCH=YES \
+      build -quiet) >&2; then
+    mlx_shim_missing "$swarch build failed" || return 1
     return 0
   fi
-  local bin
-  bin="$(cd "$pkg" && swift build -c release --arch "$swarch" --product dskokoro --show-bin-path 2>/dev/null)"
+  local products="$derived/Build/Products/Release"
+  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+  local metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
   # if/else not bare && — missing file must not kill set -e with empty contract.
-  if [ -f "$bin/libdskokoro.dylib" ]; then
-    echo "$bin/libdskokoro.dylib"
+  if [ -f "$bin" ] && [ -f "$metallib" ]; then
+    echo "$bin"
   else
-    echo "   WARN: libdskokoro.dylib missing after build — apple-native TTS not bundled" >&2
+    mlx_shim_missing "dylib or Metal library missing after $swarch build" || return 1
   fi
 }
 
+# Copy SwiftPM resource bundles generated beside the Xcode-built MLX shim. In addition to the
+# mandatory default.metallib this includes tokenizer/configuration and dependency resources.
+bundle_swift_package_resources() {
+  local out="$1" mlx="$2"
+  local swarch products resource copied=0
+  swarch="$(lipo -archs "$mlx" 2>/dev/null | awk '{print $1}')"
+  if [ "$swarch" = "x86_64" ]; then
+    echo "   Intel system-speech shim has no MLX resource bundles"
+    return 0
+  fi
+  products="$BUNDLE_LIB_DIR/DontSpeakMLX/.build/xcode-$swarch/Build/Products/Release"
+  mkdir -p "$out"
+  for resource in "$products"/*.bundle; do
+    [ -d "$resource" ] || continue
+    cp -R "$resource" "$out/"
+    copied=$((copied + 1))
+  done
+  [ -f "$out/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ] || {
+    echo "   ERROR: MLX default.metallib was not bundled" >&2
+    return 1
+  }
+  echo "   bundled $copied Swift package resource bundles"
+}
+
+# Copy the legal files for Swift packages linked into libdontspeak_mlx. SwiftSyntax is a
+# build-only macro dependency of mlx-swift-lm and is not linked into the shipped dylib.
+bundle_swift_package_licenses() {
+  local out="$1" mlx="${2:-}"
+  if [ -n "$mlx" ] && [ "$(lipo -archs "$mlx" 2>/dev/null | awk '{print $1}')" = "x86_64" ]; then
+    return 0
+  fi
+  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
+  local checkouts=""
+  local candidate
+  for candidate in "$pkg"/.build/xcode-*/SourcePackages/checkouts "$pkg/.build/checkouts"; do
+    if [ -d "$candidate" ]; then
+      checkouts="$candidate"
+      break
+    fi
+  done
+  [ -d "$checkouts" ] || return 0
+  mkdir -p "$out"
+  local checkout_dir package_name legal_file legal_name copied=0
+  for checkout_dir in "$checkouts"/*; do
+    [ -d "$checkout_dir" ] || continue
+    package_name="${checkout_dir##*/}"
+    [ "$package_name" = "swift-syntax" ] && continue
+    for legal_file in "$checkout_dir"/LICENSE* "$checkout_dir"/NOTICE*; do
+      [ -f "$legal_file" ] || continue
+      legal_name="${legal_file##*/}"
+      cp "$legal_file" "$out/$package_name-$legal_name"
+      copied=$((copied + 1))
+    done
+  done
+  echo "   bundled $copied Swift package license/notice files"
+}
+
 # assemble_app: 1 app 2 exe 3 helper 4 car 5 icns 6 plist 7 menubar_svg 8 sign
-# Optional DONTSPEAK_DSKOKORO_DYLIB, DONTSPEAK_CLI_BIN.
+# Optional DONTSPEAK_MLX_DYLIB, DONTSPEAK_CLI_BIN.
 assemble_app() {
   local app="$1" exe="$2" helper="$3" car="$4" icns="$5" plist="$6" mbsvg="$7" sign="$8"
   local repo; repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -97,11 +198,11 @@ assemble_app() {
     cp "$cli" "$app/Contents/Helpers/dontspeak"
     echo "   bundled dontspeak CLI ← $cli"
   fi
-  local dsk="${DONTSPEAK_DSKOKORO_DYLIB:-}"
-  if [ -n "$dsk" ] && [ -f "$dsk" ]; then
+  local mlx="${DONTSPEAK_MLX_DYLIB:-}"
+  if [ -n "$mlx" ] && [ -f "$mlx" ]; then
     mkdir -p "$app/Contents/Frameworks"
-    cp "$dsk" "$app/Contents/Frameworks/libdskokoro.dylib"
-    echo "   bundled libdskokoro ← $dsk"
+    cp "$mlx" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
+    echo "   bundled libdontspeak_mlx ← $mlx"
   fi
   cp "$plist"  "$app/Contents/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$(product_version)" "$app/Contents/Info.plist"
@@ -116,6 +217,10 @@ assemble_app() {
   cp "$repo/LICENSE" "$app/Contents/Resources/LICENSE"
   cp "$repo/NOTICE.md" "$app/Contents/Resources/NOTICE.md"
   cp "$repo/licenses/"* "$app/Contents/Resources/licenses/"
+  if [ -n "$mlx" ] && [ -f "$mlx" ]; then
+    bundle_swift_package_resources "$app/Contents/Resources" "$mlx"
+    bundle_swift_package_licenses "$app/Contents/Resources/licenses/swift" "$mlx"
+  fi
   if [ -f "$mbsvg" ]; then
     cp "$mbsvg" "$app/Contents/Resources/MenuBarIcon.svg"
     command -v rsvg-convert >/dev/null 2>&1 \
@@ -165,8 +270,8 @@ sign_app_dist() {
   local opts=(--force --options runtime --timestamp --sign "$sign")
   [ -f "$app/Contents/Frameworks/libonnxruntime.dylib" ] &&
     codesign "${opts[@]}" "$app/Contents/Frameworks/libonnxruntime.dylib"
-  [ -f "$app/Contents/Frameworks/libdskokoro.dylib" ] &&
-    codesign "${opts[@]}" "$app/Contents/Frameworks/libdskokoro.dylib"
+  [ -f "$app/Contents/Frameworks/libdontspeak_mlx.dylib" ] &&
+    codesign "${opts[@]}" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
   codesign "${opts[@]}" --entitlements "$ent" "$app/Contents/MacOS/ds-helper"
   [ -f "$app/Contents/Helpers/dontspeak" ] &&
     codesign "${opts[@]}" "$app/Contents/Helpers/dontspeak"
