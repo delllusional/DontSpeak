@@ -59,6 +59,83 @@ pub const KOKORO_G2P_DECODER: Download = Download {
     size_bytes: 1_750_816,
 };
 
+// MLX Audio/Misaki uses espeakng-loader for Kokoro's Spanish, French, Hindi,
+// Italian, and Portuguese frontends. Wheels contain the shared library and its
+// espeak-ng-data tree; selection and extraction live in `kokoro_frontend.rs`.
+pub const ESPEAKNG_LOADER_VERSION: &str = "0.2.4";
+
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/9d/ed/a3d872fbad4f3a3f3db0e8c31768ab14e77cd77306de16b8b20b1e1df7ea/espeakng_loader-0.2.4-py3-none-win_amd64.whl";
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "41f1e08ac9deda2efd1ea9de0b81dab9f5ae3c4b24284f76533d0a7b1dd7abd7";
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 9_437_292;
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/29/64/0b75bc50ec53b4e000bac913625511215aa96124adf5dba8c4baa17c02cd/espeakng_loader-0.2.4-py3-none-win_arm64.whl";
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "d7a2928843eaeb2df82f99a370f44e8a630f59b02f9b0d1f168a03c4eeb76b89";
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 9_426_841;
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/f8/92/f44ed7f531143c3c6c97d56e2b0f9be8728dc05e18b96d46eb539230ed46/espeakng_loader-0.2.4-py3-none-macosx_10_12_x86_64.whl";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "b77477ae2ddf62a748e04e49714eabb2f3a24f344166200b00539083bd669904";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 9_938_387;
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/a8/26/258c0cd43b9bc1043301c5f61767d6a6c3b679df82790c9cb43a3277b865/espeakng_loader-0.2.4-py3-none-macosx_11_0_arm64.whl";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "d27cdca31112226e7299d8562e889d3e38a1e48055c9ee381b45d669072ee59f";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 9_892_565;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/de/1e/25ec5ab07528c0fbb215a61800a38eca05c8a99445515a02d7fa5debcb32/espeakng_loader-0.2.4-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.whl";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "08721baf27d13d461f6be6eed9a65277e70d68234ff484fd8b9897b222cdcb6d";
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 10_078_484;
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_URL: &str = "https://files.pythonhosted.org/packages/d9/ad/1b768d8daffc2996e07bbcb6f534d8de3202cd75fce1f1c45eced1ce6465/espeakng_loader-0.2.4-py3-none-manylinux_2_28_aarch64.whl";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SHA256: &str =
+    "d1e798141b46a050cdb75fcf3c17db969bb2c40394f3f4a48910655d547508b9";
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+pub const ESPEAKNG_LOADER_SIZE_BYTES: u64 = 10_037_736;
+
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+))]
+pub const ESPEAKNG_LOADER: Download = Download {
+    file_name: "espeakng-loader-0.2.4.whl",
+    url: ESPEAKNG_LOADER_URL,
+    sha256: ESPEAKNG_LOADER_SHA256,
+    size_bytes: ESPEAKNG_LOADER_SIZE_BYTES,
+};
+
+// Platform-independent Lindera dictionary for jpreprocess 0.15.0, the native
+// OpenJTalk-compatible Japanese frontend.
+pub const KOKORO_JAPANESE_DICTIONARY: Download = Download {
+    file_name: "jpreprocess-naist-jdic-0.15.0",
+    url: "https://github.com/jpreprocess/jpreprocess/releases/download/v0.15.0/naist-jdic-jpreprocess.tar.gz",
+    sha256: "8a930bbc57bf4adcf521d53544c7dc9ab8ab3aa997a591b1b1608dc5539017b8",
+    size_bytes: 28_668_638,
+};
+
 // ── Parakeet STT: streaming FastConformer 1040ms int8 (NeMo hybrid large) ──
 // sherpa-onnx export of stt_en_fastconformer_hybrid_large_streaming_1040ms.
 // Cache-aware streaming over ORT/CUDA. Cadence from encoder metadata. ~137 MB.
@@ -451,6 +528,36 @@ pub const KOKORO_G2P: Project = Project {
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
     platforms: Platform::ALL,
     files: &[KOKORO_G2P_ENCODER, KOKORO_G2P_DECODER],
+};
+
+/// The platform wheel used by Misaki's eSpeak-backed Kokoro language frontends.
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "aarch64")
+))]
+pub const KOKORO_ESPEAK_FRONTEND: Project = Project {
+    name: "eSpeak NG",
+    usage: "Spanish, French, Hindi, Italian, and Portuguese Kokoro pronunciation",
+    homepage: "https://github.com/espeak-ng/espeak-ng",
+    license: "GPL-3.0-or-later",
+    license_url: "https://github.com/espeak-ng/espeak-ng/blob/master/COPYING",
+    platforms: Platform::ALL,
+    files: &[ESPEAKNG_LOADER],
+};
+
+/// OpenJTalk-compatible dictionary used by the native Japanese Kokoro frontend.
+pub const KOKORO_JAPANESE_FRONTEND: Project = Project {
+    name: "jpreprocess Japanese dictionary",
+    usage: "Japanese Kokoro pronunciation",
+    homepage: "https://github.com/jpreprocess/jpreprocess",
+    license: "BSD-3-Clause",
+    license_url: "https://github.com/jpreprocess/jpreprocess/blob/main/LICENSE",
+    platforms: Platform::ALL,
+    files: &[KOKORO_JAPANESE_DICTIONARY],
 };
 
 /// Streaming FastConformer STT — NVIDIA NeMo (CC-BY-4.0; ONNX by csukuangfj / sherpa-onnx).

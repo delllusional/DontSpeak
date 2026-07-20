@@ -1,10 +1,14 @@
-//! Single English text frontend for both Kokoro backends.
+//! Shared multilingual text frontend for both Kokoro backends.
 //!
-//! `voice-g2p` (Misaki tokenizer/tagger/lexicon) with espeak-ng disabled; ONNX BART
-//! only for unresolved words. Final stage drops unsupported chars, emits model-bounded
-//! [`KokoroPhonemeChunk`]s shared by ONNX and MLX.
+//! English uses `voice-g2p` (Misaki tokenizer/tagger/lexicon) plus ONNX BART for
+//! unresolved words. Spanish, French, Hindi, Italian, and Portuguese use the same
+//! eSpeak path as MLX Audio; Japanese and Mandarin use dedicated native frontends.
+//! Final output is vocabulary-filtered and emitted as model-bounded chunks.
 
 mod bart;
+mod espeak;
+mod japanese;
+mod mandarin;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -48,8 +52,8 @@ impl EnglishFrontend {
             .iter()
             .map(|&(word, phonemes)| (word.to_string(), phonemes.to_string()))
             .collect();
-        let g2p =
-            voice_g2p::G2P::with_config(espeak_free_config()).with_overrides(overrides.clone());
+        let g2p = voice_g2p::G2P::with_config(external_espeak_disabled_config())
+            .with_overrides(overrides.clone());
         Self {
             g2p: Some(g2p),
             overrides,
@@ -224,13 +228,13 @@ impl EnglishFrontend {
 }
 
 fn try_phonemize(text: &str) -> Result<String, String> {
-    match try_phonemize_cancellable(text, &|| false)? {
+    match try_phonemize_english_cancellable(text, &|| false)? {
         Cancellable::Finished(phonemes) => Ok(phonemes),
         Cancellable::Cancelled => unreachable!("the non-cancellable frontend cannot cancel"),
     }
 }
 
-fn try_phonemize_cancellable(
+fn try_phonemize_english_cancellable(
     text: &str,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Cancellable<String>, String> {
@@ -258,12 +262,9 @@ fn try_phonemize_cancellable(
     Ok(Cancellable::Finished(phonemes))
 }
 
-/// The voice-g2p config with the external `espeak-ng` process fallback disabled: an empty
-/// executable name cannot resolve through PATH on any supported platform. LOAD-BEARING for
-/// the no-GPL invariant (espeak-ng is GPLv3) — voice-g2p is exact-pinned in the workspace
-/// manifest because this relies on 0.2.2 passing the path through verbatim; the test below
-/// pins the empty path so a refactor cannot silently reintroduce a resolvable command.
-fn espeak_free_config() -> voice_g2p::G2PConfig {
+/// English OOV resolution stays on the pinned BART graphs; multilingual eSpeak is called
+/// in-process through [`espeak`] rather than through `voice-g2p`'s external process hook.
+fn external_espeak_disabled_config() -> voice_g2p::G2PConfig {
     voice_g2p::G2PConfig {
         espeak_path: String::new(),
     }
@@ -364,8 +365,12 @@ fn drop_unsupported_phonemes(phonemes: &str) -> String {
 ///
 /// An empty result means "nothing speakable" (an image-only or punctuation-only block), which
 /// is a successful no-op — callers must not report it as a synthesis failure.
-pub fn phoneme_batches_for(text: &str, _voice: &str) -> Result<Vec<KokoroPhonemeChunk>, String> {
-    match phoneme_batches_for_cancellable(text, _voice, || false)? {
+pub fn phoneme_batches_for(
+    text: &str,
+    voice: &str,
+    language: &str,
+) -> Result<Vec<KokoroPhonemeChunk>, String> {
+    match phoneme_batches_for_cancellable(text, voice, language, || false)? {
         PhonemeBatchesOutcome::Finished(batches) => Ok(batches),
         PhonemeBatchesOutcome::Cancelled => {
             unreachable!("the non-cancellable frontend cannot cancel")
@@ -377,10 +382,18 @@ pub fn phoneme_batches_for(text: &str, _voice: &str) -> Result<Vec<KokoroPhoneme
 /// tokens and immediately before and after every potentially slow BART OOV inference.
 pub fn phoneme_batches_for_cancellable(
     text: &str,
-    _voice: &str,
+    voice: &str,
+    language: &str,
     cancelled: impl Fn() -> bool,
 ) -> Result<PhonemeBatchesOutcome, String> {
-    let phonemes = match try_phonemize_cancellable(text, &cancelled)? {
+    let voice_language = ds_voices::enumerate::kokoro_language(voice);
+    if voice_language != "other" && voice_language != language {
+        log::warn!(
+            target: "tts",
+            "Kokoro voice '{voice}' is {voice_language}, but the text language is {language}"
+        );
+    }
+    let phonemes = match try_phonemize_for_cancellable(text, language, &cancelled)? {
         Cancellable::Finished(phonemes) => phonemes,
         Cancellable::Cancelled => return Ok(PhonemeBatchesOutcome::Cancelled),
     };
@@ -389,6 +402,36 @@ pub fn phoneme_batches_for_cancellable(
         .map(KokoroPhonemeChunk)
         .collect();
     Ok(PhonemeBatchesOutcome::Finished(batches))
+}
+
+fn try_phonemize_for_cancellable(
+    text: &str,
+    language: &str,
+    cancelled: &impl Fn() -> bool,
+) -> Result<Cancellable<String>, String> {
+    if language == "en" {
+        return try_phonemize_english_cancellable(text, cancelled);
+    }
+    let normalized = crate::normalize_spoken_text(text);
+    if !normalized.chars().any(char::is_alphanumeric) {
+        return Ok(Cancellable::Finished(String::new()));
+    }
+    if cancelled() {
+        return Ok(Cancellable::Cancelled);
+    }
+    let phonemes = match language {
+        "ja" => japanese::phonemize(&normalized)?,
+        "zh" => mandarin::phonemize(&normalized)?,
+        "es" | "fr" | "hi" | "it" | "pt" => espeak::phonemize(&normalized, language)?,
+        _ => return Err(format!("unsupported Kokoro language: {language}")),
+    };
+    if cancelled() {
+        return Ok(Cancellable::Cancelled);
+    }
+    if phonemes.trim().is_empty() {
+        return Err(format!("{language} G2P returned no phonemes"));
+    }
+    Ok(Cancellable::Finished(phonemes))
 }
 
 #[cfg(test)]
@@ -513,18 +556,17 @@ mod tests {
     #[test]
     fn cancellable_batching_reports_cancellation_without_an_error() {
         assert!(matches!(
-            phoneme_batches_for_cancellable("Zorblax", "af_heart", || true)
+            phoneme_batches_for_cancellable("Zorblax", "af_heart", "en", || true)
                 .expect("cancellation is not a frontend error"),
             PhonemeBatchesOutcome::Cancelled
         ));
     }
 
-    /// GPL guard: empty espeak path → no PATH-resolvable GPLv3 espeak-ng (issue #57).
     #[test]
-    fn espeak_process_fallback_is_disabled_by_an_empty_path() {
+    fn english_does_not_spawn_an_external_espeak_process() {
         assert!(
-            espeak_free_config().espeak_path.is_empty(),
-            "a non-empty espeak path could spawn the GPLv3 espeak-ng process"
+            external_espeak_disabled_config().espeak_path.is_empty(),
+            "English OOV must stay on the in-process BART path"
         );
     }
 
@@ -568,7 +610,7 @@ mod tests {
     fn shared_frontend_returns_only_valid_model_bounded_chunks() {
         let text =
             "A long narration sentence with several technical words and identifiers. ".repeat(30);
-        let chunks = phoneme_batches_for(&text, "af_heart").expect("valid Kokoro frontend");
+        let chunks = phoneme_batches_for(&text, "af_heart", "en").expect("valid Kokoro frontend");
         assert!(chunks.len() > 1);
         for chunk in chunks {
             assert!(chunk.as_str().chars().count() <= crate::vocab::MAX_PHONEME_LENGTH);
@@ -578,7 +620,11 @@ mod tests {
 
     #[test]
     fn empty_input_is_a_successful_empty_frontend() {
-        assert!(phoneme_batches_for("", "af_heart").unwrap().is_empty());
+        assert!(
+            phoneme_batches_for("", "af_heart", "en")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// G2P output goes straight to the model; OOV chars mispronounce every reply.
@@ -622,7 +668,7 @@ mod tests {
         );
         assert_eq!(drop_unsupported_phonemes("hˈɛlO„ wˈɜɹld"), "hˈɛlO wˈɜɹld");
 
-        let chunks = phoneme_batches_for("The „quoted“ build is ready.", "af_heart")
+        let chunks = phoneme_batches_for("The „quoted“ build is ready.", "af_heart", "en")
             .expect("an unsupported character must not fail the utterance");
         assert!(!chunks.is_empty(), "the reply was silenced");
         for chunk in &chunks {
@@ -634,7 +680,7 @@ mod tests {
     #[test]
     fn unspeakable_text_yields_no_chunks_rather_than_an_error() {
         for text in ["   ", "🎉", "![](img.png)", "...", "!?", "—"] {
-            let chunks = phoneme_batches_for(text, "af_heart")
+            let chunks = phoneme_batches_for(text, "af_heart", "en")
                 .unwrap_or_else(|e| panic!("{text:?} must not be an error: {e}"));
             assert!(chunks.is_empty(), "{text:?} produced pause-only chunks");
         }

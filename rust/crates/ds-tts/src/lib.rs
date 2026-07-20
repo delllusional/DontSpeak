@@ -1,7 +1,7 @@
 //! ds-tts — pluggable text-to-speech engines for dontspeak (ARCHITECTURE §A.1).
 //!
 //! One trait [`Tts`] behind dynamic dispatch (`VoiceConfig::resolved_tts`). Implementors:
-//!   * [`KokoroTts`] — DEFAULT. Native Kokoro (ort + voice-g2p + rodio) via the
+//!   * [`KokoroTts`] — DEFAULT. Native multilingual Kokoro (ort + G2P + rodio) via the
 //!     `ds-helper` bin in its own process group + single-speaker pidfile. No Python.
 //!   * [`SystemTts`] — macOS `say`; Windows System.Speech + Linux spd-say behind cfg.
 //!

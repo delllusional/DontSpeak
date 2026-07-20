@@ -7,6 +7,9 @@ use std::path::PathBuf;
 
 use crate::download::prefetch_key;
 use crate::hash::verify_sha256_cached;
+use crate::kokoro_frontend::{
+    espeak_dist, is_espeak_loader_present, is_japanese_dictionary_present, japanese_dictionary_dist,
+};
 use crate::model_path;
 use crate::ort::{onnxruntime_dist, onnxruntime_dylib_file, onnxruntime_dylib_path};
 use crate::target::DownloadTarget;
@@ -69,7 +72,7 @@ pub fn is_kokoro_g2p_present() -> bool {
 
 /// Shared Kokoro text frontend assets (G2P + version-checked ORT).
 pub fn is_kokoro_frontend_present() -> bool {
-    is_kokoro_g2p_present()
+    is_kokoro_g2p_present() && is_espeak_loader_present() && is_japanese_dictionary_present()
 }
 
 /// Full portable Kokoro set present (SHA + ORT version-gate). TTS factory fail-quiet probe.
@@ -201,12 +204,25 @@ fn onnxruntime_dylib_file_entry() -> Option<DownloadFile> {
     })
 }
 
-/// Text frontend shared by both Kokoro synthesis backends: unknown-word G2P graphs and ORT.
+/// Text frontend shared by both Kokoro synthesis backends: English OOV graphs,
+/// multilingual pronunciation assets, and ORT.
 pub fn kokoro_frontend_files() -> Vec<DownloadFile> {
     let mut v = vec![
         DownloadFile::of(crate::urls::KOKORO_G2P_ENCODER),
         DownloadFile::of(crate::urls::KOKORO_G2P_DECODER),
     ];
+    if let Some(dist) = espeak_dist() {
+        v.push(DownloadFile {
+            file_name: format!(
+                "espeakng-loader-{}.whl",
+                crate::urls::ESPEAKNG_LOADER_VERSION
+            ),
+            url: dist.url.to_string(),
+            size_bytes: dist.size_bytes,
+        });
+    }
+    let japanese = crate::urls::KOKORO_JAPANESE_DICTIONARY;
+    v.push(DownloadFile::of(japanese));
     v.extend(onnxruntime_dylib_file_entry());
     v
 }
@@ -301,10 +317,22 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                     .unwrap_or(false)
             })
         }
-        DownloadTarget::KokoroFrontend => [kokoro_g2p_encoder_spec(), kokoro_g2p_decoder_spec()]
-            .iter()
-            .filter_map(&spec_item)
-            .collect(),
+        DownloadTarget::KokoroFrontend => {
+            let mut items: Vec<_> = [kokoro_g2p_encoder_spec(), kokoro_g2p_decoder_spec()]
+                .iter()
+                .filter_map(&spec_item)
+                .collect();
+            if let Some(dist) = espeak_dist()
+                && !is_espeak_loader_present()
+            {
+                items.push(item(dist.url, dist.archive_sha256));
+            }
+            let japanese = japanese_dictionary_dist();
+            if !is_japanese_dictionary_present() {
+                items.push(item(japanese.url, japanese.archive_sha256));
+            }
+            items
+        }
         DownloadTarget::ParakeetModel => [
             parakeet_encoder_spec(),
             parakeet_decoder_spec(),

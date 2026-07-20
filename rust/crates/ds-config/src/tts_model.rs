@@ -48,7 +48,7 @@ where
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TtsFrontend {
-    EnglishPhonemes,
+    KokoroPhonemes,
     PlainText,
 }
 
@@ -61,9 +61,7 @@ pub struct TtsModelDescriptor {
     pub default_language: &'static str,
     /// Languages the DontSpeak frontend can currently send to this model.
     pub languages: &'static [&'static str],
-    /// Published model coverage shown in the Libraries catalog. This stays separate from
-    /// `languages` because Kokoro's non-English voices require frontends DontSpeak does not
-    /// ship under its no-GPL policy.
+    /// Published model coverage shown in the Libraries catalog.
     pub model_languages: &'static [&'static str],
     pub voices: &'static [&'static str],
     /// Out-of-box pool for this model. `voices` may expose additional choices.
@@ -143,7 +141,7 @@ impl TtsModelDescriptor {
     }
 }
 
-const KOKORO_LANGUAGES: &[&str] = &["en"];
+const KOKORO_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
 // Kokoro v1.0 publishes eight languages. American and British English are separate
 // voice families but one language in the upstream release count.
 const KOKORO_MODEL_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
@@ -182,7 +180,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
             Provider::OrtCoreMl,
             Provider::OrtCpu,
         ],
-        frontend: TtsFrontend::EnglishPhonemes,
+        frontend: TtsFrontend::KokoroPhonemes,
         supports_rate: true,
         supports_full_duplex: true,
         supports_resume: true,
@@ -284,7 +282,7 @@ mod tests {
             "ja"
         );
         let kokoro = TtsModel::Kokoro.descriptor();
-        assert_eq!(kokoro.languages, &["en"]);
+        assert_eq!(kokoro.languages, KOKORO_MODEL_LANGUAGES);
         assert_eq!(
             kokoro.model_languages,
             &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"]

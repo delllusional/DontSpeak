@@ -38,20 +38,23 @@ Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-
 Codex (in-process). Streaming routes retry rejected work; no route yet propagates
 terminal playback ACK to the producer.
 
-## Shared English frontend
+## Kokoro language frontends
 
-Applies to **Kokoro** fully; System TTS stops after step 2 (OS handles digits).
+All Kokoro backends consume the same validated phoneme chunks. System TTS stops after
+shared prose cleanup and leaves pronunciation to the OS.
 
 1. `SpokenText` (pulldown-cmark GFM): speak prose/labels/code; drop markup/HTML/link
    targets/task/footnote/alert markers and commit-like hashes. Block boundaries = word
    boundaries. This is the only text-cleanup implementation.
 2. Bare URLs → word `link` (keep surrounding punctuation).
-3. Number/version/identifier expand → one contextual G2P pass. (**Kokoro only** —
-   `normalize_kokoro_text`; System uses the shared prose directly.)
-4. `voice-g2p` (empty eSpeak path — never invoked).
-5. Dictionary misses → pinned BART ONNX G2P (cache successes; fail → spell ASCII or
-   say `unknown`; degraded not permanently cached).
-6. Drop OOV phonemes (warn); split to ≤ 509-char `KokoroPhonemeChunk`.
+3. English: number/version/identifier expansion → `voice-g2p`; dictionary misses use
+   pinned BART ONNX G2P (cache successes; fail → spell ASCII or say `unknown`).
+4. Spanish, French, Hindi, Italian, and Portuguese: the MLX Audio/Misaki eSpeak route,
+   using a checksum-pinned `espeakng-loader` wheel loaded through the eSpeak C ABI.
+5. Japanese: a native OpenJTalk-compatible tokenizer/dictionary mapped with Misaki's
+   Kokoro phoneme rules. Mandarin: Jieba segmentation, pinyin, number expansion, and
+   Misaki's pinyin-to-IPA mapping.
+6. Drop OOV phonemes (warn); split to ≤ 509-character `KokoroPhonemeChunk`.
 
 Cap 509: style matrix rows `0..=509` by unpadded token count. Whitespace/emoji-only →
 zero chunks = success before opening audio.
@@ -59,7 +62,7 @@ zero chunks = success before opening audio.
 ## Models and backends
 
 `ds-model` owns immutable URLs, paths, digests, licenses, and per-model directories.
-Kokoro + styles + BART + ORT are checked as one stack.
+Kokoro + styles + English BART + multilingual frontend assets + ORT are checked as one stack.
 BART is frontend, not ONNX-synth-only — MLX still needs ORT
 (`kokoro_g2p_files_present`, `ensure_ort_dylib_gpu`).
 
@@ -75,7 +78,7 @@ All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 
 | Model | Language mode | Voices | Providers | Rate / full duplex |
 |---|---|---|---|---|
-| Kokoro | English; accent per voice | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
+| Kokoro | English, Spanish, French, Hindi, Italian, Japanese, Portuguese, Mandarin | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
 | Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
 | Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
 | OmniVoice | auto (any detected language) | default voice | ORT CPU, MLX (no CUDA — pinned int4 export) | no / no |

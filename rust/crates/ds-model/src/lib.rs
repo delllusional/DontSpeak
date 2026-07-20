@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 mod archive;
 pub mod download;
 pub mod hash;
+mod kokoro_frontend;
 pub mod libraries;
 pub mod mlx_repo;
 /// MLX Audio shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
@@ -55,6 +56,12 @@ pub use download::{
     ensure, ensure_in_dir, ensure_with_progress, prefetch_key, set_prefetch_source, url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
+pub use kokoro_frontend::{
+    ensure_espeak_loader, ensure_espeak_loader_with_progress, ensure_japanese_dictionary,
+    ensure_japanese_dictionary_with_progress, espeak_data_dir, espeak_library_path,
+    espeak_root_dir, is_espeak_loader_present, is_japanese_dictionary_present,
+    japanese_dictionary_dir,
+};
 pub use ort::{
     ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime,
     ensure_onnxruntime_with_progress, ensure_ort_dylib, ensure_ort_dylib_gpu,

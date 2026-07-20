@@ -5,6 +5,10 @@
 use std::path::PathBuf;
 
 use crate::download::{ensure, ensure_with_progress};
+use crate::kokoro_frontend::{
+    ensure_espeak_loader, ensure_espeak_loader_with_progress, ensure_japanese_dictionary,
+    ensure_japanese_dictionary_with_progress,
+};
 use crate::model_path;
 use crate::ort::{ensure_onnxruntime, ensure_onnxruntime_with_progress};
 use crate::spec::{
@@ -84,6 +88,8 @@ pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
     ensure(&kokoro_voices_spec())?;
     ensure(&kokoro_g2p_encoder_spec())?;
     ensure(&kokoro_g2p_decoder_spec())?;
+    ensure_espeak_loader()?;
+    ensure_japanese_dictionary()?;
     ensure_onnxruntime()?;
     Ok(model)
 }
@@ -99,6 +105,8 @@ pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::R
             Box::new(|p| ensure_with_progress(&kokoro_voices_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_g2p_encoder_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_g2p_decoder_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_espeak_loader_with_progress(p).map(|_| ())),
+            Box::new(|p| ensure_japanese_dictionary_with_progress(p).map(|_| ())),
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;
@@ -128,7 +136,8 @@ pub fn run_setup_sepformer_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     })
 }
 
-/// Shared Kokoro text frontend assets (OOV G2P + ORT); not synthesis weights or voices.
+/// Shared Kokoro text frontend assets (English OOV, multilingual G2P, and ORT);
+/// not synthesis weights or voices.
 pub fn run_setup_kokoro_frontend_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
@@ -139,6 +148,8 @@ pub fn run_setup_kokoro_frontend_with_progress(
         vec![
             Box::new(|p| ensure_with_progress(&kokoro_g2p_encoder_spec(), p).map(|_| ())),
             Box::new(|p| ensure_with_progress(&kokoro_g2p_decoder_spec(), p).map(|_| ())),
+            Box::new(|p| ensure_espeak_loader_with_progress(p).map(|_| ())),
+            Box::new(|p| ensure_japanese_dictionary_with_progress(p).map(|_| ())),
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;

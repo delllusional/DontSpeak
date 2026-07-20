@@ -184,6 +184,16 @@ pub fn catalog() -> Value {
         ));
     }
     push_portable(&mut projects, &urls::KOKORO_G2P);
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "windows", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64")
+    ))]
+    push_portable(&mut projects, &urls::KOKORO_ESPEAK_FRONTEND);
+    push_portable(&mut projects, &urls::KOKORO_JAPANESE_FRONTEND);
     projects.extend(
         crate::tts_assets::TTS_ORT_ASSETS
             .iter()
@@ -246,16 +256,27 @@ mod tests {
             .flat_map(|p| p["files"].as_array().unwrap().iter())
             .map(|f| f["name"].as_str().unwrap().to_string())
             .collect();
-        let downloads = crate::tts_assets::TTS_ORT_ASSETS
+        let mut downloads: Vec<_> = crate::tts_assets::TTS_ORT_ASSETS
             .iter()
             .flat_map(|set| set.files.iter())
             .copied()
             .chain([
+                urls::KOKORO_JAPANESE_DICTIONARY,
                 urls::PARAKEET_ENCODER,
                 urls::PARAKEET_DECODER,
                 urls::PARAKEET_JOINER,
                 urls::PARAKEET_TOKENS,
-            ]);
+            ])
+            .collect();
+        #[cfg(any(
+            all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64")
+        ))]
+        downloads.push(urls::ESPEAKNG_LOADER);
         for d in downloads {
             assert!(
                 names.iter().any(|n| n == d.file_name),

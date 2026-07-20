@@ -233,8 +233,8 @@ pub(crate) fn frontend_batches_with_cancel(
     cancelled: &dyn Fn() -> bool,
 ) -> Result<FrontendOutcome, String> {
     let batches = match model.descriptor().frontend {
-        ds_config::TtsFrontend::EnglishPhonemes => {
-            match g2p::phoneme_batches_for_cancellable(text, voice, cancelled)? {
+        ds_config::TtsFrontend::KokoroPhonemes => {
+            match g2p::phoneme_batches_for_cancellable(text, voice, language, cancelled)? {
                 g2p::PhonemeBatchesOutcome::Finished(batches) => {
                     batches.into_iter().map(FrontendBatch::Kokoro).collect()
                 }
@@ -366,7 +366,7 @@ mod tests {
     fn every_model_frontend_is_selected_by_the_registry() {
         for model in ds_config::TtsModel::ALL.iter().copied() {
             assert_eq!(
-                model.descriptor().frontend == ds_config::TtsFrontend::EnglishPhonemes,
+                model.descriptor().frontend == ds_config::TtsFrontend::KokoroPhonemes,
                 model == ds_config::TtsModel::Kokoro,
                 "{model:?}"
             );

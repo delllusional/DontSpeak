@@ -30,8 +30,15 @@ serde_json = { workspace = true }
 # lib.rs — so they're no longer pure modules of THIS crate. Pinned once in the workspace.
 # ONNX inference (load-dynamic: no onnxruntime baked, resolved at runtime).
 ort = { workspace = true }
-# Released Misaki-compatible English frontend. Its optional eSpeak process is disabled in g2p.rs.
+# Released Misaki-compatible English frontend.
 voice-g2p = { workspace = true }
+# Runtime-load the same prebuilt eSpeak distribution used by MLX Audio/Misaki.
+libloading = { workspace = true }
+# Native Japanese OpenJTalk and Mandarin pinyin frontends.
+jpreprocess = { workspace = true }
+jieba-rs = { workspace = true }
+pinyin = { workspace = true }
+chinese-number = { workspace = true }
 # Parse Markdown structurally so narration keeps labels/code but omits markup and link targets.
 pulldown-cmark = { workspace = true }
 # Report phonemes dropped for being outside Kokoro's vocabulary — the loss must be observable,
@@ -49,11 +56,6 @@ rodio = { workspace = true, features = ["symphonia-aiff"] }
 [dev-dependencies]
 # Tempdir-only fixtures (wav round-trip, tokenizer.json fixture) — never live resources.
 tempfile = { workspace = true }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-# dlopen libdontspeak_mlx.dylib (the MLX Audio Kokoro shim) for the
-# MLX TTS backend. Loaded at runtime, like ort's load-dynamic onnxruntime.
-libloading = { workspace = true }
 
 [lints]
 workspace = true

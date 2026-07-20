@@ -3,9 +3,11 @@
 //! Atomic temp + rename so a partial extract never lands.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 const MAX_EXTRACTED_MEMBER_BYTES: u64 = 1024 * 1024 * 1024;
+const MAX_FRONTEND_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_FRONTEND_MEMBERS: u32 = 4096;
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
@@ -25,10 +27,6 @@ fn add_extracted_bytes(total: &mut u64, copied: u64) -> std::io::Result<()> {
     add_extracted_bytes_with_limit(total, copied, MAX_EXTRACTED_TOTAL_BYTES)
 }
 
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
 fn add_extracted_bytes_with_limit(total: &mut u64, copied: u64, limit: u64) -> std::io::Result<()> {
     *total = total.checked_add(copied).ok_or_else(|| {
         std::io::Error::new(
@@ -62,6 +60,144 @@ fn copy_bounded_with_limit(
         ));
     }
     Ok(copied)
+}
+
+fn subtree_relative(path: &Path, root: &Path) -> Option<PathBuf> {
+    let relative = path.strip_prefix(root).ok()?;
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    Some(relative.to_path_buf())
+}
+
+fn archive_path_is_safe(path: &Path) -> bool {
+    path.components()
+        .all(|component| matches!(component, Component::Normal(_)))
+}
+
+fn add_frontend_member(total: &mut u64, count: &mut u32, copied: u64) -> std::io::Result<()> {
+    *count = count.checked_add(1).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frontend archive member count overflow",
+        )
+    })?;
+    if *count > MAX_FRONTEND_MEMBERS {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frontend archive contains too many members",
+        ));
+    }
+    add_extracted_bytes_with_limit(total, copied, MAX_FRONTEND_EXTRACTED_BYTES)
+}
+
+/// Extract one package subtree from a wheel while preserving its relative layout.
+pub(crate) fn extract_wheel_subtree(
+    wheel_path: &Path,
+    source_root: &Path,
+    dest: &Path,
+) -> std::io::Result<()> {
+    let file = std::fs::File::open(wheel_path)?;
+    let mut archive = zip::ZipArchive::new(file).map_err(std::io::Error::other)?;
+    let mut count = 0u32;
+    let mut extracted_bytes = 0u64;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(std::io::Error::other)?;
+        let Some(path) = entry.enclosed_name() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frontend wheel contains an unsafe path",
+            ));
+        };
+        if !archive_path_is_safe(&path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frontend wheel contains an unsafe path",
+            ));
+        }
+        let Some(relative) = subtree_relative(&path, source_root) else {
+            continue;
+        };
+        let output = dest.join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&output)?;
+            continue;
+        }
+        if entry
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frontend wheel contains a symbolic link",
+            ));
+        }
+        let parent = output
+            .parent()
+            .ok_or_else(|| std::io::Error::other("frontend member has no parent"))?;
+        std::fs::create_dir_all(parent)?;
+        let mut file = std::fs::File::create(&output)?;
+        let copied = copy_bounded(&mut entry, &mut file)?;
+        add_frontend_member(&mut extracted_bytes, &mut count, copied)?;
+    }
+    if count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "frontend wheel package subtree is empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Extract one regular-file subtree from a gzip tar archive.
+pub(crate) fn extract_tgz_subtree(
+    archive_path: &Path,
+    source_root: &Path,
+    dest: &Path,
+) -> std::io::Result<()> {
+    let file = std::fs::File::open(archive_path)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    let mut count = 0u32;
+    let mut extracted_bytes = 0u64;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        if !archive_path_is_safe(&path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frontend tar contains an unsafe path",
+            ));
+        }
+        let Some(relative) = subtree_relative(&path, source_root) else {
+            continue;
+        };
+        let output = dest.join(relative);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&output)?;
+            continue;
+        }
+        if !entry.header().entry_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "frontend tar subtree contains a non-regular member",
+            ));
+        }
+        let parent = output
+            .parent()
+            .ok_or_else(|| std::io::Error::other("frontend member has no parent"))?;
+        std::fs::create_dir_all(parent)?;
+        let mut file = std::fs::File::create(&output)?;
+        let copied = copy_bounded(&mut entry, &mut file)?;
+        add_frontend_member(&mut extracted_bytes, &mut count, copied)?;
+    }
+    if count == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "frontend tar package subtree is empty",
+        ));
+    }
+    Ok(())
 }
 
 /// Extract onnxruntime shared lib onto `dest` (Microsoft `.zip` on Windows / `.tgz` elsewhere).
@@ -331,10 +467,6 @@ mod tests {
         assert_eq!(output, b"12345");
     }
 
-    #[cfg(all(
-        any(target_os = "windows", target_os = "linux"),
-        target_arch = "x86_64"
-    ))]
     #[test]
     fn extracted_total_rejects_limit_and_integer_overflow() {
         let mut total = 3;
@@ -344,6 +476,52 @@ mod tests {
         let mut total = u64::MAX;
         let error = add_extracted_bytes_with_limit(&mut total, 1, u64::MAX).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn frontend_wheel_extracts_only_the_requested_subtree() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("frontend.whl");
+        let file = std::fs::File::create(&archive_path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        archive
+            .start_file("espeakng_loader/espeak-ng-data/es_dict", options)
+            .unwrap();
+        archive.write_all(b"spanish").unwrap();
+        archive
+            .start_file("metadata/not-the-payload.txt", options)
+            .unwrap();
+        archive.write_all(b"ignore").unwrap();
+        archive.finish().unwrap();
+
+        let dest = dir.path().join("wheel-output");
+        extract_wheel_subtree(&archive_path, Path::new("espeakng_loader"), &dest).unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("espeak-ng-data/es_dict")).unwrap(),
+            b"spanish"
+        );
+        assert!(!dest.join("metadata").exists());
+    }
+
+    #[test]
+    fn frontend_tgz_preserves_dictionary_layout_and_ignores_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive_path = dir.path().join("dictionary.tgz");
+        write_tgz(
+            &archive_path,
+            &[
+                ("naist-jdic/metadata.json", b"dictionary"),
+                ("release-notes.txt", b"ignore"),
+            ],
+        );
+        let dest = dir.path().join("tar-output");
+        extract_tgz_subtree(&archive_path, Path::new("naist-jdic"), &dest).unwrap();
+        assert_eq!(
+            std::fs::read(dest.join("metadata.json")).unwrap(),
+            b"dictionary"
+        );
+        assert!(!dest.join("release-notes.txt").exists());
     }
 
     #[test]
