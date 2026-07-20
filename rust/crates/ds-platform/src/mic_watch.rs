@@ -250,8 +250,9 @@ mod macos {
                     .dev
                     .store(if registered { new_dev } else { 0 }, Ordering::Relaxed);
                 if new_dev != 0 && !registered {
-                    eprintln!(
-                        "dontspeak: failed to watch the new default input device; waiting for another device change"
+                    log::warn!(
+                        target: "platform",
+                        "failed to watch the new default input device; waiting for another device change"
                     );
                 }
             }

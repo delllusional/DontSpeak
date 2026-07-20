@@ -23,7 +23,10 @@ fn set_user_key_mapping(pairs: &str) -> bool {
     {
         Ok(s) => s.success(),
         Err(e) => {
-            eprintln!("[dontspeak] hidutil failed ({e}); Caps will still toggle capitals");
+            log::warn!(
+                target: "platform",
+                "hidutil failed ({e}); Caps will still toggle capitals"
+            );
             false
         }
     }
@@ -37,7 +40,10 @@ pub fn own_caps_key() {
         "{{\"HIDKeyboardModifierMappingSrc\":{SRC_CAPS_LOCK},\"HIDKeyboardModifierMappingDst\":{DST_NO_ACTION}}}"
     );
     if set_user_key_mapping(&pair) {
-        eprintln!("[dontspeak] owning Caps key (remapped Caps Lock → No Action; no caps toggle)");
+        log::info!(
+            target: "platform",
+            "owning Caps key (remapped Caps Lock → No Action; no caps toggle)"
+        );
     }
 }
 

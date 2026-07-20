@@ -247,8 +247,9 @@ pub fn model_dir() -> Option<PathBuf> {
         if path.is_absolute() && path.is_dir() {
             return Some(path);
         }
-        eprintln!(
-            "dontspeak: ignoring DONTSPEAK_MODEL_DIR={} because it is not an existing absolute directory",
+        log::warn!(
+            target: "config",
+            "ignoring DONTSPEAK_MODEL_DIR={} because it is not an existing absolute directory",
             path.display()
         );
     }

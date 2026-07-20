@@ -13,6 +13,8 @@ description = "Selects and builds DontSpeak's configured STT engine, degrading t
 ds-config = { workspace = true }
 ds-stt = { workspace = true }
 ds-platform = { workspace = true }
+# STT factory diagnostics via the log facade (ds_log sink).
+log = { workspace = true }
 
 [dev-dependencies]
 # Tempdir-rooted Paths for stt_box_maps_each_engine, keeping its ClaudeCode arm off the real

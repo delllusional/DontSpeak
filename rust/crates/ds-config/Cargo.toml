@@ -27,6 +27,8 @@ tempfile = { workspace = true }
 # The unified activity log (issue #6 split): VoiceConfig::load logs a warning on
 # bad/unknown config.toml keys via this crate's log()/LogLevel.
 ds-log = { workspace = true }
+# Path-resolution diagnostics via the log facade (ds_log sink).
+log = { workspace = true }
 # The ONE client-identity enum (`ClientSource`, formerly this crate's `WireTarget`): the
 # registry's `target`, `exclude_clients`' element type, and the `--client` token the hook
 # wiring stamps. Re-exported flat from lib.rs, so downstream crates keep saying

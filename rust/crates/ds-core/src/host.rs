@@ -42,8 +42,9 @@ fn join_stale(thread: JoinHandle<()>, timeout: Duration) {
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-    eprintln!(
-        "dontspeak: engine_start gave up waiting {timeout:?} for the previous engine \
+    log::warn!(
+        target: "core",
+        "engine_start gave up waiting {timeout:?} for the previous engine \
          thread to finish draining; detaching it instead of blocking the caller"
     );
 }
@@ -78,7 +79,7 @@ pub(crate) fn engine_start() -> bool {
         .name("ds-engine".into())
         .spawn(move || {
             if let Err(e) = dontspeakd::engine_run(r.clone(), rl) {
-                eprintln!("dontspeak: engine startup failed: {e}");
+                log::error!(target: "core", "engine startup failed: {e}");
                 r.store(false, Ordering::SeqCst);
             }
         })

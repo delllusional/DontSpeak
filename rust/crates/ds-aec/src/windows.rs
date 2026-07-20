@@ -193,8 +193,9 @@ fn capture_thread(
             ) {
                 Ok(()) => break, // `stop` was set — clean shutdown
                 Err(e) => {
-                    eprintln!(
-                        "dontspeak: WASAPI echo-cancelled capture lost ({e}) — \
+                    log::warn!(
+                        target: "aec",
+                        "WASAPI echo-cancelled capture lost ({e}) — \
                          reconnecting to the default communications endpoint"
                     );
                     *last_error.lock().unwrap() = Some(e);
@@ -208,8 +209,9 @@ fn capture_thread(
                         match open_capture() {
                             Ok(o) => break Some(o),
                             Err(e2) => {
-                                eprintln!(
-                                    "dontspeak: WASAPI echo-cancel reconnect attempt failed \
+                                log::warn!(
+                                    target: "aec",
+                                    "WASAPI echo-cancel reconnect attempt failed \
                                      ({e2}); retrying"
                                 );
                                 *last_error.lock().unwrap() = Some(e2);
@@ -218,14 +220,15 @@ fn capture_thread(
                     };
                     match reopened {
                         Some(o) => {
-                            eprintln!(
-                                "dontspeak: WASAPI echo-cancelled capture reconnected \
-                                 ({} Hz)",
+                            log::info!(
+                                target: "aec",
+                                "WASAPI echo-cancelled capture reconnected ({} Hz)",
                                 o.rate
                             );
                             if o.rate != published_rate {
-                                eprintln!(
-                                    "dontspeak: WASAPI echo-cancel reconnect renegotiated \
+                                log::info!(
+                                    target: "aec",
+                                    "WASAPI echo-cancel reconnect renegotiated \
                                      {published_rate} Hz -> {} Hz; converting continuously back \
                                      to {published_rate} Hz",
                                     o.rate

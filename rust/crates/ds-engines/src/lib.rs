@@ -29,7 +29,7 @@ impl EngineAvailability for RealAvailability {
 }
 
 fn warn(msg: &str) {
-    eprintln!("dontspeak/engines: {msg}");
+    log::warn!(target: "engines", "{msg}");
 }
 
 /// Build STT from config; may return inert (see crate doc).

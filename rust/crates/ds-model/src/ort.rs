@@ -295,7 +295,10 @@ pub fn cuda_session_builder(
         })() {
             Ok(b) => return Ok((b, RealizedProvider::Cuda)),
             Err(e) => {
-                eprintln!("dontspeak/helper: CUDA EP registration failed — running on CPU: {e}")
+                log::warn!(
+                    target: "model",
+                    "CUDA EP registration failed — running on CPU: {e}"
+                )
             }
         }
     }

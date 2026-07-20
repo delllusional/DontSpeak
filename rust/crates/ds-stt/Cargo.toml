@@ -30,6 +30,8 @@ ringbuf = { workspace = true }
 # Direct `ort` for the streaming STT runner and the speaker-SEPARATION session (SepFormer
 # int8 ONNX). Same shared load-dynamic runtime Kokoro uses — no separate onnxruntime linked.
 ort = { workspace = true }
+# Operational diagnostics via the log facade (ds_log sink installed by host/helper).
+log = { workspace = true }
 
 # Diarization segments cross the shim's C ABI as JSON (see ds-stt::diarize).
 serde = { workspace = true }

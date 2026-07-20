@@ -739,7 +739,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         if let Err(message) = ds_narrate::retry_pending(paths, session_id, |utterance| {
             admit_narration(paths, session_tag.clone(), client, utterance)
         }) {
-            eprintln!("dontspeak: narration rejected: {message}");
+            log::warn!(target: "hook", "narration rejected: {message}");
         }
         if client == ClientSource::Grok {
             let key = hook
@@ -766,7 +766,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
                 short_on,
                 |utterance| admit_narration(paths, session_tag.clone(), client, utterance),
             ) {
-                eprintln!("dontspeak: narration rejected: {message}");
+                log::warn!(target: "hook", "narration rejected: {message}");
             }
         }
     }
@@ -890,12 +890,12 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         ) {
             Ok(ds_ipc::Response::Error { message }) => {
                 any_failed = true;
-                eprintln!("dontspeak: narration rejected: {message}");
+                log::warn!(target: "hook", "narration rejected: {message}");
             }
             Ok(_) => any_enqueued = true,
             Err(e) => {
                 any_failed = true;
-                eprintln!("dontspeak: narration request failed: {e}");
+                log::warn!(target: "hook", "narration request failed: {e}");
             }
         }
     }
@@ -993,7 +993,7 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
         short_on,
         |utterance| admit_narration(paths, session_tag.clone(), client, utterance),
     ) {
-        eprintln!("dontspeak: narration rejected: {message}");
+        log::warn!(target: "hook", "narration rejected: {message}");
     }
 }
 

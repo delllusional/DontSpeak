@@ -107,7 +107,7 @@ impl StreamingModel {
         match Self::load_on(dir, int8, want_gpu) {
             Ok(m) => Ok(m),
             Err(e) if want_gpu => {
-                eprintln!("dontspeak/helper: STT GPU load failed ({e}); retrying on CPU");
+                log::warn!(target: "stt", "STT GPU load failed ({e}); retrying on CPU");
                 Self::load_on(dir, int8, false)
             }
             Err(e) => Err(e),
@@ -444,7 +444,7 @@ impl StreamingModel {
             if let Some(tok) = self.tokens.get(t as usize) {
                 s.push_str(tok);
             } else {
-                eprintln!("dontspeak/helper: STT emitted out-of-range token id {t}");
+                log::warn!(target: "stt", "STT emitted out-of-range token id {t}");
             }
         }
         s.replace('\u{2581}', " ").trim().to_string()
@@ -760,12 +760,16 @@ impl StreamSession {
             Ok(new) if !new.is_empty() => {
                 self.audio_ms += new.len() as f64 / 16.0;
                 if let Err(e) = self.backend.accept_16k(&new) {
-                    eprintln!("StreamSession::finalize: tail flush failed, finalizing anyway: {e}");
+                    log::warn!(
+                        target: "stt",
+                        "StreamSession::finalize: tail flush failed, finalizing anyway: {e}"
+                    );
                 }
             }
             Ok(_) => {}
             Err(e) => {
-                eprintln!(
+                log::warn!(
+                    target: "stt",
                     "StreamSession::finalize: resampler flush failed, finalizing anyway: {e}"
                 );
             }

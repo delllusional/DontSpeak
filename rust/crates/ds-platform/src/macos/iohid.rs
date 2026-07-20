@@ -316,7 +316,10 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
                 let manager = IOHIDManagerCreate(ptr::null(), KIO_HID_OPTIONS_TYPE_NONE);
                 if manager.is_null() {
                     if !warned {
-                        eprintln!("[dontspeak] IOHIDManagerCreate failed; retrying caps HOLD");
+                        log::warn!(
+                            target: "platform",
+                            "IOHIDManagerCreate failed; retrying caps HOLD"
+                        );
                         warned = true;
                     }
                     std::thread::sleep(HID_OPEN_RETRY);
@@ -330,7 +333,10 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
                 if rc == KERN_SUCCESS {
                     STUCK_GRANT.record_success();
                     if warned {
-                        eprintln!("[dontspeak] caps HOLD armed (Accessibility granted)");
+                        log::info!(
+                            target: "platform",
+                            "caps HOLD armed (Accessibility granted)"
+                        );
                     }
                     // Serve HID input until told to stop. Bounded (1 s) passes instead
                     // of one blocking `CFRunLoopRun`: `CFRunLoopStop` only stops a loop
@@ -369,8 +375,9 @@ pub fn spawn_caps_hid_monitor(caps_down: Arc<AtomicBool>) {
                 // way. Tell the two cases apart by checking AX trust directly: if it's
                 // already true, this denial can NEVER self-heal by retrying in place.
                 if !warned {
-                    eprintln!(
-                        "[dontspeak] IOHIDManagerOpen denied (0x{:08X}); waiting for the \
+                    log::warn!(
+                        target: "platform",
+                        "IOHIDManagerOpen denied (0x{:08X}); waiting for the \
                          Accessibility grant",
                         rc as u32
                     );

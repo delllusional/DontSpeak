@@ -143,7 +143,7 @@ fn fail(message: &str) -> ! {
     std::process::exit(1);
 }
 
-/// Surfaces the crate's `log::debug!` lines (e.g. lingua detection) on stderr — the
+/// Surfaces the crate's `log::debug!` lines (e.g. whatlang detection) on stderr — the
 /// example runs outside the host that normally installs the ds-log sink.
 struct StderrLogger;
 

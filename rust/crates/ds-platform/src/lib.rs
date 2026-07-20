@@ -23,8 +23,9 @@ pub trait KeyInjector {
 }
 
 pub fn warn_unsupported_dictation_key(base: &KeyBase) {
-    eprintln!(
-        "dontspeak: can't synthesize claude_code dictation key {base:?} — bind voice:pushToTalk to Space or a Ctrl+<letter>"
+    log::warn!(
+        target: "platform",
+        "can't synthesize claude_code dictation key {base:?} — bind voice:pushToTalk to Space or a Ctrl+<letter>"
     );
 }
 

@@ -104,9 +104,9 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Err(e) => {
             let msg = format!("ds-helper: prefetch '{what}' failed: {e}");
-            log::warn!(target: "helper", "{}", msg);
-            eprintln!("{msg}");
-            // GUI subsystem discards stderr; leave a diagnosable on-disk trace.
+            log::warn!(target: "helper", "{msg}");
+            // GUI subsystem discards stderr; leave a diagnosable on-disk trace
+            // when the unified log sink is not yet readable.
             let _ = std::fs::write(std::env::temp_dir().join("ds-prefetch-error.log"), &msg);
             1
         }

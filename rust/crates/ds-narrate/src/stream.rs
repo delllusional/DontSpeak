@@ -344,8 +344,9 @@ fn read_state(state_path: &Path) -> DisplayState {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(state) => state,
             Err(e) => {
-                eprintln!(
-                    "dontspeak: ignoring corrupt narration state {}: {e}",
+                log::warn!(
+                    target: "narrate",
+                    "ignoring corrupt narration state {}: {e}",
                     state_path.display()
                 );
                 DisplayState::default()
@@ -353,8 +354,9 @@ fn read_state(state_path: &Path) -> DisplayState {
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DisplayState::default(),
         Err(e) => {
-            eprintln!(
-                "dontspeak: could not read narration state {}: {e}",
+            log::warn!(
+                target: "narrate",
+                "could not read narration state {}: {e}",
                 state_path.display()
             );
             DisplayState::default()
@@ -498,8 +500,9 @@ fn with_state_lock<T>(state_path: &Path, f: impl FnOnce() -> T) -> T {
 
 fn atomic_write(path: &Path, contents: &str) {
     if let Err(e) = ds_config::atomic_write_str(path, contents) {
-        eprintln!(
-            "dontspeak: could not write narration state {}: {e}",
+        log::warn!(
+            target: "narrate",
+            "could not write narration state {}: {e}",
             path.display()
         );
     }

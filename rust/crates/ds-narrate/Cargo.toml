@@ -19,6 +19,8 @@ ds-config = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+# Narration-state diagnostics via the log facade (ds_log sink).
+log = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

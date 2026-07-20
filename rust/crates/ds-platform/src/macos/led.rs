@@ -396,7 +396,10 @@ impl RetryingCapsLed {
                 // LED writer left zero diagnostic trace anywhere for the process's
                 // whole life.
                 if !self.manager_create_warned.replace(true) {
-                    eprintln!("[dontspeak] Caps LED: IOHIDManagerCreate failed; retrying");
+                    log::warn!(
+                        target: "platform",
+                        "Caps LED: IOHIDManagerCreate failed; retrying"
+                    );
                 }
             }
         }

@@ -30,6 +30,8 @@ semver = { workspace = true }
 # ONE GPU-aware ORT SessionBuilder (`cuda_session_builder`) shared by ONNX TTS + Parakeet STT,
 # so the CUDA-EP registration + CPU-fallback logic lives here, not copy-pasted per engine.
 ort = { workspace = true }
+# EP fallback diagnostics go through the log facade (ds_log sink), same as ds-tts.
+log = { workspace = true }
 # Parse the HuggingFace tree API (file list + sizes + LFS oids) so we self-manage the
 # MLX Audio model downloads at pinned revisions (see mlx_repo.rs).
 serde_json = { workspace = true }

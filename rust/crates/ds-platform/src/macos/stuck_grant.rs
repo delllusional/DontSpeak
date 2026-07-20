@@ -87,8 +87,9 @@ impl StuckGrantLatch {
 /// same event. `resource` names what was denied (e.g. "caps HOLD", "Caps LED
 /// writer") for the one call-site-specific word in an otherwise identical message.
 pub(crate) fn log_stuck(resource: &str, count: u32) {
-    eprintln!(
-        "[dontspeak] {resource} stuck: Accessibility is trusted but IOHIDManagerOpen \
+    log::warn!(
+        target: "platform",
+        "{resource} stuck: Accessibility is trusted but IOHIDManagerOpen \
          has denied {count} times anyway — this process's grant is stale and won't \
          self-heal in place; asking the engine to relaunch"
     );

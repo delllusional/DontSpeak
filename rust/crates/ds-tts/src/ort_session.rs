@@ -94,8 +94,9 @@ fn provider_builder(
                     .error_on_failure()])?)
         })() {
             Ok(builder) => return Ok((builder, ds_config::RealizedProvider::CoreMl)),
-            Err(error) => eprintln!(
-                "dontspeak/helper: Core ML EP registration failed — running on CPU: {error}"
+            Err(error) => log::warn!(
+                target: "tts",
+                "Core ML EP registration failed — running on CPU: {error}"
             ),
         }
     }
@@ -110,8 +111,9 @@ pub(crate) fn load_with_fallback<T>(
     match load(&preference) {
         Ok(value) => Ok(value),
         Err(error) if !preference.eq_ignore_ascii_case("cpu") => {
-            eprintln!(
-                "dontspeak/{label}: provider '{preference}' failed ({error}); falling back to CPU"
+            log::warn!(
+                target: "tts",
+                "{label}: provider '{preference}' failed ({error}); falling back to CPU"
             );
             load("cpu")
         }

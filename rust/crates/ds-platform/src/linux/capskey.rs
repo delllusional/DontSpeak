@@ -396,8 +396,9 @@ pub fn own_caps_key() {
             // exactly as `release_caps_key` left them and skip owning the key under
             // the NEW desktop this run, rather than silently orphaning the old one.
             // The next launch (or a manual retry) reconciles it the same way.
-            eprintln!(
-                "[dontspeak] could not release the previous desktop's Caps ownership ({}); \
+            log::warn!(
+                target: "platform",
+                "could not release the previous desktop's Caps ownership ({}); \
                  leaving it in place and skipping Caps ownership this run — will retry later",
                 prev.token()
             );
@@ -408,8 +409,9 @@ pub fn own_caps_key() {
     match desktop {
         Desktop::Gnome | Desktop::Kde | Desktop::X11Generic => {
             let Some(opts) = options_for(desktop) else {
-                eprintln!(
-                    "[dontspeak] could not read the {} keymap options; Caps will still toggle capitals",
+                log::warn!(
+                    target: "platform",
+                    "could not read the {} keymap options; Caps will still toggle capitals",
                     desktop.token()
                 );
                 return;
@@ -423,14 +425,16 @@ pub fn own_caps_key() {
             // release, but an option with no marker is a permanent orphan. If the marker
             // can't be persisted, leave the key as normal caps-lock rather than risk it.
             if !marker_write(desktop) {
-                eprintln!(
-                    "[dontspeak] could not persist the Caps ownership marker; leaving Caps as caps-lock"
+                log::warn!(
+                    target: "platform",
+                    "could not persist the Caps ownership marker; leaving Caps as caps-lock"
                 );
                 return;
             }
             match edit_options_for(desktop, OptionsEdit::AddCapsNone) {
-                EditOutcome::Changed => eprintln!(
-                    "[dontspeak] owning Caps key ({}: added {CAPS_NONE}; no caps toggle)",
+                EditOutcome::Changed => log::info!(
+                    target: "platform",
+                    "owning Caps key ({}: added {CAPS_NONE}; no caps toggle)",
                     desktop.token()
                 ),
                 EditOutcome::Unchanged => {
@@ -441,16 +445,18 @@ pub fn own_caps_key() {
                 EditOutcome::Failed => {
                     // Keep the marker: a write may have landed before a later generation
                     // check failed. Release can safely reconcile either state next time.
-                    eprintln!(
-                        "[dontspeak] could not confirm {CAPS_NONE} on {}; Caps may still toggle capitals",
+                    log::warn!(
+                        target: "platform",
+                        "could not confirm {CAPS_NONE} on {}; Caps may still toggle capitals",
                         desktop.token()
                     );
                 }
             }
         }
         Desktop::WaylandOther => {
-            eprintln!(
-                "[dontspeak] this Wayland compositor's keymap can't be changed from outside — \
+            log::warn!(
+                target: "platform",
+                "this Wayland compositor's keymap can't be changed from outside — \
                  add `{CAPS_NONE}` to its config (sway: `input type:keyboard xkb_options {CAPS_NONE}`; \
                  Hyprland: `input:kb_options = {CAPS_NONE}`) to stop Caps toggling capitals; \
                  dictation works either way"

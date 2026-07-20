@@ -632,8 +632,9 @@ pub(crate) fn serve() -> ! {
         {
             Ok(_) => Some(sig),
             Err(e) => {
-                eprintln!(
-                    "dontspeak-helper: could not spawn full-duplex listener ({e}); falling back to half-duplex"
+                log::warn!(
+                    target: "helper",
+                    "could not spawn full-duplex listener ({e}); falling back to half-duplex"
                 );
                 None
             }

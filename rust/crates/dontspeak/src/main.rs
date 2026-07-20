@@ -115,8 +115,9 @@ fn run_grok_hook() {
     if let Some(paths) = ds_config::Paths::resolve()
         && let Err(e) = ds_config::sync_grok_narrate_from_config(&paths)
     {
-        eprintln!(
-            "dontspeak: WARNING: could not sync Grok narrate digests in {} ({e})",
+        log::warn!(
+            target: "hook",
+            "could not sync Grok narrate digests in {} ({e})",
             paths.grok_agents_md.display()
         );
     }

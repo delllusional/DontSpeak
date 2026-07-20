@@ -11,6 +11,8 @@ description = "Platform traits (KeyInjector, FrontmostWindow, CapsKeyMonitor) wi
 build = "build.rs"
 
 [dependencies]
+# Caps / mic / inject diagnostics via the log facade (ds_log sink).
+log = { workspace = true }
 
 # ---- macOS ---------------------------------------------------------------
 [target.'cfg(target_os = "macos")'.dependencies]

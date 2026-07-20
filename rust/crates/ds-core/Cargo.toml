@@ -43,6 +43,8 @@ serde_json = { workspace = true }
 # The full engine, hosted in-process by a native app via the C ABI
 # (ds_engine_start/stop/reload). Pulls the TTS/STT/platform stack.
 dontspeakd = { workspace = true }
+# Engine host diagnostics via the log facade (ds_log sink).
+log = { workspace = true }
 # The System-TTS engine's per-OS settings-opener seam (open_voice_settings),
 # surfaced over the C ABI (ds_open_voice_settings) for the UIs' "Manage voices".
 ds-tts = { workspace = true }

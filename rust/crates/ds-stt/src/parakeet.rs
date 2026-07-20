@@ -209,7 +209,7 @@ impl ParakeetTranscriber {
 }
 
 fn warn(msg: &str) {
-    eprintln!("dontspeak/parakeet: {msg}");
+    log::warn!(target: "stt", "parakeet: {msg}");
 }
 
 /// cpal input stream: downmix each frame to mono f32 into the ring.

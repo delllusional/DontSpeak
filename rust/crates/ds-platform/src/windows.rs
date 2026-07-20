@@ -229,8 +229,9 @@ fn ensure_caps_hook() -> bool {
             let hook =
                 SetWindowsHookExW(WH_KEYBOARD_LL, Some(caps_hook_proc), Some(hmod.into()), 0);
             let Ok(hook) = hook else {
-                eprintln!(
-                    "dontspeak: SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled"
+                log::error!(
+                    target: "platform",
+                    "SetWindowsHookExW(WH_KEYBOARD_LL) failed — Caps dictation disabled"
                 );
                 HOOK_STARTED.store(false, Ordering::SeqCst);
                 let _ = ready_tx.send(false);
@@ -291,8 +292,9 @@ fn ensure_caps_hook() -> bool {
                     // `send(true).is_err()` cleanup branch above. `shutdown_caps_hook`
                     // also joins (or forcibly unhooks) within its own bounded timeout.
                     drop(ready_rx);
-                    eprintln!(
-                        "dontspeak: Caps hook did not become ready within {START_TIMEOUT:?} ({error})"
+                    log::error!(
+                        target: "platform",
+                        "Caps hook did not become ready within {START_TIMEOUT:?} ({error})"
                     );
                     shutdown_caps_hook();
                     false
@@ -302,7 +304,7 @@ fn ensure_caps_hook() -> bool {
         Err(_) => {
             // Couldn't spawn — allow a later retry rather than latching the guard on.
             HOOK_STARTED.store(false, Ordering::SeqCst);
-            eprintln!("dontspeak: failed to spawn Caps hook thread");
+            log::error!(target: "platform", "failed to spawn Caps hook thread");
             false
         }
     }
@@ -366,8 +368,9 @@ fn shutdown_caps_hook() {
                     let _ = UnhookWindowsHookEx(HHOOK(raw as *mut std::ffi::c_void));
                 }
             }
-            eprintln!(
-                "dontspeak: shutdown_caps_hook gave up waiting {JOIN_TIMEOUT:?} for the hook \
+            log::warn!(
+                target: "platform",
+                "shutdown_caps_hook gave up waiting {JOIN_TIMEOUT:?} for the hook \
                  pump thread; forcibly unhooked and detached it instead of blocking"
             );
         }
@@ -449,8 +452,9 @@ impl WindowsPlatform {
         // call, and cbSize is the true size of INPUT, as SendInput requires.
         let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
         if sent as usize != inputs.len() {
-            eprintln!(
-                "dontspeak: SendInput inserted {sent} of {} keyboard events",
+            log::warn!(
+                target: "platform",
+                "SendInput inserted {sent} of {} keyboard events",
                 inputs.len()
             );
         }
