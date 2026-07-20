@@ -36,6 +36,15 @@ const LANGUAGES: &[Lang] = &[
     Lang::Tur,
 ];
 
+/// Built once and shared by reference across threads — the engine detects on its TTS
+/// worker while other callers may detect concurrently. `detect_lang` takes `&self` and
+/// holds no interior mutability, so the shared `&Detector` needs no lock; this asserts the
+/// `Sync` that the `static` relies on stays true.
+const _: fn() = || {
+    fn assert_sync<T: Sync>() {}
+    assert_sync::<Detector>();
+};
+
 fn detector() -> &'static Detector {
     static DETECTOR: OnceLock<Detector> = OnceLock::new();
     DETECTOR.get_or_init(|| Detector::with_allowlist(LANGUAGES.to_vec()))
@@ -57,6 +66,31 @@ pub fn detect_language(text: &str) -> String {
         prose.chars().count()
     );
     code.to_string()
+}
+
+/// The single decision — shared by every synthesis path (engine gate, one-shot, warm
+/// helper) — of whether a model can speak a detected language, and the one wording of
+/// the refusal. Kept here next to [`detect_language`] so the check and the codes it
+/// validates cannot drift. `Ok` when the model accepts the code (OmniVoice auto-detects,
+/// so it accepts anything).
+pub fn ensure_model_speaks(language: &str, model: ds_config::TtsModel) -> Result<(), String> {
+    if model.descriptor().accepts_detected_language(language) {
+        Ok(())
+    } else {
+        Err(format!(
+            "detected language `{language}` is not supported by {}",
+            model.as_str()
+        ))
+    }
+}
+
+/// [`detect_language`] followed by [`ensure_model_speaks`], for the paths that start from
+/// raw text (one-shot; warm helper when it re-detects). The engine detects earlier — for
+/// its status gate — so it calls the two halves separately.
+pub fn detect_supported_language(text: &str, model: ds_config::TtsModel) -> Result<String, String> {
+    let language = detect_language(text);
+    ensure_model_speaks(&language, model)?;
+    Ok(language)
 }
 
 /// `whatlang::Lang` → the two-letter ISO 639-1 code every model frontend consumes
@@ -129,5 +163,30 @@ mod tests {
         for text in ["", "   ", "12345", "🎉"] {
             assert_eq!(detect_language(text), DEFAULT_LANGUAGE);
         }
+    }
+
+    #[test]
+    fn ensure_model_speaks_gates_on_the_model_language_set() {
+        use ds_config::TtsModel;
+        // Kokoro has no Russian; Qwen does. One shared decision for every synthesis path.
+        assert!(ensure_model_speaks("ru", TtsModel::Kokoro).is_err());
+        assert!(ensure_model_speaks("ru", TtsModel::Qwen).is_ok());
+        assert!(ensure_model_speaks("en", TtsModel::Kokoro).is_ok());
+        // OmniVoice auto-detects, so it accepts any detected code.
+        assert!(ensure_model_speaks("ru", TtsModel::OmniVoice).is_ok());
+        let message = ensure_model_speaks("ru", TtsModel::Kokoro).unwrap_err();
+        assert!(message.contains("`ru`") && message.contains("kokoro"));
+    }
+
+    #[test]
+    fn detect_supported_language_combines_detection_and_the_gate() {
+        use ds_config::TtsModel;
+        // Russian text detects as `ru`, which Qwen accepts but Kokoro refuses.
+        let russian = "Этот ответ написан на русском языке.";
+        assert_eq!(
+            detect_supported_language(russian, TtsModel::Qwen).unwrap(),
+            "ru"
+        );
+        assert!(detect_supported_language(russian, TtsModel::Kokoro).is_err());
     }
 }

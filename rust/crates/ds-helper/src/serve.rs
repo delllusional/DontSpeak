@@ -1263,12 +1263,8 @@ pub(crate) fn serve() -> ! {
         // synthesis was requested. Model-specific representation stays behind one shared
         // outcome, so all platforms use the same lifecycle and cancellation contract.
         let model = tts_model();
-        if !model.descriptor().accepts_detected_language(&language) {
-            println!(
-                "{} detected language `{language}` is not supported by {}",
-                proto::ERR,
-                model.as_str()
-            );
+        if let Err(message) = ds_tts::ensure_model_speaks(&language, model) {
+            println!("{} {message}", proto::ERR);
             let _ = std::io::stdout().flush();
             continue;
         }

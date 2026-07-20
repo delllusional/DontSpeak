@@ -1167,14 +1167,9 @@ impl TtsQueue {
             let voice = voice_override.cloned().unwrap_or(base_voice);
             let rate = rate_override.unwrap_or(cfg.rate);
             if engine == Some(ds_config::TtsEngine::BuiltIn)
-                && !cfg
-                    .tts_model_descriptor()
-                    .accepts_detected_language(language)
+                && let Err(message) = ds_tts::ensure_model_speaks(language, cfg.tts_model)
             {
-                return GateOutcome::Drop(format!(
-                    "detected language `{language}` is not supported by {}",
-                    cfg.tts_model.as_str()
-                ));
+                return GateOutcome::Drop(message);
             }
 
             // Never send built-in TTS work before its model is ready. Accepted work is HELD

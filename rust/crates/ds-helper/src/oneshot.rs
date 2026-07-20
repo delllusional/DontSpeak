@@ -296,14 +296,8 @@ pub(crate) fn prepare_backend_audio(
 }
 
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
-    let language = ds_tts::detect_language(text);
     let model = tts_model();
-    if !model.descriptor().accepts_detected_language(&language) {
-        return Err(format!(
-            "detected language `{language}` is not supported by {}",
-            model.as_str()
-        ));
-    }
+    let language = ds_tts::detect_supported_language(text, model)?;
     let FrontendOutcome::Finished(batches) = frontend_batches(model, text, voice, &language)?
     else {
         unreachable!("the one-shot frontend cannot cancel")
