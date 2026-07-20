@@ -183,6 +183,14 @@ impl KokoroSynth {
                 data.len()
             ));
         }
+        // Checked BEFORE `trim_silence`, which reports all-NaN audio as trimmed-away
+        // silence and so would hide the failure this guard exists to surface.
+        if data.iter().any(|sample| !sample.is_finite()) {
+            return Err(format!(
+                "{} produced non-finite audio for this model",
+                self.provider.as_str()
+            ));
+        }
         Ok(crate::trim::trim_silence(data))
     }
 }
