@@ -159,7 +159,7 @@ static TOOLS: &[Tool] = &[
             ),
             p(
                 "tts_model",
-                PType::Enum(&["kokoro", "chatterbox", "qwen", "omnivoice"]),
+                PType::Enum(ds_config::TtsModel::TOKENS),
                 false,
                 VOICES_MODEL,
             ),
@@ -208,7 +208,7 @@ static TOOLS: &[Tool] = &[
             ),
             p(
                 "tts_model",
-                PType::Enum(&["kokoro", "chatterbox", "qwen", "omnivoice"]),
+                PType::Enum(ds_config::TtsModel::TOKENS),
                 false,
                 SET_CONFIG_TTS_MODEL,
             ),
@@ -408,10 +408,7 @@ fn voice_pools_valid(value: &Value) -> bool {
         let Some(voices) = voices.as_array() else {
             return false;
         };
-        let known = matches!(
-            name.as_str(),
-            "system" | "kokoro" | "chatterbox" | "qwen" | "omnivoice"
-        );
+        let known = name == "system" || ds_config::TtsModel::TOKENS.contains(&name.as_str());
         let allowed_empty = name == "system";
         known
             && (allowed_empty || !voices.is_empty())
@@ -450,13 +447,41 @@ fn tool_schema(t: &Tool, name: &str) -> Value {
     tool
 }
 
+/// Model tokens plus `null` for the `voices` output, whose `model` is absent for the
+/// system engine.
+fn model_enum_or_null() -> Vec<Value> {
+    let mut values: Vec<Value> = ds_config::TtsModel::TOKENS
+        .iter()
+        .map(|token| Value::String((*token).to_string()))
+        .collect();
+    values.push(Value::Null);
+    values
+}
+
+/// One pool per built-in model plus `system`. Only `system` may be empty — clearing a
+/// model's pool is spelled by omitting it, so an empty array is a client bug.
+fn voice_pool_properties() -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "system".to_string(),
+        json!({ "type": "array", "items": { "type": "string", "minLength": 1 } }),
+    );
+    for token in ds_config::TtsModel::TOKENS {
+        properties.insert(
+            (*token).to_string(),
+            json!({ "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }),
+        );
+    }
+    Value::Object(properties)
+}
+
 fn output_schema_for(output: Output) -> Value {
     match output {
         Output::Status => json!({
             "type": "object",
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system", "off"] },
-                "model": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
+                "model": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
                 "language": { "type": "string" },
                 "voices": { "type": "array", "items": { "type": "string" } },
                 "rate": { "type": "number" },
@@ -530,7 +555,7 @@ fn output_schema_for(output: Output) -> Value {
             "type": "object",
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system"] },
-                "model": { "type": ["string", "null"], "enum": ["kokoro", "chatterbox", "qwen", "omnivoice", null] },
+                "model": { "type": ["string", "null"], "enum": model_enum_or_null() },
                 "language": { "type": "string" },
                 "languages": {
                     "type": "array",
@@ -548,7 +573,7 @@ fn output_schema_for(output: Output) -> Value {
                                         "language_tag": { "type": ["string", "null"] },
                                         "gender": { "type": ["string", "null"] },
                                         "engine": { "type": "string", "enum": ["built_in", "system"] },
-                                        "model": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
+                                        "model": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
                                         "active": { "type": "boolean" }
                                     },
                                     "required": ["id", "label", "language_tag", "gender", "engine", "active"],
@@ -565,7 +590,7 @@ fn output_schema_for(output: Output) -> Value {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "enum": ["kokoro", "chatterbox", "qwen", "omnivoice"] },
+                            "id": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
                             "name": { "type": "string" },
                             "default_language": { "type": "string" },
                             "languages": { "type": "array", "items": { "type": "string" } },
@@ -659,13 +684,7 @@ fn param_schema(param: &Param) -> Value {
             "description": d,
             "minProperties": 1,
             "additionalProperties": false,
-            "properties": {
-                "system": { "type": "array", "items": { "type": "string", "minLength": 1 } },
-                "kokoro": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-                "chatterbox": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-                "qwen": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
-                "omnivoice": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
-            }
+            "properties": voice_pool_properties()
         }),
         // No top-level `type` — `oneOf` of the two accepted shapes.
         PType::Gain => json!({
@@ -1076,6 +1095,10 @@ mod tests {
         let mut stt_tokens = toks(SttEngine::ALL, SttEngine::as_str);
         stt_tokens.push("off".to_string());
         assert_eq!(schema_string_enum("stt_engine"), stt_tokens);
+        assert_eq!(
+            schema_string_enum("tts_model"),
+            toks(ds_config::TtsModel::ALL, ds_config::TtsModel::as_str)
+        );
         assert_eq!(
             schema_item_enum("provider"),
             toks(Provider::ALL, Provider::as_str)

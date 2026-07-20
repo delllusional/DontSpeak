@@ -62,7 +62,7 @@ pub fn spawn(paths: &Paths, txt: &str, voice: &str, rate: f32) -> std::io::Resul
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .env("DONTSPEAK_TTS_MODEL", "kokoro")
+        .env("DONTSPEAK_TTS_MODEL", ds_config::TtsModel::Kokoro.as_str())
         .env("DONTSPEAK_PROVIDER", cfg.tts_provider_token())
         .env_remove("DONTSPEAK_STT_PROVIDER")
         .env_remove("DONTSPEAK_FULL_DUPLEX")

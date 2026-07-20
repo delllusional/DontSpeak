@@ -69,7 +69,9 @@ impl OrtSessions {
         }
         #[cfg(target_os = "macos")]
         if descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
-            && (self.preference.eq_ignore_ascii_case("coreml")
+            && (self
+                .preference
+                .eq_ignore_ascii_case(ds_config::Provider::OrtCoreMl.as_str())
                 || (self.preference.eq_ignore_ascii_case("auto")
                     && std::env::var_os("DONTSPEAK_FULL_DUPLEX").is_some()))
         {

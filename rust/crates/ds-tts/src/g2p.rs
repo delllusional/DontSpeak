@@ -404,12 +404,35 @@ pub fn phoneme_batches_for_cancellable(
     Ok(PhonemeBatchesOutcome::Finished(batches))
 }
 
+/// Which frontend owns a Kokoro language. Split out from the dispatch so the mapping can
+/// be pinned against the languages ds-config publishes without loading a G2P runtime — a
+/// language added there but not routed here would otherwise fail only at synthesis.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KokoroFrontend {
+    English,
+    Japanese,
+    Mandarin,
+    Espeak,
+}
+
+impl KokoroFrontend {
+    fn for_language(language: &str) -> Option<Self> {
+        Some(match language {
+            "en" => Self::English,
+            "ja" => Self::Japanese,
+            "zh" => Self::Mandarin,
+            "es" | "fr" | "hi" | "it" | "pt" => Self::Espeak,
+            _ => return None,
+        })
+    }
+}
+
 fn try_phonemize_for_cancellable(
     text: &str,
     language: &str,
     cancelled: &impl Fn() -> bool,
 ) -> Result<Cancellable<String>, String> {
-    if language == "en" {
+    if KokoroFrontend::for_language(language) == Some(KokoroFrontend::English) {
         return try_phonemize_english_cancellable(text, cancelled);
     }
     let normalized = crate::normalize_spoken_text(text);
@@ -419,11 +442,12 @@ fn try_phonemize_for_cancellable(
     if cancelled() {
         return Ok(Cancellable::Cancelled);
     }
-    let phonemes = match language {
-        "ja" => japanese::phonemize(&normalized)?,
-        "zh" => mandarin::phonemize(&normalized)?,
-        "es" | "fr" | "hi" | "it" | "pt" => espeak::phonemize(&normalized, language)?,
-        _ => return Err(format!("unsupported Kokoro language: {language}")),
+    let phonemes = match KokoroFrontend::for_language(language) {
+        Some(KokoroFrontend::Japanese) => japanese::phonemize(&normalized)?,
+        Some(KokoroFrontend::Mandarin) => mandarin::phonemize(&normalized)?,
+        Some(KokoroFrontend::Espeak) => espeak::phonemize(&normalized, language)?,
+        Some(KokoroFrontend::English) => unreachable!("English returns above"),
+        None => return Err(format!("unsupported Kokoro language: {language}")),
     };
     if cancelled() {
         return Ok(Cancellable::Cancelled);
@@ -437,6 +461,20 @@ fn try_phonemize_for_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ds-config publishes Kokoro's languages; this dispatch must route every one of
+    /// them. Adding a language there without wiring a frontend here would surface only
+    /// as a failed utterance at runtime.
+    #[test]
+    fn every_published_kokoro_language_is_routed() {
+        for language in ds_config::TtsModel::Kokoro.descriptor().languages {
+            assert!(
+                KokoroFrontend::for_language(language).is_some(),
+                "no G2P frontend routes published language '{language}'"
+            );
+        }
+        assert_eq!(KokoroFrontend::for_language("cs"), None);
+    }
 
     fn assert_vocab_safe(phonemes: &str) {
         let unsupported: Vec<char> = phonemes

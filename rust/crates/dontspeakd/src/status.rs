@@ -582,7 +582,7 @@ mod tests {
     use super::{
         EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
         engine_state, model_status_json, realized_provider_token, row_download_frac,
-        row_downloading, stt_provider_token, tts_provider_token,
+        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -927,6 +927,12 @@ mod tests {
         assert_eq!(stt_provider_token(b, "MLX").as_deref(), Some("mlx"));
         // Anything unrecognized (or "System") is CPU, never a wrong GPU claim.
         assert_eq!(stt_provider_token(b, "System").as_deref(), Some("cpu"));
+        // ds-status is deliberately independent of ds-config, so the two model-token
+        // vocabularies are unguarded duplicates anywhere but here, where both are in
+        // scope: a rename on one side alone would split the config and status wires.
+        for model in ds_config::TtsModel::ALL {
+            assert_eq!(status_tts_model(*model).as_str(), model.as_str());
+        }
         // The shared mapper's own table.
         assert_eq!(realized_provider_token("CUDA"), Provider::OrtCuda);
         assert_eq!(realized_provider_token("MLX"), Provider::Mlx);

@@ -515,13 +515,14 @@ impl TtsManager {
     ) -> ds_config::RealizedProvider {
         use ds_config::RealizedProvider;
         let descriptor = model.descriptor();
-        if which.eq_ignore_ascii_case("coreml")
+        if which.eq_ignore_ascii_case(ds_config::Provider::OrtCoreMl.as_str())
             && descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
         {
             return RealizedProvider::CoreMl;
         }
         if let Some(mlx_available) = mlx_available
-            && (which.eq_ignore_ascii_case("mlx") || which.eq_ignore_ascii_case("auto"))
+            && (which.eq_ignore_ascii_case(ds_config::Provider::Mlx.as_str())
+                || which.eq_ignore_ascii_case("auto"))
             && descriptor.supports_provider(ds_config::Provider::Mlx)
         {
             return if mlx_available {
