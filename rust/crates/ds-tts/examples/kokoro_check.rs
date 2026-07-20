@@ -9,7 +9,6 @@
 //! layout stays silent).
 
 fn main() {
-    StderrLogger::install();
     let mut args = std::env::args().skip(1);
     let text = args
         .next()
@@ -141,31 +140,4 @@ fn dump_graph_io(model_bytes: &[u8]) {
 fn fail(message: &str) -> ! {
     eprintln!("FAIL: {message}");
     std::process::exit(1);
-}
-
-/// Surfaces the crate's `log::debug!` lines (e.g. whatlang detection) on stderr — the
-/// example runs outside the host that normally installs the ds-log sink.
-struct StderrLogger;
-
-impl StderrLogger {
-    fn install() {
-        static LOGGER: StderrLogger = StderrLogger;
-        let _ = log::set_logger(&LOGGER);
-        log::set_max_level(log::LevelFilter::Debug);
-    }
-}
-
-impl log::Log for StderrLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool {
-        true
-    }
-    fn log(&self, record: &log::Record) {
-        eprintln!(
-            "log[{}] {}: {}",
-            record.level(),
-            record.target(),
-            record.args()
-        );
-    }
-    fn flush(&self) {}
 }
