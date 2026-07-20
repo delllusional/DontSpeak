@@ -63,9 +63,11 @@ skip = [
     # rust-i18n 4.2+ (serde-saphyr→ahash) needs 0.3; rand 0.10 / tempfile need 0.4. Irreducible until ahash migrates.
     { crate = "getrandom@0.3.4", reason = "ahash (rust-i18n 4.2) vs getrandom 0.4 (rand 0.10/tempfile); deny any unlisted duplicate version" },
     { crate = "daachorse@1.0.1", reason = "tokenizers 0.23 uses daachorse 1 while jpreprocess/lindera use daachorse 2; major-version split" },
-    { crate = "hashbrown@0.14.5", reason = "whatlang 0.16 uses hashbrown 0.14 while indexmap uses 0.17" },
+    { crate = "foldhash@0.1.5", reason = "whatlang 0.18's hashbrown 0.15 uses foldhash 0.1 while jieba-rs's hashbrown 0.16 uses foldhash 0.2" },
+    { crate = "hashbrown@0.15.5", reason = "whatlang 0.18 uses hashbrown 0.15 while indexmap uses 0.17" },
     { crate = "hashbrown@0.16.1", reason = "jieba-rs (libflate) uses hashbrown 0.16 while indexmap uses 0.17" },
     { crate = "itertools@0.11.0", reason = "rust-i18n 4.2 uses itertools 0.11 while tokenizers uses 0.14" },
+    { crate = "syn@3.0.2", reason = "latest serde_derive/thiserror-impl/async-trait use syn 3 while the rest of the graph is still on syn 2 (ecosystem mid-migration)" },
     { crate = "r-efi@5.3.0", reason = "getrandom 0.3's r-efi 5 vs getrandom 0.4's r-efi 6; deny any unlisted duplicate version" },
     { crate = "jni@0.21.1", reason = "existing Android transitive split; deny any unlisted duplicate version" },
     { crate = "jni-sys@0.3.1", reason = "existing Android transitive split; deny any unlisted duplicate version" },

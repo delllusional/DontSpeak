@@ -147,7 +147,7 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 # embeds ~93 MB of models per binary (it ships in both ds_core and ds-helper); whatlang's
 # models are ~0.3 MB. Trade-off: whatlang has no Malay/Swahili (Chatterbox-only) and is
 # less accurate on very short text. See ds-tts `language`.
-whatlang = "0.16"
+whatlang = "0.18"
 # RFC 3339 provider reset timestamps. Parsing only; native hosts format in the
 # user's locale/time zone.
 time = { version = "0.3", features = ["parsing"] }
@@ -193,7 +193,7 @@ voice-g2p = "=0.2.2"
 jpreprocess = { version = "=0.15.0", default-features = false, features = ["tokenizer"] }
 jieba-rs = "=0.10.3"
 pinyin = "=0.11.0"
-chinese-number = { version = "=0.7.8", default-features = false, features = ["number-to-chinese"] }
+chinese-number = { version = "=0.8.2", default-features = false, features = ["number-to-chinese"] }
 # CommonMark parser used to turn rendered agent replies into prose before G2P.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 # Audio playback of raw f32 mono PCM at 24 kHz.
