@@ -334,6 +334,25 @@ mod tests {
     }
 
     #[test]
+    fn default_language_is_a_supported_code() {
+        // The warm-helper clamp falls an unsupported code back to `default_language`, so it
+        // must itself be supported. OmniVoice's default is the `auto` sentinel the clamp
+        // never returns (it accepts every code), so it is exempt.
+        for model in TtsModel::ALL.iter().copied() {
+            if model == TtsModel::OmniVoice {
+                continue;
+            }
+            let descriptor = model.descriptor();
+            assert!(
+                descriptor.supports_language(descriptor.default_language),
+                "{} default language {} is not in its supported set",
+                descriptor.id,
+                descriptor.default_language
+            );
+        }
+    }
+
+    #[test]
     fn providers_are_filtered_by_model() {
         for model in TtsModel::ALL {
             assert!(model.descriptor().supports_provider(Provider::Mlx));

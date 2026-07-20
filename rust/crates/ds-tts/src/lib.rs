@@ -41,9 +41,7 @@ pub(crate) mod vocab;
 pub mod wav;
 
 pub use kokoro::KokoroTts;
-pub use language::{
-    DEFAULT_LANGUAGE, detect_language, detect_supported_language, ensure_model_speaks,
-};
+pub use language::{DEFAULT_LANGUAGE, detect_language, supported_language};
 pub use system::SystemTts;
 pub use vocab::SAMPLE_RATE;
 

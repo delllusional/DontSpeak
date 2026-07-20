@@ -1069,12 +1069,14 @@ impl TtsQueue {
         voice_override: Option<&String>,
         rate_override: Option<f32>,
     ) -> (SpeechOutcome, usize) {
-        let language = ds_tts::detect_language(text);
+        // Read the model as a Copy local so the config lock drops before detection runs.
+        let model = self.config.lock().unwrap().tts_model;
+        let language = ds_tts::detect_language(text, model);
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
             let (engine, voice, rate) =
-                match self.gate_item(item, gen0, &language, voice_override, rate_override) {
+                match self.gate_item(item, gen0, voice_override, rate_override) {
                     GateOutcome::Play {
                         engine,
                         voice,
@@ -1126,7 +1128,6 @@ impl TtsQueue {
         &self,
         item: &Item,
         gen0: u64,
-        language: &str,
         voice_override: Option<&String>,
         rate_override: Option<f32>,
     ) -> GateOutcome {
@@ -1166,11 +1167,6 @@ impl TtsQueue {
             };
             let voice = voice_override.cloned().unwrap_or(base_voice);
             let rate = rate_override.unwrap_or(cfg.rate);
-            if engine == Some(ds_config::TtsEngine::BuiltIn)
-                && let Err(message) = ds_tts::ensure_model_speaks(language, cfg.tts_model)
-            {
-                return GateOutcome::Drop(message);
-            }
 
             // Never send built-in TTS work before its model is ready. Accepted work is HELD
             // during an ordinary warm-up and remains busy; it is dropped only for an explicit
@@ -3711,7 +3707,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             done_tx
-                .send(gated.gate_item(&item("held across warm-up"), gen0, "en", None, None))
+                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None))
                 .unwrap();
         });
         // The gate publishes in-flight once it passes the (currently clear) hold gate; give it

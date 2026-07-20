@@ -1263,11 +1263,10 @@ pub(crate) fn serve() -> ! {
         // synthesis was requested. Model-specific representation stays behind one shared
         // outcome, so all platforms use the same lifecycle and cancellation contract.
         let model = tts_model();
-        if let Err(message) = ds_tts::ensure_model_speaks(&language, model) {
-            println!("{} {message}", proto::ERR);
-            let _ = std::io::stdout().flush();
-            continue;
-        }
+        // Clamp (never refuse): the engine already scoped the code to its model, but the
+        // model can change between that detection and this warm run. An unsupported code
+        // falls back to the model's default rather than dropping the utterance.
+        let language = ds_tts::supported_language(&language, model);
         let cancelled = || cancel.load(Ordering::SeqCst);
         let batches =
             match frontend_batches_with_cancel(model, &text, &voice, &language, &cancelled) {

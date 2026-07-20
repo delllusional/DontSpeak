@@ -30,9 +30,10 @@ Canonical path from assistant text to built-in or system speech. Streaming mecha
 Narration selection decides what to speak but does not rewrite it. Every delivery route
 converges on `ds_tts::normalize_spoken_text`, which owns markup, URL, hash, and whitespace
 cleanup once. Backend normalization starts from that prose; it does not duplicate cleanup.
-The same `lingua` detector sees that normalized prose for every engine and model. An
-ambiguous or unspeakable input resolves to English; a detected language unsupported by
-the selected model fails that utterance instead of changing models or engines.
+The `whatlang` detector sees that normalized prose, scoped to the selected model's
+supported languages, so detection only ever yields a language that model can speak (or
+the English fallback for ambiguous or unspeakable input). No utterance is refused for
+language — the model is never changed to fit a detected language.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
 Codex (in-process). Streaming routes retry rejected work; no route yet propagates
