@@ -273,12 +273,19 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
-      - name: swift test (macOS DontSpeakMLX shim)
+      - name: xcodebuild test (macOS DontSpeakMLX shim)
         if: runner.os == 'macOS'
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         working-directory: apps/macos/DontSpeakMLX
-        run: swift test
+        # MLX's Metal shaders are an Xcode-generated SwiftPM resource bundle. A plain
+        # `swift test` builds the code but aborts the first GPU-backed test without it.
+        run: |
+          xcodebuild test \
+            -scheme DontSpeakMLX-Package \
+            -destination 'platform=macOS' \
+            -derivedDataPath .build/xcode-tests \
+            -quiet
 
       # WinUI xunit tests; the composite is shared with csharp.yml.
       - name: dotnet test (WinUI app)
