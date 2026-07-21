@@ -338,7 +338,13 @@ struct PausedState {
 }
 
 pub struct TtsQueue {
+    /// Every mutation must publish the new depth via [`TtsQueue::publish_queue_depth`]
+    /// before releasing the guard — `queue_depth` mirrors `items.len()`.
     items: Mutex<VecDeque<Item>>,
+    /// Lock-free mirror of pending depth for status reads. `items` is held across
+    /// helper-child I/O (`hard_cancel_in_flight` → `stop_fade`), so a status read that
+    /// took the lock would stall behind a wedged helper.
+    queue_depth: AtomicU64,
     /// Lock before `items` (see enqueue_narration).
     accepted_narrations: Mutex<AcceptedNarrations>,
     /// Per-turn language pins. Never hold with `items`; take after `accepted_narrations` drops.
@@ -386,6 +392,7 @@ impl TtsQueue {
         let config = VoiceConfig::load(&paths);
         let q = Arc::new(Self {
             items: Mutex::new(VecDeque::new()),
+            queue_depth: AtomicU64::new(0),
             accepted_narrations: Mutex::new(AcceptedNarrations::default()),
             language_pins: Mutex::new(LanguagePins::default()),
             cv: Condvar::new(),
@@ -452,6 +459,7 @@ impl TtsQueue {
         let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
         Arc::new(TtsQueue {
             items: Mutex::new(VecDeque::new()),
+            queue_depth: AtomicU64::new(0),
             accepted_narrations: Mutex::new(AcceptedNarrations::default()),
             language_pins: Mutex::new(LanguagePins::default()),
             cv: Condvar::new(),
@@ -658,7 +666,7 @@ impl TtsQueue {
             session,
             resume_skip: 0,
         });
-        self.bump_queue_depth_if_changed(before, q.len());
+        self.publish_queue_depth(before, q.len());
         self.cv.notify_one();
         Ok(())
     }
@@ -759,7 +767,7 @@ impl TtsQueue {
         let gen0 = self.generation.load(Ordering::SeqCst);
         let before = q.len();
         let item = q.remove(pos).expect("select_pos returns a valid index");
-        self.bump_queue_depth_if_changed(before, q.len());
+        self.publish_queue_depth(before, q.len());
         self.in_flight.store(true, Ordering::SeqCst);
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
@@ -797,7 +805,7 @@ impl TtsQueue {
         let mut items = self.items.lock().unwrap();
         let before = items.len();
         items.clear();
-        self.bump_queue_depth_if_changed(before, items.len());
+        self.publish_queue_depth(before, items.len());
         drop(items);
         *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
@@ -820,7 +828,7 @@ impl TtsQueue {
         let mut items = self.items.lock().unwrap();
         let before = items.len();
         prune_session(&mut items, &session);
-        self.bump_queue_depth_if_changed(before, items.len());
+        self.publish_queue_depth(before, items.len());
         let cancel_current = self
             .playing
             .lock()
@@ -866,7 +874,7 @@ impl TtsQueue {
             if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                 prune_session(&mut items, &Some(sticky));
             }
-            self.bump_queue_depth_if_changed(before, items.len());
+            self.publish_queue_depth(before, items.len());
             self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
@@ -880,7 +888,7 @@ impl TtsQueue {
                 .as_ref()
                 .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
             retain_only_session(&mut items, &Some(target));
-            self.bump_queue_depth_if_changed(before, items.len());
+            self.publish_queue_depth(before, items.len());
             if playing_is_other {
                 self.hard_cancel_in_flight_locked(&items);
             }
@@ -1006,26 +1014,17 @@ impl TtsQueue {
         }
     }
 
-    /// `(tts_active, queued, paused, muted)`. Queued excludes in-flight.
-    pub fn snapshot(&self) -> (bool, usize, bool, bool) {
-        let queued = self.items.lock().unwrap().len();
-        (
-            self.tts_active.load(Ordering::SeqCst),
-            queued,
-            self.paused.lock().unwrap().paused,
-            self.tts.is_muted(),
-        )
-    }
-
     /// Lock-free `activity.speaking` (must not take `items`).
     pub fn is_tts_active(&self) -> bool {
         self.tts_active.load(Ordering::SeqCst)
     }
 
     /// `(speaking, speaker, queued)` for `model_status` activity. Queued is pending-only.
+    /// Reads only atomics + the short-lived `playing` lock: status must never wait on
+    /// `items`, which cancel paths hold across helper-child I/O.
     pub fn tts_status_sample(&self) -> (bool, Option<ClientSource>, u64) {
         let active = self.is_tts_active();
-        let queued = self.items.lock().unwrap().len() as u64;
+        let queued = self.queue_depth.load(Ordering::SeqCst);
         if !active {
             return (false, None, queued);
         }
@@ -1039,11 +1038,38 @@ impl TtsQueue {
         (true, source, queued)
     }
 
-    /// Bump WaitModelStatus only when pending depth actually changed.
-    fn bump_queue_depth_if_changed(&self, before: usize, after: usize) {
+    /// Publish the new pending depth, then bump WaitModelStatus only when it changed.
+    /// Store-before-bump so a woken waiter reads the depth that caused the wake.
+    /// Call under the `items` guard from every site that mutates the queue.
+    fn publish_queue_depth(&self, before: usize, after: usize) {
+        let prev = self.queue_depth.swap(after as u64, Ordering::SeqCst);
+        debug_assert_eq!(
+            prev, before as u64,
+            "pending depth drifted: an `items` mutation skipped publish_queue_depth"
+        );
         if before != after {
             self.gate.bump();
         }
+    }
+
+    /// Seed/mutate `items` in tests through the production publish path, so hand-built
+    /// queue state can't leave the depth mirror stale and mask a real drift.
+    #[cfg(test)]
+    fn edit_items_locked_for_test<R>(
+        &self,
+        items: &mut VecDeque<Item>,
+        f: impl FnOnce(&mut VecDeque<Item>) -> R,
+    ) -> R {
+        let before = items.len();
+        let out = f(items);
+        self.publish_queue_depth(before, items.len());
+        out
+    }
+
+    #[cfg(test)]
+    fn edit_items_for_test<R>(&self, f: impl FnOnce(&mut VecDeque<Item>) -> R) -> R {
+        let mut items = self.items.lock().unwrap();
+        self.edit_items_locked_for_test(&mut items, f)
     }
 
     /// Sole `tts_active` writer; bumps gate only on real transitions.
@@ -1599,7 +1625,7 @@ impl TtsQueue {
         let mut q = self.items.lock().unwrap();
         let before = q.len();
         q.push_front(item);
-        self.bump_queue_depth_if_changed(before, q.len());
+        self.publish_queue_depth(before, q.len());
     }
 }
 
@@ -2180,7 +2206,7 @@ mod tests {
         // running under; `requeue_if_resuming` must look THAT up (not the live `paused` flag)
         // and re-enqueue the item at the front, ahead of whatever was already queued.
         let q = mk_queue();
-        q.items.lock().unwrap().push_back(item("already queued"));
+        q.edit_items_for_test(|q| q.push_back(item("already queued")));
         q.record_cancel_kind(7, true);
         q.requeue_if_resuming(item("interrupted"), 7);
         let items = q.items.lock().unwrap();
@@ -2302,7 +2328,7 @@ mod tests {
         q.enqueue("   \n\t".into(), None, None, ClientSource::Unknown, None)
             .unwrap();
         assert_eq!(
-            q.snapshot().1,
+            q.tts_status_sample().2,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
@@ -2314,7 +2340,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(q.snapshot().1, 1, "a real text block is queued");
+        assert_eq!(q.tts_status_sample().2, 1, "a real text block is queued");
     }
 
     #[test]
@@ -2513,7 +2539,7 @@ mod tests {
         )
         .unwrap();
         q.set_muted(true);
-        let item = q.items.lock().unwrap().pop_front().unwrap();
+        let item = q.edit_items_for_test(|q| q.pop_front()).unwrap();
         let QueueAction::Earcon(event) = item.action else {
             panic!("queued action must remain a cue");
         };
@@ -2686,7 +2712,7 @@ mod tests {
         );
 
         // Per-session prune: only a prune that actually drops an item bumps.
-        q.items.lock().unwrap().push_back(narr(Some("a")));
+        q.edit_items_for_test(|q| q.push_back(narr(Some("a"))));
         let before_prune = q.gate.seq();
         q.clear_session(Some("nobody".into()));
         assert_eq!(
@@ -2712,6 +2738,44 @@ mod tests {
             "resume push_front must bump"
         );
         assert_eq!(q.tts_status_sample().2, 1);
+        assert_eq!(
+            q.queue_depth.load(Ordering::SeqCst) as usize,
+            q.items.lock().unwrap().len(),
+            "the published depth must equal the real queue"
+        );
+    }
+
+    /// Regression: `model_status` sampled pending depth under `items`, which cancel paths
+    /// hold across helper-child I/O (`hard_cancel_in_flight` → `stop_fade`). A wedged
+    /// helper then stalled every host status refresh. The read is lock-free now.
+    #[test]
+    fn tts_status_sample_does_not_wait_on_the_queue_lock() {
+        let q = mk_queue();
+        q.enqueue(
+            "pending".into(),
+            None,
+            None,
+            ClientSource::ClaudeCode,
+            Some("a".into()),
+        )
+        .unwrap();
+
+        // Stand in for a cancel path blocked inside `stop_fade` with `items` held.
+        let items = q.items.lock().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = Arc::clone(&q);
+        let handle = std::thread::spawn(move || tx.send(reader.tts_status_sample()).unwrap());
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(2))
+                .expect("status read must not wait on the queue lock")
+                .2,
+            1,
+            "the lock-free read still reports the pending depth"
+        );
+
+        drop(items);
+        handle.join().unwrap();
     }
 
     #[test]
@@ -2808,7 +2872,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("session speech queue is full"));
 
-        q.items.lock().unwrap().clear();
+        q.edit_items_for_test(|q| q.clear());
         let mut admitted_id = None;
         ds_narrate::retry_pending(&paths, session, |utt| {
             admitted_id = Some(utt.id.clone());
@@ -3032,10 +3096,7 @@ mod tests {
     #[test]
     fn clear_drops_everything_resets_paused_and_bumps_generation() {
         let q = mk_queue();
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("b"))]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
         q.paused.lock().unwrap().paused = true;
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -3068,12 +3129,14 @@ mod tests {
     #[test]
     fn clear_session_prunes_only_that_sessions_queued_items() {
         let q = mk_queue();
-        q.items.lock().unwrap().extend([
-            narr(Some("a")),
-            narr(Some("b")),
-            narr(None),
-            narr(Some("a")),
-        ]);
+        q.edit_items_for_test(|q| {
+            q.extend([
+                narr(Some("a")),
+                narr(Some("b")),
+                narr(None),
+                narr(Some("a")),
+            ])
+        });
         q.clear_session(Some("a".into()));
         let kept: Vec<_> = q
             .items
@@ -3122,10 +3185,7 @@ mod tests {
     #[test]
     fn cancel_for_submit_is_a_noop_without_scopes_or_a_resolved_target() {
         let q = mk_queue();
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("b"))]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
         let gen_before = q.generation.load(Ordering::SeqCst);
 
         // Neither scope requested.
@@ -3142,10 +3202,7 @@ mod tests {
     #[test]
     fn cancel_for_submit_current_prunes_target_and_cancels_unconditionally() {
         let q = mk_queue();
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("b"))]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
         // Someone ELSE is playing ("b") — `current` must still cancel unconditionally.
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
@@ -3179,10 +3236,7 @@ mod tests {
     fn cancel_for_submit_other_keeps_only_target_and_cancels_only_when_playing_is_other() {
         // Playing a DIFFERENT session than the target → `other` cancels it.
         let q = mk_queue();
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("b")), narr(None)]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b")), narr(None)]));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
@@ -3212,10 +3266,7 @@ mod tests {
         // Playing the TARGET itself → `other` must leave it alone (the worker can
         // legitimately already be playing the target's own item).
         let q2 = mk_queue();
-        q2.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("b"))]);
+        q2.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
         q2.tts_active.store(true, Ordering::SeqCst);
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
@@ -3242,11 +3293,9 @@ mod tests {
 
         // Playing sticky digests for the target → also not "other".
         let q3 = mk_queue();
-        q3.items.lock().unwrap().extend([
-            narr(Some("a")),
-            narr(Some("grok-stop:a")),
-            narr(Some("b")),
-        ]);
+        q3.edit_items_for_test(|q| {
+            q.extend([narr(Some("a")), narr(Some("grok-stop:a")), narr(Some("b"))])
+        });
         q3.tts_active.store(true, Ordering::SeqCst);
         *q3.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
@@ -3274,12 +3323,14 @@ mod tests {
         // `current` first drops the target's own queued items, then `other` retains ONLY
         // the target's items (now none) — the combination empties the queue entirely.
         let q = mk_queue();
-        q.items.lock().unwrap().extend([
-            narr(Some("a")),
-            narr(Some("b")),
-            narr(None),
-            narr(Some("a")),
-        ]);
+        q.edit_items_for_test(|q| {
+            q.extend([
+                narr(Some("a")),
+                narr(Some("b")),
+                narr(None),
+                narr(Some("a")),
+            ])
+        });
         q.cancel_for_submit(Some("a".into()), true, true);
         assert!(q.items.lock().unwrap().is_empty());
     }
@@ -3417,7 +3468,7 @@ mod tests {
         q.in_flight.store(false, Ordering::SeqCst);
         assert!(!q.is_busy());
 
-        q.items.lock().unwrap().push_back(narr(Some("a")));
+        q.edit_items_for_test(|q| q.push_back(narr(Some("a"))));
         assert!(q.is_busy(), "anything queued counts as busy");
     }
 
@@ -3427,7 +3478,7 @@ mod tests {
     fn is_busy_couples_the_dequeue_to_in_flight_transition() {
         let q = mk_queue();
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(Some("a")));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(Some("a"))));
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
@@ -3443,7 +3494,8 @@ mod tests {
             "the busy reader must wait for the queue transition lock"
         );
 
-        items.pop_front().expect("queued item");
+        q.edit_items_locked_for_test(&mut items, |q| q.pop_front())
+            .expect("queued item");
         q.in_flight.store(true, Ordering::SeqCst);
         drop(items);
 
@@ -3458,7 +3510,7 @@ mod tests {
     fn global_clear_cancels_an_item_claimed_during_the_queue_transition() {
         let q = mk_queue();
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(Some("a")));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(Some("a"))));
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let clearer = Arc::clone(&q);
@@ -3483,7 +3535,7 @@ mod tests {
     fn session_clear_cancels_an_item_claimed_during_the_queue_transition() {
         let q = mk_queue();
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(Some("a")));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(Some("a"))));
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let clearer = Arc::clone(&q);
@@ -3508,7 +3560,7 @@ mod tests {
     fn other_scope_cancels_a_foreign_item_claimed_during_pruning() {
         let q = mk_queue();
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(Some("other")));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(Some("other"))));
 
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let clearer = Arc::clone(&q);
@@ -3539,7 +3591,7 @@ mod tests {
         cancel: impl FnOnce(Arc<TtsQueue>) + Send + 'static,
     ) -> (u64, u64) {
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(survivor));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(survivor)));
         q.tts_active.store(true, Ordering::SeqCst);
         let transition = q.gate.hold_transition_for_test();
 
@@ -3653,7 +3705,7 @@ mod tests {
 
         // The playing half: an untagged claimed item IS the global session — it must cancel.
         let mut items = q.items.lock().unwrap();
-        items.push_back(narr(None));
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(None)));
         let (_item, selected_generation) = q.claim_item(&mut items, 0);
         drop(items);
 
@@ -3672,10 +3724,7 @@ mod tests {
         q.set_terminal_front(true); // arm the self-disabling focus gate
         q.set_pause_bg(true);
         q.set_terminal_front(false);
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("a")), narr(Some("a"))]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("a"))]));
         q.in_flight.store(true, Ordering::SeqCst);
 
         assert!(q.worker_focus_hold());
@@ -4155,10 +4204,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert(ClientSource::ClaudeCode, "af_sarah".to_string());
-        q.items
-            .lock()
-            .unwrap()
-            .extend([narr(Some("other")), narr(Some("s1"))]);
+        q.edit_items_for_test(|q| q.extend([narr(Some("other")), narr(Some("s1"))]));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,

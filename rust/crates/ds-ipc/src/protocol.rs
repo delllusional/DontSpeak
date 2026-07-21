@@ -19,8 +19,6 @@ use serde_json::Value;
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Ping,
-    /// TTS queue snapshot.
-    Status,
     /// Kokoro frontend assets; returns immediately (single-flight download).
     EnsureKokoroFrontend,
     /// Codex app-server ready after narration subscriber attaches (TUI race).
@@ -133,13 +131,6 @@ pub enum Request {
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum Response {
     Pong,
-    /// `paused` = record-barge; `muted` = silent play-through.
-    Status {
-        tts_active: bool,
-        queued: usize,
-        paused: bool,
-        muted: bool,
-    },
     Done,
     /// Codex TUI `--remote` after narration subscriber attached.
     CodexStreamReady {
@@ -186,7 +177,6 @@ impl Response {
         matches!(
             self,
             Response::Pong
-                | Response::Status { .. }
                 | Response::Done
                 | Response::CodexStreamReady { .. }
                 | Response::Transcript { .. }
@@ -208,7 +198,6 @@ mod tests {
     fn request_roundtrips_through_json_lines() {
         let cases = [
             Request::Ping,
-            Request::Status,
             Request::EnsureKokoroFrontend,
             Request::EnsureCodexStream,
             Request::Diarize { seconds: 10 },
@@ -314,15 +303,6 @@ mod tests {
     #[test]
     fn terminal_classification() {
         assert!(Response::Pong.is_terminal());
-        assert!(
-            Response::Status {
-                tts_active: false,
-                queued: 0,
-                paused: false,
-                muted: false,
-            }
-            .is_terminal()
-        );
         assert!(Response::Done.is_terminal());
         assert!(Response::error("x").is_terminal());
         assert!(

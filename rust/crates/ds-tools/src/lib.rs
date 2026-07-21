@@ -483,7 +483,6 @@ fn output_schema_for(output: Output) -> Value {
                         "running": { "type": "boolean" },
                         "tts_active": { "type": "boolean" },
                         "queued": { "type": "integer", "minimum": 0 },
-                        "paused": { "type": "boolean" },
                         "muted": { "type": "boolean" },
                         "note": { "type": "string" }
                     },

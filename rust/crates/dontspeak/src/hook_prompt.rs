@@ -42,8 +42,9 @@ fn provide_shape(client: ClientSource, context: String) -> Value {
 /// Read-only mute probe. `false` when engine down/unreachable — omit notice, don't block.
 fn engine_muted(paths: &ds_config::Paths) -> bool {
     matches!(
-        ds_ipc::request(&paths.engine_sock, &Request::Status),
-        Ok(Response::Status { muted: true, .. })
+        ds_ipc::request(&paths.engine_sock, &Request::ModelStatus),
+        Ok(Response::ModelStatus { status })
+            if status.pointer("/activity/muted") == Some(&Value::Bool(true))
     )
 }
 

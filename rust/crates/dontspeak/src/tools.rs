@@ -270,23 +270,26 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     let a: StatusArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid status arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
+    // One round-trip feeds both the concise `state` block and `detail`.
+    let probe = probe_engine(sock);
     // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
     // (previously silently dropped the configured engine name).
-    let state = match sock {
-        Some(sock) => match ds_ipc::request(sock, &Request::Status) {
-            Ok(Response::Status {
-                tts_active,
-                queued,
-                paused,
-                muted,
-            }) => {
-                // muted in concise status: narration path never calls a tool that reports it.
-                json!({ "running": true, "tts_active": tts_active, "queued": queued, "paused": paused, "muted": muted })
-            }
-            Ok(_) => json!({ "running": true, "note": "unexpected engine response" }),
-            Err(_) => json!({ "running": false }),
-        },
-        None => json!({ "running": false, "note": "cannot resolve engine socket" }),
+    let state = match &probe {
+        EngineProbe::Live(status) => {
+            let activity = &status["activity"];
+            // muted in concise status: narration path never calls a tool that reports it.
+            json!({
+                "running": true,
+                "tts_active": activity["speaking"].as_bool().unwrap_or(false),
+                "queued": activity["queued"].as_u64().unwrap_or(0),
+                "muted": activity["muted"].as_bool().unwrap_or(false),
+            })
+        }
+        EngineProbe::Invalid => json!({ "running": true, "note": "unexpected engine response" }),
+        EngineProbe::Unreachable => json!({ "running": false }),
+        EngineProbe::Unresolved => {
+            json!({ "running": false, "note": "cannot resolve engine socket" })
+        }
     };
     let resolved_tts = cfg.resolved_tts();
     let voices = match resolved_tts {
@@ -303,18 +306,38 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         "state": state,
     });
     if a.detail.unwrap_or(false) {
-        out["status"] = match sock {
-            Some(sock) => match ds_ipc::request(sock, &Request::ModelStatus) {
-                Ok(Response::ModelStatus { status }) if status.is_object() => status,
-                Ok(Response::ModelStatus { .. }) => {
-                    json!({ "running": false, "note": "invalid engine response" })
-                }
-                _ => json!({ "running": false, "note": "engine unavailable" }),
-            },
-            None => json!({ "running": false, "note": "cannot resolve engine socket" }),
+        out["status"] = match probe {
+            EngineProbe::Live(status) => status,
+            EngineProbe::Invalid => json!({ "running": false, "note": "invalid engine response" }),
+            EngineProbe::Unreachable => json!({ "running": false, "note": "engine unavailable" }),
+            EngineProbe::Unresolved => {
+                json!({ "running": false, "note": "cannot resolve engine socket" })
+            }
         };
     }
     Ok(out)
+}
+
+/// Outcome of the `status` tool's single `ModelStatus` probe. Read-only: an absent or
+/// unreachable engine reports `running: false`, never an error.
+enum EngineProbe {
+    /// No socket path resolved.
+    Unresolved,
+    Unreachable,
+    /// Engine answered, but not with a `model_status` object.
+    Invalid,
+    Live(Value),
+}
+
+fn probe_engine(sock: Option<&PathBuf>) -> EngineProbe {
+    let Some(sock) = sock else {
+        return EngineProbe::Unresolved;
+    };
+    match ds_ipc::request(sock, &Request::ModelStatus) {
+        Ok(Response::ModelStatus { status }) if status.is_object() => EngineProbe::Live(status),
+        Ok(_) => EngineProbe::Invalid,
+        Err(_) => EngineProbe::Unreachable,
+    }
 }
 
 fn call_usage(args: &Value) -> Result<Value, String> {

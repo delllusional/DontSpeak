@@ -103,15 +103,6 @@ pub(crate) fn spawn_ipc_server(
         let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
-                ds_ipc::Request::Status => {
-                    let (tts_active, queued, paused, muted) = ttsq.snapshot();
-                    emit(&ds_ipc::Response::Status {
-                        tts_active,
-                        queued,
-                        paused,
-                        muted,
-                    });
-                }
                 ds_ipc::Request::EnsureKokoroFrontend => {
                     // Non-blocking: kick the shared-frontend download if any asset is absent.
                     // `start_download` is single-flight PER TARGET — if this target is
@@ -588,7 +579,7 @@ mod tests {
             "a synthetic continuation must not steal active-terminal status"
         );
         assert_eq!(
-            ttsq.snapshot().1,
+            ttsq.tts_status_sample().2,
             1,
             "a synthetic continuation must not cancel queued speech"
         );
@@ -624,7 +615,7 @@ mod tests {
 
         assert_eq!(ttsq.active_session(), Some("a".into()));
         assert_eq!(
-            ttsq.snapshot().1,
+            ttsq.tts_status_sample().2,
             0,
             "default clear_on_input=[current] still prunes a genuine submit's own queued item"
         );
