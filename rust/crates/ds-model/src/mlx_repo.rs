@@ -534,7 +534,8 @@ pub fn ensure_mlx_repo(repo: &MlxRepo, progress: &dyn Fn(u64, u64)) -> std::io::
 /// `progress(done_bytes, total_bytes)` where BOTH are summed across every file of every repo —
 /// so the UI shows a single monotonic "Downloading `<pct>`%" over the WHOLE set (a true global
 /// percent, not a per-file percent that resets each file). Writes each repo's completion marker
-/// once its files are all present. Missing files fetch concurrently (bounded pool).
+/// once its own files verify — per repo, so a failed member keeps completed repos' markers.
+/// Missing files fetch concurrently (bounded pool).
 pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     ensure_mlx_repos_at(HF_HOST, repos, progress)
 }
@@ -616,18 +617,32 @@ pub(crate) fn ensure_mlx_repos_at(
         }
     }
 
-    crate::parallel::run_jobs_parallel(progress, total_bytes, pre_credit.min(total_bytes), jobs)?;
+    let pool_result = crate::parallel::run_jobs_parallel(
+        progress,
+        total_bytes,
+        pre_credit.min(total_bytes),
+        jobs,
+    );
 
-    // Markers only after the full set of missing files succeeded (no marker on partial fail).
+    // Per-repo marker atomicity: write each repo's marker as soon as ALL of its own files verify,
+    // independent of sibling repos in the same set. A failed sibling no longer discards a completed
+    // repo's marker, so the next retry skips the finished repo instead of re-fetching its tree and
+    // re-hashing every already-good file. A repo with any missing file gets no marker and
+    // self-repairs on the next run.
     for (r, target, files) in &plan {
-        for f in files {
-            let dest = target.join(Path::new(&f.path));
-            if !already_have(&dest, f) {
+        if let Some(missing) = files
+            .iter()
+            .find(|f| !already_have(&target.join(Path::new(&f.path)), f))
+        {
+            // After a *successful* pool run every file must be present; a gap is a real bug, not
+            // the partial-failure case (which already carries the pool's own error).
+            if pool_result.is_ok() {
                 return Err(std::io::Error::other(format!(
                     "missing verified file after download: {}",
-                    f.path
+                    missing.path
                 )));
             }
+            continue;
         }
         let mut marker = String::with_capacity(
             r.revision.len() + files.iter().map(|f| f.path.len() + 1).sum::<usize>() + 1,
@@ -640,7 +655,8 @@ pub(crate) fn ensure_mlx_repos_at(
         }
         std::fs::write(target.join(READY_MARKER), marker)?;
     }
-    Ok(())
+
+    pool_result
 }
 
 /// LOCAL presence (no network): marker revision matches and every manifested file still exists.
@@ -674,11 +690,18 @@ pub fn is_mlx_repo_present(repo: &MlxRepo) -> bool {
 #[cfg(test)]
 thread_local! {
     static TEST_TARGET_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    // Second seam so a multi-repo set test can give each repo its own dir/marker.
+    static TEST_TARGET_DIR_2: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn test_target() -> Option<PathBuf> {
     TEST_TARGET_DIR.with(|t| t.borrow().clone())
+}
+
+#[cfg(test)]
+fn test_target_2() -> Option<PathBuf> {
+    TEST_TARGET_DIR_2.with(|t| t.borrow().clone())
 }
 
 #[cfg(test)]
@@ -1318,7 +1341,8 @@ mod tests {
             license_url: "",
         };
 
-        let err = ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {}).unwrap_err();
+        let err =
+            ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {}).unwrap_err();
         tree.assert();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(
@@ -1326,6 +1350,92 @@ mod tests {
             "partial fail must not write .ds-ready"
         );
         TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
+    }
+
+    /// A completed repo in a multi-repo set keeps its marker even when a sibling repo fails, so the
+    /// finished repo is not re-fetched/re-hashed on the next retry.
+    #[test]
+    fn ensure_mlx_repos_at_marks_completed_repo_when_sibling_fails() {
+        let server = httpmock::MockServer::start();
+        let good = b"good-repo-bytes";
+        let good_sha = crate::hash::sha256_hex(good);
+        let good_rev = "abc123rev00000000000000000000000000004";
+        let good_id = "test-org/good-repo";
+        let bad_rev = "abc123rev00000000000000000000000000005";
+        let bad_id = "test-org/bad-repo";
+
+        let good_tree = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/api/models/{good_id}/tree/{good_rev}"))
+                .query_param("recursive", "true");
+            then.status(200).json_body(serde_json::json!([{
+                "type": "file",
+                "path": "g.bin",
+                "size": good.len(),
+                "lfs": { "oid": format!("sha256:{good_sha}"), "size": good.len() }
+            }]));
+        });
+        let good_blob = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{good_id}/resolve/{good_rev}/g.bin"));
+            then.status(200).body(good);
+        });
+        let bad_tree = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/api/models/{bad_id}/tree/{bad_rev}"))
+                .query_param("recursive", "true");
+            then.status(200).json_body(serde_json::json!([{
+                "type": "file",
+                "path": "bad.bin",
+                "size": 10,
+                "lfs": { "oid": format!("sha256:{}", "0".repeat(64)), "size": 10 }
+            }]));
+        });
+        let _bad_blob = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{bad_id}/resolve/{bad_rev}/bad.bin"));
+            then.status(200).body(b"wrong-size");
+        });
+
+        let good_dir = tempfile::tempdir().unwrap();
+        let bad_dir = tempfile::tempdir().unwrap();
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(good_dir.path().to_path_buf()));
+        TEST_TARGET_DIR_2.with(|t| *t.borrow_mut() = Some(bad_dir.path().to_path_buf()));
+        let mk = |name, repo, revision, target| MlxRepo {
+            name,
+            repo,
+            revision,
+            include_prefixes: &[],
+            exclude_substrings: &[],
+            target,
+            display_name: "",
+            usage: "",
+            license: "",
+            license_url: "",
+        };
+        let good_repo = mk("good", good_id, good_rev, test_target);
+        let bad_repo = mk("bad", bad_id, bad_rev, test_target_2);
+
+        let err = ensure_mlx_repos_at(
+            server.base_url().as_str(),
+            &[&good_repo, &bad_repo],
+            &|_, _| {},
+        )
+        .unwrap_err();
+        good_tree.assert();
+        good_blob.assert();
+        bad_tree.assert();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            good_dir.path().join(READY_MARKER).is_file(),
+            "completed sibling must keep its marker"
+        );
+        assert!(
+            !bad_dir.path().join(READY_MARKER).exists(),
+            "failed sibling must not write a marker"
+        );
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
+        TEST_TARGET_DIR_2.with(|t| *t.borrow_mut() = None);
     }
 
     #[test]

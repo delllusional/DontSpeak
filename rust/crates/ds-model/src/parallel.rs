@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-/// Concurrent file fetches inside one multi-asset set (HF-friendly; caps FD/TLS pressure).
+/// Concurrent file fetches inside one asset set (HF trees and the CUDA wheel host); caps FD/TLS
+/// pressure.
 pub(crate) const PARALLEL_DOWNLOADS: usize = 4;
 
 /// One unit of work that reports local `(done, _)` bytes via the callback.
