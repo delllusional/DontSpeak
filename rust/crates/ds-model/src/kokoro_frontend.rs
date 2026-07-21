@@ -2,13 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::archive::{extract_tgz_subtree, extract_wheel_subtree};
+use crate::archive::extract_wheel_subtree;
 use crate::download::ensure_in_dir;
 use crate::spec::ModelSpec;
 
 const COMPLETE_MARKER: &str = ".complete";
 const ESPEAK_DIR_NAME: &str = "espeakng-loader-0.2.4";
-const JAPANESE_DICTIONARY_DIR_NAME: &str = "jpreprocess-naist-jdic-0.15.0";
 
 #[derive(Clone, Copy)]
 pub(crate) struct FrontendDist {
@@ -47,15 +46,6 @@ pub(crate) fn espeak_dist() -> Option<FrontendDist> {
     }
 }
 
-pub(crate) fn japanese_dictionary_dist() -> FrontendDist {
-    let download = crate::urls::KOKORO_JAPANESE_DICTIONARY;
-    FrontendDist {
-        url: download.url,
-        archive_sha256: download.sha256,
-        size_bytes: download.size_bytes,
-    }
-}
-
 fn frontend_dir(name: &str) -> Option<PathBuf> {
     Some(ds_config::model_dir()?.join(name))
 }
@@ -73,10 +63,6 @@ pub fn espeak_library_path() -> Option<PathBuf> {
         "libespeak-ng.so"
     };
     Some(espeak_root_dir()?.join(name))
-}
-
-pub fn japanese_dictionary_dir() -> Option<PathBuf> {
-    frontend_dir(JAPANESE_DICTIONARY_DIR_NAME)
 }
 
 fn marker_matches(dir: &Path, sha256: &str) -> bool {
@@ -109,21 +95,6 @@ fn espeak_payload_present(dir: &Path) -> bool {
         .all(|file| data.join(file).is_file())
 }
 
-fn japanese_dictionary_payload_present(dir: &Path) -> bool {
-    [
-        "char_def.bin",
-        "dict.da",
-        "dict.vals",
-        "dict.words",
-        "dict.wordsidx",
-        "matrix.mtx",
-        "metadata.json",
-        "unk.bin",
-    ]
-    .iter()
-    .all(|file| dir.join(file).is_file())
-}
-
 pub fn is_espeak_loader_present() -> bool {
     espeak_dist().is_some_and(|dist| {
         espeak_root_dir().is_some_and(|dir| {
@@ -132,19 +103,8 @@ pub fn is_espeak_loader_present() -> bool {
     })
 }
 
-pub fn is_japanese_dictionary_present() -> bool {
-    let dist = japanese_dictionary_dist();
-    japanese_dictionary_dir().is_some_and(|dir| {
-        japanese_dictionary_payload_present(&dir) && marker_matches(&dir, dist.archive_sha256)
-    })
-}
-
 fn extract_espeak(archive: &Path, dest: &Path) -> std::io::Result<()> {
     extract_wheel_subtree(archive, Path::new("espeakng_loader"), dest)
-}
-
-fn extract_japanese_dictionary(archive: &Path, dest: &Path) -> std::io::Result<()> {
-    extract_tgz_subtree(archive, Path::new("naist-jdic"), dest)
 }
 
 fn ensure_distribution(
@@ -212,22 +172,6 @@ pub fn ensure_espeak_loader_with_progress(progress: &dyn Fn(u64, u64)) -> std::i
     )
 }
 
-pub fn ensure_japanese_dictionary_with_progress(
-    progress: &dyn Fn(u64, u64),
-) -> std::io::Result<PathBuf> {
-    let dir = japanese_dictionary_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
-    })?;
-    ensure_distribution(
-        &dir,
-        japanese_dictionary_dist(),
-        japanese_dictionary_payload_present,
-        extract_japanese_dictionary,
-        "Japanese dictionary",
-        progress,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,7 +180,6 @@ mod tests {
     fn payload_checks_require_the_complete_layout() {
         let root = tempfile::tempdir().unwrap();
         assert!(!espeak_payload_present(root.path()));
-        assert!(!japanese_dictionary_payload_present(root.path()));
     }
 
     #[test]
@@ -245,12 +188,5 @@ mod tests {
             assert_eq!(dist.archive_sha256.len(), 64);
             assert!(dist.url.contains("espeakng_loader-0.2.4"));
         }
-        let japanese = japanese_dictionary_dist();
-        assert_eq!(japanese.archive_sha256.len(), 64);
-        assert!(
-            japanese
-                .url
-                .contains("jpreprocess/releases/download/v0.15.0")
-        );
     }
 }

@@ -193,7 +193,6 @@ pub fn catalog() -> Value {
         all(target_os = "linux", target_arch = "aarch64")
     ))]
     push_portable(&mut projects, &urls::KOKORO_ESPEAK_FRONTEND);
-    push_portable(&mut projects, &urls::KOKORO_JAPANESE_FRONTEND);
     projects.extend(
         crate::tts_assets::TTS_ORT_ASSETS
             .iter()
@@ -261,7 +260,6 @@ mod tests {
             .flat_map(|set| set.files.iter())
             .copied()
             .chain([
-                urls::KOKORO_JAPANESE_DICTIONARY,
                 urls::PARAKEET_ENCODER,
                 urls::PARAKEET_DECODER,
                 urls::PARAKEET_JOINER,

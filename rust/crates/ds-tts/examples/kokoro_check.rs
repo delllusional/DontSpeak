@@ -49,7 +49,7 @@ fn main() {
     println!("provider:  {}", synth.provider().as_str());
 
     // The real path: detect the language, then run the language-aware frontend (English
-    // G2P, or espeak / Japanese / Mandarin for the others) rather than assuming English.
+    // G2P, or espeak for the others) rather than assuming English.
     let language = ds_tts::detect_language(&text, ds_config::TtsModel::Kokoro);
     println!("language:  {language}");
     let chunks = ds_tts::g2p::phoneme_batches_for(&text, &voice, &language)

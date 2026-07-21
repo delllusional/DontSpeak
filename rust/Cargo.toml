@@ -189,11 +189,6 @@ half = "2"
 # Released Misaki-compatible English frontend. DontSpeak supplies OOV pronunciations
 # through the pinned BART graphs.
 voice-g2p = "=0.2.2"
-# Native equivalents of MLX Audio's dedicated Japanese and Mandarin Kokoro frontends.
-jpreprocess = { version = "=0.15.0", default-features = false, features = ["tokenizer"] }
-jieba-rs = "=0.10.3"
-pinyin = "=0.11.0"
-chinese-number = { version = "=0.8.2", default-features = false, features = ["number-to-chinese"] }
 # CommonMark parser used to turn rendered agent replies into prose before G2P.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 # Audio playback of raw f32 mono PCM at 24 kHz.

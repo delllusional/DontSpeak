@@ -132,15 +132,6 @@ pub const ESPEAKNG_LOADER: Download = Download {
     size_bytes: ESPEAKNG_LOADER_SIZE_BYTES,
 };
 
-// Platform-independent Lindera dictionary for jpreprocess 0.15.0, the native
-// OpenJTalk-compatible Japanese frontend.
-pub const KOKORO_JAPANESE_DICTIONARY: Download = Download {
-    file_name: "jpreprocess-naist-jdic-0.15.0",
-    url: "https://github.com/jpreprocess/jpreprocess/releases/download/v0.15.0/naist-jdic-jpreprocess.tar.gz",
-    sha256: "8a930bbc57bf4adcf521d53544c7dc9ab8ab3aa997a591b1b1608dc5539017b8",
-    size_bytes: 28_668_638,
-};
-
 // ── Parakeet STT: streaming FastConformer 1040ms int8 (NeMo hybrid large) ──
 // sherpa-onnx export of stt_en_fastconformer_hybrid_large_streaming_1040ms.
 // Cache-aware streaming over ORT/CUDA. Cadence from encoder metadata. ~137 MB.
@@ -552,17 +543,6 @@ pub const KOKORO_ESPEAK_FRONTEND: Project = Project {
     license_url: "https://github.com/espeak-ng/espeak-ng/blob/master/COPYING",
     platforms: Platform::ALL,
     files: &[ESPEAKNG_LOADER],
-};
-
-/// OpenJTalk-compatible dictionary used by the native Japanese Kokoro frontend.
-pub const KOKORO_JAPANESE_FRONTEND: Project = Project {
-    name: "jpreprocess Japanese dictionary",
-    usage: "Japanese Kokoro pronunciation",
-    homepage: "https://github.com/jpreprocess/jpreprocess",
-    license: "BSD-3-Clause",
-    license_url: "https://github.com/jpreprocess/jpreprocess/blob/main/LICENSE",
-    platforms: Platform::ALL,
-    files: &[KOKORO_JAPANESE_DICTIONARY],
 };
 
 /// Streaming FastConformer STT — NVIDIA NeMo (CC-BY-4.0; ONNX by csukuangfj / sherpa-onnx).

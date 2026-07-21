@@ -15,9 +15,6 @@ DontSpeak's MIT licensing.
   Misaki's `us_gold.json` and `us_silver.json` pronunciation dictionaries byte-for-byte;
   those data files are **Apache-2.0**. A copy of that license is shipped at
   `licenses/Apache-2.0.txt`; the crate's MIT notice is at `licenses/voice-g2p-MIT.txt`.
-- **jpreprocess** (OpenJTalk-compatible Japanese text preprocessing) — **BSD-3-Clause**.
-- **jieba-rs**, **pinyin**, and **chinese-number** (Mandarin segmentation,
-  pronunciation, and number expansion) — **MIT**.
 - **ONNX Runtime** Rust bindings (`ort`) — **MIT OR Apache-2.0**.
 - **attohttpc** (HTTP client used for model downloads) — **MPL-2.0**. Used as an
   unmodified upstream dependency; its own source files remain under MPL-2.0.
@@ -120,8 +117,6 @@ Each carries its upstream license:
 - **eSpeak NG**, fetched in the platform wheel published by `espeakng-loader` and loaded
   in-process for Kokoro's Spanish, French, Hindi, Italian, and Portuguese frontends —
   **GPL-3.0-or-later**. https://github.com/espeak-ng/espeak-ng
-- **jpreprocess NAIST-JDIC dictionary**, used by Kokoro's Japanese frontend —
-  **BSD-3-Clause**. https://github.com/jpreprocess/jpreprocess
 - **Kokoro-82M** TTS model (hexgrad; onnx-community FP32 export) — **Apache-2.0**.
   https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
 - **Chatterbox Multilingual** TTS model and default reference voice (Resemble AI,

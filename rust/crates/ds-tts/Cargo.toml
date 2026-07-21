@@ -34,11 +34,6 @@ half = { workspace = true }
 voice-g2p = { workspace = true }
 # Runtime-load the same prebuilt eSpeak distribution used by MLX Audio/Misaki.
 libloading = { workspace = true }
-# Native Japanese OpenJTalk and Mandarin pinyin frontends.
-jpreprocess = { workspace = true }
-jieba-rs = { workspace = true }
-pinyin = { workspace = true }
-chinese-number = { workspace = true }
 # Parse Markdown structurally so narration keeps labels/code but omits markup and link targets.
 pulldown-cmark = { workspace = true }
 # Report phonemes dropped for being outside Kokoro's vocabulary — the loss must be observable,

@@ -71,7 +71,6 @@ Comment style: [../AGENTS.md](../AGENTS.md) § Code comments. Hosting:
 ## Synthesis
 
 Dynamic `ort` (`ORT_DYLIB_PATH`); shared by built-in ORT TTS + Parakeet. Kokoro uses
-`voice-g2p` plus BART ONNX for English, eSpeak for Spanish/French/Hindi/Italian/Portuguese,
-and dedicated native Japanese and Mandarin frontends. MLX Kokoro still uses the same Rust
-frontend assets. Other models use plain-text chunks.
+`voice-g2p` plus BART ONNX for English and eSpeak for Spanish/French/Hindi/Italian/
+Portuguese. MLX Kokoro still uses the same Rust frontend assets. Other models use plain-text chunks.
 Playback: `rodio` 24 kHz mono. `ds-helper` process group for barge-in/pidfile takeover.

@@ -58,9 +58,8 @@ pub use download::{
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use kokoro_frontend::{
-    ensure_espeak_loader_with_progress, ensure_japanese_dictionary_with_progress,
-    espeak_library_path, espeak_root_dir, is_espeak_loader_present, is_japanese_dictionary_present,
-    japanese_dictionary_dir,
+    ensure_espeak_loader_with_progress, espeak_library_path, espeak_root_dir,
+    is_espeak_loader_present,
 };
 pub use ort::{
     ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime_with_progress, ensure_ort_dylib,

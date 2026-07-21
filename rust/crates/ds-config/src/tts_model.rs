@@ -146,7 +146,9 @@ impl TtsModelDescriptor {
     }
 }
 
-const KOKORO_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
+// Japanese and Mandarin are dropped: their frontends cost ~3.6 MiB in every binary and
+// a 27 MiB dictionary download for a pipeline eSpeak cannot stand in for.
+const KOKORO_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "pt"];
 // Kokoro v1.0 publishes eight languages. American and British English are separate
 // voice families but one language in the upstream release count.
 const KOKORO_MODEL_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
@@ -291,12 +293,18 @@ mod tests {
             "ja"
         );
         let kokoro = TtsModel::Kokoro.descriptor();
-        assert_eq!(kokoro.languages, KOKORO_MODEL_LANGUAGES);
+        assert_eq!(kokoro.languages, KOKORO_LANGUAGES);
         assert_eq!(
             kokoro.model_languages,
             &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"]
         );
         assert_eq!(kokoro.supported_language_count(), 8);
+        // Published upstream, not routed here — the JA/ZH frontends were dropped.
+        for dropped in ["ja", "zh"] {
+            assert!(!kokoro.supports_language(dropped));
+            assert!(!kokoro.accepts_detected_language(dropped));
+            assert!(kokoro.model_languages.contains(&dropped));
+        }
         assert!(
             kokoro
                 .language_list_url()

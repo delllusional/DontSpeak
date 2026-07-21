@@ -2,13 +2,11 @@
 //!
 //! English uses `voice-g2p` (Misaki tokenizer/tagger/lexicon) plus ONNX BART for
 //! unresolved words. Spanish, French, Hindi, Italian, and Portuguese use the same
-//! eSpeak path as MLX Audio; Japanese and Mandarin use dedicated native frontends.
-//! Final output is vocabulary-filtered and emitted as model-bounded chunks.
+//! eSpeak path as MLX Audio. Final output is vocabulary-filtered and emitted as
+//! model-bounded chunks.
 
 mod bart;
 mod espeak;
-mod japanese;
-mod mandarin;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
@@ -410,8 +408,6 @@ pub fn phoneme_batches_for_cancellable(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KokoroFrontend {
     English,
-    Japanese,
-    Mandarin,
     Espeak,
 }
 
@@ -419,8 +415,6 @@ impl KokoroFrontend {
     fn for_language(language: &str) -> Option<Self> {
         Some(match language {
             "en" => Self::English,
-            "ja" => Self::Japanese,
-            "zh" => Self::Mandarin,
             "es" | "fr" | "hi" | "it" | "pt" => Self::Espeak,
             _ => return None,
         })
@@ -443,8 +437,6 @@ fn try_phonemize_for_cancellable(
         return Ok(Cancellable::Cancelled);
     }
     let phonemes = match KokoroFrontend::for_language(language) {
-        Some(KokoroFrontend::Japanese) => japanese::phonemize(&normalized)?,
-        Some(KokoroFrontend::Mandarin) => mandarin::phonemize(&normalized)?,
         Some(KokoroFrontend::Espeak) => espeak::phonemize(&normalized, language)?,
         Some(KokoroFrontend::English) => unreachable!("English returns above"),
         None => return Err(format!("unsupported Kokoro language: {language}")),

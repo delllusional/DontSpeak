@@ -149,57 +149,6 @@ pub(crate) fn extract_wheel_subtree(
     Ok(())
 }
 
-/// Extract one regular-file subtree from a gzip tar archive.
-pub(crate) fn extract_tgz_subtree(
-    archive_path: &Path,
-    source_root: &Path,
-    dest: &Path,
-) -> std::io::Result<()> {
-    let file = std::fs::File::open(archive_path)?;
-    let gz = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(gz);
-    let mut count = 0u32;
-    let mut extracted_bytes = 0u64;
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        if !archive_path_is_safe(&path) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "frontend tar contains an unsafe path",
-            ));
-        }
-        let Some(relative) = subtree_relative(&path, source_root) else {
-            continue;
-        };
-        let output = dest.join(relative);
-        if entry.header().entry_type().is_dir() {
-            std::fs::create_dir_all(&output)?;
-            continue;
-        }
-        if !entry.header().entry_type().is_file() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "frontend tar subtree contains a non-regular member",
-            ));
-        }
-        let parent = output
-            .parent()
-            .ok_or_else(|| std::io::Error::other("frontend member has no parent"))?;
-        std::fs::create_dir_all(parent)?;
-        let mut file = std::fs::File::create(&output)?;
-        let copied = copy_bounded(&mut entry, &mut file)?;
-        add_frontend_member(&mut extracted_bytes, &mut count, copied)?;
-    }
-    if count == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "frontend tar package subtree is empty",
-        ));
-    }
-    Ok(())
-}
-
 /// Extract onnxruntime shared lib onto `dest` (Microsoft `.zip` on Windows / `.tgz` elsewhere).
 #[cfg(target_os = "windows")]
 pub(crate) fn extract_runtime_member(zip_path: &Path, dest: &Path) -> std::io::Result<()> {
@@ -502,26 +451,6 @@ mod tests {
             b"spanish"
         );
         assert!(!dest.join("metadata").exists());
-    }
-
-    #[test]
-    fn frontend_tgz_preserves_dictionary_layout_and_ignores_siblings() {
-        let dir = tempfile::tempdir().unwrap();
-        let archive_path = dir.path().join("dictionary.tgz");
-        write_tgz(
-            &archive_path,
-            &[
-                ("naist-jdic/metadata.json", b"dictionary"),
-                ("release-notes.txt", b"ignore"),
-            ],
-        );
-        let dest = dir.path().join("tar-output");
-        extract_tgz_subtree(&archive_path, Path::new("naist-jdic"), &dest).unwrap();
-        assert_eq!(
-            std::fs::read(dest.join("metadata.json")).unwrap(),
-            b"dictionary"
-        );
-        assert!(!dest.join("release-notes.txt").exists());
     }
 
     #[test]

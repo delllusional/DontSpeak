@@ -62,10 +62,7 @@ shared prose cleanup and leaves pronunciation to the OS.
    pinned BART ONNX G2P (cache successes; fail → spell ASCII or say `unknown`).
 4. Spanish, French, Hindi, Italian, and Portuguese: the MLX Audio/Misaki eSpeak route,
    using a checksum-pinned `espeakng-loader` wheel loaded through the eSpeak C ABI.
-5. Japanese: a native OpenJTalk-compatible tokenizer/dictionary mapped with Misaki's
-   Kokoro phoneme rules. Mandarin: Jieba segmentation, pinyin, number expansion, and
-   Misaki's pinyin-to-IPA mapping.
-6. Drop OOV phonemes (warn); split to ≤ 509-character `KokoroPhonemeChunk`.
+5. Drop OOV phonemes (warn); split to ≤ 509-character `KokoroPhonemeChunk`.
 
 Cap 509: style matrix rows `0..=509` by unpadded token count. Whitespace/emoji-only →
 zero chunks = success before opening audio.
@@ -89,7 +86,7 @@ All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 
 | Model | Language mode | Voices | Providers | Rate / full duplex |
 |---|---|---|---|---|
-| Kokoro | English, Spanish, French, Hindi, Italian, Japanese, Portuguese, Mandarin | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
+| Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
 | Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
 | Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
 | OmniVoice | auto (any detected language) | default voice | ORT CPU, MLX (no CUDA — pinned int4 export) | no / no |

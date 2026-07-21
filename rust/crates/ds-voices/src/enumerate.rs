@@ -34,7 +34,8 @@ const KOKORO_MLX_DIR_NAME: &str = "kokoro-82m";
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────
 
 /// Language subtag from a Kokoro id's leading family char (`af_sarah` → "en").
-/// Unknown shapes → "other". German (`d`) intentionally unmapped for now.
+/// Unknown shapes → "other". German (`d`) has no frontend; Japanese (`j`) and
+/// Mandarin (`z`) lost theirs, so their voices stay unreachable.
 pub fn kokoro_language(id: &str) -> &'static str {
     match id.as_bytes().first() {
         // `a` American + `b` British both → "en".
@@ -43,9 +44,7 @@ pub fn kokoro_language(id: &str) -> &'static str {
         Some(b'f') => "fr",
         Some(b'h') => "hi",
         Some(b'i') => "it",
-        Some(b'j') => "ja",
         Some(b'p') => "pt",
-        Some(b'z') => "zh",
         _ => "other",
     }
 }
@@ -416,9 +415,11 @@ mod tests {
         assert_eq!(kokoro_language("af_sarah"), "en");
         assert_eq!(kokoro_language("bm_george"), "en");
         assert_eq!(kokoro_language("ef_dora"), "es");
-        // German removed for now: `d` family not mapped.
+        // No frontend → "other": German was never mapped, Japanese and Mandarin were dropped.
         assert_eq!(kokoro_language("df_anna"), "other");
         assert_eq!(kokoro_language("dm_klaus"), "other");
+        assert_eq!(kokoro_language("jf_alpha"), "other");
+        assert_eq!(kokoro_language("zf_xiaobei"), "other");
         // Unknown shapes never panic.
         assert_eq!(kokoro_language("weird"), "other");
         assert_eq!(kokoro_language(""), "other");

@@ -90,10 +90,11 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
   rebuild = stale running code. See [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 - **Speech frontend runtimes.** English dictionary misses use a checksum-pinned ONNX
   G2P model via ORT (so Apple MLX TTS still needs the ORT dylib). Kokoro's other
-  published languages use checksum-pinned frontend assets: a dynamically loaded
-  `espeakng-loader` runtime plus native Japanese and Mandarin pipelines. Keep their
-  downloads and notices in sync. Linux also dynamically links the disclosed system
-  libraries in [NOTICE.md](NOTICE.md).
+  routed languages go through one checksum-pinned frontend asset: the dynamically
+  loaded `espeakng-loader` runtime. Japanese and Mandarin are published by the model
+  but not routed — their native pipelines were dropped. Keep downloads and notices in
+  sync. Linux also dynamically links the disclosed system libraries in
+  [NOTICE.md](NOTICE.md).
 - **No Cargo + Git-LFS deps.** libgit2 checkout skips LFS smudge (~132-byte pointer).
   `git-lfs` and `CARGO_NET_GIT_FETCH_WITH_CLI` do not fix checkout. crates.io is fine;
   check `.gitattributes` before any `{ git = ..., rev = ... }`.

@@ -7,9 +7,7 @@ use std::path::PathBuf;
 
 use crate::download::prefetch_key;
 use crate::hash::verify_sha256_cached;
-use crate::kokoro_frontend::{
-    espeak_dist, is_espeak_loader_present, is_japanese_dictionary_present, japanese_dictionary_dist,
-};
+use crate::kokoro_frontend::{espeak_dist, is_espeak_loader_present};
 use crate::model_path;
 use crate::ort::{onnxruntime_dist, onnxruntime_dylib_file, onnxruntime_dylib_path};
 use crate::target::DownloadTarget;
@@ -72,7 +70,7 @@ pub fn is_kokoro_g2p_present() -> bool {
 
 /// Shared Kokoro text frontend assets (G2P + version-checked ORT).
 pub fn is_kokoro_frontend_present() -> bool {
-    is_kokoro_g2p_present() && is_espeak_loader_present() && is_japanese_dictionary_present()
+    is_kokoro_g2p_present() && is_espeak_loader_present()
 }
 
 /// Full portable Kokoro set present (SHA + ORT version-gate). TTS factory fail-quiet probe.
@@ -221,8 +219,6 @@ pub fn kokoro_frontend_files() -> Vec<DownloadFile> {
             size_bytes: dist.size_bytes,
         });
     }
-    let japanese = crate::urls::KOKORO_JAPANESE_DICTIONARY;
-    v.push(DownloadFile::of(japanese));
     v.extend(onnxruntime_dylib_file_entry());
     v
 }
@@ -326,10 +322,6 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 && !is_espeak_loader_present()
             {
                 items.push(item(dist.url, dist.archive_sha256));
-            }
-            let japanese = japanese_dictionary_dist();
-            if !is_japanese_dictionary_present() {
-                items.push(item(japanese.url, japanese.archive_sha256));
             }
             items
         }
