@@ -85,6 +85,10 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 
 ## Invariants
 
+- **No backward compatibility.** Pre-release, no installed user base: don't design
+  migrations, config/asset self-heal, retired-file cleanup, or upgrade paths for
+  "existing installs" — ship the simplest correct change and assume a fresh
+  install. Delete this rule at first public release.
 - **Config:** `config.toml` under the OS data dir. Never put DontSpeak settings in
   `~/.claude/settings.json` (Claude's hooks + `voice` block only).
 - **No FFI codegen.** uniffi rejected for the 35-fn `ds-core` surface — see
