@@ -40,6 +40,9 @@ const hooksDirectory = privateHooksDirectory(root);
 const message = readFileSync(messageFile, "utf8");
 const record = normalizeCacheRecord(readAttributionCache(root, hooksDirectory));
 const active = activeAgentEnvironment();
+if (active?.conflict) {
+  fail([`conflicting active agent markers: ${active.conflict.join(", ")}`]);
+}
 
 if (!record) {
   // Grok often skips PreToolUse (no session id / untrusted hooks). Live-resolve

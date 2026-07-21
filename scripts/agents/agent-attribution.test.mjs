@@ -440,6 +440,13 @@ test("GROK_AGENT alone marks an active Grok agent environment", () => {
   assert.equal(detectClient("auto", {}, { GROK_AGENT: "1" }), "grok");
 });
 
+test("conflicting runtime markers fail closed", () => {
+  assert.deepEqual(
+    activeAgentEnvironment({ GROK_AGENT: "1", CODEX_THREAD_ID: "thread" }),
+    { conflict: ["grok", "codex"] },
+  );
+});
+
 test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const home = temporaryDirectory(t);

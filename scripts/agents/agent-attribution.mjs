@@ -861,8 +861,13 @@ export function sessionIdFromInput(input, env = process.env) {
 }
 
 export function activeAgentEnvironment(env = process.env) {
+  const grok = Boolean(env.GROK_SESSION_ID || env.GROK_AGENT);
+  const codex = Boolean(env.CODEX_THREAD_ID);
+  if (grok && codex) {
+    return { conflict: ["grok", "codex"] };
+  }
   // GROK_AGENT alone marks an agent shell (session id may be absent).
-  if (env.GROK_SESSION_ID || env.GROK_AGENT) {
+  if (grok) {
     return { client: "grok", sessionId: env.GROK_SESSION_ID || undefined };
   }
   if (env.CODEX_THREAD_ID) return { client: "codex", sessionId: env.CODEX_THREAD_ID };
@@ -997,6 +1002,9 @@ export function validateCacheRecord(record, root, env = process.env, now = Date.
   }
   if (!record.root || resolve(record.root) !== resolve(root)) errors.push("runtime capture belongs to a different worktree");
   const active = activeAgentEnvironment(env);
+  if (active?.conflict) {
+    errors.push(`conflicting active agent markers: ${active.conflict.join(", ")}`);
+  }
   // Agent env: 15m (long command chains). Env-less human terminal: 5m.
   const maxAge = active ? ATTRIBUTION_CACHE_MAX_AGE_MS : ENVLESS_ATTRIBUTION_CACHE_MAX_AGE_MS;
   const captured = Date.parse(record.capturedAt);
