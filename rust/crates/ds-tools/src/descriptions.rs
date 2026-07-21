@@ -24,6 +24,10 @@ pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 
 pub const STATUS: &str = "Speech config and runtime state.";
 pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
+pub const STATUS_SINCE: &str =
+    "Wait for the status sequence to change from this value, then return the new status.";
+pub const STATUS_TIMEOUT_MS: &str =
+    "Maximum wait in milliseconds when since is set. Default 30000; maximum 60000.";
 
 pub const USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
 pub const USAGE_REFRESH: &str = "Bypass the 60-second cache and query providers. Default false.";

@@ -35,6 +35,32 @@ pub struct EngineStatus {
     pub error: Option<String>,
 }
 
+/// One active model download. Byte totals come from the live transfer; rate is the
+/// whole-target average and ETA is absent until enough progress has been observed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DownloadStatus {
+    pub target: String,
+    pub done_bytes: u64,
+    pub total_bytes: u64,
+    pub bytes_per_second: Option<u64>,
+    pub eta_seconds: Option<u64>,
+}
+
+/// Diagnostic attached when a language-specific voice does not own the detected language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UtteranceWarning {
+    VoiceLanguageMismatch,
+}
+
+/// Voice resolution for an utterance that reached playback.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UtteranceStatus {
+    pub voice: String,
+    pub language: String,
+    pub warning: Option<UtteranceWarning>,
+}
+
 /// Selected TTS engine, its realized provider, and its lifecycle status.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsStatus {
@@ -47,6 +73,8 @@ pub struct TtsStatus {
     pub provider: Option<String>,
     /// `null` when speech is off.
     pub status: Option<EngineStatus>,
+    /// Most recent utterance that reached playback; retained while idle.
+    pub last_utterance: Option<UtteranceStatus>,
 }
 
 /// Selected STT engine, its realized provider, and its lifecycle status.
@@ -82,6 +110,12 @@ pub struct Activity {
     /// Wireable client for the in-flight TTS utterance. `null` when idle or the producer
     /// is not a Usage agent (greet / unknown / DontSpeak).
     pub speaker: Option<ds_client::ClientSource>,
+    /// Resolved voice for the in-flight utterance; `null` while idle.
+    pub voice: Option<String>,
+    /// Detected language for the in-flight utterance; `null` while idle.
+    pub language: Option<String>,
+    /// Per-utterance quality diagnostic; `null` while idle or when no mismatch is known.
+    pub warning: Option<UtteranceWarning>,
     pub muted: bool,
 }
 
@@ -162,6 +196,8 @@ pub struct ModelStatus {
     pub dictation: Dictation,
     pub stats: Stats,
     pub tray: Vec<StatusTrayKind>,
+    /// Active transfers only, sorted by stable target token.
+    pub downloads: Vec<DownloadStatus>,
 }
 
 #[cfg(test)]
@@ -185,6 +221,9 @@ mod tests {
                 recording: false,
                 speaking: false,
                 speaker: None,
+                voice: None,
+                language: None,
+                warning: None,
                 muted: false,
             },
             tts: TtsStatus {
@@ -193,6 +232,7 @@ mod tests {
                 language: None,
                 provider: None,
                 status: Some(engine_none()),
+                last_utterance: None,
             },
             stt: SttStatus {
                 engine: StatusSttEngine::BuiltIn,
@@ -218,6 +258,7 @@ mod tests {
                 lifetime: LifetimeSnapshot::default(),
             },
             tray: vec![StatusTrayKind::Stt, StatusTrayKind::Tts],
+            downloads: vec![],
         }
     }
 
@@ -227,7 +268,7 @@ mod tests {
         let v = serde_json::to_value(sample()).unwrap();
 
         let root = v.as_object().unwrap();
-        assert_eq!(root.len(), 8, "no duplicated root-level engine fields");
+        assert_eq!(root.len(), 9, "no duplicated root-level engine fields");
         for key in [
             "seq",
             "activity",
@@ -237,13 +278,14 @@ mod tests {
             "dictation",
             "stats",
             "tray",
+            "downloads",
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert_eq!(v["activity"].as_object().unwrap().len(), 6);
+        assert_eq!(v["activity"].as_object().unwrap().len(), 9);
         assert_eq!(v["stats"]["tts"].as_object().unwrap().len(), 10);
         assert_eq!(v["stats"]["tts"]["queued"], 0);
-        assert_eq!(v["tts"].as_object().unwrap().len(), 5);
+        assert_eq!(v["tts"].as_object().unwrap().len(), 6);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
         assert_eq!(v["dictation"].as_object().unwrap().len(), 3);
@@ -266,6 +308,11 @@ mod tests {
             v["activity"]["speaker"].is_null(),
             "activity.speaker null when idle"
         );
+        assert!(v["activity"]["voice"].is_null());
+        assert!(v["activity"]["language"].is_null());
+        assert!(v["activity"]["warning"].is_null());
+        assert!(v["tts"]["last_utterance"].is_null());
+        assert!(v["downloads"].as_array().unwrap().is_empty());
         assert_eq!(v["tray"], serde_json::json!(["stt", "tts"]));
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
@@ -312,6 +359,38 @@ mod tests {
 
     fn opt_short_string() -> impl Strategy<Value = Option<String>> {
         prop::option::of(short_string())
+    }
+
+    fn utterance_warning_strategy() -> impl Strategy<Value = UtteranceWarning> {
+        Just(UtteranceWarning::VoiceLanguageMismatch)
+    }
+
+    prop_compose! {
+        fn utterance_status_strategy()(
+            voice in short_string(),
+            language in short_string(),
+            warning in prop::option::of(utterance_warning_strategy()),
+        ) -> UtteranceStatus {
+            UtteranceStatus { voice, language, warning }
+        }
+    }
+
+    prop_compose! {
+        fn download_status_strategy()(
+            target in short_string(),
+            done_bytes in any::<u64>(),
+            total_bytes in any::<u64>(),
+            bytes_per_second in prop::option::of(any::<u64>()),
+            eta_seconds in prop::option::of(any::<u64>()),
+        ) -> DownloadStatus {
+            DownloadStatus {
+                target,
+                done_bytes,
+                total_bytes,
+                bytes_per_second,
+                eta_seconds,
+            }
+        }
     }
 
     fn short_string_vec() -> impl Strategy<Value = Vec<String>> {
@@ -372,6 +451,9 @@ mod tests {
             recording in any::<bool>(),
             speaking in any::<bool>(),
             speaker in prop::option::of(client_source_strategy()),
+            voice in opt_short_string(),
+            language in opt_short_string(),
+            warning in prop::option::of(utterance_warning_strategy()),
             muted in any::<bool>(),
         ) -> Activity {
             Activity {
@@ -380,6 +462,9 @@ mod tests {
                 recording,
                 speaking,
                 speaker,
+                voice,
+                language,
+                warning,
                 muted,
             }
         }
@@ -406,8 +491,9 @@ mod tests {
             language in opt_short_string(),
             provider in opt_short_string(),
             status in prop::option::of(engine_status_strategy()),
+            last_utterance in prop::option::of(utterance_status_strategy()),
         ) -> TtsStatus {
-            TtsStatus { engine, model, language, provider, status }
+            TtsStatus { engine, model, language, provider, status, last_utterance }
         }
     }
 
@@ -517,6 +603,7 @@ mod tests {
             dictation in dictation_strategy(),
             stats in stats_strategy(),
             tray in prop::collection::vec(tray_kind_strategy(), 0..4),
+            downloads in prop::collection::vec(download_status_strategy(), 0..4),
         ) -> ModelStatus {
             ModelStatus {
                 seq,
@@ -527,6 +614,7 @@ mod tests {
                 dictation,
                 stats,
                 tray,
+                downloads,
             }
         }
     }
@@ -548,6 +636,7 @@ mod tests {
             prop_assert!(v["stats"]["stt"]["transcriptions"].is_u64());
             prop_assert!(v["stats"]["lifetime"]["tts_secs"].is_u64());
             prop_assert!(v["diarization"]["speakers"].is_array());
+            prop_assert!(v["downloads"].is_array());
 
             let back: ModelStatus = serde_json::from_value(v).unwrap();
             prop_assert_eq!(back, status);

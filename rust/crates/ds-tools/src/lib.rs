@@ -131,7 +131,16 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: "status",
         description: STATUS,
-        params: &[p("detail", PType::Bool, false, STATUS_DETAIL)],
+        params: &[
+            p("detail", PType::Bool, false, STATUS_DETAIL),
+            p("since", PType::Int(0, i64::MAX), false, STATUS_SINCE),
+            p(
+                "timeout_ms",
+                PType::Int(1, 60_000),
+                false,
+                STATUS_TIMEOUT_MS,
+            ),
+        ],
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Status),
@@ -552,9 +561,49 @@ fn output_schema_for(output: Output) -> Value {
                     "type": "object",
                     "properties": {
                         "running": { "type": "boolean" },
+                        "seq": { "type": "integer", "minimum": 0 },
                         "tts_active": { "type": "boolean" },
                         "queued": { "type": "integer", "minimum": 0 },
                         "muted": { "type": "boolean" },
+                        "voice": { "type": ["string", "null"] },
+                        "detected_language": { "type": ["string", "null"] },
+                        "warning": {
+                            "type": ["string", "null"],
+                            "enum": ["voice_language_mismatch", null]
+                        },
+                        "last_utterance": {
+                            "type": ["object", "null"],
+                            "properties": {
+                                "voice": { "type": "string" },
+                                "language": { "type": "string" },
+                                "warning": {
+                                    "type": ["string", "null"],
+                                    "enum": ["voice_language_mismatch", null]
+                                }
+                            },
+                            "required": ["voice", "language", "warning"],
+                            "additionalProperties": false
+                        },
+                        "tts": { "type": ["object", "null"] },
+                        "stt": { "type": ["object", "null"] },
+                        "downloads": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "target": { "type": "string" },
+                                    "done_bytes": { "type": "integer", "minimum": 0 },
+                                    "total_bytes": { "type": "integer", "minimum": 0 },
+                                    "bytes_per_second": { "type": ["integer", "null"], "minimum": 0 },
+                                    "eta_seconds": { "type": ["integer", "null"], "minimum": 0 }
+                                },
+                                "required": [
+                                    "target", "done_bytes", "total_bytes",
+                                    "bytes_per_second", "eta_seconds"
+                                ],
+                                "additionalProperties": false
+                            }
+                        },
                         "note": { "type": "string" }
                     },
                     "required": ["running"],

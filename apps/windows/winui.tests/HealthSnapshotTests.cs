@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 using Xunit;
 
 namespace DontSpeak.Tests;
@@ -52,6 +53,25 @@ public class HealthSnapshotTests
 
         var idle = Parse("""{"activity":{"speaking":false,"speaker":"claude_code"}}""");
         Assert.Null(idle.Activity.Speaker);
+    }
+
+    [Fact]
+    public void StatusMirrorDecodesUtteranceAndDownloadTelemetry()
+    {
+        var dto = JsonSerializer.Deserialize<ModelStatusDto>("""
+            {"activity":{"voice":"if_sara","language":"it","warning":null},
+             "tts":{"model":null,"last_utterance":{"voice":"if_sara",
+                    "language":"it","warning":null}},
+             "downloads":[{"target":"kokoro_model","done_bytes":25,"total_bytes":100,
+                           "bytes_per_second":10,"eta_seconds":8}]}
+            """);
+
+        Assert.Equal("if_sara", dto!.Activity!.Voice);
+        Assert.Equal("it", dto.Activity.Language);
+        Assert.Equal("if_sara", dto.Tts!.LastUtterance!.Voice);
+        Assert.Equal(25UL, dto.Downloads![0].DoneBytes);
+        Assert.Equal(10UL, dto.Downloads[0].BytesPerSecond);
+        Assert.Equal(8UL, dto.Downloads[0].EtaSeconds);
     }
 
     [Fact]

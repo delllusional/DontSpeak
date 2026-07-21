@@ -578,7 +578,7 @@ mod tests {
             "a synthetic continuation must not steal active-terminal status"
         );
         assert_eq!(
-            ttsq.tts_status_sample().2,
+            ttsq.tts_status_sample().queued,
             1,
             "a synthetic continuation must not cancel queued speech"
         );
@@ -614,7 +614,7 @@ mod tests {
 
         assert_eq!(ttsq.active_session(), Some("a".into()));
         assert_eq!(
-            ttsq.tts_status_sample().2,
+            ttsq.tts_status_sample().queued,
             0,
             "default clear_on_input=[current] still prunes a genuine submit's own queued item"
         );

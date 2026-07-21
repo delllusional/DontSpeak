@@ -906,6 +906,7 @@ dependencies = [
  "ds-log",
  "ds-narrate",
  "ds-platform",
+ "ds-status",
  "ds-tools",
  "ds-voices",
  "ds-wire",

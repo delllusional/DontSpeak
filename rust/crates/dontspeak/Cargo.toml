@@ -46,6 +46,8 @@ ds-voices = { workspace = true }
 # The tool catalog (names/descriptions/schemas) is shared with the app's FFI
 # (ds-core) so the list never drifts — this server exposes it, the app shows it.
 ds-tools = { workspace = true }
+# Typed engine status keeps the MCP projection in lockstep with the host-app contract.
+ds-status = { workspace = true }
 # Mic-active gate for the `narrate --display` hook (was ds-narrate).
 ds-platform = { workspace = true }
 serde = { workspace = true }

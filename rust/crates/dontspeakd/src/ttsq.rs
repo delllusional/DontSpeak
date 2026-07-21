@@ -31,6 +31,8 @@ struct PlayingClaim {
     session: Option<String>,
     /// Speech, not a cue — the in-flight half of the depth the status reports.
     speech: bool,
+    /// Filled after the play gate resolves the live model, voice, and language.
+    utterance: Option<ds_status::UtteranceStatus>,
 }
 
 struct PlayingGuard<'a>(&'a Mutex<Option<PlayingClaim>>);
@@ -195,6 +197,16 @@ struct Item {
     resume_skip: usize,
 }
 
+/// Lock-light queue snapshot consumed by `model_status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TtsStatusSample {
+    pub speaking: bool,
+    pub speaker: Option<ClientSource>,
+    pub queued: u64,
+    pub utterance: Option<ds_status::UtteranceStatus>,
+    pub last_utterance: Option<ds_status::UtteranceStatus>,
+}
+
 /// Pending utterances in `q`. Earcons are cues rather than things to say, so they are not
 /// counted: the depth the status reports is "how much is there left to speak".
 fn speech_depth(q: &VecDeque<Item>) -> usize {
@@ -334,6 +346,7 @@ pub struct TtsQueue {
     /// Always acquired inside `items`.
     active: Mutex<ActiveSel>,
     playing: Mutex<Option<PlayingClaim>>,
+    last_utterance: Mutex<Option<ds_status::UtteranceStatus>>,
     tts: Arc<TtsManager>,
     gate: Arc<StatusGate>,
     /// MarkActive de-dups auto-Enter vs real text submit.
@@ -371,6 +384,7 @@ impl TtsQueue {
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
+            last_utterance: Mutex::new(None),
             tts,
             gate,
             mic,
@@ -438,6 +452,7 @@ impl TtsQueue {
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
+            last_utterance: Mutex::new(None),
             tts,
             gate: StatusGate::new(),
             mic,
@@ -700,6 +715,7 @@ impl TtsQueue {
             source: item.source,
             session: item.session.clone(),
             speech: item.action.speech_text().is_some(),
+            utterance: None,
         });
         (item, gen0)
     }
@@ -947,28 +963,31 @@ impl TtsQueue {
         self.tts_active.load(Ordering::SeqCst)
     }
 
-    /// `(speaking, speaker, queued)` for `model_status` activity. Queued counts utterances
-    /// still outstanding: those waiting plus the one being spoken.
+    /// Queue activity for `model_status`. Queued counts utterances still outstanding:
+    /// those waiting plus the one being spoken.
     /// Reads only atomics + the short-lived `playing` lock: status must never wait on
     /// `items`, which cancel paths hold across helper-child I/O.
-    pub fn tts_status_sample(&self) -> (bool, Option<ClientSource>, u64) {
+    pub fn tts_status_sample(&self) -> TtsStatusSample {
         let active = self.is_tts_active();
         let pending = self.queue_depth.load(Ordering::SeqCst);
-        if !active {
-            return (false, None, pending);
-        }
-        let claim = self
-            .playing
-            .lock()
-            .unwrap()
+        let claim = active
+            .then(|| self.playing.lock().unwrap().clone())
+            .flatten();
+        let source = claim
             .as_ref()
-            .map(|p| (p.source, p.speech));
-        let source = claim.map(|(source, _)| source).filter(|s| s.is_client());
+            .map(|claim| claim.source)
+            .filter(|source| source.is_client());
         // The utterance being spoken is outstanding work, so it counts. No extra publish:
         // `set_tts_active` already bumps the gate on both edges of playback, which is
         // exactly when this addend appears and disappears.
-        let speaking_utterance = u64::from(claim.is_some_and(|(_, speech)| speech));
-        (true, source, pending + speaking_utterance)
+        let speaking_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
+        TtsStatusSample {
+            speaking: active,
+            speaker: source,
+            queued: pending + speaking_utterance,
+            utterance: claim.and_then(|claim| claim.utterance),
+            last_utterance: self.last_utterance.lock().unwrap().clone(),
+        }
     }
 
     /// Publish the new pending speech depth, then bump WaitModelStatus only when it changed.
@@ -1010,6 +1029,17 @@ impl TtsQueue {
         if self.tts_active.swap(on, Ordering::SeqCst) != on {
             self.gate.bump();
         }
+    }
+
+    /// Publish resolution before `tts_active` flips so the same status-gate wake exposes
+    /// the voice and language atomically with `activity.speaking = true`.
+    fn publish_resolved_utterance(&self, utterance: ds_status::UtteranceStatus) {
+        if let Some(claim) = self.playing.lock().unwrap().as_mut()
+            && claim.speech
+        {
+            claim.utterance = Some(utterance.clone());
+        }
+        *self.last_utterance.lock().unwrap() = Some(utterance);
     }
 
     /// Pause flag (cause-agnostic).
@@ -1276,6 +1306,11 @@ impl TtsQueue {
                     }
                 };
 
+            self.publish_resolved_utterance(ds_status::UtteranceStatus {
+                voice: voice.clone(),
+                language: language.clone(),
+                warning: utterance_warning(engine, model, &voice, &language),
+            });
             self.set_tts_active(true);
             let result =
                 self.speak_one(engine, text, &voice, &language, rate, &params, resume_skip);
@@ -1639,6 +1674,20 @@ enum SpeechOutcome {
     Requeue,
 }
 
+fn utterance_warning(
+    engine: Option<ds_config::TtsEngine>,
+    model: ds_config::TtsModel,
+    voice: &str,
+    language: &str,
+) -> Option<ds_status::UtteranceWarning> {
+    if engine != Some(ds_config::TtsEngine::BuiltIn) || model != ds_config::TtsModel::Kokoro {
+        return None;
+    }
+    let voice_language = ds_tts::enumerate::kokoro_language(voice);
+    (voice_language != "other" && voice_language != language)
+        .then_some(ds_status::UtteranceWarning::VoiceLanguageMismatch)
+}
+
 fn should_retry_speak(
     engine: Option<ds_config::TtsEngine>,
     model_supports_resume: bool,
@@ -1832,6 +1881,30 @@ mod tests {
             Some(base),
             base + Duration::from_secs(4)
         ));
+    }
+
+    #[test]
+    fn utterance_warning_only_flags_kokoro_language_mismatches() {
+        use ds_config::{TtsEngine, TtsModel};
+        use ds_status::UtteranceWarning;
+
+        assert_eq!(
+            utterance_warning(Some(TtsEngine::BuiltIn), TtsModel::Kokoro, "af_sarah", "it"),
+            Some(UtteranceWarning::VoiceLanguageMismatch)
+        );
+        assert_eq!(
+            utterance_warning(Some(TtsEngine::BuiltIn), TtsModel::Kokoro, "if_sara", "it"),
+            None
+        );
+        assert_eq!(
+            utterance_warning(
+                Some(TtsEngine::BuiltIn),
+                TtsModel::Chatterbox,
+                "default",
+                "it"
+            ),
+            None
+        );
     }
 
     fn pool() -> Vec<String> {
@@ -2335,7 +2408,7 @@ mod tests {
         q.enqueue("   \n\t".into(), None, None, ClientSource::Unknown, None)
             .unwrap();
         assert_eq!(
-            q.tts_status_sample().2,
+            q.tts_status_sample().queued,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
@@ -2347,7 +2420,11 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(q.tts_status_sample().2, 1, "a real text block is queued");
+        assert_eq!(
+            q.tts_status_sample().queued,
+            1,
+            "a real text block is queued"
+        );
     }
 
     #[test]
@@ -2613,7 +2690,10 @@ mod tests {
     #[test]
     fn tts_status_sample_exposes_wireable_playing_source_only() {
         let q = mk_queue();
-        assert_eq!(q.tts_status_sample(), (false, None, 0));
+        let idle = q.tts_status_sample();
+        assert!(!idle.speaking);
+        assert_eq!(idle.speaker, None);
+        assert_eq!(idle.queued, 0);
 
         q.enqueue(
             "hello".into(),
@@ -2629,29 +2709,40 @@ mod tests {
         }
         q.set_active_for_test(true);
         // Nothing waiting, but the claimed utterance is still outstanding → 1.
-        assert_eq!(
-            q.tts_status_sample(),
-            (true, Some(ClientSource::ClaudeCode), 1)
-        );
+        let speaking = q.tts_status_sample();
+        assert!(speaking.speaking);
+        assert_eq!(speaking.speaker, Some(ClientSource::ClaudeCode));
+        assert_eq!(speaking.queued, 1);
 
         // Non-wireable producers (legacy DontSpeak self-talk) must not light a Usage card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::DontSpeak,
             session: None,
             speech: true,
+            utterance: None,
         });
-        assert_eq!(q.tts_status_sample(), (true, None, 1));
+        let speaking = q.tts_status_sample();
+        assert!(speaking.speaking);
+        assert_eq!(speaking.speaker, None);
+        assert_eq!(speaking.queued, 1);
 
         // GreetSession-style path: client source on the item lights the matching card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Grok,
             session: Some("open".into()),
             speech: true,
+            utterance: None,
         });
-        assert_eq!(q.tts_status_sample(), (true, Some(ClientSource::Grok), 1));
+        let speaking = q.tts_status_sample();
+        assert!(speaking.speaking);
+        assert_eq!(speaking.speaker, Some(ClientSource::Grok));
+        assert_eq!(speaking.queued, 1);
 
         q.set_active_for_test(false);
-        assert_eq!(q.tts_status_sample(), (false, None, 0));
+        let idle = q.tts_status_sample();
+        assert!(!idle.speaking);
+        assert_eq!(idle.speaker, None);
+        assert_eq!(idle.queued, 0);
     }
 
     /// Only utterances count: cues share the queue but are not things to say.
@@ -2665,7 +2756,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            q.tts_status_sample().2,
+            q.tts_status_sample().queued,
             0,
             "a pending cue is not an utterance"
         );
@@ -2677,7 +2768,7 @@ mod tests {
         }
         q.set_active_for_test(true);
         assert_eq!(
-            q.tts_status_sample().2,
+            q.tts_status_sample().queued,
             0,
             "a cue in flight is not an utterance"
         );
@@ -2691,15 +2782,19 @@ mod tests {
             Some("sess".into()),
         )
         .unwrap();
-        assert_eq!(q.tts_status_sample().2, 1, "waiting utterance");
+        assert_eq!(q.tts_status_sample().queued, 1, "waiting utterance");
         {
             let mut items = q.items.lock().unwrap();
             let _ = q.claim_item(&mut items, 0);
         }
-        assert_eq!(q.tts_status_sample().2, 1, "same utterance, now speaking");
+        assert_eq!(
+            q.tts_status_sample().queued,
+            1,
+            "same utterance, now speaking"
+        );
         q.set_active_for_test(false);
         assert_eq!(
-            q.tts_status_sample().2,
+            q.tts_status_sample().queued,
             0,
             "silence reports nothing outstanding"
         );
@@ -2724,7 +2819,10 @@ mod tests {
         .unwrap();
         let seq1 = q.gate.seq();
         assert_eq!(seq1, seq0.wrapping_add(1), "enqueue must bump gate");
-        assert_eq!(q.tts_status_sample(), (true, None, 1));
+        let sample = q.tts_status_sample();
+        assert!(sample.speaking);
+        assert_eq!(sample.speaker, None);
+        assert_eq!(sample.queued, 1);
 
         // Claim empties pending and bumps, but the count holds: the utterance moved from
         // waiting to speaking, and both count.
@@ -2735,7 +2833,11 @@ mod tests {
         let seq2 = q.gate.seq();
         assert_eq!(seq2, seq1.wrapping_add(1), "claim must bump gate");
         assert_eq!(q.queue_depth.load(Ordering::SeqCst), 0, "nothing waits");
-        assert_eq!(q.tts_status_sample().2, 1, "the spoken utterance counts");
+        assert_eq!(
+            q.tts_status_sample().queued,
+            1,
+            "the spoken utterance counts"
+        );
 
         // Failed enqueue (empty / oversize / full) must not bump.
         q.enqueue(
@@ -2789,7 +2891,7 @@ mod tests {
             before_prune.wrapping_add(1),
             "clear_session that prunes must bump once"
         );
-        assert_eq!(q.tts_status_sample().2, 0);
+        assert_eq!(q.tts_status_sample().queued, 0);
 
         // Resume push_front re-grows pending depth.
         let before_requeue = q.gate.seq();
@@ -2800,7 +2902,7 @@ mod tests {
             before_requeue.wrapping_add(1),
             "resume push_front must bump"
         );
-        assert_eq!(q.tts_status_sample().2, 1);
+        assert_eq!(q.tts_status_sample().queued, 1);
         assert_eq!(
             q.queue_depth.load(Ordering::SeqCst) as usize,
             q.items.lock().unwrap().len(),
@@ -2832,7 +2934,7 @@ mod tests {
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(2))
                 .expect("status read must not wait on the queue lock")
-                .2,
+                .queued,
             1,
             "the lock-free read still reports the pending depth"
         );
@@ -3216,6 +3318,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("a".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
         q.clear_session(Some("a".into()));
@@ -3232,6 +3335,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("b".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
         q2.clear_session(Some("a".into()));
@@ -3270,6 +3374,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("b".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -3304,6 +3409,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("other".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -3335,6 +3441,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("a".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
 
@@ -3365,6 +3472,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("grok-stop:a".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before3 = q3.generation.load(Ordering::SeqCst);
         q3.cancel_for_submit(Some("a".into()), false, true);
@@ -3703,6 +3811,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("cleared".into()),
             speech: true,
+            utterance: None,
         });
 
         let (selected_generation, final_generation) =
@@ -3723,6 +3832,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("current".into()),
             speech: true,
+            utterance: None,
         });
 
         let (selected_generation, final_generation) =
@@ -3743,6 +3853,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("other".into()),
             speech: true,
+            utterance: None,
         });
 
         let (selected_generation, final_generation) =
@@ -4282,6 +4393,7 @@ mod tests {
             source: ClientSource::Unknown,
             session: Some("s1".into()),
             speech: true,
+            utterance: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 

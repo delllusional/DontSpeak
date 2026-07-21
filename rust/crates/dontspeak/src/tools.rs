@@ -143,6 +143,8 @@ enum ToolSuccess {
 #[serde(default, deny_unknown_fields)]
 struct StatusArgs {
     detail: Option<bool>,
+    since: Option<u64>,
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -297,20 +299,31 @@ fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid status arguments: {e}"))?;
+    if a.timeout_ms.is_some() && a.since.is_none() {
+        return Err("status: `timeout_ms` requires `since`".into());
+    }
     let cfg = VoiceConfig::load(paths);
-    // One round-trip feeds both the concise `state` block and `detail`.
-    let probe = probe_engine(sock);
+    // One round-trip feeds both the concise `state` block and `detail`; `since` selects
+    // the engine's existing change-gated long poll instead of client-side spinning.
+    let probe = probe_engine(sock, a.since, a.timeout_ms.unwrap_or(30_000));
     // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
     // (previously silently dropped the configured engine name).
     let state = match &probe {
         EngineProbe::Live(status) => {
-            let activity = &status["activity"];
             // muted in concise status: narration path never calls a tool that reports it.
             json!({
                 "running": true,
-                "tts_active": activity["speaking"].as_bool().unwrap_or(false),
-                "queued": status["stats"]["tts"]["queued"].as_u64().unwrap_or(0),
-                "muted": activity["muted"].as_bool().unwrap_or(false),
+                "seq": status.seq,
+                "tts_active": status.activity.speaking,
+                "queued": status.stats.tts.queued,
+                "muted": status.activity.muted,
+                "voice": status.activity.voice,
+                "detected_language": status.activity.language,
+                "warning": status.activity.warning,
+                "last_utterance": status.tts.last_utterance,
+                "tts": status.tts.status,
+                "stt": status.stt.status,
+                "downloads": status.downloads,
             })
         }
         EngineProbe::Invalid => json!({ "running": true, "note": "unexpected engine response" }),
@@ -335,7 +348,8 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     });
     if a.detail.unwrap_or(false) {
         out["status"] = match probe {
-            EngineProbe::Live(status) => status,
+            EngineProbe::Live(status) => serde_json::to_value(status)
+                .map_err(|error| format!("status serialization failed: {error}"))?,
             EngineProbe::Invalid => json!({ "running": false, "note": "invalid engine response" }),
             EngineProbe::Unreachable => json!({ "running": false, "note": "engine unavailable" }),
             EngineProbe::Unresolved => {
@@ -354,15 +368,21 @@ enum EngineProbe {
     Unreachable,
     /// Engine answered, but not with a `model_status` object.
     Invalid,
-    Live(Value),
+    Live(ds_status::ModelStatus),
 }
 
-fn probe_engine(sock: Option<&PathBuf>) -> EngineProbe {
+fn probe_engine(sock: Option<&PathBuf>, since: Option<u64>, timeout_ms: u64) -> EngineProbe {
     let Some(sock) = sock else {
         return EngineProbe::Unresolved;
     };
-    match ds_ipc::request(sock, &Request::ModelStatus) {
-        Ok(Response::ModelStatus { status }) if status.is_object() => EngineProbe::Live(status),
+    let request = since.map_or(Request::ModelStatus, |since| Request::WaitModelStatus {
+        since,
+        timeout_ms,
+    });
+    match ds_ipc::request(sock, &request) {
+        Ok(Response::ModelStatus { status }) => serde_json::from_value(status)
+            .map(EngineProbe::Live)
+            .unwrap_or(EngineProbe::Invalid),
         Ok(_) => EngineProbe::Invalid,
         Err(_) => EngineProbe::Unreachable,
     }
@@ -780,7 +800,12 @@ mod drift {
         );
         assert_tool_matches(
             "status",
-            serde_json::to_value(StatusArgs { detail: Some(true) }).unwrap(),
+            serde_json::to_value(StatusArgs {
+                detail: Some(true),
+                since: Some(7),
+                timeout_ms: Some(30_000),
+            })
+            .unwrap(),
         );
         assert_tool_matches(
             "usage",
@@ -889,6 +914,76 @@ mod usage_output {
 #[cfg(test)]
 mod status_output {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn live_status() -> Value {
+        json!({
+            "seq": 8,
+            "activity": {
+                "caps": true, "caps_active": false, "recording": false,
+                "speaking": true, "speaker": "codex", "voice": "if_sara",
+                "language": "it", "warning": null, "muted": false
+            },
+            "tts": {
+                "engine": "built_in", "model": "kokoro", "language": "auto",
+                "provider": "cpu",
+                "status": { "state": "downloading", "progress": 0.25, "error": null },
+                "last_utterance": { "voice": "if_sara", "language": "it", "warning": null }
+            },
+            "stt": {
+                "engine": "off", "provider": null, "status": null, "voice_key": null
+            },
+            "diarization": {
+                "status": { "state": "missing", "progress": 0.0, "error": null },
+                "enabled": false, "provider": "mlx", "speakers": [],
+                "activity_threshold": 0.5
+            },
+            "dictation": { "state": "hidden", "text": "", "can_paste": true },
+            "stats": {
+                "tts": {
+                    "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0,
+                    "ttfa_min_ms": 0.0, "ttfa_avg_ms": 0.0, "ttfa_max_ms": 0.0,
+                    "utterances": 1, "audio_secs": 1.0, "failures": 0, "queued": 2
+                },
+                "stt": {
+                    "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0,
+                    "transcriptions": 0, "audio_secs": 0.0, "failures": 0
+                },
+                "lifetime": { "tts_secs": 1, "stt_secs": 0 }
+            },
+            "tray": ["tts"],
+            "downloads": [{
+                "target": "kokoro_model", "done_bytes": 25, "total_bytes": 100,
+                "bytes_per_second": 10, "eta_seconds": 8
+            }]
+        })
+    }
+
+    fn serve_status_once(
+        status: Value,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::mpsc::Receiver<Request>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("status.sock");
+        let listener = ds_ipc::transport::bind(&sock).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            tx.send(serde_json::from_str(&line).unwrap()).unwrap();
+            let mut response = serde_json::to_string(&Response::ModelStatus { status }).unwrap();
+            response.push('\n');
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (dir, sock, rx, thread)
+    }
 
     /// Regression: `engine` (config) and `state` (live) must both appear — duplicate keys
     /// used to drop the configured name.
@@ -939,6 +1034,46 @@ mod status_output {
             .get("status")
             .expect("detail adds a nested `status` section");
         assert!(status.is_object(), "`status` is an object, got {status:?}");
+    }
+
+    #[test]
+    fn status_long_poll_uses_wait_request_and_projects_compact_telemetry() {
+        let (_socket_dir, sock, requests, server) = serve_status_once(live_status());
+        let config_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(config_dir.path());
+
+        let value = call_status(
+            &paths,
+            Some(&sock),
+            &json!({ "since": 7, "timeout_ms": 1_000 }),
+        )
+        .unwrap();
+        match requests.recv().unwrap() {
+            Request::WaitModelStatus { since, timeout_ms } => {
+                assert_eq!(since, 7);
+                assert_eq!(timeout_ms, 1_000);
+            }
+            other => panic!("expected WaitModelStatus, got {other:?}"),
+        }
+        server.join().unwrap();
+
+        assert_eq!(value["state"]["seq"], 8);
+        assert_eq!(value["state"]["voice"], "if_sara");
+        assert_eq!(value["state"]["detected_language"], "it");
+        assert_eq!(value["state"]["tts"]["progress"], 0.25);
+        assert_eq!(value["state"]["downloads"][0]["done_bytes"], 25);
+        assert_eq!(value["state"]["downloads"][0]["bytes_per_second"], 10);
+        assert!(value.get("status").is_none(), "detail remains opt-in");
+    }
+
+    #[test]
+    fn status_timeout_requires_a_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        assert_eq!(
+            call_status(&paths, None, &json!({ "timeout_ms": 100 })).unwrap_err(),
+            "status: `timeout_ms` requires `since`"
+        );
     }
 }
 

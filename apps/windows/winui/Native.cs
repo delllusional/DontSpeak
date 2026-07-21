@@ -378,6 +378,7 @@ internal sealed record ModelStatusDto
     [JsonPropertyName("dictation")] public DictationDto? Dictation { get; init; }
     [JsonPropertyName("stats")] public StatsDto? Stats { get; init; }
     [JsonPropertyName("tray")] public string?[]? TrayIndicator { get; init; }
+    [JsonPropertyName("downloads")] public DownloadStatusDto[]? Downloads { get; init; }
 }
 
 internal sealed record EngineStatusDto
@@ -394,7 +395,26 @@ internal sealed record ActivityDto
     [JsonPropertyName("recording")] public bool Recording { get; init; }
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
     [JsonPropertyName("speaker")] public string? Speaker { get; init; }
+    [JsonPropertyName("voice")] public string? Voice { get; init; }
+    [JsonPropertyName("language")] public string? Language { get; init; }
+    [JsonPropertyName("warning")] public string? Warning { get; init; }
     [JsonPropertyName("muted")] public bool Muted { get; init; }
+}
+
+internal sealed record UtteranceStatusDto
+{
+    [JsonPropertyName("voice")] public string? Voice { get; init; }
+    [JsonPropertyName("language")] public string? Language { get; init; }
+    [JsonPropertyName("warning")] public string? Warning { get; init; }
+}
+
+internal sealed record DownloadStatusDto
+{
+    [JsonPropertyName("target")] public string? Target { get; init; }
+    [JsonPropertyName("done_bytes")] public ulong DoneBytes { get; init; }
+    [JsonPropertyName("total_bytes")] public ulong TotalBytes { get; init; }
+    [JsonPropertyName("bytes_per_second")] public ulong? BytesPerSecond { get; init; }
+    [JsonPropertyName("eta_seconds")] public ulong? EtaSeconds { get; init; }
 }
 
 internal sealed record TtsStatusDto
@@ -404,6 +424,7 @@ internal sealed record TtsStatusDto
     [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("status")] public EngineStatusDto? Status { get; init; }
+    [JsonPropertyName("last_utterance")] public UtteranceStatusDto? LastUtterance { get; init; }
 }
 
 internal sealed record SttStatusDto

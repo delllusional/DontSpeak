@@ -53,12 +53,19 @@ Speech config and runtime state.
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `detail` | boolean | no | Include model, dictation, and runtime stats. Default false. |
+| `since` | integer ≥0 | no | Wait for the status sequence to change from this value, then return the new status. |
+| `timeout_ms` | integer 1–60000 | no | Maximum wait in milliseconds when since is set. Default 30000; maximum 60000. |
 
 With `detail=true`, nested model lifecycle/stats land under the `status` key
 (not `models`). Engine tokens are config tokens (`built_in` / `system` / `off`).
 Concise `model` is the configured built-in model and `language` is `auto` (both non-null by
 schema even when the engine resolves to `system`/`off`); the `detail` `status` section uses resolved
 `ModelStatus` semantics and nulls them when no built-in model is active.
+
+The concise `state` includes the status sequence, TTS/STT lifecycle rows, active download
+targets with byte totals/rate/ETA, the current resolved voice and detected language, and the
+last utterance that reached playback. Pass its `seq` back as `since` to long-poll without a
+client-side polling loop. `timeout_ms` is only valid with `since`.
 
 ## usage
 

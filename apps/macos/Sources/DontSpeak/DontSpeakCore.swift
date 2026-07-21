@@ -411,6 +411,9 @@ struct ActivityDTO: Decodable {
     var recording: Bool
     var speaking: Bool
     var speaker: String?
+    var voice: String?
+    var language: String?
+    var warning: String?
     var muted: Bool
 
     enum CodingKeys: String, CodingKey {
@@ -419,6 +422,9 @@ struct ActivityDTO: Decodable {
         case recording
         case speaking
         case speaker
+        case voice
+        case language
+        case warning
         case muted
     }
 }
@@ -441,6 +447,34 @@ struct TtsStatusDTO: Decodable {
     var language: String?
     var provider: String?
     var status: EngineStatusDTO?
+    var lastUtterance: UtteranceStatusDTO?
+
+    enum CodingKeys: String, CodingKey {
+        case engine, model, language, provider, status
+        case lastUtterance = "last_utterance"
+    }
+}
+
+struct UtteranceStatusDTO: Decodable {
+    var voice: String
+    var language: String
+    var warning: String?
+}
+
+struct DownloadStatusDTO: Decodable {
+    var target: String
+    var doneBytes: UInt64
+    var totalBytes: UInt64
+    var bytesPerSecond: UInt64?
+    var etaSeconds: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case target
+        case doneBytes = "done_bytes"
+        case totalBytes = "total_bytes"
+        case bytesPerSecond = "bytes_per_second"
+        case etaSeconds = "eta_seconds"
+    }
 }
 
 struct SttStatusDTO: Decodable {
@@ -464,6 +498,7 @@ struct ModelStatusDTO: Decodable {
     var dictation: DictationDTO
     var stats: StatsDTO
     var tray: [String]
+    var downloads: [DownloadStatusDTO]
 
     enum CodingKeys: String, CodingKey {
         case seq
@@ -472,5 +507,6 @@ struct ModelStatusDTO: Decodable {
         case dictation
         case stats
         case tray
+        case downloads
     }
 }

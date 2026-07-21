@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ds_config::{Paths, VoiceConfig};
 
@@ -16,9 +16,9 @@ use crate::stats;
 use crate::tts::TtsManager;
 use ds_model::DownloadTarget;
 use ds_status::{
-    Activity, DiarizationStatus, Dictation, DictationState, EngineState, EngineStatus, ModelStatus,
-    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, StatusTtsModel, SttStatus,
-    TtsSnapshot, TtsStatus,
+    Activity, DiarizationStatus, Dictation, DictationState, DownloadStatus, EngineState,
+    EngineStatus, ModelStatus, Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine,
+    StatusTtsModel, SttStatus, TtsSnapshot, TtsStatus,
 };
 
 /// Status seq + condvar for `WaitModelStatus`. Bump after every status flip.
@@ -90,13 +90,13 @@ pub(crate) struct EngineShared {
 }
 
 /// Model presence report. `read_tts` runs under gate.snapshot so mid-report
-/// transitions stay unacked. Returns `(speaking, speaker, queued)`.
+/// transitions stay unacked.
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
-    read_tts: impl FnOnce() -> (bool, Option<ds_config::ClientSource>, u64),
+    read_tts: impl FnOnce() -> crate::ttsq::TtsStatusSample,
 ) -> serde_json::Value {
-    let ((tts_active, tts_source, tts_queued), seq) = shared.gate.snapshot(read_tts);
+    let (tts_sample, seq) = shared.gate.snapshot(read_tts);
     let EngineShared {
         tts,
         caps_active,
@@ -184,11 +184,11 @@ pub(crate) fn model_status_json(
         .unwrap_or((String::new(), false, true, false));
 
     // Per-target download snapshot (parallel; each row owns its fraction).
-    let dl = downloads
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .targets
-        .clone();
+    let (dl, download_rate_start) = {
+        let downloads = downloads.lock().unwrap_or_else(|e| e.into_inner());
+        (downloads.targets.clone(), downloads.rate_start.clone())
+    };
+    let download_statuses = active_download_statuses(&dl, &download_rate_start, Instant::now());
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
     // Active-only (Done % is row_download_frac).
     let frac_for = |eng: DownloadTarget| match dl.get(&eng) {
@@ -338,8 +338,20 @@ pub(crate) fn model_status_json(
             caps: caps_loop_enabled(&cfg),
             caps_active: caps_active.load(Ordering::Relaxed),
             recording: dict_recording,
-            speaking: tts_active,
-            speaker: tts_source,
+            speaking: tts_sample.speaking,
+            speaker: tts_sample.speaker,
+            voice: tts_sample
+                .utterance
+                .as_ref()
+                .map(|utterance| utterance.voice.clone()),
+            language: tts_sample
+                .utterance
+                .as_ref()
+                .map(|utterance| utterance.language.clone()),
+            warning: tts_sample
+                .utterance
+                .as_ref()
+                .and_then(|utterance| utterance.warning),
             muted: tts.is_muted(),
         },
         tts: TtsStatus {
@@ -350,6 +362,7 @@ pub(crate) fn model_status_json(
                 .then(|| "auto".to_string()),
             provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
             status: tts_status,
+            last_utterance: tts_sample.last_utterance,
         },
         stt: SttStatus {
             engine: status_stt_engine(resolved_stt),
@@ -373,15 +386,50 @@ pub(crate) fn model_status_json(
         stats: Stats {
             // Depth comes from the queue under `gate.snapshot`, not the stats accumulator.
             tts: TtsSnapshot {
-                queued: tts_queued,
+                queued: tts_sample.queued,
                 ..tts_stats.snapshot()
             },
             stt: stt_stats.snapshot(),
             lifetime: lifetime.snapshot(),
         },
         tray: cfg.tray.iter().copied().map(status_tray_kind).collect(),
+        downloads: download_statuses,
     };
     serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
+}
+
+fn active_download_statuses(
+    targets: &std::collections::HashMap<DownloadTarget, TargetState>,
+    rate_start: &std::collections::HashMap<DownloadTarget, (Instant, u64)>,
+    now: Instant,
+) -> Vec<DownloadStatus> {
+    let mut statuses: Vec<_> = targets
+        .iter()
+        .filter_map(|(target, state)| {
+            let TargetState::Active(progress) = state else {
+                return None;
+            };
+            let bytes_per_second = rate_start.get(target).and_then(|(started, start_done)| {
+                let elapsed = now.saturating_duration_since(*started);
+                let transferred = progress.done.saturating_sub(*start_done);
+                (transferred > 0 && elapsed >= Duration::from_millis(250))
+                    .then(|| ((transferred as f64 / elapsed.as_secs_f64()).round() as u64).max(1))
+            });
+            let eta_seconds = bytes_per_second.and_then(|rate| {
+                (progress.total > 0)
+                    .then(|| progress.total.saturating_sub(progress.done).div_ceil(rate))
+            });
+            Some(DownloadStatus {
+                target: target.as_str().to_string(),
+                done_bytes: progress.done,
+                total_bytes: progress.total,
+                bytes_per_second,
+                eta_seconds,
+            })
+        })
+        .collect();
+    statuses.sort_by(|left, right| left.target.cmp(&right.target));
+    statuses
 }
 
 /// Child realized-EP → config Provider (shared STT/TTS; drift guard in tests).
@@ -585,17 +633,22 @@ pub(crate) fn dictation_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
-        engine_state, model_status_json, realized_provider_token, row_download_frac,
-        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
+        EngineShared, StatusGate, active_download_statuses, combined_error, dictation_local_stt,
+        dictation_state, engine_state, model_status_json, realized_provider_token,
+        row_download_frac, row_downloading, status_tts_model, stt_provider_token,
+        tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
     use crate::stats::{LifetimeSeconds, SttStats, TtsStats};
     use crate::tts::TtsManager;
+    use crate::ttsq::TtsStatusSample;
     use ds_config::{Paths, Provider, SttEngine, TtsEngine};
     use ds_model::DownloadTarget;
-    use ds_status::{DictationState, EngineState, ModelStatus, StatusSttEngine, StatusTtsEngine};
+    use ds_status::{
+        DictationState, EngineState, ModelStatus, StatusSttEngine, StatusTtsEngine,
+        UtteranceStatus, UtteranceWarning,
+    };
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -677,10 +730,27 @@ mod tests {
             gate,
         };
 
-        let value = model_status_json(&shared, &paths, || (true, None, 3));
+        let utterance = UtteranceStatus {
+            voice: "af_sarah".to_string(),
+            language: "it".to_string(),
+            warning: Some(UtteranceWarning::VoiceLanguageMismatch),
+        };
+        let value = model_status_json(&shared, &paths, || TtsStatusSample {
+            speaking: true,
+            speaker: None,
+            queued: 3,
+            utterance: Some(utterance.clone()),
+            last_utterance: Some(utterance),
+        });
         // caps events are logged (see `Engine::record_caps`) but never serialized here.
         assert!(value.get("caps_events").is_none());
         assert_eq!(value["stats"]["tts"]["queued"], 3);
+        assert_eq!(value["activity"]["voice"], "af_sarah");
+        assert_eq!(value["activity"]["language"], "it");
+        assert_eq!(value["activity"]["warning"], "voice_language_mismatch");
+        assert_eq!(value["downloads"][0]["target"], "kokoro_model");
+        assert_eq!(value["downloads"][0]["done_bytes"], 25);
+        assert_eq!(value["downloads"][0]["total_bytes"], 100);
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {
@@ -701,6 +771,7 @@ mod tests {
         let tts = status.tts.status.as_ref().unwrap();
         assert_eq!(tts.state, EngineState::Downloading);
         assert_eq!(tts.progress, 0.25);
+        assert_eq!(status.tts.last_utterance.as_ref().unwrap().language, "it");
         let stt = status.stt.status.as_ref().unwrap();
         assert_eq!(stt.state, EngineState::Failed);
         assert_eq!(stt.error.as_deref(), Some("download failed"));
@@ -789,6 +860,48 @@ mod tests {
             gate.seq(),
             "the next wait must return immediately for the unacknowledged transition"
         );
+    }
+
+    #[test]
+    fn active_downloads_report_sorted_bytes_rate_and_eta() {
+        use std::collections::HashMap;
+
+        let now = Instant::now();
+        let mut targets = HashMap::new();
+        targets.insert(
+            DownloadTarget::QwenModel,
+            TargetState::Active(DownloadProgress {
+                done: 50,
+                total: 200,
+            }),
+        );
+        targets.insert(
+            DownloadTarget::KokoroModel,
+            TargetState::Active(DownloadProgress {
+                done: 100,
+                total: 100,
+            }),
+        );
+        targets.insert(
+            DownloadTarget::ParakeetModel,
+            TargetState::Failed("offline".to_string()),
+        );
+        let rate_start = HashMap::from([
+            (DownloadTarget::QwenModel, (now - Duration::from_secs(2), 0)),
+            (
+                DownloadTarget::KokoroModel,
+                (now - Duration::from_secs(1), 0),
+            ),
+        ]);
+
+        let statuses = active_download_statuses(&targets, &rate_start, now);
+        assert_eq!(statuses.len(), 2, "terminal targets are omitted");
+        assert_eq!(statuses[0].target, "kokoro_model");
+        assert_eq!(statuses[0].bytes_per_second, Some(100));
+        assert_eq!(statuses[0].eta_seconds, Some(0));
+        assert_eq!(statuses[1].target, "qwen_model");
+        assert_eq!(statuses[1].bytes_per_second, Some(25));
+        assert_eq!(statuses[1].eta_seconds, Some(6));
     }
 
     /// Each model row picks ITS OWN target's fraction from the parallel-download map:

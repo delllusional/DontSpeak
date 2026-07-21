@@ -48,8 +48,9 @@ neither its own evidence nor a corpus is spoken English rather than a coin flip.
 switch between admit and play.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
-Codex (in-process). Streaming routes retry rejected work; no route yet propagates
-terminal playback ACK to the producer.
+Codex (in-process). Streaming routes retry rejected work. Status exposes the current and
+most recently resolved voice/language, but no route yet propagates a per-utterance terminal
+playback ACK to the producer.
 
 ## Kokoro language frontends
 
@@ -172,7 +173,8 @@ macOS full-duplex: feeder thread + ~2 s VPIO lookahead; mute zeros output at ren
 while draining ring at wall rate (AEC far-end = speakers). Fail: abort feeder before
 clearing ring.
 
-Terminal outcomes logged but not yet correlated back to narration records.
+Terminal outcomes are logged but not yet correlated back to narration records; status retains
+resolved voice/language metadata rather than a per-ID outcome history.
 
 ## Gaps / planned
 
