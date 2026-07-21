@@ -105,18 +105,16 @@ mod tests {
     use crate::voice::tests::sample_voice;
     use crate::{SttEngine, TtsEngine};
 
-    /// Test-only mirror of the on-disk/IPC shape `{ "dontspeak": {…} }`. Production no longer
-    /// reads this from settings.json; used to prove `VoiceConfig` (de)serialize discipline.
+    /// Test helper for [`merge_settings`]'s `{ "dontspeak": {…} }` envelope.
     #[derive(Debug, Default, serde::Deserialize)]
     struct SettingsRoot {
         dontspeak: Option<VoiceConfig>,
     }
 
     #[test]
-    fn ds_block_parses_from_json_wrapper() {
-        let r: SettingsRoot =
-            serde_json::from_str(r#"{"dontspeak":{"tts_voices":{"kokoro":["am_adam"]}}}"#).unwrap();
-        let v = r.dontspeak.unwrap();
+    fn voice_config_parses_tts_voices_from_json() {
+        let v: VoiceConfig =
+            serde_json::from_str(r#"{"tts_voices":{"kokoro":["am_adam"]}}"#).unwrap();
         assert_eq!(v.tts_voices.kokoro, vec!["am_adam"]);
         assert_eq!(v.rate, 1.0);
     }

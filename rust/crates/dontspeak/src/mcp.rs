@@ -800,7 +800,7 @@ mod tests {
             json!({"name": "listen", "arguments": {"seconds": 61}}),
             json!({"name": "status", "arguments": {"extra": true}}),
             json!({"name": "mute", "arguments": {"on": "yes"}}),
-            json!({"name": "voices", "arguments": {"tts_engine": "off"}}),
+            json!({"name": "voices", "arguments": {"tts_engine": "bogus"}}),
         ];
         for (index, params) in calls.into_iter().enumerate() {
             let request = json!({

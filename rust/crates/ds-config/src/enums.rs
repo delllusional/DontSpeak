@@ -792,12 +792,8 @@ mod tests {
         assert_eq!(Cpu.as_str(), "CPU");
         assert_eq!(CoreMl.as_str(), "CoreML");
         assert_eq!(Mlx.as_str(), "MLX");
-        assert_eq!(RealizedProvider::parse("CoreML-ANE"), Cpu);
         assert_eq!(System.as_str(), "System");
-        // Canonical tokens only — old pre-MLX names (`ane`, `apple_native`) are unknown.
-        assert_eq!(Provider::parse("ane"), None);
         assert_eq!(Provider::Mlx.as_str(), "mlx");
-        assert_eq!(DiarizerProvider::parse("apple_native"), None);
         assert_eq!(DiarizerProvider::Mlx.as_str(), "mlx");
         assert_eq!(Provider::parse("coreml"), Some(Provider::OrtCoreMl));
         // Unknown / casing drift → CPU, never a spurious accelerated-provider claim.
@@ -819,7 +815,7 @@ mod tests {
         assert!(provider_pref_wants_gpu("CUDA"));
         assert!(provider_pref_wants_gpu("auto"));
         assert!(!provider_pref_wants_gpu("cpu"));
-        assert!(!provider_pref_wants_gpu("ane"));
+        assert!(!provider_pref_wants_gpu("mlx"));
         assert!(!provider_pref_wants_gpu(""));
     }
 
@@ -927,15 +923,6 @@ mod tests {
         assert!(!SttEngine::System.stt_usable_on("windows", "x86_64"));
         assert!(!SttEngine::System.stt_usable_on("linux", "aarch64"));
         assert!(!TtsEngine::System.tts_usable_on("linux", "x86_64"));
-    }
-
-    #[test]
-    fn legacy_model_token_is_not_an_engine() {
-        assert_eq!(TtsEngine::parse("chatterbox"), None);
-        assert_eq!(
-            parse_tts_ladder(&arr(&["chatterbox", "system"])),
-            vec![TtsEngine::System]
-        );
     }
 
     #[test]

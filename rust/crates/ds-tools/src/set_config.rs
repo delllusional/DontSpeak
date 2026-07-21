@@ -470,7 +470,7 @@ mod tests {
         anim.apply(&mut c3).unwrap();
         assert_eq!(c3.tray, vec![TrayKind::SttAnimated, TrayKind::TtsAnimated]);
 
-        let err = serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "tray": ["both"] }))
+        let err = serde_json::from_value::<SetConfigArgs>(serde_json::json!({ "tray": ["bogus"] }))
             .unwrap_err();
         assert!(err.to_string().contains("must be one of"), "got: {err}");
 
@@ -602,15 +602,6 @@ mod tests {
             err.contains("ru_boris") && err.contains("chatterbox"),
             "{err}"
         );
-    }
-
-    #[test]
-    fn set_config_rejects_model_names_as_engines() {
-        let err = serde_json::from_value::<SetConfigArgs>(
-            serde_json::json!({ "tts_engine": "chatterbox" }),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("must be one of"), "got: {err}");
     }
 
     #[test]

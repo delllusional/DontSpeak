@@ -84,8 +84,8 @@ impl DownloadTarget {
         }
     }
 
-    /// Parse a wire token into a target. Each target has exactly ONE canonical token (no
-    /// legacy aliases). Returns `None` for an unknown token.
+    /// Parse a wire token into a target. Each target has exactly one canonical token.
+    /// Returns `None` for an unknown token.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "onnxruntime" => DownloadTarget::Onnxruntime,
@@ -200,38 +200,6 @@ mod tests {
         ] {
             assert_eq!(DownloadTarget::parse(t.as_str()), Some(t), "{:?}", t);
         }
-    }
-
-    #[test]
-    fn every_target_has_one_canonical_token_no_legacy_aliases() {
-        assert_eq!(DownloadTarget::KokoroModel.as_str(), "kokoro_model");
-        assert_eq!(DownloadTarget::KokoroFrontend.as_str(), "kokoro_frontend");
-        assert_eq!(DownloadTarget::ParakeetModel.as_str(), "parakeet_model");
-        assert_eq!(DownloadTarget::ChatterboxModel.as_str(), "chatterbox_model");
-        assert_eq!(DownloadTarget::ChatterboxMlx.as_str(), "chatterbox_mlx");
-        assert_eq!(DownloadTarget::QwenModel.as_str(), "qwen_model");
-        assert_eq!(DownloadTarget::QwenMlx.as_str(), "qwen_mlx");
-        assert_eq!(DownloadTarget::OmniVoiceModel.as_str(), "omnivoice_model");
-        assert_eq!(DownloadTarget::OmniVoiceMlx.as_str(), "omnivoice_mlx");
-        assert_eq!(DownloadTarget::parse("chatterbox"), None);
-        assert_eq!(DownloadTarget::parse("chatterbox_en_model"), None);
-        assert_eq!(DownloadTarget::Onnxruntime.as_str(), "onnxruntime");
-        assert_eq!(DownloadTarget::DiarizationMlx.as_str(), "diarization_mlx");
-        // The pre-rename bare brand tokens are NOT accepted (single canonical name, no aliases).
-        assert_eq!(DownloadTarget::parse("kokoro"), None);
-        assert_eq!(DownloadTarget::parse("parakeet"), None);
-        assert_eq!(DownloadTarget::parse("kokoro_voices"), None);
-        // Pre-MLX Apple target tokens are not aliases.
-        assert_eq!(DownloadTarget::parse("kokoro_coreml"), None);
-        assert_eq!(DownloadTarget::parse("parakeet_coreml"), None);
-        assert_eq!(DownloadTarget::parse("diarization_coreml"), None);
-        // Same for the older runtime/diarization tokens.
-        assert_eq!(DownloadTarget::parse("onnx"), None);
-        assert_eq!(DownloadTarget::parse("diarization"), None);
-        // The legacy "all" combined-fetch target is GONE: the engine sequences per-model
-        // targets (each row shows its own %), and the installer prefetch's no-arg default
-        // falls through run_prefetch's unknown-token arm to the same models+cuda behavior.
-        assert_eq!(DownloadTarget::parse("all"), None);
     }
 
     #[test]

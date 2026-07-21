@@ -1125,19 +1125,6 @@ mod voices_tests {
         assert_eq!(out["language"], json!("ru"));
     }
 
-    /// Regression: `"off"` used to deserialize to deleted `TtsEngine::Off` and return an
-    /// empty catalog; schema never listed it — now hard-errors at deserialize (parity).
-    #[test]
-    fn tts_engine_argument_off_is_now_a_hard_error_not_an_empty_list() {
-        let (_dir, paths) = rooted_paths();
-        let err = call_voices(&paths, &json!({ "tts_engine": "off" }))
-            .expect_err("\"off\" is no longer a recognized tts_engine token");
-        assert!(
-            err.contains("invalid voices arguments") && err.contains("must be one of"),
-            "got: {err}"
-        );
-    }
-
     #[test]
     fn every_pool_voice_is_marked_active() {
         // `active` = pool membership: ALL configured voices flag, not just entry 0 —

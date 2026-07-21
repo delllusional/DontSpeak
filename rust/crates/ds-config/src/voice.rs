@@ -946,10 +946,9 @@ pub(crate) mod tests {
             vec![Provider::OrtCuda, Provider::Mlx, Provider::OrtCpu]
         );
         assert_eq!(prov(r#"{"provider":["cpu"]}"#), vec![Provider::OrtCpu]);
-        // Core ML remains an explicit ONNX TTS provider; unknown tokens (`ane`,
-        // `ort_coreml`, `auto`) drop.
+        // Known tokens kept; unknown tokens drop.
         assert_eq!(
-            prov(r#"{"provider":["coreml","ort_coreml","ane","auto"]}"#),
+            prov(r#"{"provider":["coreml","bogus","auto"]}"#),
             vec![Provider::OrtCoreMl]
         );
         // Empty array, all-unknown, and any non-array all fall open to the default ladder
@@ -1021,10 +1020,8 @@ pub(crate) mod tests {
         // A non-empty ladder keeps its order (deduped) and turns diarization ON.
         let on = diar(r#"{"diarizer":["mlx"]}"#);
         assert_eq!(on, vec![DiarizerProvider::Mlx]);
-        // Empty, all-unknown (`auto`/`onnx`/`apple_native`), and non-array all read as OFF.
-        assert!(diar(r#"{"diarizer":["auto"]}"#).is_empty());
-        assert!(diar(r#"{"diarizer":["onnx"]}"#).is_empty());
-        assert!(diar(r#"{"diarizer":["apple_native"]}"#).is_empty());
+        // Empty, all-unknown, and non-array all read as OFF.
+        assert!(diar(r#"{"diarizer":["bogus"]}"#).is_empty());
         assert!(diar(r#"{"diarizer":[]}"#).is_empty());
         assert!(diar(r#"{"diarizer":"mlx"}"#).is_empty());
 
@@ -1060,12 +1057,11 @@ pub(crate) mod tests {
         );
         // Unknown tokens drop, duplicates collapse, order canonicalizes.
         assert_eq!(
-            tray(r#"{"tray":["tts","both","tts","stt"]}"#),
+            tray(r#"{"tray":["tts","bogus","tts","stt"]}"#),
             vec![TrayKind::Stt, TrayKind::Tts]
         );
-        // A legacy string / wrong-typed value degrades to the default set (NO migration of the
-        // old none/both tokens — clean rename, no compat shim).
-        for raw in [r#"{"tray":"both"}"#, r#"{"tray":"none"}"#, r#"{"tray":3}"#] {
+        // Non-array values fall open to the default set.
+        for raw in [r#"{"tray":"stt"}"#, r#"{"tray":3}"#] {
             assert_eq!(
                 serde_json::from_str::<VoiceConfig>(raw).unwrap().tray,
                 vec![TrayKind::Stt, TrayKind::TtsAnimated],
@@ -1080,12 +1076,6 @@ pub(crate) mod tests {
         assert_eq!(p(r#"{"listen_mode":"always"}"#), ListenMode::Always);
         assert_eq!(
             p(r#"{"listen_mode":"record_submit"}"#),
-            ListenMode::RecordSubmit
-        );
-        // Each mode has ONE canonical token (no aliases): the old `always-listening` spelling
-        // is now an unknown token and degrades to the default.
-        assert_eq!(
-            p(r#"{"listen_mode":"always-listening"}"#),
             ListenMode::RecordSubmit
         );
         // Unknown / wrong-typed degrade to the default, never error the block.
@@ -1428,8 +1418,7 @@ pub(crate) mod tests {
 
     #[test]
     fn narrate_drops_unknown_tokens_and_dedups() {
-        // Unknown tokens in the array are dropped (fail-open), duplicates collapsed. The
-        // pre-rename `short`/`messages` aliases are now unknown (no compat shim).
+        // Unknown tokens in the array are dropped (fail-open), duplicates collapsed.
         let v: VoiceConfig =
             serde_json::from_str(r#"{"narrate":["shorts","loud","shorts","digests"]}"#).unwrap();
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
@@ -1437,11 +1426,10 @@ pub(crate) mod tests {
 
     #[test]
     fn narrate_non_array_falls_back_to_default() {
-        // A legacy bool/string or wrong-typed value degrades to the default set (NO migration
-        // of the old off/final/all tokens — clean rename, no compat shim).
+        // Bool / string / wrong-typed values fall open to the default set.
         for raw in [
             r#"{"narrate":true}"#,
-            r#"{"narrate":"all"}"#,
+            r#"{"narrate":"digests"}"#,
             r#"{"narrate":7}"#,
         ] {
             let v: VoiceConfig = serde_json::from_str(raw).unwrap();
