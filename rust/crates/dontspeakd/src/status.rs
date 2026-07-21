@@ -169,7 +169,7 @@ pub(crate) fn model_status_json(
     // finalized transcript while awaiting confirmation, else the live partial — but never
     // the finalized text while a Caps press is in flight (a long-press cancel mustn't flash
     // the bubble before it dismisses).
-    let (dict_text, dict_awaiting, dict_has_target, dict_refused) = paste
+    let (dict_text, dict_awaiting, dict_has_target, dict_refused, dict_frontend_owned) = paste
         .lock()
         .map(|p| {
             let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
@@ -179,9 +179,11 @@ pub(crate) fn model_status_json(
                 p.can_paste,
                 // Same refusal clock as tick digest.
                 crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
+                // Frontend-owned (Zed): force served state to hidden.
+                p.frontend_owned,
             )
         })
-        .unwrap_or((String::new(), false, true, false));
+        .unwrap_or((String::new(), false, true, false, false));
 
     // Per-target download snapshot (parallel; each row owns its fraction).
     let dl = downloads
@@ -366,7 +368,13 @@ pub(crate) fn model_status_json(
             activity_threshold: cfg.activity_threshold as f64,
         },
         dictation: Dictation {
-            state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
+            state: served_dictation_state(
+                dict_frontend_owned,
+                dict_recording,
+                dict_awaiting,
+                dict_local,
+                dict_refused,
+            ),
             text: dict_text,
             can_paste: dict_has_target,
         },
@@ -582,12 +590,29 @@ pub(crate) fn dictation_state(
     }
 }
 
+/// Frontend-owned dictation forces Hidden so tray overlays stay down (Zed renders it).
+pub(crate) fn served_dictation_state(
+    frontend_owned: bool,
+    recording: bool,
+    awaiting: bool,
+    local_stt: bool,
+    refused: bool,
+) -> DictationState {
+    if frontend_owned {
+        DictationState::Hidden
+    } else {
+        dictation_state(recording, awaiting, local_stt, refused)
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::{
         EngineShared, StatusGate, combined_error, dictation_local_stt, dictation_state,
         engine_state, model_status_json, realized_provider_token, row_download_frac,
-        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
+        row_downloading, served_dictation_state, status_tts_model, stt_provider_token,
+        tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -1056,6 +1081,28 @@ mod tests {
     /// `state != Hidden ⇔ awaiting || (recording && local_stt) || refused` —
     /// pinned across the FULL 16-row truth table so a precedence edit can't silently
     /// change any host's panel visibility.
+    #[test]
+    fn served_dictation_state_overrides_only_frontend_owned() {
+        // Frontend-owned always Hidden regardless of underlying phase.
+        assert_eq!(
+            served_dictation_state(true, true, false, true, false),
+            DictationState::Hidden
+        );
+        assert_eq!(
+            served_dictation_state(true, false, true, true, false),
+            DictationState::Hidden
+        );
+        // Not frontend-owned: same as dictation_state.
+        assert_eq!(
+            served_dictation_state(false, true, false, true, false),
+            dictation_state(true, false, true, false)
+        );
+        assert_eq!(
+            served_dictation_state(false, false, true, true, false),
+            dictation_state(false, true, true, false)
+        );
+    }
+
     #[test]
     fn dictation_state_matches_the_show_gate_for_all_inputs() {
         for recording in [false, true] {

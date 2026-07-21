@@ -194,7 +194,7 @@ pub struct VoiceConfig {
     )]
     pub clear_on_input: Vec<CancelSpeechScope>,
 
-    /// Pause when no terminal frontmost. Default false.
+    /// Pause when no terminal frontmost (incl. Zed-like). Default false.
     #[serde(default)]
     pub pause_bg: bool,
 
@@ -220,6 +220,10 @@ pub struct VoiceConfig {
     /// Grok file-tail mid-turn. Default on; inert without `~/.grok` + session.
     #[serde(default = "default_enabled")]
     pub grok_stream: bool,
+
+    /// Kill-switch for `subscribe_frontend` (docs/ZED-FRONTEND.md). Default on.
+    #[serde(default = "default_enabled")]
+    pub frontend_enabled: bool,
 
     /// Extra terminal ids (OS-native). Frontmost/pause/claude_code leak. #14.
     #[serde(default)]
@@ -388,6 +392,7 @@ impl Default for VoiceConfig {
             codex_app_server_url: String::new(),
             codex_bin: default_codex_bin(),
             grok_stream: true,
+            frontend_enabled: true,
             extra_terminals: Vec::new(),
             extra_editors: Vec::new(),
             exclude_clients: None,
@@ -804,6 +809,19 @@ pub(crate) mod tests {
         assert!(toml.contains("grok_stream"));
         let back: VoiceConfig = toml::from_str(&toml).unwrap();
         assert!(!back.grok_stream);
+    }
+
+    #[test]
+    fn frontend_enabled_defaults_on_and_overrides() {
+        // Default ON (inert until a frontend subscribes); plain bool override.
+        let v: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(v.frontend_enabled);
+        let v: VoiceConfig = serde_json::from_str(r#"{"frontend_enabled":false}"#).unwrap();
+        assert!(!v.frontend_enabled);
+        assert!(
+            VoiceConfig::known_keys().contains("frontend_enabled"),
+            "frontend_enabled must be a known config key"
+        );
     }
 
     #[test]
@@ -1456,7 +1474,8 @@ pub(crate) mod tests {
             codex_daemon: true,  // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
             codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
-            grok_stream: false,  // non-default (default is true)
+            grok_stream: false, // non-default (default is true)
+            frontend_enabled: false, // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])
             exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)

@@ -182,8 +182,9 @@ pub fn engine_run(
     let codex_sessions = crate::codex_stream::SessionRegistry::new();
     let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-    // RPC first — answer before Kokoro warm blocks.
-    spawn_ipc_server(
+    // RPC first — answer before Kokoro warm. Returns FrontendRegistry
+    // for engine emission/confirm wiring.
+    let frontends = spawn_ipc_server(
         shared.clone(),
         paths.clone(),
         running.clone(),
@@ -193,6 +194,8 @@ pub fn engine_run(
         downloads.clone(),
         codex_sessions.clone(),
         grok_sessions.clone(),
+        // System-wide mic for NarrateBatch (not PTT stt_active).
+        mic_watcher.handle(),
     );
 
     spawn_mic_barge_watcher(ttsq.clone(), stt_active.clone(), mic_watcher.handle());
@@ -242,6 +245,8 @@ pub fn engine_run(
     daemon.stt_active = Some(stt_active.clone());
     daemon.status_gate = Some(status_gate.clone());
     daemon.paste = paste.clone();
+    // Live native-frontend subscriptions (Zed).
+    daemon.frontends = Some(frontends);
     // Rebuild STT now that tts is set (HelperStt path).
     daemon.stt = build_stt(
         &cfg,

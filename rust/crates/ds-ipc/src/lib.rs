@@ -9,5 +9,5 @@ pub mod server;
 pub mod transport;
 
 pub use client::{Client, connect, request};
-pub use protocol::{Request, Response};
-pub use server::{Handler, serve};
+pub use protocol::{DictationEvent, Request, Response};
+pub use server::{Conn, HandleOutcome, Handler, ShutdownHandle, serve};

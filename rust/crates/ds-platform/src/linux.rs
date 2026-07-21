@@ -35,6 +35,20 @@ fn is_known_terminal_wm_class(name: &str, extra: &[String]) -> bool {
         || extra.iter().any(|e| e.eq_ignore_ascii_case(name))
 }
 
+/// Like [`is_known_terminal_wm_class`] but counting only the table's
+/// `inject_keys: true` rows — the KEY-INJECTION subset behind
+/// `is_inject_terminal_frontmost()`. A terminal-LIKE row (Zed) matches the full
+/// lookup above (TTS focus gate) but must never receive the `claude_code`
+/// push-to-talk chord. `extra` (config.toml `extra_terminals`) still matches:
+/// user-declared entries are real terminals by declaration, so they stay
+/// inject-eligible.
+fn is_inject_terminal_wm_class(name: &str, extra: &[String]) -> bool {
+    crate::KNOWN_TERMINALS
+        .iter()
+        .any(|t| t.inject_keys && t.linux_wm_class == Some(name))
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(name))
+}
+
 /// Map a [`KeyBase`] to its Linux evdev key code (US-QWERTY physical position — uinput
 /// emits scancodes that the compositor maps to keysyms via the active layout). `None`
 /// for `Unsupported`. Linux keycodes are NOT alphabetical, hence the explicit table.
@@ -279,9 +293,10 @@ impl Drop for LinuxPlatform {
 }
 
 impl KeyInjector for LinuxPlatform {
-    // Native evdev/uinput synthesis, ours — no library. The caller (ds-stt) gates
-    // every method on `is_terminal_frontmost()`, so a key/transcript never leaks outside a
-    // terminal. An unsupported chord is logged + skipped; no uinput ⇒ silent no-op.
+    // Native evdev/uinput synthesis, ours — no library. The caller (ds-stt) gates the
+    // dictation chord on `is_inject_terminal_frontmost()` (terminal-LIKE rows like Zed
+    // excluded), so a key never leaks outside an inject-eligible terminal. An
+    // unsupported chord is logged + skipped; no uinput ⇒ silent no-op.
 
     /// Tap the dictation chord once: press modifiers, press+release the base key, release
     /// modifiers (reverse). One discrete keypress = one toggle of Claude Code's voice TAP.
@@ -355,6 +370,50 @@ impl FrontmostWindow for LinuxPlatform {
         // (return false) on any failure so a transcript never leaks into a non-terminal app.
         match &self.x11 {
             Some(x11) => x11.is_terminal_frontmost(&self.extra_terminals.borrow()),
+            None => false,
+        }
+    }
+
+    fn is_inject_terminal_frontmost(&self) -> bool {
+        if self.wayland {
+            // Wayland has no portable active-window query. Synthetic uinput events are
+            // system-wide rather than surface-scoped, so failing open could inject the
+            // ClaudeNative PTT chord into any focused application. Same fail-closed
+            // stance as `is_terminal_frontmost` above until a compositor-specific probe
+            // is available. Explicit override (vs. trait default) so the inject gate's
+            // Wayland contract stays documented next to the X11 branch.
+            return false;
+        }
+        // X11: same fail-closed WM_CLASS matching as `is_terminal_frontmost`, but
+        // against the inject-eligible subset only (Zed rows excluded).
+        match &self.x11 {
+            Some(x11) => x11.is_inject_terminal_frontmost(&self.extra_terminals.borrow()),
+            None => false,
+        }
+    }
+
+    fn is_app_frontmost(&self, app_tag: &str) -> bool {
+        if self.wayland {
+            // Wayland: no portable active-window query — FAIL CLOSED here, unlike
+            // `is_terminal_frontmost`'s fail-open stance above. `frontend_tag_known`
+            // is a static table membership check, not a live-window query: failing
+            // open on it would mean "Zed is subscribed" reads as "Zed is frontmost"
+            // for EVERY dictation, in every app, for as long as Zed stays connected —
+            // hiding the floating overlay and racing a delivery+ack round trip against
+            // dictations that have nothing to do with Zed, and (since any nack drops
+            // the subscriber) evicting Zed's subscription the moment the user dictates
+            // anywhere else. `is_terminal_frontmost`'s fail-open is safe because it's a
+            // coarse "assume some terminal-like surface" guess across a broad class;
+            // collapsing that same guess onto ONE specific named app has real,
+            // visible costs and no offsetting benefit when Zed isn't actually
+            // focused. A wrong `false` here just keeps the classic overlay+paste path
+            // (today's behavior, as if Zed weren't subscribed at all) — matching the
+            // fail-closed principle this trait method documents everywhere else.
+            return false;
+        }
+        // X11: same fail-closed WM_CLASS matching as `is_terminal_frontmost`.
+        match &self.x11 {
+            Some(x11) => x11.is_app_frontmost(app_tag),
             None => false,
         }
     }
@@ -479,21 +538,23 @@ impl X11Focus {
         if win == 0 { None } else { Some(win) }
     }
 
-    fn is_terminal_frontmost(&self, extra: &[String]) -> bool {
-        let Some(win) = self.active_window() else {
-            return false;
-        };
-        // WM_CLASS is "instance\0class\0" (Latin-1). Match the CLASS (second) field, then
-        // fall back to the instance, against the terminal allowlist (lowercased).
-        let Ok(cookie) =
-            self.conn
-                .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
-        else {
-            return false;
-        };
-        let Ok(reply) = cookie.reply() else {
-            return false;
-        };
+    /// The active window's WM_CLASS names — "instance\0class\0" (Latin-1) — as
+    /// `[class, instance]` (class first: it identifies the app; the instance is the
+    /// fallback), lowercased, `None` on any query failure. Shared by
+    /// `is_terminal_frontmost` / `is_inject_terminal_frontmost` / `is_app_frontmost`
+    /// so all three matchers read the property identically and FAIL CLOSED the same way.
+    ///
+    /// Sync-blocking X11 get_property with no timeout (pre-existing). Frontend
+    /// ownership tripled the call rate per poll tick — still one connection, still
+    /// fail-closed on hang; a non-blocking path is a follow-up if it ever bites.
+    fn active_window_wm_class(&self) -> Option<[Option<String>; 2]> {
+        let win = self.active_window()?;
+        let reply = self
+            .conn
+            .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
+            .ok()?
+            .reply()
+            .ok()?;
         let mut parts = reply
             .value
             .split(|&b| b == 0)
@@ -501,10 +562,39 @@ impl X11Focus {
             .map(|s| String::from_utf8_lossy(s).to_ascii_lowercase());
         let instance = parts.next();
         let class = parts.next();
-        [class, instance]
+        Some([class, instance])
+    }
+
+    fn is_terminal_frontmost(&self, extra: &[String]) -> bool {
+        // Match the CLASS field, then fall back to the instance, against the terminal
+        // allowlist (lowercased).
+        self.active_window_wm_class()
             .into_iter()
             .flatten()
+            .flatten()
             .any(|name| is_known_terminal_wm_class(&name, extra))
+    }
+
+    fn is_inject_terminal_frontmost(&self, extra: &[String]) -> bool {
+        // Same WM_CLASS read as `is_terminal_frontmost`, matched against the
+        // inject-eligible subset only (see `is_inject_terminal_wm_class`): ds-stt
+        // gates the `claude_code` push-to-talk chord on this, so a frontmost Zed
+        // (`inject_keys: false`) reads false and no keystroke lands in a Zed buffer.
+        self.active_window_wm_class()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|name| is_inject_terminal_wm_class(&name, extra))
+    }
+
+    fn is_app_frontmost(&self, app_tag: &str) -> bool {
+        // Same WM_CLASS read as `is_terminal_frontmost`, matched against FRONTEND_APPS
+        // (linux rows stored lowercased; match is also case-insensitive).
+        self.active_window_wm_class()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|name| crate::frontend_tag_matches_linux_wm_class(app_tag, &name))
     }
 }
 
@@ -533,7 +623,10 @@ mod keycode_parity {
 mod known_terminal_table {
     /// The exact literal `TERM_WM_CLASSES` this crate carried before `KNOWN_TERMINALS`
     /// (ds-platform/src/lib.rs) replaced it — pinned here so a future edit to the
-    /// shared table can't silently drop (or duplicate away) a Linux entry.
+    /// shared table can't silently drop (or duplicate away) a Linux entry. Pins the
+    /// `inject_keys: true` subset: the KEY-INJECTION set must stay exactly the
+    /// pre-Zed terminal list (the terminal-LIKE rows added since are pinned
+    /// separately below).
     const OLD_TERM_WM_CLASSES: &[&str] = &[
         "gnome-terminal-server",
         "konsole",
@@ -565,19 +658,69 @@ mod known_terminal_table {
     fn matches_old_term_wm_classes_exactly() {
         let entries: Vec<&str> = crate::KNOWN_TERMINALS
             .iter()
+            .filter(|t| t.inject_keys)
             .filter_map(|t| t.linux_wm_class)
             .collect();
         let derived: std::collections::BTreeSet<&str> = entries.iter().copied().collect();
         let old: std::collections::BTreeSet<&str> = OLD_TERM_WM_CLASSES.iter().copied().collect();
         assert_eq!(
             derived, old,
-            "KNOWN_TERMINALS' linux_wm_class entries drifted from the pre-refactor TERM_WM_CLASSES list"
+            "KNOWN_TERMINALS' inject-eligible linux_wm_class entries drifted from the pre-refactor TERM_WM_CLASSES list"
         );
         assert_eq!(
             entries.len(),
             derived.len(),
             "a linux_wm_class value is duplicated across two KNOWN_TERMINALS rows"
         );
+    }
+
+    /// The focus-gate-only (`inject_keys: false`) Linux identities — exactly the
+    /// three Zed channels (stored lowercased for the X11 byte-exact match; see the
+    /// table comment). Pinned so a new terminal row accidentally added with
+    /// `inject_keys: false` (silently disabling its `claude_code` push-to-talk tap)
+    /// fails loudly, and so a Zed wm_class never sneaks INTO the injection set.
+    #[test]
+    fn focus_gate_only_wm_classes_are_exactly_zed() {
+        let non_inject: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter(|t| !t.inject_keys)
+            .filter_map(|t| t.linux_wm_class)
+            .collect();
+        assert_eq!(
+            non_inject,
+            vec!["dev.zed.zed", "dev.zed.zed-preview", "dev.zed.zed-dev"]
+        );
+        // No duplicates across the FULL table either (inject + non-inject).
+        let all: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter_map(|t| t.linux_wm_class)
+            .collect();
+        let dedup: std::collections::BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(
+            all.len(),
+            dedup.len(),
+            "a linux_wm_class value is duplicated across two KNOWN_TERMINALS rows"
+        );
+    }
+
+    /// The split lookup itself: Zed satisfies the full-table match (TTS focus gate)
+    /// but NOT the inject-eligible match; a real terminal satisfies both;
+    /// `extra_terminals` entries stay inject-eligible. Matched with the LOWERCASED
+    /// name the X11 lookup path produces.
+    #[test]
+    fn inject_lookup_excludes_zed_but_keeps_terminals_and_extras() {
+        use super::{is_inject_terminal_wm_class, is_known_terminal_wm_class};
+        let no_extra: Vec<String> = Vec::new();
+        assert!(is_known_terminal_wm_class("dev.zed.zed", &no_extra));
+        assert!(!is_inject_terminal_wm_class("dev.zed.zed", &no_extra));
+        assert!(is_known_terminal_wm_class("dev.zed.zed-preview", &no_extra));
+        assert!(!is_inject_terminal_wm_class("dev.zed.zed-preview", &no_extra));
+        assert!(is_known_terminal_wm_class("dev.zed.zed-dev", &no_extra));
+        assert!(!is_inject_terminal_wm_class("dev.zed.zed-dev", &no_extra));
+        assert!(is_known_terminal_wm_class("konsole", &no_extra));
+        assert!(is_inject_terminal_wm_class("konsole", &no_extra));
+        let extra = vec!["myterm".to_string()];
+        assert!(is_inject_terminal_wm_class("myterm", &extra));
     }
 }
 

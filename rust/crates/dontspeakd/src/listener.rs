@@ -442,6 +442,11 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
             gate.bump();
         }
         if let Ok(mut p) = self.paste.lock() {
+            // A hands-free capture is NEVER frontend-owned (v1 keeps always-listening
+            // on the classic overlay + paste path): clear any stale tag a previous
+            // Caps PTT dictation left behind, so the served `dictation.state` token
+            // isn't suppressed for THIS surface (see `PasteBuf::frontend_owned`).
+            p.frontend_owned = false;
             if capturing {
                 p.partial = self.turn.buffer().to_string();
                 if p.target.is_none() {
@@ -590,6 +595,36 @@ mod tests {
         assert!(!l.stt_active.load(Ordering::SeqCst));
         assert_eq!(gate.seq(), 2, "idle edge bumps the gate once more");
         assert_eq!(l.paste.lock().unwrap().partial, "");
+    }
+
+    #[test]
+    fn sync_pill_clears_a_stale_frontend_owned_tag() {
+        // A previous Caps PTT dictation can leave `frontend_owned` set (e.g. a refusal
+        // cue that simply expired, or a ClaudeNative stop — no consuming confirm ever
+        // ran) before the user flips to always-listening. A hands-free capture is
+        // NEVER frontend-owned (v1: classic overlay + paste), so the stale tag must
+        // not suppress the served overlay token for the listener's surface — sync_pill
+        // clears it in BOTH the capturing and idle branches.
+        let plat = Rc::new(MockPlatform::default());
+        let mut l = Listener::for_test(plat, turn(), None);
+
+        // Idle branch.
+        l.paste.lock().unwrap().frontend_owned = true;
+        l.sync_pill();
+        assert!(
+            !l.paste.lock().unwrap().frontend_owned,
+            "idle sync_pill must clear a stale frontend-owned tag"
+        );
+
+        // Capturing branch.
+        l.turn.on_segment("hey computer add a button");
+        assert!(l.turn.capturing());
+        l.paste.lock().unwrap().frontend_owned = true;
+        l.sync_pill();
+        assert!(
+            !l.paste.lock().unwrap().frontend_owned,
+            "capturing sync_pill must clear a stale frontend-owned tag too"
+        );
     }
 
     #[test]

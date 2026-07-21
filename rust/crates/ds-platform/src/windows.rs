@@ -56,16 +56,32 @@ fn is_known_terminal_exe(exe: &str, extra: &[String]) -> bool {
         || extra.iter().any(|e| e.eq_ignore_ascii_case(exe))
 }
 
+/// Like [`is_known_terminal_exe`] but counting only the table's `inject_keys: true`
+/// rows — the KEY-INJECTION subset behind `is_inject_terminal_frontmost()`. A
+/// terminal-LIKE row (Zed) matches the full lookup above (TTS focus gate, paste
+/// short-circuit) but must never receive the `claude_code` push-to-talk chord.
+/// `extra` (config.toml `extra_terminals`) still matches: user-declared entries are
+/// real terminals by declaration, so they stay inject-eligible.
+fn is_inject_terminal_exe(exe: &str, extra: &[String]) -> bool {
+    crate::KNOWN_TERMINALS
+        .iter()
+        .any(|t| t.inject_keys && t.windows_exe == Some(exe))
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(exe))
+}
+
 /// Process image base-names (lowercased, no path) for editors that render their main text
 /// surface with a custom GPU/canvas toolkit rather than a native Win32 edit control, so UI
 /// Automation exposes no Edit/Document role (and no settable Value pattern) on the focused
 /// buffer even though a synthetic paste + Enter lands in it fine. Same underlying cause as
 /// the terminal exemption in `can_paste()` below (a custom-drawn text view with no
 /// AX/UIA text pattern) — kept as a SEPARATE list rather than folded into the shared
-/// `KNOWN_TERMINALS` terminal table, because `is_terminal_frontmost()` also gates
-/// unrelated behavior (mic pause-in-background in `ttsq.rs`, dictation-key/transcript
-/// leak prevention in `ds-stt`) that a code editor should not opt into just because its
-/// buffer view happens to be UIA-invisible.
+/// `KNOWN_TERMINALS` terminal table, because this list gates ONLY the paste-target
+/// probe: an entry here should not opt into the TTS focus gate the way a
+/// `KNOWN_TERMINALS` row does. (Zed now ALSO has a `KNOWN_TERMINALS` row — a
+/// deliberate opt-in to the `pause_in_background` focus gate for its embedded
+/// terminals, with `inject_keys: false` keeping the `claude_code` dictation chord
+/// out; see `KnownTerminal::inject_keys`. Its entry here stays: this list is the
+/// paste-exemption source of truth, independent of Zed's focus-gate row.)
 ///
 /// - "zed.exe": Zed's GPUI framework draws the buffer itself; its Windows UI Automation
 ///   support is still partial (accessibility is an explicitly ongoing project — see
@@ -485,8 +501,8 @@ impl Drop for WindowsPlatform {
 }
 
 impl KeyInjector for WindowsPlatform {
-    // Native SendInput, ours — no library. The caller (ds-stt) gates these on
-    // `is_terminal_frontmost()`.
+    // Native SendInput, ours — no library. The caller (ds-stt) gates the dictation
+    // chord on `is_inject_terminal_frontmost()` (terminal-LIKE rows like Zed excluded).
 
     /// Tap the dictation chord once: press modifiers, press+release the base key, release
     /// modifiers (reverse). One discrete keypress = one toggle of Claude Code's voice TAP.
@@ -560,6 +576,23 @@ impl FrontmostWindow for WindowsPlatform {
         // `frontmost_process_basename`) returns false and nothing is injected.
         frontmost_process_basename()
             .is_some_and(|base| is_known_terminal_exe(&base, &self.extra_terminals.borrow()))
+    }
+
+    fn is_inject_terminal_frontmost(&self) -> bool {
+        // Same fail-closed foreground-process resolution as `is_terminal_frontmost`,
+        // matched against the inject-eligible subset only (see `is_inject_terminal_exe`):
+        // ds-stt gates the `claude_code` push-to-talk chord on this, so a frontmost Zed
+        // (`inject_keys: false`) reads false and no keystroke lands in a Zed buffer.
+        frontmost_process_basename()
+            .is_some_and(|base| is_inject_terminal_exe(&base, &self.extra_terminals.borrow()))
+    }
+
+    fn is_app_frontmost(&self, app_tag: &str) -> bool {
+        // Same foreground-process resolution as `is_terminal_frontmost`, matched against
+        // the shared FRONTEND_APPS table instead. FAILS CLOSED on any resolution failure
+        // (the dictation then stays on the classic overlay + paste path).
+        frontmost_process_basename()
+            .is_some_and(|base| crate::frontend_tag_matches_windows_exe(app_tag, &base))
     }
 
     fn can_paste(&self) -> bool {
@@ -1054,13 +1087,16 @@ mod custom_text_exes {
     }
 
     #[test]
-    fn disjoint_from_term_exes() {
+    fn disjoint_from_inject_term_exes() {
         // The two lists gate different behavior (see CUSTOM_TEXT_EXES's doc comment);
-        // an exe in both would be redundant and signals it belongs in one, not both.
+        // a custom-drawn EDITOR can never be an inject-eligible terminal — an exe in
+        // both would signal it belongs in one, not both. Overlap with the FULL table
+        // is now deliberate (Zed has a focus-gate-only `inject_keys: false` row AND a
+        // paste exemption here), so the invariant is against the INJECT subset.
         for exe in CUSTOM_TEXT_EXES {
             assert!(
-                !is_known_terminal_exe(exe, &[]),
-                "{exe} listed in both exe tables"
+                !is_inject_terminal_exe(exe, &[]),
+                "{exe} listed as both a custom-text editor and an inject-eligible terminal"
             );
         }
     }
@@ -1099,7 +1135,10 @@ mod extra_paste_targets {
 mod known_terminal_table {
     /// The exact literal `TERM_EXES` this crate carried before `KNOWN_TERMINALS`
     /// (ds-platform/src/lib.rs) replaced it — pinned here so a future edit to the
-    /// shared table can't silently drop (or duplicate away) a Windows entry.
+    /// shared table can't silently drop (or duplicate away) a Windows entry. Pins the
+    /// `inject_keys: true` subset: the KEY-INJECTION set must stay exactly the
+    /// pre-Zed terminal list (the terminal-LIKE rows added since are pinned
+    /// separately below).
     const OLD_TERM_EXES: &[&str] = &[
         "windowsterminal.exe",
         "openconsole.exe",
@@ -1119,19 +1158,67 @@ mod known_terminal_table {
     fn matches_old_term_exes_exactly() {
         let entries: Vec<&str> = crate::KNOWN_TERMINALS
             .iter()
+            .filter(|t| t.inject_keys)
             .filter_map(|t| t.windows_exe)
             .collect();
         let derived: std::collections::BTreeSet<&str> = entries.iter().copied().collect();
         let old: std::collections::BTreeSet<&str> = OLD_TERM_EXES.iter().copied().collect();
         assert_eq!(
             derived, old,
-            "KNOWN_TERMINALS' windows_exe entries drifted from the pre-refactor TERM_EXES list"
+            "KNOWN_TERMINALS' inject-eligible windows_exe entries drifted from the pre-refactor TERM_EXES list"
         );
         assert_eq!(
             entries.len(),
             derived.len(),
             "a windows_exe value is duplicated across two KNOWN_TERMINALS rows"
         );
+    }
+
+    /// The focus-gate-only (`inject_keys: false`) Windows identities — exactly the
+    /// three Zed channel exes. Pinned so a new terminal row accidentally added with
+    /// `inject_keys: false` (silently disabling its `claude_code` push-to-talk tap)
+    /// fails loudly, and so a Zed exe never sneaks INTO the injection set.
+    #[test]
+    fn focus_gate_only_exes_are_exactly_zed() {
+        let non_inject: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter(|t| !t.inject_keys)
+            .filter_map(|t| t.windows_exe)
+            .collect();
+        assert_eq!(
+            non_inject,
+            vec!["zed.exe", "zed-preview.exe", "zed-dev.exe"]
+        );
+        // No duplicates across the FULL table either (inject + non-inject).
+        let all: Vec<&str> = crate::KNOWN_TERMINALS
+            .iter()
+            .filter_map(|t| t.windows_exe)
+            .collect();
+        let dedup: std::collections::BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(
+            all.len(),
+            dedup.len(),
+            "a windows_exe value is duplicated across two KNOWN_TERMINALS rows"
+        );
+    }
+
+    /// The split lookup itself: Zed satisfies the full-table match (TTS focus gate /
+    /// paste short-circuit) but NOT the inject-eligible match; a real terminal
+    /// satisfies both; `extra_terminals` entries stay inject-eligible.
+    #[test]
+    fn inject_lookup_excludes_zed_but_keeps_terminals_and_extras() {
+        use super::{is_inject_terminal_exe, is_known_terminal_exe};
+        let no_extra: Vec<String> = Vec::new();
+        assert!(is_known_terminal_exe("zed.exe", &no_extra));
+        assert!(!is_inject_terminal_exe("zed.exe", &no_extra));
+        assert!(is_known_terminal_exe("zed-preview.exe", &no_extra));
+        assert!(!is_inject_terminal_exe("zed-preview.exe", &no_extra));
+        assert!(is_known_terminal_exe("zed-dev.exe", &no_extra));
+        assert!(!is_inject_terminal_exe("zed-dev.exe", &no_extra));
+        assert!(is_known_terminal_exe("windowsterminal.exe", &no_extra));
+        assert!(is_inject_terminal_exe("windowsterminal.exe", &no_extra));
+        let extra = vec!["myterm.exe".to_string()];
+        assert!(is_inject_terminal_exe("myterm.exe", &extra));
     }
 }
 

@@ -1,24 +1,20 @@
 //! Settings "test recognition": same warm-helper Parakeet as dictation.
-//! `run()` (streaming conn) listens + relays `Partial`; `stop()` (second conn)
-//! ends listen so `run()` emits terminal `Transcript`.
+//! `run()` (streaming [`Conn`]) listens + relays `Partial`; `stop()` (second conn)
+//! ends listen so `run()` emits terminal `Transcript`. Write failures on `Conn`
+//! also end the listen (client hang-up mid-session).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ds_ipc::Response;
+use ds_ipc::{Conn, Response};
 
 use crate::tts::TtsManager;
 
 pub struct TestSession {
-    /// The warm helper that hosts both engines (Kokoro + Parakeet). STT runs there.
+    /// Warm helper hosts both engines; STT runs there.
     tts: Arc<TtsManager>,
-    /// This session's early-stop flag — see `HelperStt::stop_requested` (same race,
-    /// same fix): `run()` and `stop()` are driven by two DIFFERENT connections/threads,
-    /// so a `stop` arriving before `run()` has reached `TtsManager::listen_cancellable`
-    /// must still be observed instead of finding nothing to cancel yet. Reset at the top
-    /// of each `run()` (this `TestSession` is a single long-lived instance reused across
-    /// sessions, not recreated per session — see `boot.rs`), rather than replaced, since
-    /// `run`/`stop` only ever get `&self`.
+    /// Early-stop flag (same race as `HelperStt::stop_requested`): `run`/`stop` are
+    /// different threads; reset at top of each `run` (long-lived instance; see `boot.rs`).
     stop_requested: Arc<AtomicBool>,
 }
 
@@ -30,37 +26,59 @@ impl TestSession {
         }
     }
 
-    /// Run a recognition session, streaming responses via `emit`. Blocks on the
-    /// calling (connection) thread until `stop()` ends the helper's listen.
-    pub fn run(&self, emit: &mut dyn FnMut(&Response)) {
-        // Provider-aware gate: on the MLX path the ONNX model files are never
+    /// Run a recognition session, streaming responses over `conn`. Blocks on the
+    /// calling (connection) thread until `stop()` ends the helper's listen — or
+    /// until the client disconnects (an observed `Partial` write failure aborts
+    /// the listen; see the module docs).
+    pub fn run(&self, conn: &mut Conn) {
+        // Provider-aware gate: on the ANE (Core ML) path the ONNX model files are never
         // downloaded, so the raw ONNX-only `parakeet_present()` would wrongly block here.
         let parakeet_ok = ds_config::Paths::resolve()
             .map(|p| crate::config_gate::parakeet_present_for(&ds_config::VoiceConfig::load(&p)))
             .unwrap_or(false);
         if !parakeet_ok {
-            emit(&Response::error(
+            let _ = conn.send(&Response::error(
                 "Parakeet model not installed — download it in Settings",
             ));
             return;
         }
         self.stop_requested.store(false, Ordering::SeqCst);
-        emit(&Response::Listening);
-        // The partial callback borrows `emit` only for the listen call; `emit` is
+        if conn.send(&Response::Listening).is_err() {
+            // The client is already gone — don't open the mic for nobody.
+            return;
+        }
+        // The partial callback borrows `conn` only for the listen call; `conn` is
         // free again for the terminal response below.
+        let mut disconnected = false;
         let result = {
             let mut on_partial = |t: &str| {
-                emit(&Response::Partial {
-                    text: t.to_string(),
-                })
+                if disconnected {
+                    return;
+                }
+                if conn
+                    .send(&Response::Partial {
+                        text: t.to_string(),
+                    })
+                    .is_err()
+                {
+                    // The streaming client hung up mid-session: abort the helper's
+                    // listen so this returns now, instead of holding the mic and
+                    // streaming into the void until an external
+                    // `TestRecognitionStop` arrives on a second connection.
+                    disconnected = true;
+                    self.tts.stop_listen();
+                }
             };
             self.tts
                 .listen_cancellable(&self.stop_requested, &mut on_partial)
         };
-        match result {
-            Ok(text) => emit(&Response::Transcript { text }),
-            Err(e) => emit(&Response::error(format!("test recognition: {e}"))),
+        if disconnected {
+            return; // no client left to read a terminal line
         }
+        let _ = match result {
+            Ok(text) => conn.send(&Response::Transcript { text }),
+            Err(e) => conn.send(&Response::error(format!("test recognition: {e}"))),
+        };
     }
 
     /// Stop the active session: end the helper's listen so `run()` finishes and

@@ -1,18 +1,18 @@
 //! Wire: one JSON [`Request`] per line in; one-or-more JSON [`Response`] lines out.
 //! Streaming (test-recognition) ends on a terminal line.
 //!
-//! Config as `serde_json::Value` (`ds_config` voice_to/from_value) — no VoiceConfig mirror.
+//! Config as `serde_json::Value` (`ds_config` voice_to/from_value) ΓÇö no VoiceConfig mirror.
 
 use ds_client::ClientSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Client → engine (`#[serde(tag = "cmd")]`, snake_case).
+/// Client ΓåÆ engine (`#[serde(tag = "cmd")]`, snake_case).
 ///
 /// ## `source` field
 ///
 /// Required on: GreetSession, MarkActive, SessionEnd, Stop, Speak, SpeakNarration, Earcon.
-/// Absent field = hard decode error (stale hooks rejected). Unrecognised token →
+/// Absent field = hard decode error (stale hooks rejected). Unrecognised token ΓåÆ
 /// `ClientSource::Unknown`. Guard: `request_without_source_is_a_hard_decode_error`.
 /// Tray / engine self-talk / STT tools omit `source` (FFI unchanged).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +37,7 @@ pub enum Request {
     MarkActive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        /// Issue #11 harness continuation — liveness only (no active claim / clear_on_input).
+        /// Issue #11 harness continuation ΓÇö liveness only (no active claim / clear_on_input).
         /// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
         #[serde(default)]
         synthetic: bool,
@@ -58,7 +58,7 @@ pub enum Request {
     SpeakNarration {
         text: String,
         /// Reconstructed turn text so far, capped by the engine. Backs this chunk's
-        /// language only when the chunk itself is too short to classify; absent/empty →
+        /// language only when the chunk itself is too short to classify; absent/empty ΓåÆ
         /// the chunk stands on its own text.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detection_text: Option<String>,
@@ -82,7 +82,7 @@ pub enum Request {
         session: Option<String>,
         source: ClientSource,
     },
-    /// Stream Listening/partials → terminal Transcript.
+    /// Stream Listening/partials ΓåÆ terminal Transcript.
     TestRecognitionStart,
     /// Stop via second connection (first is streaming).
     TestRecognitionStop,
@@ -100,7 +100,7 @@ pub enum Request {
     ListSpeakers,
     /// Presence/removability; engine is authority. File IO in app.
     ModelStatus,
-    /// Block until `seq` ≠ `since` or timeout. `since = 0` immediate.
+    /// Block until `seq` Γëá `since` or timeout. `since = 0` immediate.
     WaitModelStatus {
         since: u64,
         timeout_ms: u64,
@@ -113,7 +113,7 @@ pub enum Request {
     Shutdown,
     /// Same as mtime poll (shared debounce).
     Reload,
-    /// Earcon (Stop / Notification). Disabled cue ⇒ no-op.
+    /// Earcon (Stop / Notification). Disabled cue ΓçÆ no-op.
     Earcon {
         event: ds_earcon::EarconEvent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -122,9 +122,47 @@ pub enum Request {
     },
     /// macOS System STT TCC + capability before persisting `stt_engine=system`.
     AuthorizeSystemStt,
+    /// Take over this conn as `app`'s native-frontend subscription (Zed-style).
+    /// Streams [`Response::FrontendEvent`]; client replies with [`Request::AckDeliver`].
+    /// ≤1 live sub per tag (resubscribe evicts). Error if `frontend_enabled` is off.
+    SubscribeFrontend { app: String },
+    /// Panel-agent cumulative batch → same `ds_narrate::deliver_batch` pipeline as hooks.
+    /// `key` is stable per message; `is_final` ends the turn. → [`Response::Done`].
+    NarrateBatch {
+        session: String,
+        key: String,
+        text: String,
+        is_final: bool,
+    },
+    /// Ack a `deliver` event (`seq` match) on the subscribed conn. `ok:false` / timeout
+    /// → paste fallback. Late acks after the deadline are ignored.
+    AckDeliver { seq: u64, ok: bool },
 }
 
-/// Engine → client (`#[serde(tag = "ok")]`). Streaming: Listening/Partial then terminal.
+/// Dictation lifecycle inside [`Response::FrontendEvent`] (`event` tag). Wire shapes
+/// pinned by tests + Zed fixtures (docs/ZED-FRONTEND.md).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum DictationEvent {
+    /// Frontend-owned PTT started (mic open).
+    RecordingStarted,
+    /// Live partial (cumulative replace).
+    Partial { text: String },
+    /// Recording ended; await confirm.
+    AwaitingConfirm { text: String },
+    /// Insert `text` (submit when true). Must [`Request::AckDeliver`] this `seq`.
+    Deliver { text: String, submit: bool },
+    /// Nothing to deliver (cancel / empty / teardown) ΓÇö clear marked text.
+    Cancelled,
+    /// Start refused (e.g. models not ready).
+    Refused,
+    /// Unknown event tag from a newer daemon ΓÇö ignore, keep subscription.
+    #[serde(other)]
+    Unknown,
+}
+
+
+/// Engine ΓåÆ client (`#[serde(tag = "ok")]`). Streaming: Listening/Partial then terminal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "ok", rename_all = "snake_case")]
 pub enum Response {
@@ -141,7 +179,7 @@ pub enum Response {
     Transcript {
         text: String,
     },
-    /// `[{"speaker","start","end","name"?}, …]` (seconds).
+    /// `[{"speaker","start","end","name"?}, ΓÇª]` (seconds).
     Diarization {
         segments: Value,
     },
@@ -157,8 +195,14 @@ pub enum Response {
     Error {
         message: String,
     },
-    /// Unknown `ok` tag. Terminal so `Client::recv` cleans up mid-stream. Decode-only
-    /// (`#[serde(other)]`); this crate does not encode it.
+    /// Dictation lifecycle on a subscription (non-terminal). seq for [Request::AckDeliver].
+    FrontendEvent {
+        #[serde(flatten)]
+        event: DictationEvent,
+        seq: u64,
+    },
+    /// Unknown ok tag. Terminal so Client::recv cleans up mid-stream. Decode-only
+    /// (#[serde(other)]); this crate does not encode it.
     #[serde(other)]
     Unknown,
 }
@@ -265,6 +309,21 @@ mod tests {
                 session: Some("sess-1".into()),
                 source: ClientSource::Grok,
             },
+                        Request::SubscribeFrontend { app: "zed".into() },
+            Request::AckDeliver { seq: 4, ok: true },
+            Request::AckDeliver { seq: 5, ok: false },
+            Request::NarrateBatch {
+                session: "s1".into(),
+                key: "k1".into(),
+                text: "hello".into(),
+                is_final: false,
+            },
+            Request::NarrateBatch {
+                session: "s1".into(),
+                key: "k1".into(),
+                text: "hello world".into(),
+                is_final: true,
+            },
             Request::Shutdown,
         ];
         for req in cases {
@@ -311,7 +370,7 @@ mod tests {
         assert!(!Response::Partial { text: "x".into() }.is_terminal());
     }
 
-    /// Issue #11: absent `synthetic` → false.
+    /// Issue #11: absent `synthetic` ΓåÆ false.
     #[test]
     fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
         let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude_code"}"#;
@@ -415,7 +474,7 @@ mod tests {
             } if text == "digest" && det == "full so-far corpus"
         ));
 
-        // Absent field (older CLI) → None; engine detects on spoken text alone. A stale
+        // Absent field (older CLI) ΓåÆ None; engine detects on spoken text alone. A stale
         // CLI still sending the retired `message_key` decodes the same way (serde ignores
         // unknown fields), so hooks and engine may update out of step.
         let legacy =
@@ -441,7 +500,109 @@ mod tests {
         assert!(!bare_line.contains("detection_text"));
     }
 
-    /// Unknown `ok` tag → terminal `Response::Unknown` (see variant docs).
+    /// Unknown `ok` tag ΓåÆ terminal `Response::Unknown` (see variant docs).
+    /// Cross-repo wire contract: the Zed frontend mirrors these EXACT byte
+    /// shapes as fixture tests (see docs/ZED-FRONTEND.md), so key names, key
+    /// ORDER, and value spelling are all load-bearing here — a serialization
+    /// change that reshuffles or renames anything must fail loudly.
+    #[test]
+    fn frontend_wire_shapes_match_the_documented_contract() {
+        // Client → daemon, on the persistent subscription connection.
+        assert_eq!(
+            serde_json::to_string(&Request::SubscribeFrontend { app: "zed".into() }).unwrap(),
+            r#"{"cmd":"subscribe_frontend","app":"zed"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::AckDeliver { seq: 4, ok: true }).unwrap(),
+            r#"{"cmd":"ack_deliver","seq":4,"ok":true}"#
+        );
+        // Client → daemon, one-shot (the panel-agent narration bridge).
+        assert_eq!(
+            serde_json::to_string(&Request::NarrateBatch {
+                session: "sess-1".into(),
+                key: "sess-1#0#2".into(),
+                text: "> Hi.".into(),
+                is_final: false,
+            })
+            .unwrap(),
+            r#"{"cmd":"narrate_batch","session":"sess-1","key":"sess-1#0#2","text":"> Hi.","is_final":false}"#
+        );
+
+        // Daemon → client, streamed on that connection.
+        let cases: [(Response, &str); 6] = [
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::RecordingStarted,
+                    seq: 1,
+                },
+                r#"{"ok":"frontend_event","event":"recording_started","seq":1}"#,
+            ),
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::Partial {
+                        text: "hello wor".into(),
+                    },
+                    seq: 2,
+                },
+                r#"{"ok":"frontend_event","event":"partial","text":"hello wor","seq":2}"#,
+            ),
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::AwaitingConfirm {
+                        text: "hello world".into(),
+                    },
+                    seq: 3,
+                },
+                r#"{"ok":"frontend_event","event":"awaiting_confirm","text":"hello world","seq":3}"#,
+            ),
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::Deliver {
+                        text: "hello world".into(),
+                        submit: true,
+                    },
+                    seq: 4,
+                },
+                r#"{"ok":"frontend_event","event":"deliver","text":"hello world","submit":true,"seq":4}"#,
+            ),
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::Cancelled,
+                    seq: 5,
+                },
+                r#"{"ok":"frontend_event","event":"cancelled","seq":5}"#,
+            ),
+            (
+                Response::FrontendEvent {
+                    event: DictationEvent::Refused,
+                    seq: 6,
+                },
+                r#"{"ok":"frontend_event","event":"refused","seq":6}"#,
+            ),
+        ];
+        for (resp, wire) in cases {
+            assert_eq!(serde_json::to_string(&resp).unwrap(), wire);
+            // And the decode side round-trips back to the same bytes.
+            let back: Response = serde_json::from_str(wire).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), wire);
+        }
+    }
+
+    #[test]
+    fn unknown_frontend_event_does_not_break_the_subscription_decoder() {
+        let response: Response = serde_json::from_str(
+            r#"{"ok":"frontend_event","event":"future_event","text":"ignored","seq":9}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            response,
+            Response::FrontendEvent {
+                event: DictationEvent::Unknown,
+                seq: 9
+            }
+        ));
+    }
+
     #[test]
     fn unrecognized_response_tag_falls_back_to_unknown_instead_of_erroring() {
         let future_line = r#"{"ok":"some_future_variant","extra":"field","n":42}"#;
