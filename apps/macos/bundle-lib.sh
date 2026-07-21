@@ -181,6 +181,22 @@ bundle_swift_package_licenses() {
   echo "   bundled $copied Swift package license/notice files"
 }
 
+# strip_locals FILE — drop local symbols from a bundled Mach-O (`-x` keeps every external
+# one, so `nm`'s `ds_engine_start` guard and the Rust side's `dlsym("ds_mlx_*")` still
+# resolve). Called on the copy inside the .app and always before codesign, so signatures
+# cover the stripped bytes. Best-effort: a strip failure costs size, never correctness.
+# The Xcode-built MLX shim carries ~677k local symbols (~30 MB) — by far the biggest win.
+strip_locals() {
+  local bin="$1" before after
+  before="$(stat -f%z "$bin" 2>/dev/null || echo 0)"
+  if ! strip -x "$bin" 2>/dev/null; then
+    echo "   WARN: strip -x $bin failed — shipping unstripped" >&2
+    return 0
+  fi
+  after="$(stat -f%z "$bin" 2>/dev/null || echo 0)"
+  echo "   stripped $(basename "$bin"): $before → $after bytes"
+}
+
 # assemble_app: 1 app 2 exe 3 helper 4 car 5 icns 6 plist 7 menubar_svg 8 sign
 # Optional DONTSPEAK_MLX_DYLIB, DONTSPEAK_CLI_BIN.
 assemble_app() {
@@ -189,6 +205,7 @@ assemble_app() {
   rm -rf "$app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
   cp "$exe"    "$app/Contents/MacOS/DontSpeak"
+  strip_locals "$app/Contents/MacOS/DontSpeak"
   # Helper must sit next to app binary (engine spawns sibling).
   cp "$helper" "$app/Contents/MacOS/ds-helper"
   local cli="${DONTSPEAK_CLI_BIN:-}"
@@ -202,6 +219,7 @@ assemble_app() {
   if [ -n "$mlx" ] && [ -f "$mlx" ]; then
     mkdir -p "$app/Contents/Frameworks"
     cp "$mlx" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
+    strip_locals "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
     echo "   bundled libdontspeak_mlx ← $mlx"
   fi
   cp "$plist"  "$app/Contents/Info.plist"
