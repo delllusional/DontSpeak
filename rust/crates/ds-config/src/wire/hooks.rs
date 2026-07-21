@@ -7,10 +7,6 @@ use super::registry::HookCommandStyle;
 use ds_client::ClientSource;
 use serde_json::{Map, Value, json};
 
-/// Keep-list for install-dir prune (`prune_stale_bins`): basenames of bins we still ship.
-/// User-writable install dirs only (macOS `.app`, Win portable extract, Linux `~/.local/bin`).
-pub const INSTALLED_BINS: &[&str] = &["dontspeak", "ds-helper", "ds-winui", "ds-gtk"];
-
 /// Inputs for [`merge_hooks`]. Caller owns path formatting (incl. `.exe`).
 pub struct HookSpec<'a> {
     /// Absolute `dontspeak[.exe]`. Verbs via `args` ([`HookCommandStyle::ArgsArray`]) or
@@ -177,7 +173,7 @@ pub fn merge_hooks(mut root: Value, spec: &HookSpec) -> Result<Value, HooksMerge
             }
         }
     }
-    // Config lives in our config.toml; strip legacy settings.json `dontspeak` seed.
+    // Config lives in config.toml — never leave a top-level `dontspeak` seed here.
     obj.remove("dontspeak");
     // CC `voice` is read-only (`claude_code` STT reports; never force `/voice` on).
     if let Some(ch) = spec.notif_channel {

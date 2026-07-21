@@ -148,8 +148,6 @@ impl DiarizerProvider {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "mlx" => Some(DiarizerProvider::Mlx),
-            // Legacy pre-MLX persisted token: parse-only alias, never emitted.
-            "apple_native" => Some(DiarizerProvider::Mlx),
             _ => None,
         }
     }
@@ -198,8 +196,6 @@ impl Provider {
             "cuda" => Some(Provider::OrtCuda),
             "coreml" => Some(Provider::OrtCoreMl),
             "mlx" => Some(Provider::Mlx),
-            // Legacy pre-MLX persisted token: parse-only alias, never emitted.
-            "ane" => Some(Provider::Mlx),
             _ => None,
         }
     }
@@ -798,14 +794,10 @@ mod tests {
         assert_eq!(Mlx.as_str(), "MLX");
         assert_eq!(RealizedProvider::parse("CoreML-ANE"), Cpu);
         assert_eq!(System.as_str(), "System");
-        // Legacy pre-MLX config tokens parse as MLX aliases but never round-trip: the
-        // canonical token is emitted (asymmetric on purpose — a migration, not a rename).
-        assert_eq!(Provider::parse("ane"), Some(Provider::Mlx));
+        // Canonical tokens only — old pre-MLX names (`ane`, `apple_native`) are unknown.
+        assert_eq!(Provider::parse("ane"), None);
         assert_eq!(Provider::Mlx.as_str(), "mlx");
-        assert_eq!(
-            DiarizerProvider::parse("apple_native"),
-            Some(DiarizerProvider::Mlx)
-        );
+        assert_eq!(DiarizerProvider::parse("apple_native"), None);
         assert_eq!(DiarizerProvider::Mlx.as_str(), "mlx");
         assert_eq!(Provider::parse("coreml"), Some(Provider::OrtCoreMl));
         // Unknown / casing drift → CPU, never a spurious accelerated-provider claim.

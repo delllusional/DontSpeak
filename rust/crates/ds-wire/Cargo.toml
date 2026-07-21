@@ -11,7 +11,7 @@ description = "DontSpeak's client-wiring orchestrator + writers: the shared home
 
 [dependencies]
 ds-config = { workspace = true }
-# hooks.rs::seed_and_prune logs seed success/failure via ds_log::log/LogLevel.
+# hooks.rs::seed_config logs seed success/failure via ds_log::log/LogLevel.
 ds-log = { workspace = true }
 # io.rs uses serde_json::Value; mcp.rs tests use json!.
 serde_json = { workspace = true }

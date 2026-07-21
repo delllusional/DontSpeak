@@ -82,9 +82,9 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
 
-    // Interactive wire only (engine reconcile never seeds/prunes).
+    // Interactive wire only (engine reconcile never seeds config).
     if !remove && !print_only {
-        hooks::seed_and_prune(&paths);
+        hooks::seed_config(&paths);
     }
 
     // Before `--all` so `--reconcile` is not also an unconditional wire.

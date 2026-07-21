@@ -118,7 +118,6 @@ impl DownloadTarget {
     /// * `sepformer_model` is macOS-only too (the speaker-lock is macOS code), though it
     ///   is plain ONNX, not MLX;
     /// * `cuda` (the ONNX CUDA EP wheels) exists only on x86_64 Windows/Linux;
-    /// * legacy `dotnet` / `winapp` tokens are not fetchable on any host;
     /// * everything else (the onnxruntime dylib and the ONNX model sets) is universal.
     pub fn is_supported_on_this_host(self) -> bool {
         match self {

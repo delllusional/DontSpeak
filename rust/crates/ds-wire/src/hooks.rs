@@ -1,65 +1,14 @@
-//! Hook writers ([`claude_json_hooks`], TOML, Grok, [`seed_and_prune`]).
+//! Hook writers ([`claude_json_hooks`], TOML, Grok, [`seed_config`]).
 //! Registry target; merges in `ds-config`; IO in `super::io`.
 //! Additive, idempotent, backed-up. Unmergeable → leave untouched.
 //! Print-only seed/capture: #30 / `wire_surfaces_print_only`.
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
-use ds_config::{ClientSource, HookCommandStyle, HookSpec, INSTALLED_BINS, Paths};
+use ds_config::{ClientSource, HookCommandStyle, HookSpec, Paths};
 
-/// Dropped binary names. Explicit list — not a prefix (shared install dir isn't ours alone).
-const KNOWN_LEGACY_BINS: &[&str] = &["ds-mcp", "ds-speak", "ds-narrate", "dontspeakd"];
-
-/// Exact match vs [`KNOWN_LEGACY_BINS`] (modulo exe suffix), not in [`INSTALLED_BINS`].
-/// Prefix matching used to delete `dontspeak-uninstall` and foreign `ds-sync`.
-fn is_stale_ds_bin(name: &str) -> bool {
-    match name.strip_suffix(std::env::consts::EXE_SUFFIX) {
-        // EXE_SUFFIX is "" on unix → strip_suffix yields Some(name).
-        Some(stem) => KNOWN_LEGACY_BINS.contains(&stem) && !INSTALLED_BINS.contains(&stem),
-        None => false,
-    }
-}
-
-/// Best-effort prune beside `current_exe`. Regular files only; unix requires execute bit.
-fn prune_stale_bins() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let Some(dir) = exe.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !is_stale_ds_bin(name) {
-            continue;
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let executable = entry
-                .metadata()
-                .map(|m| m.permissions().mode() & 0o111 != 0)
-                .unwrap_or(false);
-            if !executable {
-                continue; // never delete non-executable namesakes
-            }
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => eprintln!("wire: pruned stale binary {}", path.display()),
-            Err(e) => eprintln!("wire: could not prune {} ({e}) — skipping", path.display()),
-        }
-    }
-}
-
-/// Seed missing `config.toml` + prune legacy bins. Interactive wire only (not engine reconcile).
-pub(crate) fn seed_and_prune(paths: &Paths) {
+/// Seed missing `config.toml`. Interactive wire only (not engine reconcile).
+pub(crate) fn seed_config(paths: &Paths) {
     if !paths.config_toml.exists() {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
             let msg = format!("wire: could not seed {}: {e}", paths.config_toml.display());
@@ -71,7 +20,6 @@ pub(crate) fn seed_and_prune(paths: &Paths) {
             ds_log::log(&paths.log_file, ds_log::LogLevel::Info, "hook", &msg);
         }
     }
-    prune_stale_bins();
 }
 
 /// Claude-contract JSON hooks. Malformed/unmergeable → leave untouched (exit 0).
@@ -583,33 +531,6 @@ fn sync_grok_narrate_rules(paths: &Paths, digests_on: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn prunes_only_known_legacy_binaries_keeps_current_foreign_and_own_non_bins() {
-        let ext = std::env::consts::EXE_SUFFIX; // ".exe" on Windows, "" on unix
-        let f = |b: &str| format!("{b}{ext}");
-
-        assert!(is_stale_ds_bin(&f("ds-mcp")));
-        assert!(is_stale_ds_bin(&f("ds-speak")));
-        assert!(is_stale_ds_bin(&f("ds-narrate")));
-        assert!(is_stale_ds_bin(&f("dontspeakd")));
-
-        assert!(!is_stale_ds_bin(&f("dontspeak")));
-        assert!(!is_stale_ds_bin(&f("ds-helper")));
-        assert!(!is_stale_ds_bin(&f("ds-winui")));
-        assert!(!is_stale_ds_bin(&f("ds-gtk")));
-
-        // Regression: prefix match used to delete our own uninstall script every wire.
-        assert!(!is_stale_ds_bin(&f("dontspeak-uninstall")));
-        assert!(!is_stale_ds_bin(&f("ds-sync")));
-        assert!(!is_stale_ds_bin(&f("ds-oldname")));
-
-        assert!(!is_stale_ds_bin(&f("ripgrep")));
-        assert!(!is_stale_ds_bin(&f("node")));
-
-        #[cfg(windows)]
-        assert!(!is_stale_ds_bin("ds_core.dll"));
-    }
 
     fn read_json(cfg: &std::path::Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(cfg).unwrap()).unwrap()
@@ -1168,19 +1089,11 @@ mod tests {
     }
 
     #[test]
-    fn seed_and_prune_seeds_config_toml_once_then_leaves_it_alone() {
-        // `seed_and_prune` also unconditionally runs `prune_stale_bins`, which walks
-        // `current_exe()`'s own directory (this test binary's build-output dir) and removes
-        // any entry named exactly one of `KNOWN_LEGACY_BINS`. Safe today because no workspace
-        // `[[bin]]` target is named `ds-mcp`/`ds-speak`/`ds-narrate`/`dontspeakd` — the
-        // workspace DOES contain `ds-narrate` and `dontspeakd` CRATES again, but both are
-        // lib-only (no executable ever lands in the install dir, so the prune can never match
-        // them). A future `[[bin]]` reusing one of those names would need this comment (and
-        // test) revisited.
+    fn seed_config_seeds_config_toml_once_then_leaves_it_alone() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
 
-        seed_and_prune(&paths);
+        seed_config(&paths);
         assert!(paths.config_toml.exists());
 
         // Append a marker to the seeded file, then prove a second call does NOT overwrite it
@@ -1189,24 +1102,24 @@ mod tests {
         contents.push_str("\n# marker\n");
         std::fs::write(&paths.config_toml, &contents).unwrap();
 
-        seed_and_prune(&paths);
+        seed_config(&paths);
         let after = std::fs::read_to_string(&paths.config_toml).unwrap();
         assert_eq!(after, contents);
     }
 
-    /// `write_settings`'s `Err` branch inside `seed_and_prune`: pre-create a plain FILE at the
+    /// `write_settings`'s `Err` branch inside `seed_config`: pre-create a plain FILE at the
     /// path that would be `paths.config_toml`'s parent directory, so the underlying
-    /// `create_dir_all` fails. `seed_and_prune` returns `()`, not a `Result` — reading the
+    /// `create_dir_all` fails. `seed_config` returns `()`, not a `Result` — reading the
     /// function, its `Err(e)` arm only logs (via `ds_log::log`) and continues (does not
     /// propagate, does not panic), so the only observable effect is that `config_toml` is never
     /// created.
     #[test]
-    fn seed_and_prune_write_failure_is_logged_not_fatal() {
+    fn seed_config_write_failure_is_logged_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::write(dir.path().join(".dontspeak"), b"blocking file").unwrap();
 
-        seed_and_prune(&paths); // must not panic
+        seed_config(&paths); // must not panic
         assert!(!paths.config_toml.exists());
     }
 

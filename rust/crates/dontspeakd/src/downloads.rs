@@ -254,7 +254,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::SepformerModel => {
                     ds_model::run_setup_sepformer_with_progress(&prog).map(|_| ())
                 }
-                // Installer-prefetch / legacy wire tokens — no engine fetch; surface misroute.
+                // Installer-prefetch / non-engine tokens — no engine fetch; surface misroute.
                 _ => Err(std::io::Error::other(format!(
                     "'{}' is not an engine download target",
                     which.as_str()

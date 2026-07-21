@@ -946,11 +946,11 @@ pub(crate) mod tests {
             vec![Provider::OrtCuda, Provider::Mlx, Provider::OrtCpu]
         );
         assert_eq!(prov(r#"{"provider":["cpu"]}"#), vec![Provider::OrtCpu]);
-        // Core ML remains an explicit ONNX TTS provider; legacy `ane` migrates to the MLX
-        // rung; `ort_coreml`/`auto` stay unknown and drop.
+        // Core ML remains an explicit ONNX TTS provider; unknown tokens (`ane`,
+        // `ort_coreml`, `auto`) drop.
         assert_eq!(
             prov(r#"{"provider":["coreml","ort_coreml","ane","auto"]}"#),
-            vec![Provider::OrtCoreMl, Provider::Mlx]
+            vec![Provider::OrtCoreMl]
         );
         // Empty array, all-unknown, and any non-array all fall open to the default ladder
         // (compute is never "off").
@@ -1021,14 +1021,10 @@ pub(crate) mod tests {
         // A non-empty ladder keeps its order (deduped) and turns diarization ON.
         let on = diar(r#"{"diarizer":["mlx"]}"#);
         assert_eq!(on, vec![DiarizerProvider::Mlx]);
-        // Empty, all-unknown (old `auto`/`onnx`), and non-array all read as OFF (empty).
+        // Empty, all-unknown (`auto`/`onnx`/`apple_native`), and non-array all read as OFF.
         assert!(diar(r#"{"diarizer":["auto"]}"#).is_empty());
         assert!(diar(r#"{"diarizer":["onnx"]}"#).is_empty());
-        // Legacy pre-MLX `apple_native` migrates to the MLX rung rather than reading as off.
-        assert_eq!(
-            diar(r#"{"diarizer":["apple_native"]}"#),
-            vec![DiarizerProvider::Mlx]
-        );
+        assert!(diar(r#"{"diarizer":["apple_native"]}"#).is_empty());
         assert!(diar(r#"{"diarizer":[]}"#).is_empty());
         assert!(diar(r#"{"diarizer":"mlx"}"#).is_empty());
 
