@@ -485,7 +485,7 @@ pub(crate) fn run_listen(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Cache-aware streaming dictation (the built-in ONNX "parakeet" engine).
+// Segment-at-a-time dictation (the built-in ONNX "parakeet" engine).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Process-wide cache of the loaded streaming backend, keyed by the provider it was built for

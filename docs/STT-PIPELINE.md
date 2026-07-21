@@ -1,9 +1,16 @@
 # Speech-to-text pipeline
 
-Built-in dictation: streaming FastConformer 1040 ms (Windows/Linux), MLX Audio Parakeet
-(Apple Silicon), macOS System Speech. Same provider for Caps-Lock and always-listening.
-The portable FastConformer emits lowercase text without punctuation; its encoder metadata
-sets the live partial cadence.
+Built-in dictation: Parakeet TDT 0.6b v3 everywhere — ONNX over `ort` (Windows/Linux),
+MLX Audio (Apple Silicon) — plus macOS System Speech. Same provider for Caps-Lock and
+always-listening. The model detects its own language among 25 European ones; nothing in the
+config selects it.
+
+The ONNX model is full-context (no encoder cache), so the portable path decodes a whole
+speech segment at each pause the VAD endpointer finds, and force-splits a pause-free
+monologue at `boundary::MAX_SEGMENT_SECS`. That bound is what keeps decode cost flat: a
+re-decoded open tail grows with dictation length. Features are log-mel fbank at the
+encoder's declared `feat_dim`, normalized per bin when the export declares `per_feature` —
+without that normalization every segment decodes blank.
 
 ## Ownership
 

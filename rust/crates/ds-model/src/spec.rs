@@ -87,22 +87,22 @@ pub fn is_kokoro_present() -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parakeet STT — streaming FastConformer transducer (int8 ONNX: encoder + decoder LSTM +
-// joiner + tokens) via `ds-stt::streaming` on the shared `ort` runtime as Kokoro.
+// Parakeet STT — TDT 0.6b v3 transducer (int8 ONNX: encoder + decoder LSTM + joiner +
+// tokens) via `ds-stt::streaming` on the shared `ort` runtime as Kokoro.
 // All four files load flat from `model_dir()`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// [`ModelSpec`] for the encoder (`encoder.int8.onnx`, ~132 MB).
+/// [`ModelSpec`] for the encoder (`encoder.int8.onnx`, ~652 MB).
 pub fn parakeet_encoder_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::PARAKEET_ENCODER)
 }
 
-/// [`ModelSpec`] for the decoder LSTM (`decoder.int8.onnx`, ~4 MB).
+/// [`ModelSpec`] for the decoder LSTM (`decoder.int8.onnx`, ~12 MB).
 pub fn parakeet_decoder_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::PARAKEET_DECODER)
 }
 
-/// [`ModelSpec`] for the joiner (`joiner.int8.onnx`, ~1.4 MB).
+/// [`ModelSpec`] for the joiner (`joiner.int8.onnx`, ~6 MB).
 pub fn parakeet_joiner_spec() -> ModelSpec {
     ModelSpec::of(crate::urls::PARAKEET_JOINER)
 }
@@ -592,29 +592,33 @@ mod tests {
     fn parakeet_specs_have_right_urls_files_and_pins() {
         let enc = parakeet_encoder_spec();
         assert_eq!(enc.file_name, "encoder.int8.onnx");
-        assert!(
-            enc.url.contains(
-                "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8/resolve/main/encoder.int8.onnx"
-            ),
-            "encoder url: {}",
-            enc.url
-        );
         let dec = parakeet_decoder_spec();
         assert_eq!(dec.file_name, "decoder.int8.onnx");
         let joiner = parakeet_joiner_spec();
         assert_eq!(joiner.file_name, "joiner.int8.onnx");
         let tokens = parakeet_tokens_spec();
         assert_eq!(tokens.file_name, "tokens.txt");
-        let variant = "sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-1040ms-int8";
+        let variant = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8";
         for spec in [&enc, &dec, &joiner, &tokens] {
             assert!(
                 spec.url.contains(variant),
-                "portable STT assets must all use the 1040ms export: {}",
+                "portable STT assets must all come from the v3 export: {}",
+                spec.url
+            );
+            // A commit, not a branch: `main` can be repointed under a live pin.
+            assert!(
+                spec.url
+                    .contains("/resolve/2bda32ec70b097a55adaa07d9a7173915b43cc78/"),
+                "asset must pin the export commit: {}",
                 spec.url
             );
         }
-        assert!(crate::urls::PARAKEET.usage.contains("1040ms"));
-        assert!(crate::urls::PARAKEET.homepage.contains("1040ms"));
+        assert!(crate::urls::PARAKEET.usage.contains("v3"));
+        assert!(
+            crate::urls::PARAKEET
+                .homepage
+                .contains("parakeet-tdt-0.6b-v3")
+        );
         // All four pin distinct, lowercase, 64-hex digests.
         for spec in [&enc, &dec, &joiner, &tokens] {
             assert_eq!(spec.sha256.len(), 64, "sha256 must be 64 hex chars");

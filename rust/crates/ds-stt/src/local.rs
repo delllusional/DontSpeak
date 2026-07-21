@@ -1,6 +1,6 @@
 //! Local on-device STT selector. One type so the warm helper holds whichever
-//! `stt_engine` was selected. Parakeet-ONNX (streaming FastConformer over `ort`) and —
-//! on macOS — Parakeet through MLX Audio. Both are selectable.
+//! `stt_engine` was selected. Parakeet over `ort` and — on macOS — the same model through
+//! MLX Audio. Both are selectable.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ fn shim_available() -> bool {
 
 /// Active local transcriber. Same lazy-load surface as [`ParakeetTranscriber`].
 pub enum LocalTranscriber {
-    /// Streaming FastConformer over `ort` (`cpu`/`cuda` provider). Boxed: avoids clippy
+    /// Parakeet transducer over `ort` (`cpu`/`cuda` provider). Boxed: avoids clippy
     /// `large_enum_variant` vs the smaller MLX arm.
     ParakeetOnnx(Box<ParakeetTranscriber>),
     /// macOS MLX Audio (`parakeet` engine).

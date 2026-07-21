@@ -7,8 +7,8 @@
 //!   * [`claude_native::ClaudeNative`] — DEFAULT: Claude Code's voice (TAP mode).
 //!   * [`system::SystemStt`] — inert in-process placeholder; live macOS
 //!     `SFSpeechRecognizer` runs in the warm helper.
-//!   * [`parakeet::ParakeetTranscriber`] — LOCAL on-device: mic → 16 kHz → streaming
-//!     FastConformer ([`streaming`]) over shared `ort`; paste via `KeyInjector`.
+//!   * [`parakeet::ParakeetTranscriber`] — LOCAL on-device: mic → 16 kHz → the Parakeet
+//!     transducer ([`streaming`]) over shared `ort`; paste via `KeyInjector`.
 //!
 //! `Stt` is intentionally NOT `Send`: engine drives it from its single poll
 //! thread, and `ClaudeNative` borrows the engine-owned platform (macOS
@@ -25,7 +25,7 @@ pub mod local;
 pub mod mlx;
 pub mod parakeet;
 pub mod separate;
-/// Cache-aware STREAMING FastConformer over `ort` (each frame encoded once).
+/// Offline Parakeet transducer over `ort`, decoded one speech segment at a time.
 pub mod streaming;
 /// System STT over macOS `SFSpeechRecognizer`. macOS only.
 #[cfg(target_os = "macos")]

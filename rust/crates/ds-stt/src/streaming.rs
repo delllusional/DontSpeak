@@ -1,13 +1,20 @@
-//! Cache-aware STREAMING Parakeet/FastConformer transducer over `ort`.
+//! Offline Parakeet transducer over `ort`, segmented by voice activity.
 //!
-//! Offline path re-encodes the whole buffer every preview tick. Here: fixed chunks into a
-//! cache-aware NeMo FastConformer so each frame is encoded EXACTLY ONCE.
+//! Model: `sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8` (encoder + decoder LSTM + joiner ONNX
+//! + `tokens.txt`). Token-and-duration transducer: the joiner emits vocabulary logits AND a
+//! duration, so decoding jumps forward by the predicted frame count instead of stepping one
+//! frame at a time. The encoder is full-context with no cache — it was never trained with
+//! limited context, so it cannot be re-exported cache-aware — and each speech segment is
+//! therefore encoded ONCE, whole, at the pause that closes it. [`VadBoundaryDetector`]
+//! bounds segment length, which keeps cost flat instead of growing with dictation length
+//! the way a re-decoded open tail does.
 //!
-//! Model: `sherpa-onnx-nemo-streaming-fast-conformer-transducer-en-*` (encoder +
-//! decoder LSTM + joiner ONNX + `tokens.txt`).
-//!
-//! Features: kaldi log-mel fbank (80 bins, 25/10 ms, dither 0, snip_edges false,
-//! `use_energy` off) over [-1, 1] — NO 32768 scaling, NO CMVN. Wrong scaling → all-blank.
+//! Features: kaldi log-mel fbank (`feat_dim` bins from encoder metadata, 25/10 ms, dither 0,
+//! snip_edges false, `use_energy` off) over [-1, 1] — NO 32768 scaling. The encoder declares
+//! its own `normalize_type`; `per_feature` means NeMo normalized each mel bin over the
+//! utterance during training and the export did NOT bake that in, so it has to happen here.
+//! Either mistake — wrong scaling, missing normalization — decodes to all-blank rather than
+//! to degraded text.
 
 use std::path::Path;
 use std::time::Instant;
@@ -19,26 +26,35 @@ use ort::value::Tensor;
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 
+use crate::boundary::VadBoundaryDetector;
+
 /// One decoder step's result: (decoder_out column, next LSTM `h`, next LSTM `c`).
 type DecoderStep = (Vec<f32>, Vec<f32>, Vec<f32>);
 
-const MEL_BINS: usize = 80;
-/// Max non-blank symbols per encoder output frame (greedy decode cap).
+/// Consecutive zero-duration joiner steps tolerated on one frame before the decode advances
+/// anyway. A TDT model legitimately emits several symbols at one frame; only a model that
+/// never advances is a hang, and this is what bounds it.
 const MAX_SYMBOLS_PER_FRAME: usize = 10;
+/// Shortest segment worth encoding (100 ms at 16 kHz). Below this a "segment" is a click or
+/// the residue of a boundary that landed on silence: features would be a handful of frames
+/// and the decode is guaranteed blank.
+const MIN_SEGMENT_SAMPLES: usize = 1_600;
 
-/// Encoder metadata (read at load — never hardcode; 80/480/1040 ms variants differ).
+/// NeMo's `normalize_batch` epsilon, added to the per-bin standard deviation.
+const NORMALIZE_EPS: f32 = 1e-5;
+
+/// Encoder metadata (read at load — never hardcode; the export carries its own contract).
 struct Meta {
-    window_size: usize, // feature frames per encoder step
-    chunk_shift: usize, // frames advanced per step (overlap = window - shift)
-    blank_id: i32,      // = vocab_size; tokens.txt has vocab_size + 1 entries
+    feat_dim: usize,
+    /// `per_feature` (NeMo's default) → normalize each mel bin over the segment.
+    per_feature_norm: bool,
+    blank_id: i32, // = vocab_size; tokens.txt has vocab_size + 1 entries
     pred_hidden: usize,
     pred_layers: usize,
-    c1: [i64; 4], // cache_last_channel [1, d1, d2, d3]
-    c2: [i64; 4], // cache_last_time
 }
 
-/// Loaded streaming model: three ort sessions + meta + tokens.
-pub struct StreamingModel {
+/// Loaded model: three ort sessions + meta + tokens.
+pub struct TransducerModel {
     encoder: Session,
     decoder: Session,
     joiner: Session,
@@ -53,18 +69,39 @@ pub struct StreamingModel {
     provider: ds_config::RealizedProvider,
 }
 
-/// Per-utterance state. One per dictation; seeded by `StreamingModel::new_state`.
-pub struct StreamingState {
-    fbank: OnlineFeature,
-    feat_off: usize, // frames already consumed by an encoder step
-    cache1: Vec<f32>,
-    cache2: Vec<f32>,
-    cache_len: i64,
-    dec_out: Vec<f32>, // [pred_hidden]
-    h: Vec<f32>,       // [pred_layers, 1, pred_hidden]
-    c: Vec<f32>,
-    hyp: Vec<i32>,
+/// Per-utterance state: the audio not yet decoded, plus the segments already decoded.
+pub struct TranscribeState {
+    /// Endpointer over the 16 kHz stream this state is fed.
+    boundary: VadBoundaryDetector,
+    /// Captured audio from the last boundary onward.
+    pending: Vec<f32>,
+    /// Samples the boundary detector has already accounted for and `pending` has dropped —
+    /// boundaries come back in whole-stream coordinates, `pending` starts at this offset.
+    dropped: usize,
+    /// Finished segment texts, in spoken order.
+    committed: Vec<String>,
     transcribe_ms: f64, // cumulative model time for STTSTATS
+}
+
+impl TranscribeState {
+    /// Append `pcm_16k` and hand back every segment the endpointer just closed, in order.
+    /// Audio past the last boundary stays pending for the next call or for finalize.
+    fn take_closed_segments(&mut self, pcm_16k: &[f32]) -> Vec<Vec<f32>> {
+        self.pending.extend_from_slice(pcm_16k);
+        let mut segments = Vec::new();
+        for boundary in self.boundary.feed(pcm_16k) {
+            // Boundaries are absolute in the fed stream; `pending` starts at `dropped`.
+            let end = boundary
+                .saturating_sub(self.dropped)
+                .min(self.pending.len());
+            if end == 0 {
+                continue;
+            }
+            segments.push(self.pending.drain(..end).collect());
+            self.dropped += end;
+        }
+        segments
+    }
 }
 
 fn meta_str(s: &Session, key: &str) -> Option<String> {
@@ -88,7 +125,7 @@ fn build(path: &Path, want_gpu: bool) -> Result<(Session, ds_config::RealizedPro
     Ok((session, realized))
 }
 
-impl StreamingModel {
+impl TransducerModel {
     /// Load encoder/decoder/joiner + `tokens.txt`. Honors `DONTSPEAK_STT_PROVIDER`.
     /// Mirrors Kokoro: GPU load failure retries on CPU (e.g. Win32 1114).
     pub fn load(dir: &Path, int8: bool) -> Result<Self, String> {
@@ -123,39 +160,27 @@ impl StreamingModel {
         let (decoder, _) = build(&dir.join(format!("decoder{sfx}.onnx")), want_gpu)?;
         let (joiner, _) = build(&dir.join(format!("joiner{sfx}.onnx")), want_gpu)?;
 
-        if encoder.outputs().len() < 5 {
+        // encoded + encoded_lengths. A cache-aware export has five and threads state the
+        // decode loop below does not keep — reject it here rather than mis-decode it.
+        if encoder.outputs().len() != 2 {
             return Err(format!(
-                "encoder has {} outputs, need >= 5",
+                "encoder has {} outputs, expected 2 (offline transducer)",
                 encoder.outputs().len()
             ));
         }
 
         let vocab = meta_usize(&encoder, "vocab_size", 1024);
-        let window_size = meta_usize(&encoder, "window_size", 65);
-        let chunk_shift = meta_usize(&encoder, "chunk_shift", 56);
-        if chunk_shift == 0 || window_size == 0 {
-            return Err(format!(
-                "invalid streaming meta: window={window_size}, shift={chunk_shift} (must be > 0)"
-            ));
+        let feat_dim = meta_usize(&encoder, "feat_dim", 128);
+        if feat_dim == 0 {
+            return Err("encoder meta feat_dim is 0".to_string());
         }
         let meta = Meta {
-            window_size,
-            chunk_shift,
+            feat_dim,
+            per_feature_norm: meta_str(&encoder, "normalize_type")
+                .is_none_or(|t| t.trim() == "per_feature"),
             blank_id: vocab as i32,
             pred_hidden: meta_usize(&encoder, "pred_hidden", 640),
             pred_layers: meta_usize(&encoder, "pred_rnn_layers", 1),
-            c1: [
-                1,
-                meta_usize(&encoder, "cache_last_channel_dim1", 17) as i64,
-                meta_usize(&encoder, "cache_last_channel_dim2", 70) as i64,
-                meta_usize(&encoder, "cache_last_channel_dim3", 512) as i64,
-            ],
-            c2: [
-                1,
-                meta_usize(&encoder, "cache_last_time_dim1", 17) as i64,
-                meta_usize(&encoder, "cache_last_time_dim2", 512) as i64,
-                meta_usize(&encoder, "cache_last_time_dim3", 8) as i64,
-            ],
         };
         let dec_out_names: Vec<String> = decoder
             .outputs()
@@ -204,177 +229,165 @@ impl StreamingModel {
         self.provider
     }
 
-    /// Kaldi log-mel fbank matching reference (use_energy off, dither 0, snip_edges off, 80 bins).
-    fn new_fbank() -> Result<OnlineFeature, String> {
+    /// Kaldi log-mel fbank matching reference (use_energy off, dither 0, snip_edges off).
+    fn new_fbank(&self) -> Result<OnlineFeature, String> {
         let mut opts = FbankOptions::default();
         opts.frame_opts.samp_freq = 16_000.0;
         opts.frame_opts.dither = 0.0;
         opts.frame_opts.snip_edges = false;
-        opts.mel_opts.num_bins = MEL_BINS;
+        opts.mel_opts.num_bins = self.meta.feat_dim;
         opts.use_energy = false;
         let comp = FbankComputer::new(opts).map_err(|e| format!("fbank init: {e}"))?;
         Ok(OnlineFeature::new(FeatureComputer::Fbank(comp)))
     }
 
-    /// New utterance: zeroed caches, decoder seeded on blank/SOS (reference).
+    /// New utterance: empty capture, fresh endpointer, nothing committed.
     /// [`Self::accept_16k`] expects 16 kHz mono (resample is in the stream session).
-    pub fn new_state(&mut self) -> Result<StreamingState, String> {
-        // Copy meta so &self.meta doesn't span &mut run_decoder.
-        let (blank_id, state_len, c1, c2) = {
-            let m = &self.meta;
-            (m.blank_id, m.pred_layers * m.pred_hidden, m.c1, m.c2)
-        };
-        let fbank = Self::new_fbank()?;
-        let (dec_out, h, c) =
-            self.run_decoder(blank_id, vec![0.0f32; state_len], vec![0.0f32; state_len])?;
-        Ok(StreamingState {
-            fbank,
-            feat_off: 0,
-            cache1: vec![0.0f32; (c1[1] * c1[2] * c1[3]) as usize],
-            cache2: vec![0.0f32; (c2[1] * c2[2] * c2[3]) as usize],
-            cache_len: 0,
-            dec_out,
-            h,
-            c,
-            hyp: Vec::new(),
+    pub fn new_state(&mut self) -> Result<TranscribeState, String> {
+        Ok(TranscribeState {
+            boundary: VadBoundaryDetector::new(16_000),
+            pending: Vec::new(),
+            dropped: 0,
+            committed: Vec::new(),
             transcribe_ms: 0.0,
         })
     }
 
-    /// Feed 16 kHz mono; run ready encoder windows; return hypothesis so far.
+    /// Feed 16 kHz mono; decode every segment the endpointer closed; return the text so far.
+    /// Audio after the last boundary stays pending — it is transcribed by [`Self::finalize`].
     pub fn accept_16k(
         &mut self,
-        state: &mut StreamingState,
+        state: &mut TranscribeState,
         pcm_16k: &[f32],
     ) -> Result<String, String> {
-        if !pcm_16k.is_empty() {
-            state.fbank.accept_waveform(16_000.0, pcm_16k);
-            self.drain_windows(state, false)?;
+        if pcm_16k.is_empty() {
+            return Ok(self.text(state));
+        }
+        for segment in state.take_closed_segments(pcm_16k) {
+            self.decode_segment(state, &segment)?;
         }
         Ok(self.text(state))
     }
 
-    /// Flush remaining (zero-padded) windows → final text.
-    pub fn finalize(&mut self, state: &mut StreamingState) -> Result<String, String> {
-        state.fbank.input_finished();
-        self.drain_windows(state, true)?;
+    /// Decode the still-open tail → final text.
+    pub fn finalize(&mut self, state: &mut TranscribeState) -> Result<String, String> {
+        let tail = std::mem::take(&mut state.pending);
+        state.dropped += tail.len();
+        self.decode_segment(state, &tail)?;
         Ok(self.text(state))
     }
 
-    /// Encoder steps while a full window is ready (or pad partial on flush).
-    fn drain_windows(&mut self, state: &mut StreamingState, flush: bool) -> Result<(), String> {
-        let (window, shift) = (self.meta.window_size, self.meta.chunk_shift);
-        loop {
-            let ready = state.fbank.num_frames_ready();
-            let have = ready.saturating_sub(state.feat_off);
-            if have == 0 || (!flush && have < window) {
-                break;
-            }
-            // Channel-major [80, window]; zero-pad on flush.
-            let mut audio = vec![0.0f32; MEL_BINS * window];
-            for i in 0..window {
-                let fi = state.feat_off + i;
-                if fi >= ready {
-                    break;
-                }
-                let frame = state
-                    .fbank
-                    .get_frame(fi)
-                    .ok_or_else(|| format!("fbank frame {fi} missing"))?;
-                for (ch, &v) in frame.iter().enumerate().take(MEL_BINS) {
-                    audio[ch * window + i] = v;
-                }
-            }
-            self.run_encoder_step(state, &audio)?;
-            state.feat_off += shift;
-            if flush && have <= window {
-                break;
-            }
+    /// One whole segment: features → one encoder forward → greedy decode → commit its text.
+    /// Decoder state is per segment: a closed segment is a finished utterance, and carrying
+    /// LSTM state across a pause would condition the next one on it.
+    fn decode_segment(&mut self, state: &mut TranscribeState, pcm: &[f32]) -> Result<(), String> {
+        if pcm.len() < MIN_SEGMENT_SAMPLES {
+            return Ok(());
+        }
+        let t0 = Instant::now();
+        let audio = self.features(pcm)?;
+        let frames = audio.len() / self.meta.feat_dim;
+        let hyp = self.encode_and_decode(&audio, frames)?;
+        state.transcribe_ms += t0.elapsed().as_secs_f64() * 1000.0;
+        let text = self.detokenize(&hyp);
+        if !text.is_empty() {
+            state.committed.push(text);
         }
         Ok(())
     }
 
-    /// One encoder forward; thread caches; greedy-decode every output column.
-    fn run_encoder_step(
-        &mut self,
-        state: &mut StreamingState,
-        audio: &[f32],
-    ) -> Result<(), String> {
-        let t0 = Instant::now();
-        let m = &self.meta;
-        let window = m.window_size as i64;
-        let audio_t = Tensor::from_array((vec![1i64, MEL_BINS as i64, window], audio.to_vec()))
-            .map_err(|e| format!("audio tensor: {e}"))?;
-        let len_t = Tensor::from_array((vec![1i64], vec![window]))
+    /// Channel-major log-mel features `[feat_dim, frames]` for a whole segment.
+    fn features(&self, pcm: &[f32]) -> Result<Vec<f32>, String> {
+        let mut fbank = self.new_fbank()?;
+        fbank.accept_waveform(16_000.0, pcm);
+        fbank.input_finished();
+        let frames = fbank.num_frames_ready();
+        let bins = self.meta.feat_dim;
+        let mut audio = vec![0.0f32; bins * frames];
+        for f in 0..frames {
+            let frame = fbank
+                .get_frame(f)
+                .ok_or_else(|| format!("fbank frame {f} missing"))?;
+            for (ch, &v) in frame.iter().enumerate().take(bins) {
+                audio[ch * frames + f] = v;
+            }
+        }
+        if self.meta.per_feature_norm && frames > 1 {
+            normalize_per_feature(&mut audio, bins, frames);
+        }
+        Ok(audio)
+    }
+
+    /// Encode the whole segment once, then greedy-decode every encoder column.
+    fn encode_and_decode(&mut self, audio: &[f32], frames: usize) -> Result<Vec<i32>, String> {
+        if frames == 0 {
+            return Ok(Vec::new());
+        }
+        let audio_t = Tensor::from_array((
+            vec![1i64, self.meta.feat_dim as i64, frames as i64],
+            audio.to_vec(),
+        ))
+        .map_err(|e| format!("audio tensor: {e}"))?;
+        let len_t = Tensor::from_array((vec![1i64], vec![frames as i64]))
             .map_err(|e| format!("length tensor: {e}"))?;
-        let c1_t = Tensor::from_array((m.c1.to_vec(), state.cache1.clone()))
-            .map_err(|e| format!("cache1 tensor: {e}"))?;
-        let c2_t = Tensor::from_array((m.c2.to_vec(), state.cache2.clone()))
-            .map_err(|e| format!("cache2 tensor: {e}"))?;
-        let clen_t = Tensor::from_array((vec![1i64], vec![state.cache_len]))
-            .map_err(|e| format!("cache_len tensor: {e}"))?;
         let outputs = self
             .encoder
-            .run(ort::inputs! {
-                "audio_signal" => audio_t,
-                "length" => len_t,
-                "cache_last_channel" => c1_t,
-                "cache_last_time" => c2_t,
-                "cache_last_channel_len" => clen_t,
-            })
+            .run(ort::inputs! { "audio_signal" => audio_t, "length" => len_t })
             .map_err(|e| format!("encoder run: {e}"))?;
-        // [0]=encoded, [2]=cache1_next, [3]=cache2_next, [4]=cache_len_next.
         let (enc_shape, enc_data) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("encoder out extract: {e}"))?;
-        let d = enc_shape[1] as usize; // encoder dim (512)
-        let t_out = enc_shape[2] as usize;
-        let enc = enc_data.to_vec();
-        state.cache1 = outputs[2]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("cache1 next: {e}"))?
-            .1
-            .to_vec();
-        state.cache2 = outputs[3]
-            .try_extract_tensor::<f32>()
-            .map_err(|e| format!("cache2 next: {e}"))?
-            .1
-            .to_vec();
-        state.cache_len = outputs[4]
+        let d = enc_shape[1] as usize; // encoder dim
+        let padded = enc_shape[2] as usize;
+        // Trust the encoder's own valid-length output over the padded time axis.
+        let valid = outputs[1]
             .try_extract_tensor::<i64>()
-            .map_err(|e| format!("cache_len next: {e}"))?
+            .map_err(|e| format!("encoded length extract: {e}"))?
             .1
             .first()
             .copied()
-            .unwrap_or(0);
+            .unwrap_or(padded as i64)
+            .clamp(0, padded as i64) as usize;
+        let enc = enc_data.to_vec();
         drop(outputs);
 
-        // Greedy decode per column (channel-major: enc[ch*T'+t]).
+        let (blank_id, state_len) = (
+            self.meta.blank_id,
+            self.meta.pred_layers * self.meta.pred_hidden,
+        );
+        let (mut dec_out, mut h, mut c) =
+            self.run_decoder(blank_id, vec![0.0f32; state_len], vec![0.0f32; state_len])?;
+        let mut hyp = Vec::new();
         let mut col = vec![0.0f32; d];
-        for t in 0..t_out {
+        let mut t = 0usize;
+        let mut stalled = 0usize;
+        while t < valid {
+            // Channel-major: enc[ch * T + t].
             for (ch, slot) in col.iter_mut().enumerate() {
-                *slot = enc[ch * t_out + t];
+                *slot = enc[ch * padded + t];
             }
-            let mut emitted = 0;
-            while emitted < MAX_SYMBOLS_PER_FRAME {
-                let k = self.run_joiner(&col, &state.dec_out)?;
-                if k == self.meta.blank_id {
-                    break;
+            let (token, skip) = self.run_joiner(&col, &dec_out)?;
+            if token != blank_id {
+                hyp.push(token);
+                let step =
+                    self.run_decoder(token, std::mem::take(&mut h), std::mem::take(&mut c))?;
+                dec_out = step.0;
+                h = step.1;
+                c = step.2;
+            }
+            if skip > 0 {
+                t += skip;
+                stalled = 0;
+            } else {
+                // Duration 0 keeps the same frame so another symbol can come from it.
+                stalled += 1;
+                if stalled >= MAX_SYMBOLS_PER_FRAME {
+                    t += 1;
+                    stalled = 0;
                 }
-                state.hyp.push(k);
-                let (dec_out, h, c) = self.run_decoder(
-                    k,
-                    std::mem::take(&mut state.h),
-                    std::mem::take(&mut state.c),
-                )?;
-                state.dec_out = dec_out;
-                state.h = h;
-                state.c = c;
-                emitted += 1;
             }
         }
-        state.transcribe_ms += t0.elapsed().as_secs_f64() * 1000.0;
-        Ok(())
+        Ok(hyp)
     }
 
     fn run_decoder(&mut self, token: i32, h: Vec<f32>, c: Vec<f32>) -> Result<DecoderStep, String> {
@@ -414,7 +427,10 @@ impl StreamingModel {
         Ok((dec_out, h_next, c_next))
     }
 
-    fn run_joiner(&mut self, enc_col: &[f32], dec_out: &[f32]) -> Result<i32, String> {
+    /// One joint step → (token id, frames to skip). A TDT joiner emits the vocabulary logits
+    /// followed by one logit per configured duration, and the argmax over that tail IS the
+    /// duration in frames (the export lists durations 0..n, so index and value coincide).
+    fn run_joiner(&mut self, enc_col: &[f32], dec_out: &[f32]) -> Result<(i32, usize), String> {
         let enc_t = Tensor::from_array((vec![1i64, enc_col.len() as i64, 1], enc_col.to_vec()))
             .map_err(|e| format!("joiner enc tensor: {e}"))?;
         let dec_t = Tensor::from_array((vec![1i64, dec_out.len() as i64, 1], dec_out.to_vec()))
@@ -426,21 +442,21 @@ impl StreamingModel {
         let (_, logits) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("joiner out: {e}"))?;
-        let mut best = 0i32;
-        let mut best_v = f32::NEG_INFINITY;
-        for (i, &v) in logits.iter().enumerate() {
-            if v > best_v {
-                best_v = v;
-                best = i as i32;
-            }
+        let vocab = (self.meta.blank_id as usize) + 1;
+        if logits.len() <= vocab {
+            return Err(format!(
+                "joiner emitted {} logits, need > vocab {vocab} (token + duration halves)",
+                logits.len()
+            ));
         }
-        Ok(best)
+        let (tokens, durations) = logits.split_at(vocab);
+        Ok((argmax(tokens) as i32, argmax(durations)))
     }
 
-    /// Hypothesis detokenized (BPE `▁` → space).
-    fn text(&self, state: &StreamingState) -> String {
+    /// One segment's tokens detokenized (BPE `▁` → space).
+    fn detokenize(&self, hyp: &[i32]) -> String {
         let mut s = String::new();
-        for &t in &state.hyp {
+        for &t in hyp {
             if let Some(tok) = self.tokens.get(t as usize) {
                 s.push_str(tok);
             } else {
@@ -449,6 +465,39 @@ impl StreamingModel {
         }
         s.replace('\u{2581}', " ").trim().to_string()
     }
+
+    /// Everything decoded so far, segments joined by a space.
+    fn text(&self, state: &TranscribeState) -> String {
+        state.committed.join(" ")
+    }
+}
+
+/// NeMo `normalize_batch` with `per_feature`: each bin zero-mean and unit-variance over the
+/// segment, using the unbiased standard deviation plus [`NORMALIZE_EPS`].
+fn normalize_per_feature(audio: &mut [f32], bins: usize, frames: usize) {
+    let n = frames as f32;
+    for bin in 0..bins {
+        let row = &mut audio[bin * frames..(bin + 1) * frames];
+        let mean = row.iter().sum::<f32>() / n;
+        let var = row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / (n - 1.0);
+        let scale = 1.0 / (var.sqrt() + NORMALIZE_EPS);
+        for v in row.iter_mut() {
+            *v = (*v - mean) * scale;
+        }
+    }
+}
+
+/// Index of the largest value; ties take the first.
+fn argmax(values: &[f32]) -> usize {
+    let mut best = 0usize;
+    let mut best_v = f32::NEG_INFINITY;
+    for (i, &v) in values.iter().enumerate() {
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best
 }
 
 /// `tokens.txt`: lines `token<space>id`; index = id.
@@ -509,16 +558,17 @@ pub fn timed<T>(call: impl FnOnce() -> Result<T, String>) -> (Result<T, String>,
     (out, t0.elapsed().as_secs_f64() * 1000.0)
 }
 
-/// ONNX streaming backend as one owner (model + utterance state) for [`StreamingStt`].
+/// ONNX backend as one owner (model + utterance state) for [`StreamingStt`]. Audio streams
+/// in; text comes out a segment at a time (see the module docs).
 pub struct OnnxStreamer {
-    model: StreamingModel,
-    state: StreamingState,
+    model: TransducerModel,
+    state: TranscribeState,
 }
 
 impl OnnxStreamer {
-    /// Load the streaming model from `dir` (int8 by default) and seed a fresh utterance.
+    /// Load the model from `dir` (int8 by default) and seed a fresh utterance.
     pub fn load(dir: &Path, int8: bool) -> Result<Self, String> {
-        let mut model = StreamingModel::load(dir, int8)?;
+        let mut model = TransducerModel::load(dir, int8)?;
         let state = model.new_state()?;
         Ok(Self { model, state })
     }
@@ -795,6 +845,85 @@ impl StreamSession {
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// 30 ms frames at 16 kHz, the endpointer's granularity.
+    const FRAME: usize = 480;
+
+    fn state() -> TranscribeState {
+        TranscribeState {
+            boundary: VadBoundaryDetector::new(16_000),
+            pending: Vec::new(),
+            dropped: 0,
+            committed: Vec::new(),
+            transcribe_ms: 0.0,
+        }
+    }
+
+    #[test]
+    fn closed_segments_carry_the_audio_between_boundaries() {
+        // Speech long enough to open a region, then silence past the hangover closes it.
+        let speech = vec![0.2f32; FRAME * 10];
+        let silence = vec![0.0f32; FRAME * 30];
+        let mut st = state();
+
+        assert!(
+            st.take_closed_segments(&speech).is_empty(),
+            "an open region must not be handed out early"
+        );
+        let closed = st.take_closed_segments(&silence);
+        assert_eq!(closed.len(), 1, "the pause must close exactly one segment");
+        let first = &closed[0];
+        assert!(
+            first.len() >= speech.len(),
+            "a closed segment carries its speech plus the hangover, got {}",
+            first.len()
+        );
+        assert_eq!(
+            st.dropped,
+            first.len(),
+            "dropped must track what left `pending`"
+        );
+
+        // A second utterance stays pending until its own pause: what remains is the silence
+        // the first boundary left behind plus the new speech.
+        let closed = st.take_closed_segments(&speech);
+        assert!(closed.is_empty());
+        assert!(st.pending.len() >= speech.len());
+        assert_eq!(&st.pending[st.pending.len() - speech.len()..], &speech[..]);
+    }
+
+    #[test]
+    fn silence_alone_never_closes_a_segment() {
+        let mut st = state();
+        for _ in 0..4 {
+            assert!(
+                st.take_closed_segments(&vec![0.0f32; FRAME * 20])
+                    .is_empty()
+            );
+        }
+        assert_eq!(st.dropped, 0);
+    }
+
+    #[test]
+    fn per_feature_normalization_zeroes_mean_and_unit_variance_per_bin() {
+        // Channel-major [bins, frames]; bin 1 is a shifted, scaled copy of bin 0, so an
+        // untouched or globally-normalized array would leave them different.
+        let frames = 4;
+        let mut audio = vec![1.0, 2.0, 3.0, 4.0, 101.0, 102.0, 103.0, 104.0];
+        normalize_per_feature(&mut audio, 2, frames);
+        for bin in 0..2 {
+            let row = &audio[bin * frames..(bin + 1) * frames];
+            let mean = row.iter().sum::<f32>() / frames as f32;
+            let var =
+                row.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / (frames as f32 - 1.0);
+            assert!(mean.abs() < 1e-4, "bin {bin} mean {mean}");
+            assert!((var - 1.0).abs() < 1e-3, "bin {bin} variance {var}");
+        }
+        assert!(
+            (audio[0] - audio[frames]).abs() < 1e-4,
+            "bins differing only by offset/scale must normalize identically"
+        );
+    }
 
     #[derive(Default)]
     struct FakeBackendState {

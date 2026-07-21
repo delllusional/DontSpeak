@@ -67,9 +67,10 @@ and [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 
 ## Local STT (built-in)
 
-Same warm helper as TTS: Caps-ON opens mic → streaming FastConformer over ORT on
-Windows/Linux, or Parakeet via MLX Audio on Apple Silicon. Caps-OFF: final
-transcript → focus-gated key injector.
+Same warm helper as TTS: Caps-ON opens mic → Parakeet TDT 0.6b v3 over ORT on
+Windows/Linux, or the same model via MLX Audio on Apple Silicon. Caps-OFF: final
+transcript → focus-gated key injector. The model is full-context, so dictation is decoded
+one speech segment at a time at the pauses a VAD endpointer finds.
 Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 ## Models & ONNX

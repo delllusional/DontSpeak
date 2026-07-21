@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer};
 /// Off: `stt_engine = Some(vec![])`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SttEngine {
-    /// Local FastConformer (`built_in`). Via [`Provider`]; factory → ClaudeCode if model missing.
+    /// Local Parakeet (`built_in`). Via [`Provider`]; factory → ClaudeCode if model missing.
     #[default]
     BuiltIn,
     /// OS on-device STT (macOS). Inert when unavailable (no silent fall to claude_code).

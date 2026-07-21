@@ -1,9 +1,10 @@
-//! Parakeet — portable local STT: mic (cpal) → mono → 16 kHz (rubato) → cache-aware
-//! streaming FastConformer ([`crate::streaming`]) over shared `ort`. Cross-platform
-//! sibling of the macOS MLX Audio backend.
+//! Parakeet — portable local STT: mic (cpal) → mono → 16 kHz (rubato) → the offline
+//! transducer ([`crate::streaming`]) over shared `ort`. Cross-platform sibling of the macOS
+//! MLX Audio backend, and the same Parakeet v3 weights.
 //!
 //! This file owns mic [`Capture`] + [`resample`] and [`ParakeetTranscriber`] (one-shot
-//! whole-buffer adapter). Live helper dictation drives [`StreamingModel`] INCREMENTALLY.
+//! whole-buffer adapter). Live helper dictation feeds the same model incrementally, which
+//! decodes at speech pauses.
 //!
 //! Unlike ClaudeNative (PTT tap), this records audio and INJECTS via clipboard-paste
 //! (`KeyInjector::type_text`), focus-gated so text never leaks outside a terminal.
@@ -28,7 +29,7 @@ use ringbuf::{HeapCons, HeapProd, HeapRb};
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Async, FixedAsync, Indexing, PolynomialDegree, Resampler};
 
-use crate::streaming::StreamingModel;
+use crate::streaming::TransducerModel;
 
 /// Parakeet expects 16 kHz mono f32 in [-1, 1].
 const TARGET_RATE: u32 = 16_000;
@@ -112,18 +113,17 @@ impl Capture {
     }
 }
 
-// ── Transcriber — lazy StreamingModel; 16 kHz mono PCM → text ────────────────
+// ── Transcriber — lazy TransducerModel; 16 kHz mono PCM → text ───────────────
 
-/// Cross-platform ONNX STT via cache-aware streaming FastConformer
-/// ([`StreamingModel`]) — replaced the old whole-buffer `transcribe-rs` TDT engine.
-/// Name kept for `built_in` engine / provider tokens / asset wiring. Lazy-load +
-/// whole-buffer API; live helper drives incremental partials on the same model. `Send`.
+/// Cross-platform ONNX STT via the offline Parakeet transducer ([`TransducerModel`]).
+/// Lazy-load + whole-buffer API; the live helper feeds the same model incrementally and
+/// gets a segment's text at each pause. `Send`.
 pub struct ParakeetTranscriber {
     /// Flat dir: `encoder/decoder/joiner.int8.onnx` + `tokens.txt`.
     model_dir: PathBuf,
     /// Explicit provider for in-process users; `None` keeps helper env contract.
     provider: Option<String>,
-    model: Option<StreamingModel>,
+    model: Option<TransducerModel>,
 }
 
 impl ParakeetTranscriber {
@@ -146,13 +146,13 @@ impl ParakeetTranscriber {
     }
 
     /// Lazy load int8 over shared ort (CPU EP — dynamic-quant ops aren't GPU-accelerated).
-    fn model(&mut self) -> Result<&mut StreamingModel, String> {
+    fn model(&mut self) -> Result<&mut TransducerModel, String> {
         if self.model.is_none() {
             self.model = Some(match &self.provider {
                 Some(provider) => {
-                    StreamingModel::load_for_provider(&self.model_dir, true, provider)?
+                    TransducerModel::load_for_provider(&self.model_dir, true, provider)?
                 }
-                None => StreamingModel::load(&self.model_dir, true)?,
+                None => TransducerModel::load(&self.model_dir, true)?,
             });
         }
         Ok(self.model.as_mut().expect("model just loaded"))

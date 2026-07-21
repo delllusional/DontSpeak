@@ -74,8 +74,9 @@ Always-listening does not use Caps Lock.
 
 - **TTS** — Kokoro-82M, Chatterbox Multilingual, Qwen3-TTS, or OmniVoice
   (`tts_model`), or OS voice
-- **STT** — streaming FastConformer (1040 ms) on Windows/Linux; Parakeet via MLX Audio,
-  plus System Speech on macOS; Claude Code dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
+- **STT** — Parakeet TDT 0.6b v3 (25 European languages, detected by the model) everywhere:
+  ONNX on Windows/Linux, MLX Audio on Apple Silicon, plus System Speech on macOS; Claude Code
+  dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)
 - Diarization — Sortformer, with WeSpeaker speaker identity and SepFormer
   speaker-lock separation — issue #77
 
