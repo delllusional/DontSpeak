@@ -4,7 +4,8 @@ Plan for [#152](https://github.com/delllusional/DontSpeak/issues/152).
 **Base:** `main` @ `4e41098`  
 **Risk:** yes (TTS inference contracts, MCP surface, on-disk user voice packages)
 
-**Selection surface:** MCP tools — create, list, select/pin. Host UI may mirror later; MCP is the contract.
+**Invariant: all voice-selection interaction is via MCP.**  
+No host-only picker, no hand-editing `config.toml` as the supported way to choose a voice, no CLI-only sticky select. Agents and any future UI use the same MCP tools (`voices`, `manage_voices`, `set_config` for pool membership, `speak.voice`).
 
 ---
 
@@ -90,21 +91,26 @@ VoiceSpec {
 
 ---
 
-## 5. Selection through MCP tools (required surface)
+## 5. All voice selection via MCP (invariant)
 
-Voice **create / list / select / pin** is agent-facing via MCP. Host UI may mirror later; MCP is the contract.
+**Every** interaction that chooses, creates, lists, pins, or materializes a voice goes through MCP tools. Config files and on-disk packages are storage only — not the interaction surface. A host UI, if added later, must call the same engine operations that back these tools (no parallel private API for picking voices).
 
-### Existing tools (extend)
+### MCP tools
 
 | Tool | Role |
 | --- | --- |
-| **`voices`** | List models + packages: `id`, `kind`, label, attributes/ref summary, `active` (in pool), optional “assigned to this agent”. |
-| **`set_config`** | Pool membership only: `tts_voices.chatterbox` / `omnivoice` = **list of package ids** already registered. Does **not** create packages or accept raw instruct prose as pool entries. |
-| **`speak`** | Optional `voice` = package id for this utterance; omit → agent sticky assignment from pool. |
+| **`voices`** | Discover packages: `id`, `kind`, label, attributes/ref summary, `active` (in pool), optional “assigned to this agent”. Read-only. |
+| **`manage_voices`** (new) | Lifecycle + pin: `list`, `create`, `update`, `delete`, **`select`**, `materialize`. |
+| **`set_config`** | Global pool membership only: `tts_voices.chatterbox` / `omnivoice` = **registered package ids**. Does **not** create packages or accept raw instruct prose as pool entries. Invoked via MCP like any other config change. |
+| **`speak`** | Optional `voice` = package id for this utterance; omit → agent sticky from last `select` / assignment. |
 
-### New MCP tool: `manage_voices`
+Not supported as product paths for selection:
 
-Single tool for open-model packages. Actions:
+- Editing `config.toml` by hand as the way to “pick my voice”
+- Host-only combo boxes that write config without going through the tool/engine path
+- One-off CLI flags that bypass MCP for sticky assignment
+
+### `manage_voices` actions
 
 | Action | Purpose |
 | --- | --- |
@@ -220,7 +226,7 @@ Document contracts in `docs/TTS-PIPELINE.md` and MCP descriptions. Do not presen
 
 ### Phase 3 — Optional
 
-Session-keyed pin; status surfaces resolved package id (#151); host pickers mirroring MCP.
+Session-keyed pin; status surfaces resolved package id (#151). Any host control is a thin client of the same MCP/engine path only.
 
 ---
 
@@ -257,7 +263,7 @@ Tests: tempdir packages; no live network; unknown id fails closed; attribute par
 2. Phase 1 Chatterbox packages + `manage_voices`.  
 3. Phase 1 Omni presets + instruct on supporting provider.  
 4. Phase 2 materialize.  
-5. Session pin only if product needs per-window voices beyond agent sticky.
+5. Session pin only if product needs per-window voices beyond agent sticky (still via MCP).
 
 ---
 
