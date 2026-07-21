@@ -72,11 +72,6 @@ pub fn sync_grok_narrate_from_config(paths: &crate::Paths) -> std::io::Result<bo
     sync_grok_narrate_agents_md(&paths.grok_agents_md, digests_on)
 }
 
-/// Best-effort remove (unwire).
-pub fn clear_grok_narrate_agents_md(agents_md: &Path) -> std::io::Result<bool> {
-    sync_grok_narrate_agents_md(agents_md, false)
-}
-
 fn strip_managed_section(existing: &str) -> String {
     let Some(start) = existing.find(GROK_NARRATE_BEGIN) else {
         return existing.to_string();

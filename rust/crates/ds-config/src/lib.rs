@@ -39,8 +39,8 @@ pub use enums::{
     default_provider, intel_mac_builtin_ort_available, normalize_tray, provider_pref_wants_gpu,
 };
 pub use grok_rules::{
-    GROK_NARRATE_BEGIN, GROK_NARRATE_END, apply_grok_narrate_section, clear_grok_narrate_agents_md,
-    sync_grok_narrate_agents_md, sync_grok_narrate_from_config,
+    GROK_NARRATE_BEGIN, GROK_NARRATE_END, apply_grok_narrate_section, sync_grok_narrate_agents_md,
+    sync_grok_narrate_from_config,
 };
 pub use grok_sessions::{
     encode_grok_session_cwd, grok_chat_history_path, grok_session_dir, grok_sessions_root,
@@ -49,7 +49,7 @@ pub use grok_sessions::{
     scan_grok_chat_history_by_mtime,
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
-pub use paths::{Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, mlx_model_present, model_dir};
+pub use paths::{Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, model_dir};
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};
 pub use tts_model::{TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, tts_model_descriptor};

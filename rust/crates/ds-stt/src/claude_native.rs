@@ -75,10 +75,6 @@ impl<P: KeyInjector + FrontmostWindow> Stt for ClaudeNative<P> {
 
     // abort() == stop() (default): one toggle returns Claude to idle — §F long-press reset.
 
-    fn is_available(&self) -> bool {
-        true
-    }
-
     fn kind(&self) -> &'static str {
         "claude_code"
     }

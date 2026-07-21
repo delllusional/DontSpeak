@@ -350,7 +350,6 @@ fn print_registry(paths: Option<&Paths>) {
             "  kind:    {}",
             match spec.kind {
                 ClientKind::TerminalCli => "terminal CLI",
-                ClientKind::DesktopApp => "desktop app",
             }
         );
         if let Some(p) = paths {

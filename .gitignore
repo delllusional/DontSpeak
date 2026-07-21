@@ -27,8 +27,6 @@ apps/macos/models/
 target/
 
 # macOS DontSpeakMLX Swift package smoke-test artifacts
-apps/macos/DontSpeakMLX/ctest
-apps/macos/DontSpeakMLX/ctest_asr
 apps/macos/DontSpeakMLX/*.wav
 
 # Windows installer build artifacts

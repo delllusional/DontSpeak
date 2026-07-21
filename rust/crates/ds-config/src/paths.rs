@@ -317,57 +317,6 @@ pub fn mlx_dir() -> Option<PathBuf> {
     Some(model_dir()?.join("mlx"))
 }
 
-/// Non-empty subdir whose name contains `needle`? Pure; shared by helper + status.
-pub fn mlx_model_present_in(dir: &Path, needle: &str) -> bool {
-    let needle = needle.to_ascii_lowercase();
-    let nonempty = |p: &Path| {
-        std::fs::read_dir(p)
-            .map(|mut e| e.next().is_some())
-            .unwrap_or(false)
-    };
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries.flatten().any(|e| {
-                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
-                    && e.file_name()
-                        .to_str()
-                        .map(|n| n.to_ascii_lowercase().contains(&needle))
-                        .unwrap_or(false)
-                    && nonempty(&e.path())
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// As `mlx_model_present_in`, probing [`mlx_dir`]. `false` if the cache dir can't resolve.
-pub fn mlx_model_present(needle: &str) -> bool {
-    mlx_dir()
-        .map(|d| mlx_model_present_in(&d, needle))
-        .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod mlx_present_tests {
-    use super::mlx_model_present_in;
-
-    #[test]
-    fn present_only_for_a_nonempty_matching_subdir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        // Nothing yet → not present (clean install ⇒ the dot reads "downloading").
-        assert!(!mlx_model_present_in(dir, "kokoro"));
-        // An EMPTY matching subdir (mid-download / partial) → still not present.
-        std::fs::create_dir_all(dir.join("kokoro-82m")).unwrap();
-        assert!(!mlx_model_present_in(dir, "kokoro"));
-        // A NON-EMPTY matching subdir → present.
-        std::fs::write(dir.join("kokoro-82m/model.safetensors"), b"x").unwrap();
-        assert!(mlx_model_present_in(dir, "kokoro"));
-        // Case-insensitive substring; a non-matching needle doesn't count.
-        assert!(mlx_model_present_in(dir, "KOKORO"));
-        assert!(!mlx_model_present_in(dir, "parakeet"));
-    }
-}
-
 /// Our local machine STATE/runtime root — `stats.toml`, pidfiles, the IPC socket, and
 /// (via [`log_path`]) logs. Machine-specific, never roamed:
 ///   Windows: `%LOCALAPPDATA%\DontSpeak`

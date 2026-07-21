@@ -10,10 +10,9 @@ use ds_client::ClientSource;
 /// Where config lives by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientKind {
-    /// Terminal CLI — `$HOME` dot-dir (`~/.claude`, …).
+    /// Terminal CLI — `$HOME` dot-dir (`~/.claude`, …). Every registered client is one;
+    /// add a variant when a desktop-GUI client with app-support config appears.
     TerminalCli,
-    /// Desktop GUI — per-OS app-support ([`Paths`]).
-    DesktopApp,
 }
 
 /// How `dontspeak <client>` launches.

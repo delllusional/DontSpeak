@@ -103,11 +103,6 @@ pub trait Stt {
         self.stop();
     }
 
-    /// Usable right now (model present, supported OS). Factory degrades when false.
-    fn is_available(&self) -> bool {
-        true
-    }
-
     /// Debug tag for tests / logs.
     fn kind(&self) -> &'static str {
         "stt"

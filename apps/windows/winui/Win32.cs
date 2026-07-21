@@ -86,15 +86,6 @@ internal static class Win32
     [DllImport("gdi32.dll")]
     internal static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFO pbmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
 
-    [DllImport("gdi32.dll")]
-    internal static extern IntPtr CreateCompatibleDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    internal static extern bool DeleteDC(IntPtr hdc);
-
-    [DllImport("gdi32.dll")]
-    internal static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
-
     [DllImport("user32.dll")]
     internal static extern bool ShowWindow(IntPtr hwnd, int cmd);
 

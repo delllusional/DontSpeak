@@ -3,7 +3,7 @@
 //! No silent substitution: if `built_in` / live `system` can't be constructed here
 //! (Parakeet + system recognizer run on the warm helper), return the same inert
 //! placeholder as off/`None` — not another working engine. `claude_code` is always
-//! live here (key tap). `make_stt` always succeeds (may be inert).
+//! live here (key tap). `make_stt_at` always succeeds (may be inert).
 //!
 //! Generic over `P` via `Rc<P>` so macOS `!Send` CGEventSource need not be Sync.
 
@@ -32,14 +32,6 @@ fn warn(msg: &str) {
     log::warn!(target: "engines", "{msg}");
 }
 
-/// Build STT from config; may return inert (see crate doc).
-pub fn make_stt<P>(cfg: &VoiceConfig, plat: Rc<P>) -> Box<dyn Stt>
-where
-    P: KeyInjector + FrontmostWindow + 'static,
-{
-    make_stt_with(cfg, plat, &RealAvailability)
-}
-
 /// Claude Code `voice:pushToTalk` chord from keybindings.json (read-only).
 /// Injectable Paths (tempdir in tests). `None` ⇒ default chord.
 fn claude_code_chord(paths: Option<&ds_config::Paths>) -> ds_platform::KeyChord {
@@ -48,7 +40,7 @@ fn claude_code_chord(paths: Option<&ds_config::Paths>) -> ds_platform::KeyChord 
         .unwrap_or_default()
 }
 
-/// [`make_stt`] with injected availability (tests).
+/// [`make_stt_at`] with injected availability, resolving Paths from the OS (tests).
 pub fn make_stt_with<P>(
     cfg: &VoiceConfig,
     plat: Rc<P>,

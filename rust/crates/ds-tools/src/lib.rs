@@ -306,14 +306,6 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
         .collect()
 }
 
-/// Look up a visible primary tool name.
-pub fn resolve_tool_name(name: &str) -> Option<&'static str> {
-    TOOLS
-        .iter()
-        .find(|tool| tool.name == name && is_visible(tool))
-        .map(|tool| tool.name)
-}
-
 /// Visible primary catalog names. MCP dispatch pins via `router_handles_every_catalog_tool`.
 pub fn tool_names() -> impl Iterator<Item = &'static str> {
     TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)

@@ -223,12 +223,6 @@ pub fn kokoro_choices_from(ids: &[String], language: &str) -> Vec<VoiceChoice> {
     out
 }
 
-/// System voices for `language`, sorted by label. Label carries Enhanced/Premium
-/// where the OS reports it.
-pub fn system_choices(language: &str) -> Vec<VoiceChoice> {
-    system_choices_from(&system_voices(), language)
-}
-
 /// PURE filter+label+sort of System `voices` (unit-tested without `say`).
 pub fn system_choices_from(voices: &[SpeakerVoice], language: &str) -> Vec<VoiceChoice> {
     let want = primary_subtag(language);

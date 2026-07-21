@@ -24,9 +24,6 @@ impl Stt for SystemStt {
         false // helper owns live recognizer
     }
     fn stop(&mut self) {}
-    fn is_available(&self) -> bool {
-        Self::available()
-    }
     fn kind(&self) -> &'static str {
         "system"
     }

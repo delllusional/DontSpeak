@@ -111,16 +111,10 @@ pub trait Diarizer {
 
     fn embed(&mut self, pcm: &[f32]) -> Result<Vec<f32>, String>;
 
-    fn download(&mut self) -> Result<(), String>;
-
     fn unload(&mut self) -> bool;
 
     fn diarize_pcm_16k(&mut self, pcm: &[f32]) -> Result<Vec<SpeakerSegment>, String> {
         Ok(self.diarize_pcm_16k_full(pcm)?.segments)
-    }
-
-    fn is_available(&self) -> bool {
-        true
     }
 }
 
@@ -251,14 +245,6 @@ mod mlx_impl {
                 return Err("embed: empty embedding".into());
             }
             Ok(emb)
-        }
-
-        fn download(&mut self) -> Result<(), String> {
-            ds_model::mlx_repo::ensure_mlx_repos(
-                &ds_model::mlx_repo::DIARIZATION_MLX_SET,
-                &|_, _| {},
-            )
-            .map_err(|e| format!("download MLX diarization models: {e}"))
         }
 
         fn unload(&mut self) -> bool {

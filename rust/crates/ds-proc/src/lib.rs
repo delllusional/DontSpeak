@@ -66,10 +66,6 @@ pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::R
     Ok(pid)
 }
 
-pub fn clear_speaker(pidfile: &Path) {
-    let _ = fs::remove_file(pidfile);
-}
-
 /// Preempt recorded speaker if alive; returns signalled pgid.
 pub fn barge_in(pidfile: &Path) -> Option<i32> {
     let pgid = read_pid(pidfile)?;
@@ -197,7 +193,7 @@ mod tests {
         let pf = dir.path().join("speak-hook.pid");
         write_speaker(&pf, 4242).unwrap();
         assert_eq!(read_pid(&pf), Some(4242));
-        clear_speaker(&pf);
+        fs::remove_file(&pf).unwrap();
         assert_eq!(read_pid(&pf), None);
     }
 

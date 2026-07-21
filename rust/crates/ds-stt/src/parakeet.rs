@@ -91,7 +91,7 @@ impl Capture {
     }
 
     /// Drain mono PCM since last call (device native rate); stream stays RUNNING.
-    /// Always-listening loop uses this each poll tick (vs one-shot `into_pcm_16k`).
+    /// Always-listening loop uses this each poll tick.
     pub fn drain_new(&self) -> Vec<f32> {
         let dropped = self.dropped.swap(0, Ordering::Relaxed);
         if dropped > 0 {
@@ -109,25 +109,6 @@ impl Capture {
     /// Device native rate — for [`resample_to_16k`] and energy-frame timing.
     pub fn input_rate(&self) -> u32 {
         self.input_rate
-    }
-
-    /// Stop capture; return 16 kHz mono for [`ParakeetTranscriber::transcribe_pcm_16k`].
-    pub fn into_pcm_16k(self) -> Vec<f32> {
-        let Capture {
-            _stream,
-            buffer,
-            dropped: _,
-            input_rate,
-        } = self;
-        drop(_stream);
-        let samples = match buffer.lock() {
-            Ok(mut b) => b.pop_iter().collect::<Vec<f32>>(),
-            Err(e) => {
-                warn(&format!("buffer poisoned: {e}"));
-                return Vec::new();
-            }
-        };
-        resample_to_16k(&samples, input_rate)
     }
 }
 
