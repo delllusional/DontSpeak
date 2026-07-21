@@ -21,15 +21,17 @@ jobs:
         include:
           - graph: Rust workspace
             manifest: rust/Cargo.toml
-            config: deny.toml
           - graph: Linux GTK host
             manifest: apps/linux/gtk/Cargo.toml
-            config: ../../../rust/deny.toml
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # Same pin as ci.yml's cargo-deny job. `--config` is a top-level option that must
+      # precede `check`, so it belongs in `arguments`; `command-arguments` is appended
+      # AFTER the subcommand, which is why every scheduled run failed with
+      # "unexpected argument '--config' found". Path is repo-root relative, and the GTK
+      # workspace reuses rust/deny.toml so dependency policy stays single-source.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25
         with:
           manifest-path: ${{ matrix.manifest }}
-          # The action runs from the manifest's directory. The GTK workspace reuses
-          # rust/deny.toml so dependency policy remains single-source.
-          command-arguments: --config ${{ matrix.config }} advisories
+          arguments: --config rust/deny.toml
+          command-arguments: advisories
