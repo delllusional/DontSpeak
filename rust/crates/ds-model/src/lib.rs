@@ -71,8 +71,8 @@ pub use ort::{
 };
 pub use read_retry::{read_model_file, read_model_file_to_string};
 pub use setup::{
-    run_setup_kokoro, run_setup_kokoro_frontend_with_progress, run_setup_kokoro_with_progress,
-    run_setup_parakeet, run_setup_parakeet_with_progress, run_setup_sepformer_with_progress,
+    run_setup_kokoro_frontend_with_progress, run_setup_kokoro_with_progress,
+    run_setup_parakeet_with_progress, run_setup_sepformer_with_progress,
 };
 pub use spec::{
     DownloadFile, KOKORO_G2P_DECODER_FILE, KOKORO_G2P_ENCODER_FILE, KOKORO_ONNX_FILE,

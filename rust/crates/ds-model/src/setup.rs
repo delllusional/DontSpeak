@@ -4,13 +4,12 @@
 
 use std::path::PathBuf;
 
-use crate::download::{ensure, ensure_with_progress};
+use crate::download::ensure_with_progress;
 use crate::kokoro_frontend::{
-    ensure_espeak_loader, ensure_espeak_loader_with_progress, ensure_japanese_dictionary,
-    ensure_japanese_dictionary_with_progress,
+    ensure_espeak_loader_with_progress, ensure_japanese_dictionary_with_progress,
 };
 use crate::model_path;
-use crate::ort::{ensure_onnxruntime, ensure_onnxruntime_with_progress};
+use crate::ort::ensure_onnxruntime_with_progress;
 use crate::spec::{
     kokoro_files, kokoro_frontend_files, kokoro_g2p_decoder_spec, kokoro_g2p_encoder_spec,
     kokoro_onnx_spec, kokoro_voices_spec, parakeet_decoder_spec, parakeet_dir,
@@ -35,19 +34,7 @@ pub(crate) fn run_download_set(
     crate::parallel::run_jobs_parallel(progress, total, 0, steps)
 }
 
-/// Full Parakeet set + shared ORT dylib. Returns model dir.
-pub fn run_setup_parakeet() -> std::io::Result<PathBuf> {
-    ensure(&parakeet_encoder_spec())?;
-    ensure(&parakeet_decoder_spec())?;
-    ensure(&parakeet_joiner_spec())?;
-    ensure(&parakeet_tokens_spec())?;
-    ensure_onnxruntime()?;
-    parakeet_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
-    })
-}
-
-/// [`run_setup_parakeet`] with aggregate progress via `run_download_set`.
+/// Full Parakeet set + shared ORT dylib, with aggregate progress via `run_download_set`.
 pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = parakeet_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(
@@ -66,19 +53,7 @@ pub fn run_setup_parakeet_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     })
 }
 
-/// Full portable Kokoro set + ORT. Lazy path (`ds-helper`) uses presence + `ensure_*` instead.
-pub fn run_setup_kokoro() -> std::io::Result<PathBuf> {
-    let model = ensure(&kokoro_onnx_spec())?;
-    ensure(&kokoro_voices_spec())?;
-    ensure(&kokoro_g2p_encoder_spec())?;
-    ensure(&kokoro_g2p_decoder_spec())?;
-    ensure_espeak_loader()?;
-    ensure_japanese_dictionary()?;
-    ensure_onnxruntime()?;
-    Ok(model)
-}
-
-/// [`run_setup_kokoro`] with aggregate progress via `run_download_set`.
+/// Full portable Kokoro set + ORT, with aggregate progress via `run_download_set`.
 pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let total: u64 = kokoro_files().iter().map(|f| f.size_bytes).sum();
     run_download_set(
