@@ -79,7 +79,10 @@ fn model_allowlist(model: ds_config::TtsModel) -> Vec<Lang> {
     if languages.is_empty() || languages.contains(&"auto") {
         return full_range();
     }
-    languages.iter().filter_map(|code| lang_for_code(code)).collect()
+    languages
+        .iter()
+        .filter_map(|code| lang_for_code(code))
+        .collect()
 }
 
 /// Per-model detector, cached. Indexing by `model as usize` mirrors `descriptor()`
@@ -133,10 +136,22 @@ mod tests {
     fn detects_representative_scripts() {
         // Chatterbox's language set covers all of these.
         let m = TtsModel::Chatterbox;
-        assert_eq!(detect_language("This response is written in English.", m), "en");
-        assert_eq!(detect_language("Этот ответ написан на русском языке.", m), "ru");
-        assert_eq!(detect_language("この回答は日本語で書かれています。", m), "ja");
-        assert_eq!(detect_language("이 답변은 한국어로 작성되었습니다.", m), "ko");
+        assert_eq!(
+            detect_language("This response is written in English.", m),
+            "en"
+        );
+        assert_eq!(
+            detect_language("Этот ответ написан на русском языке.", m),
+            "ru"
+        );
+        assert_eq!(
+            detect_language("この回答は日本語で書かれています。", m),
+            "ja"
+        );
+        assert_eq!(
+            detect_language("이 답변은 한국어로 작성되었습니다.", m),
+            "ko"
+        );
     }
 
     #[test]
@@ -152,9 +167,18 @@ mod tests {
         // The espeak-backed Kokoro languages, so a detection regression that routed one
         // of these to English (silently wrong voice) fails here.
         let m = TtsModel::Kokoro;
-        assert_eq!(detect_language("Ciao, oggi è una bella giornata di sole.", m), "it");
-        assert_eq!(detect_language("Hola, hoy hace un día muy bonito.", m), "es");
-        assert_eq!(detect_language("Olá, hoje está um dia muito bonito.", m), "pt");
+        assert_eq!(
+            detect_language("Ciao, oggi è una bella giornata di sole.", m),
+            "it"
+        );
+        assert_eq!(
+            detect_language("Hola, hoy hace un día muy bonito.", m),
+            "es"
+        );
+        assert_eq!(
+            detect_language("Olá, hoje está um dia muito bonito.", m),
+            "pt"
+        );
     }
 
     #[test]
