@@ -77,13 +77,41 @@ pub fn tts_mlx_dir(model: ds_config::TtsModel) -> Option<PathBuf> {
     }
 }
 
-/// Exact local directory passed to `ParakeetModel.fromDirectory`.
+/// Exact local directory passed to `ParakeetModel.fromDirectory`. Version-less like every
+/// other MLX target, so a pin bump re-fetches in place (the ready marker carries the
+/// revision) instead of stranding the previous model's tree.
 fn parakeet_target() -> Option<PathBuf> {
-    Some(ds_config::mlx_dir()?.join("parakeet-tdt-0.6b-v2"))
+    Some(ds_config::mlx_dir()?.join("parakeet"))
 }
+
+/// The versioned directory this model used before [`parakeet_target`] became version-less.
+/// 2.3 GB that nothing else would ever claim: the status/removal UI only knows the current
+/// target, so an upgrade would otherwise leak it silently.
+const LEGACY_PARAKEET_DIR_NAME: &str = "parakeet-tdt-0.6b-v2";
 
 pub fn parakeet_mlx_dir() -> Option<PathBuf> {
     parakeet_target()
+}
+
+/// Best-effort removal of the pre-rename tree. Called on the download path, where a failure
+/// is only wasted disk — never a reason to fail the fetch.
+pub fn remove_legacy_parakeet_dir() {
+    if let Some(mlx) = ds_config::mlx_dir() {
+        remove_legacy_parakeet_dir_in(&mlx);
+    }
+}
+
+fn remove_legacy_parakeet_dir_in(mlx_dir: &Path) {
+    let legacy = mlx_dir.join(LEGACY_PARAKEET_DIR_NAME);
+    if !legacy.is_dir() {
+        return;
+    }
+    match std::fs::remove_dir_all(&legacy) {
+        Ok(()) => log::info!(target: "model", "removed the superseded Parakeet v2 model directory"),
+        Err(e) => {
+            log::warn!(target: "model", "could not remove the superseded Parakeet v2 directory: {e}")
+        }
+    }
 }
 
 pub const DIARIZATION_MLX_DIR_NAME: &str = "sortformer";
@@ -191,11 +219,12 @@ pub static OMNIVOICE_MLX: MlxRepo = MlxRepo {
     license_url: "https://huggingface.co/k2-fsa/OmniVoice#license",
 };
 
-/// MLX Parakeet TDT 0.6b v2 STT. CC-BY-4.0.
+/// MLX Parakeet TDT 0.6b v3 STT — 25 European languages, detected by the model itself.
+/// CC-BY-4.0.
 pub static PARAKEET_MLX: MlxRepo = MlxRepo {
     name: "parakeet_mlx",
-    repo: "mlx-community/parakeet-tdt-0.6b-v2",
-    revision: "8ae155301e23d820d82aa60d24817c900e69e487",
+    repo: "mlx-community/parakeet-tdt-0.6b-v3",
+    revision: "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
     include_prefixes: &[
         "config.json",
         "model.safetensors",
@@ -206,7 +235,7 @@ pub static PARAKEET_MLX: MlxRepo = MlxRepo {
     exclude_substrings: &[".DS_Store"],
     target: parakeet_target,
     display_name: "Parakeet (MLX)",
-    usage: "Apple-Silicon speech-to-text model (NVIDIA NeMo; MLX conversion)",
+    usage: "Apple-Silicon multilingual speech-to-text model (NVIDIA NeMo; MLX conversion)",
     license: "CC-BY-4.0",
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
@@ -638,6 +667,12 @@ pub(crate) fn ensure_mlx_repos_at(
         std::fs::write(target.join(READY_MARKER), marker)?;
     }
 
+    // Only once the new tree verifies: a failed fetch leaves the old one on disk rather than
+    // freeing space the user would have to re-download to get back.
+    if repos.iter().any(|r| std::ptr::eq(*r, &PARAKEET_MLX)) && is_mlx_repo_present(&PARAKEET_MLX) {
+        remove_legacy_parakeet_dir();
+    }
+
     pool_result
 }
 
@@ -699,6 +734,23 @@ mod tests {
         assert_eq!(DIARIZATION_MLX_SET.len(), 2);
         assert!(DIARIZATION_MLX.repo.contains("sortformer"));
         assert!(SPEAKER_EMBEDDING_MLX.repo.contains("wespeaker"));
+    }
+
+    #[test]
+    fn legacy_parakeet_tree_is_removed_and_the_current_one_left_alone() {
+        let mlx = tempfile::tempdir().unwrap();
+        let legacy = mlx.path().join(LEGACY_PARAKEET_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("model.safetensors"), b"old weights").unwrap();
+        let current = mlx.path().join("parakeet");
+        std::fs::create_dir_all(&current).unwrap();
+
+        remove_legacy_parakeet_dir_in(mlx.path());
+        assert!(!legacy.exists(), "superseded tree must be reclaimed");
+        assert!(current.is_dir(), "current tree must survive");
+
+        // Idempotent: nothing to remove is not an error.
+        remove_legacy_parakeet_dir_in(mlx.path());
     }
 
     #[test]

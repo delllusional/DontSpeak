@@ -134,8 +134,8 @@ Each carries its upstream license:
   Misaki dictionaries plus regular plurals mined from WikiText, but it does not establish the
   exact lineage of the published en-US weights and is committed with its British-dictionary flag
   enabled. The model's precise training provenance therefore remains unverified.
-- **Parakeet TDT 0.6b v2** STT model (NVIDIA), converted for the macOS MLX path — **CC-BY-4.0**.
-  Attribution is required: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
+- **Parakeet TDT 0.6b v3** STT model (NVIDIA), converted for the macOS MLX path — **CC-BY-4.0**.
+  Attribution is required: "Parakeet TDT 0.6b v3 © NVIDIA, licensed under CC-BY-4.0."
 - **stt_en_fastconformer_hybrid_large_streaming_1040ms** STT model (NVIDIA NeMo), the
   cross-platform ONNX path — **CC-BY-4.0**. The streaming ONNX export is by csukuangfj /
   sherpa-onnx. Attribution is required: "stt_en_fastconformer_hybrid_large_streaming_1040ms
