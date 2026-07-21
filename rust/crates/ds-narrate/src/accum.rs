@@ -7,11 +7,27 @@
 
 use std::collections::BTreeMap;
 
+/// Max bytes of detection corpus retained at selection / on the wire.
+/// Must match `dontspeakd::ttsq::MAX_SPEAK_BYTES` (engine also re-caps at enqueue).
+pub const DETECTION_TEXT_MAX_BYTES: usize = 10 * 1024;
+
+/// Prefix-truncate to `max` bytes on a char boundary (same semantics as the speak limit).
+pub fn cap_detection_text(s: String) -> String {
+    if s.len() <= DETECTION_TEXT_MAX_BYTES {
+        return s;
+    }
+    let mut end = DETECTION_TEXT_MAX_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 /// One newly speakable run plus the reconstructed message-so-far for language detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUtterance {
     pub text: String,
-    /// Full reconstructed turn text at selection time (engine may cap).
+    /// Turn text so far for language detection, capped at [`DETECTION_TEXT_MAX_BYTES`].
     pub detection_text: String,
 }
 
@@ -65,11 +81,13 @@ impl Accum {
         let total = runs.len();
         let speakable = runs.iter().take_while(|(_, complete)| *complete).count();
         let mut spoken = Vec::new();
+        // Cap once per feed so pending state and IPC never carry multi-MB corpora.
+        let detection_corpus = cap_detection_text(cumulative.clone());
         if messages_on {
             for (text, _) in runs.into_iter().take(speakable).skip(self.emitted) {
                 spoken.push(SelectedUtterance {
                     text,
-                    detection_text: cumulative.clone(),
+                    detection_text: detection_corpus.clone(),
                 });
             }
         }
@@ -80,8 +98,8 @@ impl Accum {
             self.short_done = true;
             if !cumulative.trim().is_empty() {
                 spoken.push(SelectedUtterance {
-                    text: cumulative.clone(),
-                    detection_text: cumulative,
+                    text: cumulative,
+                    detection_text: detection_corpus,
                 });
             }
         }
@@ -150,6 +168,16 @@ mod tests {
                 .contains("> One.\n\nbody one.\n\n> Two.\n\nmore.\n\n> Three.\n\ntail.")
         );
         assert!(a.feed(3, " extra.", None, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn detection_text_is_capped_at_selection() {
+        let mut a = Accum::default();
+        let huge = format!("{}{}", "E".repeat(DETECTION_TEXT_MAX_BYTES + 500), "\n\n> Quote.");
+        let out = a.feed(0, &huge, None, true, true, false);
+        assert_eq!(texts(&out), ["Quote."]);
+        assert!(out[0].detection_text.len() <= DETECTION_TEXT_MAX_BYTES);
+        assert!(out[0].detection_text.is_char_boundary(out[0].detection_text.len()));
     }
 
     #[test]

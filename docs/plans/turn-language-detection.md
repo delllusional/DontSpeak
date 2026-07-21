@@ -125,7 +125,7 @@ SpeakNarration {
 }
 ```
 
-**Do not** change `Speak`. Engine truncates `detection_text` to `MAX_SPEAK_BYTES` at enqueue (reject only if spoken `text` exceeds limit — existing rule).
+**Do not** change `Speak`. Cap `detection_text` at **selection** (`ds_narrate::DETECTION_TEXT_MAX_BYTES` = 10 KiB, matches `MAX_SPEAK_BYTES`) so IPC lines never approach `MAX_LINE_LEN` (1 MiB). Engine re-truncates at enqueue as defense in depth (reject only if spoken `text` exceeds limit — existing rule).
 
 Round-trip tests: with fields, without fields, legacy JSON decode.
 
