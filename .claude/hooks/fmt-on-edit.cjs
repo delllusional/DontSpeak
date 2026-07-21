@@ -16,7 +16,6 @@ process.stdin.on('end', () => {
     require('child_process').spawn('cargo', ['fmt', '--all'], {
       cwd: workspace,
       stdio: 'ignore',
-      shell: true,
     });
   } catch {
     // best-effort only

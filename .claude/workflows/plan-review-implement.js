@@ -1,7 +1,7 @@
 export const meta = {
   name: 'plan-review-implement',
-  description: 'Plan a DontSpeak change, adversarially review the plan, implement it, and — only if risk was flagged — run a dedicated risk audit.',
-  whenToUse: 'A nontrivial DontSpeak change that spans crates, apps, an FFI boundary, or multiple operating-system hosts. Pass the task description as args.',
+  description: 'Plan a DontSpeak change, adversarially review the plan, implement it in an isolated worktree, and — only if risk was flagged — run a dedicated risk audit.',
+  whenToUse: 'A nontrivial DontSpeak change that spans crates, apps, an FFI boundary, or multiple operating-system hosts. Pass the task description as args; pass { task, land: true } only when the user explicitly requested landing.',
   phases: [
     { title: 'Plan' },
     { title: 'Review' },
@@ -111,10 +111,12 @@ DontSpeak. You were not part of planning it — treat the plan you're given as
 settled, not a draft to second-guess. Read CLAUDE.md first for the invariants
 (config location, FFI mirror requirements, i18n catalog, deploy routes, licensing).
 
-Before touching any file: call EnterWorktree, naming it after this task (short
-kebab-case, e.g. the GitHub issue slug if one exists). Other sessions may be editing
-this same clone right now — the worktree is what keeps your edits from colliding
-with theirs. Do the entire implementation inside that worktree.
+Before touching any file: use the repository's 'start-task' skill and call
+EnterWorktree, naming it after this task (short kebab-case, e.g. the GitHub issue
+slug if one exists). The repository hook refreshes main and creates a unique branch
+and worktree. Other sessions may be editing this clone; do the entire implementation
+inside the returned worktree. Before editing, record 'git branch --show-current' and
+'git rev-parse HEAD' as the branch and base commit.
 
 Rules:
 
@@ -134,8 +136,8 @@ Rules:
   branch (no push — landing happens later). Do not call ExitWorktree
   yourself; leave the worktree in place with your commit on it.
 - Report back: what you changed (files, not prose summaries), what you verified it
-  against, any deviation from the plan with your reason, and the exact worktree name
-  you passed to EnterWorktree (also put it in the worktreeName field).${ISSUE_FILING_NOTE}`
+  against, any deviation from the plan with your reason, and the branch, base commit,
+  and absolute worktree path.${ISSUE_FILING_NOTE}`
 
 const AUDITOR_PERSONA = `You audit a specific class of DontSpeak change that ordinary code review tends to
 miss because it requires cross-file, cross-language, or cross-repo-doc knowledge.
@@ -187,26 +189,24 @@ Follow the landing section of 'docs/TASK-BASELINE.md' (canonical). Also apply
 
 Steps, in order, stopping and reporting instead of proceeding if any step fails:
 
-1. Cd into the worktree named in the handoff (under '.worktrees/'). Run
+1. Cd into the absolute worktree path in the handoff. Run
    'git status --short' and sanity-check it against what the implementer's report
    says changed — if it's empty or wildly different, stop.
-2. Squash multi-commit branches to one landing commit if needed (keep distinct
-   Agent: trailers). Fetch origin/main and rebase the task branch onto it. If
-   rebase conflicts, stop and report rather than resolving them unilaterally.
-3. From that refreshed worktree, use the repository's 'prepush' skill. Do not land on a
-   red gate.
-4. From the main worktree, land onto main with no merge commit: prefer
-   fast-forward to the verified task branch; if that can't FF (or the user says
-   pick), cherry-pick the landing commit(s) onto up-to-date main. Never force-push
-   main. Do not open a PR unless the user asked for one.
-5. Re-read 'docs/COMMIT-ATTRIBUTION.md', run its check, and push main to origin.
-6. Delete the task branch locally and on origin; remove the worktree
-   ('ExitWorktree' or 'git worktree remove' + 'git branch -d'/'-D').
-7. Close related GitHub issues (Closes #N on the commit, or gh issue close with the
-   main SHA). If a PR exists for the branch, close it after main has the change.
+2. Fetch origin/main for comparison. Preserve feature history unless the user asked
+   for a rewrite. If verification is stale or conflicts are expected, stop.
+3. From the task worktree, use the repository's 'prepush' skill. Do not land red.
+4. Find the main worktree and run 'git pull --ff-only origin main' there. Divergence
+   or tracked changes means stop.
+5. Cherry-pick only the requested verified feature commits onto main. Stop and report
+   any conflict rather than resolving it unilaterally.
+6. Re-run every applicable verification on main, check attribution, and push main
+   without force. Do not open a PR unless the user asked.
+7. Keep the feature branch and worktree unless the user explicitly asked to delete
+   them. Close related issues only after their fixes reach main.
 
-Report: whether you landed successfully, the resulting main commit SHA, issue/PR
-numbers closed, and anything you stopped short on and why.`
+Report: whether you landed successfully, the resulting main commit SHA, the
+cherry-picked feature SHAs, issue/PR state changes, and anything you stopped short
+on and why.`
 
 const FILED_ISSUES_PROP = { filedIssues: { type: 'array', items: { type: 'string' }, description: 'GitHub issue numbers/URLs filed for out-of-scope findings, if any.' } }
 
@@ -256,10 +256,12 @@ const IMPLEMENT_SCHEMA = {
   type: 'object',
   properties: {
     report: { type: 'string', description: 'What changed (files, not prose summaries), what you verified it against, any deviation from the plan.' },
-    worktreeName: { type: 'string', description: 'The exact task-worktree name; the change lives at .worktrees/<worktreeName>.' },
+    worktreePath: { type: 'string', description: 'The absolute path of the isolated task worktree.' },
+    branch: { type: 'string', description: 'The task branch checked out in the isolated worktree.' },
+    baseCommit: { type: 'string', description: 'The refreshed main commit from which the task worktree started.' },
     ...FILED_ISSUES_PROP,
   },
-  required: ['report', 'worktreeName'],
+  required: ['report', 'worktreePath', 'branch', 'baseCommit'],
 }
 
 const LAND_SCHEMA = {
@@ -279,6 +281,7 @@ const logFiled = (stage, result) => {
 }
 
 const task = typeof args === 'string' ? args : args && typeof args === 'object' ? args.task : null
+const landRequested = Boolean(args && typeof args === 'object' && args.land === true)
 if (!task || typeof task !== 'string' || !task.trim()) {
   throw new Error('plan-review-implement needs the task description passed as args, e.g. Workflow({ name: "plan-review-implement", args: "add X to Y" })')
 }
@@ -313,7 +316,7 @@ const implementation = await agent(
   `${IMPLEMENTER_PERSONA}\n\n---\n\nImplement this approved DontSpeak plan:\n\n${planned.plan}\n\nReviewer notes to account for: ${reviewed.notes}`,
   { agentType: 'general-purpose', phase: 'Implement', schema: IMPLEMENT_SCHEMA }
 )
-log(`Implementation complete (worktree: ${implementation.worktreeName}).`)
+log(`Implementation complete (worktree: ${implementation.worktreePath}).`)
 logFiled('Implement', implementation)
 
 let audit = null
@@ -321,7 +324,7 @@ if (risk) {
   phase('Audit')
   log('Risk flagged — running the risk-audit stage before calling this done.')
   audit = await agent(
-    `${AUDITOR_PERSONA}\n\n---\n\nAudit this DontSpeak change. Risk area(s) to focus on: ${(planned.riskAreas || []).join(', ') || 'unspecified — infer from the plan and diff.'}\n\nThe change lives in the worktree ".worktrees/${implementation.worktreeName}".\n\nPlan:\n${planned.plan}\n\nWhat was implemented:\n${implementation.report}`,
+    `${AUDITOR_PERSONA}\n\n---\n\nAudit this DontSpeak change. Risk area(s) to focus on: ${(planned.riskAreas || []).join(', ') || 'unspecified — infer from the plan and diff.'}\n\nThe change lives in the worktree "${implementation.worktreePath}".\n\nPlan:\n${planned.plan}\n\nWhat was implemented:\n${implementation.report}`,
     { agentType: 'Plan', phase: 'Audit', schema: AUDIT_SCHEMA }
   )
   logFiled('Audit', audit)
@@ -332,16 +335,18 @@ if (risk) {
 const clean = !risk || (audit && audit.findings.every((f) => f.verdict !== 'finding'))
 
 let land = null
-if (clean) {
+if (clean && landRequested) {
   phase('Land')
   log('Clean — landing the worktree on main and pushing.')
   land = await agent(
-    `${LANDER_PERSONA}\n\n---\n\nLand the worktree ".worktrees/${implementation.worktreeName}".\n\nWhat was implemented:\n${implementation.report}`,
+    `${LANDER_PERSONA}\n\n---\n\nLand the worktree "${implementation.worktreePath}".\n\nTask branch: ${implementation.branch}\nBase commit: ${implementation.baseCommit}\n\nWhat was implemented:\n${implementation.report}`,
     { agentType: 'general-purpose', phase: 'Land', schema: LAND_SCHEMA }
   )
   log(land.landed ? `Landed: ${land.commitSha || 'main'}.` : `Not landed: ${land.notes}`)
-} else {
+} else if (!clean) {
   log('Audit findings need a fix before landing — worktree left in place for a follow-up.')
+} else {
+  log('Implementation verified — landing was not explicitly requested, so the feature worktree remains in place.')
 }
 
 return { plan: planned.plan, review: reviewed, implementation, audit, land }

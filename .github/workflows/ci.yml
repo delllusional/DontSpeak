@@ -173,11 +173,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: node script tests
-        run: node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+        run: node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
       - name: python script tests
         run: python3 scripts/release/release-stats.test.py
       - name: macOS bundle script tests
-        run: bash apps/macos/bundle-lib.test.sh
+        run: node scripts/agents/run-bash.mjs apps/macos/bundle-lib.test.sh
 
   # Pick the shared clippy/test OS matrix: Linux-only by default, all three when
   # full-matrix is requested (the release gate). push/PR events have no `inputs`, so

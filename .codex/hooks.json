@@ -6,8 +6,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "input=$(cat); case \"$input\" in *commit*|*merge*) printf '%s' \"$input\" | node \"$(git rev-parse --show-toplevel)/scripts/agents/capture-agent-attribution.mjs\" codex;; esac",
-            "commandWindows": "input=$(cat); case \"$input\" in *commit*|*merge*) printf '%s' \"$input\" | node \"$(git rev-parse --show-toplevel)/scripts/agents/capture-agent-attribution.mjs\" codex;; esac",
+            "command": "node \"$(git rev-parse --show-toplevel)/scripts/agents/capture-agent-attribution.mjs\" codex",
+            "commandWindows": "$root = git rev-parse --show-toplevel; node \"$root/scripts/agents/capture-agent-attribution.mjs\" codex",
             "timeout": 30,
             "statusMessage": "Capturing exact commit attribution"
           }

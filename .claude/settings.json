@@ -3,15 +3,30 @@
     "commit": "",
     "pr": ""
   },
+  "worktree": {
+    "baseRef": "fresh"
+  },
   "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/agents/task-worktree.mjs", "claude-hook"],
+            "timeout": 60
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Shell|run_terminal_command",
         "hooks": [
           {
             "type": "command",
-            "command": "IFS= read -rd '' input || true\ncase \"$input\" in *commit*|*merge*) ROOT=\"${CLAUDE_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null)}\"; node \"$ROOT/scripts/agents/capture-agent-attribution.mjs\" auto <<DONTSPEAK_JSON\n$input\nDONTSPEAK_JSON\n;; esac",
-            "shell": "bash",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/agents/capture-agent-attribution.mjs", "auto"],
             "timeout": 30
           }
         ]
@@ -23,8 +38,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node .claude/hooks/fmt-on-edit.cjs",
-            "shell": "bash",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/fmt-on-edit.cjs"],
             "timeout": 30,
             "async": true
           }

@@ -27,9 +27,9 @@ Don't push until both pass; re-run after message rewrites.
 
 1. **Script tests**
    ```bash
-   node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+   node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
    python3 scripts/release/release-stats.test.py
-   bash apps/macos/bundle-lib.test.sh
+   node scripts/agents/run-bash.mjs apps/macos/bundle-lib.test.sh
    ```
 2. **Clippy**
    ```bash
@@ -86,9 +86,9 @@ to `delllusional/DontSpeak`.
 
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
-node --test scripts/agents/agent-attribution.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
 python3 scripts/release/release-stats.test.py
-bash apps/macos/bundle-lib.test.sh
+node scripts/agents/run-bash.mjs apps/macos/bundle-lib.test.sh
 cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings
 cargo fetch --locked
 CARGO_NET_OFFLINE=true \

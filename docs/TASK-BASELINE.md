@@ -7,19 +7,20 @@ Start and land work from a current baseline.
 Before planning, checking, reviewing, building, testing, implementing, auditing,
 releasing, or landing:
 
-1. Inspect `git worktree list` and the task-worktree directory. Reuse only for the
-   same task.
-2. Find the worktree where `main` is checked out (`git worktree list`) and `cd` into
-   it. Confirm no tracked changes would block an update.
-3. **From that main worktree** — not wherever you started — run
-   `git pull --ff-only origin main` (no merge commit). `git pull ... origin main` only
-   advances the local `main` ref when `main` is the checked-out branch in your current
-   directory; run it from any other branch/worktree and it silently updates nothing,
-   leaving local `main` stale for step 4.
-4. Create a named task branch + worktree from refreshed `main`
-   (`EnterWorktree` if available, else
-   `git worktree add -b <task-branch> <task-worktree> main`).
-5. Do all work, checks, and commits in that worktree.
+1. Use the `start-task` skill. Inspect `git worktree list`; reuse only an explicit
+   same-task handoff.
+2. For a new task, use `EnterWorktree` when available. The repository hook performs
+   the remaining setup. Otherwise run:
+   `node scripts/agents/task-worktree.mjs create <task-branch> --name <task-name>`.
+3. The shared starter finds the worktree where `main` is checked out, refuses tracked
+   changes there, runs `git pull --ff-only origin main` from that worktree, and creates
+   `.worktrees/<task-name>` on the requested branch at the refreshed commit.
+4. Confirm `git status --short --branch` in the returned worktree before writing.
+   Do all work, checks, and commits there.
+
+If the shared starter is unavailable, perform the same steps manually. `git pull
+... origin main` only advances local `main` when run from the worktree where `main`
+is checked out; running it from a feature branch leaves local `main` stale.
 
 If `main` has conflicting changes, has diverged, or can't fast-forward: stop and
 report. Don't reset, force, discard, or overwrite others' work.
@@ -31,6 +32,17 @@ work that target. Still fetch `origin/main` for comparisons. Handed-off worktree
 explicit target.
 
 Pure Q&A that doesn't inspect the repo needs no worktree.
+
+## Parallel isolation
+
+- One writing agent owns one task worktree and branch. Read-only review may share the
+  assigned worktree.
+- Workers never edit the `main` worktree or another task worktree and do not stash,
+  rebase, reset, prune, remove worktrees, or rewrite shared branches.
+- The integrator alone updates `main`, lands verified commits, and performs worktree
+  cleanup when the user explicitly requests it.
+- Namespace build outputs, ports, databases, processes, and other external state per
+  task. Git worktrees isolate tracked files, not machine-wide resources.
 
 ## Before final verification and publishing
 

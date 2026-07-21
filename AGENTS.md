@@ -68,6 +68,12 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked  # release-o
 
 GTK fmt: `cd apps/linux/gtk && cargo fmt --all --check`.
 
+On Windows, run repository Bash scripts through
+`node scripts/agents/run-bash.mjs <script> [args...]`. Never invoke bare `bash`:
+Windows resolves it to the System32 WSL launcher on machines where WSL may be
+disabled. The wrapper resolves Git Bash from the Git installation and fails closed
+when Git Bash is unavailable.
+
 macOS Swift tests need the FFI staticlib first, pinned to the app's macOS floor —
 unpinned, cargo targets the host OS and the link warns "built for newer macOS":
 `cd rust && MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.

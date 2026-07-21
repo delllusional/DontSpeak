@@ -11,20 +11,21 @@ Land a finished worktree safely. Canonical steps:
 
 Stop and report on any failure:
 
-1. cd worktree; `git status --short` matches implementer report (empty/wild → stop).
-2. Squash multi-commit branches; keep distinct `Agent:` trailers per COMMIT-ATTRIBUTION.
-3. Main tree: `git pull --ff-only origin main`; rebase task onto `origin/main` if needed.
-   Conflicts → stop (no force/discard/unilateral resolve).
-4. From task worktree: `prepush` skill. Don't land red.
-5. Land on `main` (no merge commit, never force `main`): prefer fast-forward local
-   `main` to the task branch; if that can't FF (or the user says pick), cherry-pick
-   the landing commit(s) onto `main`. Push `main` to origin (`delllusional/DontSpeak`,
-   never wip). Check `gh auth status` first. Don't open a PR unless the user asked.
-6. Delete the task branch locally and on `origin`; remove the worktree
-   (`ExitWorktree` or `git worktree remove` + `branch -d` / `-D` after cherry-pick).
-7. Close related GitHub issues (`Closes #N` on the commit, or `gh issue close`).
-   If a PR exists for the branch, close it after `main` has the change (cite main SHA).
+1. cd to the handed-off absolute worktree path; `git status --short` matches the
+   implementer report (unexpected or dirty → stop).
+2. Fetch `origin/main` for comparison. Preserve task history unless the user asked
+   for a rewrite; conflicts or stale verification → stop.
+3. From the task worktree, use the `prepush` skill. Don't land red.
+4. Find the worktree where `main` is checked out and run `git pull --ff-only origin
+   main` there. Divergence or tracked changes → stop.
+5. Cherry-pick only the requested verified feature commits onto `main`. Conflicts →
+   stop without resolving unilaterally.
+6. Re-run every applicable verification on the resulting `main`, check attribution,
+   and push `main` without force.
+7. Keep the feature branch and worktree unless the user explicitly asks to delete
+   them. Close related issues only after their fixes reach `main`.
 
 Any new commit: `Agent:` trailer per COMMIT-ATTRIBUTION.
 
-Report: success, main SHA, issue/PR numbers closed, or what stopped.
+Report: success, main SHA, cherry-picked feature SHAs, issue/PR state changes, or
+what stopped.

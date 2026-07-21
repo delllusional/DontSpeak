@@ -39,3 +39,4 @@ apps/windows/**/bin/
 apps/windows/**/obj/
 
 .worktrees/
+.claude/worktrees/
