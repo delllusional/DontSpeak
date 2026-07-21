@@ -173,9 +173,7 @@ pub fn merge_hooks(mut root: Value, spec: &HookSpec) -> Result<Value, HooksMerge
             }
         }
     }
-    // Config lives in config.toml — never leave a top-level `dontspeak` seed here.
     obj.remove("dontspeak");
-    // CC `voice` is read-only (`claude_code` STT reports; never force `/voice` on).
     if let Some(ch) = spec.notif_channel {
         obj.insert("preferredNotifChannel".to_string(), json!(ch));
     }

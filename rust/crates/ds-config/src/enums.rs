@@ -577,7 +577,7 @@ pub(crate) fn default_tray() -> Vec<TrayKind> {
 }
 
 /// Fail-open `tray`: array of known tokens (then normalize); empty = never color;
-/// non-array → default. No legacy token migration.
+/// non-array → default.
 pub(crate) fn de_tray<'de, D>(d: D) -> Result<Vec<TrayKind>, D::Error>
 where
     D: Deserializer<'de>,

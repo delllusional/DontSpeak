@@ -1096,8 +1096,6 @@ mod tests {
         seed_config(&paths);
         assert!(paths.config_toml.exists());
 
-        // Append a marker to the seeded file, then prove a second call does NOT overwrite it
-        // — the `!exists()` gate only seeds once.
         let mut contents = std::fs::read_to_string(&paths.config_toml).unwrap();
         contents.push_str("\n# marker\n");
         std::fs::write(&paths.config_toml, &contents).unwrap();
@@ -1107,19 +1105,13 @@ mod tests {
         assert_eq!(after, contents);
     }
 
-    /// `write_settings`'s `Err` branch inside `seed_config`: pre-create a plain FILE at the
-    /// path that would be `paths.config_toml`'s parent directory, so the underlying
-    /// `create_dir_all` fails. `seed_config` returns `()`, not a `Result` — reading the
-    /// function, its `Err(e)` arm only logs (via `ds_log::log`) and continues (does not
-    /// propagate, does not panic), so the only observable effect is that `config_toml` is never
-    /// created.
     #[test]
     fn seed_config_write_failure_is_logged_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::write(dir.path().join(".dontspeak"), b"blocking file").unwrap();
 
-        seed_config(&paths); // must not panic
+        seed_config(&paths);
         assert!(!paths.config_toml.exists());
     }
 

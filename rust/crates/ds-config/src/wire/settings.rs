@@ -105,7 +105,6 @@ mod tests {
     use crate::voice::tests::sample_voice;
     use crate::{SttEngine, TtsEngine};
 
-    /// Test helper for [`merge_settings`]'s `{ "dontspeak": {…} }` envelope.
     #[derive(Debug, Default, serde::Deserialize)]
     struct SettingsRoot {
         dontspeak: Option<VoiceConfig>,

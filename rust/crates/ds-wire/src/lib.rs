@@ -82,7 +82,6 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
 
-    // Interactive wire only (engine reconcile never seeds config).
     if !remove && !print_only {
         hooks::seed_config(&paths);
     }

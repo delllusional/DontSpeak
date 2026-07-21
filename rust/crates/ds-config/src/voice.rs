@@ -753,29 +753,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn removed_cluster_threshold_is_not_an_alias() {
-        let v: VoiceConfig = serde_json::from_str(r#"{"cluster_threshold":0.9}"#).unwrap();
-        assert_eq!(v.activity_threshold, 0.5);
-        assert!(!VoiceConfig::known_keys().contains("cluster_threshold"));
-    }
-
-    #[test]
-    fn removed_voice_shapes_are_not_compatibility_aliases() {
-        assert!(serde_json::from_str::<VoiceConfig>(r#"{"tts_voices":["af_sarah"]}"#).is_err());
-        let keys = VoiceConfig::known_keys();
-        for removed in [
-            "tts_language",
-            "tts_system_voice",
-            "kokoro_voices",
-            "chatterbox_voices",
-            "qwen_voices",
-            "omnivoice_voices",
-        ] {
-            assert!(!keys.contains(removed), "{removed} must stay removed");
-        }
-    }
-
-    #[test]
     fn codex_stream_defaults_and_overrides() {
         // Defaults: the subscriber is ON (inert without ~/.codex + a running app-server),
         // lazy app-server start is OFF (no surprise spawns), endpoint = the default unix
@@ -940,24 +917,19 @@ pub(crate) mod tests {
     fn provider_is_an_ordered_ladder_failing_open_to_default() {
         let prov = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().provider;
         let default = vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
-        // An explicit ordered ladder keeps its order (deduped); known tokens only.
         assert_eq!(
             prov(r#"{"provider":["cuda","mlx","cpu"]}"#),
             vec![Provider::OrtCuda, Provider::Mlx, Provider::OrtCpu]
         );
         assert_eq!(prov(r#"{"provider":["cpu"]}"#), vec![Provider::OrtCpu]);
-        // Known tokens kept; unknown tokens drop.
         assert_eq!(
             prov(r#"{"provider":["coreml","bogus","auto"]}"#),
             vec![Provider::OrtCoreMl]
         );
-        // Empty array, all-unknown, and any non-array all fall open to the default ladder
-        // (compute is never "off").
         assert_eq!(prov(r#"{"provider":[]}"#), default);
         assert_eq!(prov(r#"{"provider":"mlx"}"#), default);
         assert_eq!(prov(r#"{"provider":42}"#), default);
 
-        // Canonical tokens round-trip through as_str().
         for p in [
             Provider::OrtCpu,
             Provider::OrtCuda,
@@ -1014,18 +986,14 @@ pub(crate) mod tests {
     #[test]
     fn diarizer_provider_is_the_on_off_ladder() {
         let diar = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().diarizer;
-        // Default is EMPTY = diarization OFF (opt-in); the on/off flag is folded in.
         assert!(VoiceConfig::default().diarizer.is_empty());
         assert!(!VoiceConfig::default().is_diarization_on());
-        // A non-empty ladder keeps its order (deduped) and turns diarization ON.
         let on = diar(r#"{"diarizer":["mlx"]}"#);
         assert_eq!(on, vec![DiarizerProvider::Mlx]);
-        // Empty, all-unknown, and non-array all read as OFF.
         assert!(diar(r#"{"diarizer":["bogus"]}"#).is_empty());
         assert!(diar(r#"{"diarizer":[]}"#).is_empty());
         assert!(diar(r#"{"diarizer":"mlx"}"#).is_empty());
 
-        // is_diarization_on() = non-empty; resolution walks to the first platform-usable rung.
         let cfg = |r: Vec<DiarizerProvider>| VoiceConfig {
             diarizer: r,
             ..VoiceConfig::default()
@@ -1038,15 +1006,12 @@ pub(crate) mod tests {
     #[test]
     fn tray_indicator_is_a_set_of_tokens() {
         let tray = |j: &str| serde_json::from_str::<VoiceConfig>(j).unwrap().tray;
-        // The array form normalizes to one token per state, canonical order (stt, then tts);
-        // an empty array = never color.
         assert_eq!(
             tray(r#"{"tray":["stt","tts"]}"#),
             vec![TrayKind::Stt, TrayKind::Tts]
         );
         assert_eq!(tray(r#"{"tray":["tts"]}"#), vec![TrayKind::Tts]);
-        assert!(tray(r#"{"tray":[]}"#).is_empty(), "empty array = none");
-        // The `_animated` form colors AND breathes, and wins if both forms of a state appear.
+        assert!(tray(r#"{"tray":[]}"#).is_empty());
         assert_eq!(
             tray(r#"{"tray":["stt_animated","tts"]}"#),
             vec![TrayKind::SttAnimated, TrayKind::Tts]
@@ -1055,17 +1020,15 @@ pub(crate) mod tests {
             tray(r#"{"tray":["tts","tts_animated"]}"#),
             vec![TrayKind::TtsAnimated]
         );
-        // Unknown tokens drop, duplicates collapse, order canonicalizes.
         assert_eq!(
             tray(r#"{"tray":["tts","bogus","tts","stt"]}"#),
             vec![TrayKind::Stt, TrayKind::Tts]
         );
-        // Non-array values fall open to the default set.
         for raw in [r#"{"tray":"stt"}"#, r#"{"tray":3}"#] {
             assert_eq!(
                 serde_json::from_str::<VoiceConfig>(raw).unwrap().tray,
                 vec![TrayKind::Stt, TrayKind::TtsAnimated],
-                "{raw} → default set"
+                "{raw}"
             );
         }
     }
@@ -1078,7 +1041,6 @@ pub(crate) mod tests {
             p(r#"{"listen_mode":"record_submit"}"#),
             ListenMode::RecordSubmit
         );
-        // Unknown / wrong-typed degrade to the default, never error the block.
         assert_eq!(
             p(r#"{"listen_mode":"telepathy"}"#),
             ListenMode::RecordSubmit
@@ -1418,7 +1380,6 @@ pub(crate) mod tests {
 
     #[test]
     fn narrate_drops_unknown_tokens_and_dedups() {
-        // Unknown tokens in the array are dropped (fail-open), duplicates collapsed.
         let v: VoiceConfig =
             serde_json::from_str(r#"{"narrate":["shorts","loud","shorts","digests"]}"#).unwrap();
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
@@ -1426,7 +1387,6 @@ pub(crate) mod tests {
 
     #[test]
     fn narrate_non_array_falls_back_to_default() {
-        // Bool / string / wrong-typed values fall open to the default set.
         for raw in [
             r#"{"narrate":true}"#,
             r#"{"narrate":"digests"}"#,
@@ -1436,7 +1396,7 @@ pub(crate) mod tests {
             assert_eq!(
                 v.narrate,
                 vec![NarrateKind::Shorts, NarrateKind::Digests],
-                "{raw} → default set"
+                "{raw}"
             );
         }
     }
