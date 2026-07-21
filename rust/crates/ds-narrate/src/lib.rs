@@ -14,9 +14,7 @@
 mod accum;
 mod stream;
 
-pub use accum::{
-    Accum, DETECTION_TEXT_MAX_BYTES, SelectedUtterance, cap_detection_text,
-};
+pub use accum::{Accum, DETECTION_TEXT_MAX_BYTES, SelectedUtterance, cap_detection_text};
 pub use stream::{
     BatchPayload, DisplayState, DisplayStep, NarrationUtterance, StreamBatch, clear_session_state,
     deliver_batch, display_state_path, retry_pending, seed_witness, step, stop_utterances,

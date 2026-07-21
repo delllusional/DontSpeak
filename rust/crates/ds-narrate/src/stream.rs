@@ -320,11 +320,7 @@ fn pending_utterance(
 ) -> PendingUtterance {
     // Id = session|key|text|after — detection_text must not enter the hash (retry stability).
     let mut hash = Sha256::new();
-    for part in [
-        session.as_bytes(),
-        key.as_bytes(),
-        selected.text.as_bytes(),
-    ] {
+    for part in [session.as_bytes(), key.as_bytes(), selected.text.as_bytes()] {
         hash.update(part.len().to_le_bytes());
         hash.update(part);
     }
@@ -657,10 +653,7 @@ mod tests {
         let s1 = step(&state, &fin, false, true, false);
         state = s1.write.unwrap();
         assert_eq!(
-            s1.speak
-                .iter()
-                .map(|u| u.text.as_str())
-                .collect::<Vec<_>>(),
+            s1.speak.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(),
             EXPECT
         );
         let s2 = step(&state, &fin, false, true, false);
@@ -686,13 +679,14 @@ mod tests {
             selected.extend(decided.speak);
         }
         assert_eq!(
-            selected
-                .iter()
-                .map(|u| u.text.as_str())
-                .collect::<Vec<_>>(),
+            selected.iter().map(|u| u.text.as_str()).collect::<Vec<_>>(),
             ["First quote.", "Second quote."]
         );
-        assert!(selected[0].detection_text.contains("Preamble for language."));
+        assert!(
+            selected[0]
+                .detection_text
+                .contains("Preamble for language.")
+        );
         assert!(selected[0].detection_text.contains("First quote."));
         assert!(
             selected[1].detection_text.len() >= selected[0].detection_text.len(),

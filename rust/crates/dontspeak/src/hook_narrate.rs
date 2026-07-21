@@ -882,10 +882,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     let stop_message_key = assistant_text.as_deref().map(|body| {
         use sha2::Digest;
         let digest = sha2::Sha256::digest(body.as_bytes());
-        let prefix: String = digest[..8]
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
         format!("stop:{prefix}")
     });
     let stop_detection = assistant_text

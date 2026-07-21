@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-/// Max bytes of detection corpus retained at selection / on the wire.
-/// Must match `dontspeakd::ttsq::MAX_SPEAK_BYTES` (engine also re-caps at enqueue).
+/// Max bytes of detection corpus retained at selection / on the wire. Equality with the
+/// engine's per-item speak cap is asserted at compile time in `dontspeakd::ttsq`.
 pub const DETECTION_TEXT_MAX_BYTES: usize = 10 * 1024;
 
 /// Prefix-truncate to `max` bytes on a char boundary (same semantics as the speak limit).
@@ -173,11 +173,19 @@ mod tests {
     #[test]
     fn detection_text_is_capped_at_selection() {
         let mut a = Accum::default();
-        let huge = format!("{}{}", "E".repeat(DETECTION_TEXT_MAX_BYTES + 500), "\n\n> Quote.");
+        let huge = format!(
+            "{}{}",
+            "E".repeat(DETECTION_TEXT_MAX_BYTES + 500),
+            "\n\n> Quote."
+        );
         let out = a.feed(0, &huge, None, true, true, false);
         assert_eq!(texts(&out), ["Quote."]);
         assert!(out[0].detection_text.len() <= DETECTION_TEXT_MAX_BYTES);
-        assert!(out[0].detection_text.is_char_boundary(out[0].detection_text.len()));
+        assert!(
+            out[0]
+                .detection_text
+                .is_char_boundary(out[0].detection_text.len())
+        );
     }
 
     #[test]
@@ -192,7 +200,14 @@ mod tests {
             false,
         );
         assert!(first.is_empty(), "open quote waits for close");
-        let first = a.feed(1, "\n\nMore English body for context.\n\n", None, false, true, false);
+        let first = a.feed(
+            1,
+            "\n\nMore English body for context.\n\n",
+            None,
+            false,
+            true,
+            false,
+        );
         assert_eq!(texts(&first), ["Short digest one."]);
         let first_det = first[0].detection_text.clone();
         let second = a.feed(
@@ -233,7 +248,7 @@ mod tests {
         let reply = "Done — all three tests pass.";
         let mut a = Accum::default();
         let out = a.feed(
-            0, reply, None, true, /*messages*/ false, /*short*/ true
+            0, reply, None, true, /*messages*/ false, /*short*/ true,
         );
         assert_eq!(texts(&out), [reply]);
         assert_eq!(out[0].detection_text, reply);

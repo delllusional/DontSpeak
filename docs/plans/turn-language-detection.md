@@ -270,7 +270,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 | New CLI + new engine | Full so-far detection + pin |
 | Old CLI + new engine | Fields absent → detect on digest |
 | New CLI + old engine | Unknown fields ignored (no `deny_unknown_fields`) |
-| On-disk pending without `detection_text` | Default `""` → use spoken text |
+| On-disk pending without `detection_text` | Default `""` → use spoken text. A pre-upgrade entry retried after the upgrade can therefore pin from the digest alone (if that digest clears the 64-char bar), making a misdetection stick for the rest of that message instead of being re-decided per utterance. One-time, per pending entry in flight across the upgrade. |
 | MCP `Speak` | Unchanged |
 | Short-only turns | Best-effort; documented |
 

@@ -121,9 +121,10 @@ pub fn detect_language(text: &str, model: ds_config::TtsModel) -> String {
     code.to_string()
 }
 
-/// Non-refusing clamp used only by the warm helper, which trusts the engine's already-
-/// scoped code over IPC and must never drop. Guards a model-switch race: if the model
-/// changed after the engine detected, clamp an unsupported code to the model's default.
+/// Non-refusing clamp for an already-scoped code — used by the engine before it speaks an
+/// item and by the warm helper, which trusts the code it gets over IPC and must never drop.
+/// Guards a model-switch race: a code detected (or pinned) under one model that the live
+/// model can't speak resolves to that model's default.
 pub fn supported_language(language: &str, model: ds_config::TtsModel) -> String {
     let descriptor = model.descriptor();
     if descriptor.accepts_detected_language(language) {

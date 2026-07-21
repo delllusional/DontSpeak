@@ -49,7 +49,10 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
 /// Admission IDs outlive playback (producer retry); SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
-/// Per-turn language pins share the accepted-id cap (SessionEnd / FIFO eviction).
+/// Per-turn language pins share the accepted-id cap. SessionEnd prunes, but an admit
+/// racing it can still insert after the prune (detection runs off-lock), so FIFO
+/// eviction — not SessionEnd — is what bounds the map. Such a pin is never read: the
+/// session's items are already gone.
 const LANGUAGE_PINS_MAX: usize = 8192;
 /// Normalized prose length required before a solid pin is stored (short turns stay best-effort).
 const SOLID_PIN_MIN_CHARS: usize = 64;
@@ -93,7 +96,7 @@ impl LanguagePins {
             .map(String::as_str)
     }
 
-    /// Insert only when absent (first solid pin wins). FIFO-evict at cap.
+    /// Insert only when absent. FIFO-evict at cap.
     fn try_insert(&mut self, session: String, message_key: String, language: String) {
         let key = (session, message_key);
         if self.map.contains_key(&key) {
@@ -122,20 +125,12 @@ impl LanguagePins {
     }
 }
 
-/// Prefix truncate to `max` bytes on a char boundary (spoken-text speak limit semantics).
-fn truncate_to_bytes(s: String, max: usize) -> String {
-    if s.len() <= max {
-        return s;
-    }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
-}
-
 /// Per-item text cap (IPC + in-process) — enforced here so wire can't bypass.
 pub(crate) const MAX_SPEAK_BYTES: usize = 10 * 1024;
+
+/// The detection corpus rides the same wire line as spoken text, so the producer-side cap
+/// must not exceed what this queue accepts. Enforced, not just documented.
+const _: () = assert!(ds_narrate::DETECTION_TEXT_MAX_BYTES == MAX_SPEAK_BYTES);
 
 /// Pending bounds under stalled focus/mic (speech vs cue quotas).
 const MAX_PENDING_ITEMS: usize = 128;
@@ -683,10 +678,11 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(());
         }
-        // Cap detection corpus at speak limit; never reject on detection size alone.
+        // Re-cap the detection corpus (an old or hand-rolled producer may not have);
+        // never reject on detection size alone.
         let detection_text = detection_text
             .filter(|s| !s.trim().is_empty())
-            .map(|s| truncate_to_bytes(s, MAX_SPEAK_BYTES));
+            .map(ds_narrate::cap_detection_text);
         let message_key = message_key.filter(|k| !k.is_empty());
         let action = QueueAction::Speech {
             text: text.clone(),
@@ -709,13 +705,13 @@ impl TtsQueue {
             self.enqueue_action(action, source, session.clone())?;
         }
 
-        // Pin only after items is released; never hold pins + items together.
+        // Pin only after items is released (see the `language_pins` field).
         let corpus = detection_text.as_deref().unwrap_or(text.as_str());
         self.try_pin_language_at_admit(session.as_deref(), message_key.as_deref(), corpus);
         Ok(())
     }
 
-    /// Solid pin when normalized prose ≥ 64 chars; first pin wins for the map key.
+    /// Pin the turn's language from `corpus` when its normalized prose is long enough.
     fn try_pin_language_at_admit(
         &self,
         session: Option<&str>,
@@ -726,15 +722,17 @@ impl TtsQueue {
             return;
         };
         let session_tag = session.unwrap_or("");
-        let prose_len = ds_tts::normalize_spoken_text(corpus).chars().count();
-        if prose_len < SOLID_PIN_MIN_CHARS {
-            return;
-        }
+        // Cheap map probe before normalizing up to 10 KiB: every later digest of an
+        // already-pinned turn re-enters here on the IPC thread and would redo that work.
         {
             let pins = self.language_pins.lock().unwrap();
             if pins.get(session_tag, message_key).is_some() {
                 return;
             }
+        }
+        let prose_len = ds_tts::normalize_spoken_text(corpus).chars().count();
+        if prose_len < SOLID_PIN_MIN_CHARS {
+            return;
         }
         // Config Copy, drop before detect (same pattern as play_speech).
         let model = self.config.lock().unwrap().tts_model;
@@ -1174,7 +1172,9 @@ impl TtsQueue {
             let _playing = PlayingGuard(&self.playing);
 
             match &item.action {
-                QueueAction::Speech { text, voice, rate, .. } => {
+                QueueAction::Speech {
+                    text, voice, rate, ..
+                } => {
                     let (outcome, resume_skip) =
                         self.play_speech(&item, gen0, text, voice.as_ref(), *rate);
                     item.resume_skip = resume_skip;
@@ -1201,6 +1201,34 @@ impl TtsQueue {
         }
     }
 
+    /// Language for one item: turn pin → else detect on its corpus (falling back to the
+    /// spoken text) → always clamp to `model`. The clamp is what covers a model switch
+    /// between admit and play: the pin was detected under the admit-time model's language
+    /// set, and a code the live model can't speak resolves to that model's default.
+    fn resolve_language(&self, item: &Item, text: &str, model: ds_config::TtsModel) -> String {
+        let session_tag = item.session.as_deref().unwrap_or("");
+        let (detection_text, message_key) = match &item.action {
+            QueueAction::Speech {
+                detection_text,
+                message_key,
+                ..
+            } => (detection_text.as_deref(), message_key.as_deref()),
+            QueueAction::Earcon(_) => (None, None),
+        };
+        let pinned = message_key.and_then(|key| {
+            self.language_pins
+                .lock()
+                .unwrap()
+                .get(session_tag, key)
+                .map(str::to_string)
+        });
+        let language = match pinned {
+            Some(code) => code,
+            None => ds_tts::detect_language(detection_text.unwrap_or(text), model),
+        };
+        ds_tts::supported_language(&language, model)
+    }
+
     /// Play speech; one retry on warm-child transport loss (reload mid-write).
     fn play_speech(
         &self,
@@ -1212,33 +1240,7 @@ impl TtsQueue {
     ) -> (SpeechOutcome, usize) {
         // Read the model as a Copy local so the config lock drops before detection runs.
         let model = self.config.lock().unwrap().tts_model;
-        // Pin → else detect on corpus/spoken text → always clamp for live model.
-        let language = {
-            let session_tag = item.session.as_deref().unwrap_or("");
-            let (detection_text, message_key) = match &item.action {
-                QueueAction::Speech {
-                    detection_text,
-                    message_key,
-                    ..
-                } => (detection_text.as_deref(), message_key.as_deref()),
-                QueueAction::Earcon(_) => (None, None),
-            };
-            let pinned = message_key.and_then(|key| {
-                self.language_pins
-                    .lock()
-                    .unwrap()
-                    .get(session_tag, key)
-                    .map(str::to_string)
-            });
-            match pinned {
-                Some(code) => code,
-                None => {
-                    let corpus = detection_text.unwrap_or(text);
-                    ds_tts::detect_language(corpus, model)
-                }
-            }
-        };
-        let language = ds_tts::supported_language(&language, model);
+        let language = self.resolve_language(item, text, model);
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
@@ -3603,7 +3605,10 @@ mod tests {
         let worker = Arc::clone(q);
         std::thread::spawn(move || {
             let spoken = item(text);
-            let QueueAction::Speech { text, voice, rate, .. } = &spoken.action else {
+            let QueueAction::Speech {
+                text, voice, rate, ..
+            } = &spoken.action
+            else {
                 unreachable!()
             };
             worker.play_speech(
@@ -4509,14 +4514,8 @@ mod tests {
             Some(key_es.into()),
         )
         .unwrap();
-        assert_eq!(
-            q.language_pins.lock().unwrap().get("s", key_en),
-            Some("en")
-        );
-        assert_eq!(
-            q.language_pins.lock().unwrap().get("s", key_es),
-            Some("es")
-        );
+        assert_eq!(q.language_pins.lock().unwrap().get("s", key_en), Some("en"));
+        assert_eq!(q.language_pins.lock().unwrap().get("s", key_es), Some("es"));
     }
 
     #[test]
@@ -4529,52 +4528,63 @@ mod tests {
         assert!(pins.get("s0", "k").is_none(), "oldest pin FIFO-evicted");
         assert!(pins.get("s1", "k").is_none());
         assert!(
-            pins
-                .get(&format!("s{}", LANGUAGE_PINS_MAX + 1), "k")
+            pins.get(&format!("s{}", LANGUAGE_PINS_MAX + 1), "k")
                 .is_some()
         );
     }
 
-    #[test]
-    fn play_speech_uses_pinned_language() {
-        let q = mk_queue();
-        q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
-        // Pin English for the turn, then play a short false-friend digest.
-        q.language_pins.lock().unwrap().try_insert(
-            "s".into(),
-            "m".into(),
-            "en".into(),
-        );
-        let spoken = Item {
+    fn spoken_item(text: &str, message_key: Option<&str>) -> Item {
+        Item {
             action: QueueAction::Speech {
-                text: "Bon courage.".into(),
+                text: text.into(),
                 detection_text: None,
-                message_key: Some("m".into()),
+                message_key: message_key.map(str::to_string),
                 voice: None,
                 rate: None,
             },
             source: ClientSource::Unknown,
             session: Some("s".into()),
             resume_skip: 0,
-        };
-        // Resolve language the same way play_speech does (without running the helper).
-        let model = q.config.lock().unwrap().tts_model;
-        let session_tag = spoken.session.as_deref().unwrap_or("");
-        let message_key = match &spoken.action {
-            QueueAction::Speech {
-                message_key: Some(k),
-                ..
-            } => k.as_str(),
-            _ => panic!("expected message_key"),
-        };
-        let language = q
-            .language_pins
+        }
+    }
+
+    #[test]
+    fn resolve_language_prefers_the_turn_pin_over_the_digest() {
+        let q = mk_queue();
+        let model = ds_config::TtsModel::Kokoro;
+        q.config.lock().unwrap().tts_model = model;
+        q.language_pins
             .lock()
             .unwrap()
-            .get(session_tag, message_key)
-            .map(str::to_string)
-            .unwrap_or_else(|| ds_tts::detect_language("Bon courage.", model));
-        let language = ds_tts::supported_language(&language, model);
-        assert_eq!(language, "en");
+            .try_insert("s".into(), "m".into(), "en".into());
+        // Short French-looking digest inside an English turn: the pin decides.
+        let pinned = spoken_item("Bon courage.", Some("m"));
+        assert_eq!(q.resolve_language(&pinned, "Bon courage.", model), "en");
+        // Same digest under an unpinned key falls back to per-item detection.
+        let unpinned = spoken_item("Bon courage.", Some("other"));
+        assert_eq!(
+            q.resolve_language(&unpinned, "Bon courage.", model),
+            ds_tts::detect_language("Bon courage.", model)
+        );
+    }
+
+    #[test]
+    fn resolve_language_clamps_a_pin_the_live_model_cannot_speak() {
+        let q = mk_queue();
+        // Pinned while Chatterbox was active: `ru` is in its set but not Kokoro's.
+        q.language_pins
+            .lock()
+            .unwrap()
+            .try_insert("s".into(), "m".into(), "ru".into());
+        let item = spoken_item("Короткая реплика.", Some("m"));
+        assert_eq!(
+            q.resolve_language(&item, "Короткая реплика.", ds_config::TtsModel::Chatterbox),
+            "ru"
+        );
+        assert_eq!(
+            q.resolve_language(&item, "Короткая реплика.", ds_config::TtsModel::Kokoro),
+            ds_config::TtsModel::Kokoro.descriptor().default_language,
+            "model switch between admit and play clamps to the live model's default"
+        );
     }
 }
