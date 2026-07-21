@@ -69,8 +69,9 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked  # release-o
 
 GTK fmt: `cd apps/linux/gtk && cargo fmt --all --check`.
 
-macOS Swift tests need the FFI staticlib first:
-`cd rust && cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.
+macOS Swift tests need the FFI staticlib first, pinned to the app's macOS floor —
+unpinned, cargo targets the host OS and the link warns "built for newer macOS":
+`cd rust && MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --profile release-ffi --locked -p ds-core && cd ../apps/macos && swift test`.
 
 WinUI: `dotnet test apps/windows/winui.tests` (see `.github/actions/dotnet-test-winui`).
 

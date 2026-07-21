@@ -71,8 +71,9 @@ after publish, CI patches **only** the Lines table's Binaries size cells
      Prefer deleting stale skips over accumulating them.
 - **macOS Swift tests** (not in prepush):
   ```bash
-  (cd rust && cargo build --profile release-ffi --locked -p ds-core)
-  (cd apps/macos && MACOSX_DEPLOYMENT_TARGET=14.0 swift test)
+  # the pin goes on the cargo build: it sets the staticlib's deployment target
+  (cd rust && MACOSX_DEPLOYMENT_TARGET=14.0 cargo build --profile release-ffi --locked -p ds-core)
+  (cd apps/macos && swift test)
   ```
   Release also runs WinUI xunit on Windows.
 - **Release notes ready** before tagging — real releases and `-dev` drafts alike. Write
