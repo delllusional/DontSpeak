@@ -358,10 +358,8 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 .map(|(u, s)| item(u, s))
                 .collect()
         }
-        // The portable Windows bundle is self-contained. Dotnet/Winapp deliberately have no
-        // prefetch manifest because their aka.ms redirects are mutable and cannot be pinned to
-        // the SHA required by the downloader. MLX sets and off-x86_64 CUDA have no static
-        // manifest because MLX downloads a pinned repository tree rather than named files.
+        // MLX sets and off-x86_64 CUDA have no static manifest: MLX downloads a pinned
+        // repository tree rather than named files.
         _ => vec![],
     }
 }

@@ -91,9 +91,6 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Some(DownloadTarget::Models) => models(),
         Some(DownloadTarget::Cuda) => cuda(),
-        // Legacy Windows prerequisite tokens: package is self-contained; aka.ms URLs were
-        // unpinned and removed. No-ops for older installer invocations.
-        Some(DownloadTarget::Dotnet) | Some(DownloadTarget::Winapp) => Ok(()),
         // Unknown (incl. no-arg "all") ⇒ models + CUDA, historical installer default.
         None => models().and_then(|_| cuda()),
     };

@@ -97,16 +97,6 @@ fn speaker_embedding_target() -> Option<PathBuf> {
     Some(ds_config::mlx_dir()?.join(SPEAKER_EMBEDDING_DIR_NAME))
 }
 
-/// Exact local directory passed to `SortformerModel.fromModelDirectory`.
-pub fn diarization_dir() -> Option<PathBuf> {
-    diarization_target()
-}
-
-/// Exact local directory for the MLX WeSpeaker embedding checkpoint.
-pub fn speaker_embedding_dir() -> Option<PathBuf> {
-    speaker_embedding_target()
-}
-
 /// MLX Kokoro TTS weights and voice embeddings. Apache-2.0.
 pub static KOKORO_MLX: MlxRepo = MlxRepo {
     name: "kokoro_mlx",
@@ -520,14 +510,6 @@ fn download_one_at(
             }
         }
     }
-}
-
-/// Download a single MLX repo, reporting one overall 0..1 byte-progress bar — a thin
-/// single-repo wrapper over the universal [`ensure_mlx_repos`] (identical byte-weighted
-/// aggregate), for callers that fetch exactly one repo (the engine-side download manager / the
-/// diarization fetch).
-pub fn ensure_mlx_repo(repo: &MlxRepo, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
-    ensure_mlx_repos(&[repo], progress)
 }
 
 /// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:

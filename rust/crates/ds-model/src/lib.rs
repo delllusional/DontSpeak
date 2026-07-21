@@ -4,13 +4,13 @@
 //! Kokoro TTS set — `kokoro-v1.0-fp32.onnx`, voices, the tiny English G2P encoder/decoder,
 //! and the matching `libonnxruntime` dylib for `ort` (load-dynamic, resolved at
 //! runtime). One base dir [`ds_config::model_dir`] holds every asset; each is a
-//! [`ModelSpec`] with a pinned SHA-256. [`ensure`] returns a cached file if its
+//! [`ModelSpec`] with a pinned SHA-256. [`ensure_with_progress`] returns a cached file if its
 //! checksum matches, else downloads to a `.part` temp file (blocking `attohttpc`,
 //! N retries), verifies the SHA-256, and atomically renames it onto the final
 //! path — never leaving a half-written model behind.
 //!
 //! ONNXRUNTIME, two routes (documented in README):
-//!   (A) DEFAULT — [`ensure_onnxruntime`] downloads the version-matched prebuilt
+//!   (A) DEFAULT — [`ensure_onnxruntime_with_progress`] downloads the version-matched prebuilt
 //!       ORT for the platform (the pyke CDN `.tgz` `ort` itself trusts; pinned
 //!       SHA-256), extracts the single `libonnxruntime*.dylib` member, and lands
 //!       it in `model_dir()`. The caller sets `ORT_DYLIB_PATH` to it. Keeps the
@@ -27,7 +27,7 @@
 //!
 //! A stalled download retains its partial temp file and resumes with a validated HTTP Range
 //! request. Download progress is exposed by the engine. The pure fns below are network-free
-//! and unit-tested; `ensure` is exercised by localhost fixtures (no real CDN).
+//! and unit-tested; the download path is exercised by localhost fixtures (no real CDN).
 //!
 //! Also: `read_retry` (AV/EDR transient-`NotFound`); [`update_check`] (shared HTTP GET).
 
@@ -39,11 +39,11 @@ pub mod hash;
 mod kokoro_frontend;
 pub mod libraries;
 pub mod mlx_repo;
-mod parallel;
 /// MLX Audio shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
 #[cfg(target_os = "macos")]
 pub mod mlx_shim;
 pub mod ort;
+mod parallel;
 mod read_retry;
 pub mod setup;
 pub mod spec;
@@ -54,20 +54,18 @@ pub mod urls;
 
 // Flat facade — stable `ds_model::<item>` paths.
 pub use download::{
-    ensure, ensure_in_dir, ensure_with_progress, prefetch_key, set_prefetch_source, url_basename,
+    ensure_in_dir, ensure_with_progress, prefetch_key, set_prefetch_source, url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use kokoro_frontend::{
-    ensure_espeak_loader, ensure_espeak_loader_with_progress, ensure_japanese_dictionary,
-    ensure_japanese_dictionary_with_progress, espeak_data_dir, espeak_library_path,
-    espeak_root_dir, is_espeak_loader_present, is_japanese_dictionary_present,
+    ensure_espeak_loader_with_progress, ensure_japanese_dictionary_with_progress,
+    espeak_library_path, espeak_root_dir, is_espeak_loader_present, is_japanese_dictionary_present,
     japanese_dictionary_dir,
 };
 pub use ort::{
-    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime,
-    ensure_onnxruntime_with_progress, ensure_ort_dylib, ensure_ort_dylib_gpu,
-    is_onnxruntime_dylib_version_ok, onnxruntime_dylib_file, onnxruntime_dylib_path,
-    set_ort_dylib_path,
+    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime_with_progress, ensure_ort_dylib,
+    ensure_ort_dylib_gpu, is_onnxruntime_dylib_version_ok, onnxruntime_dylib_file,
+    onnxruntime_dylib_path, set_ort_dylib_path,
 };
 pub use read_retry::{read_model_file, read_model_file_to_string};
 pub use setup::{
@@ -89,7 +87,7 @@ pub use tts_assets::{
     TTS_ORT_ASSETS, TtsOrtAssetSet, is_tts_model_present, run_setup_tts_model_with_progress,
     tts_model_dir, tts_model_file_path, tts_model_files_present, tts_ort_asset_set,
 };
-pub use update_check::{UpdateInfo, check_for_update};
+pub use update_check::UpdateInfo;
 
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),

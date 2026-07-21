@@ -40,10 +40,6 @@ pub enum DownloadTarget {
     DiarizationMlx,
     /// Installer group: default Kokoro TTS + Parakeet STT ONNX models.
     Models,
-    /// Legacy Windows .NET Desktop Runtime token (no-op; wire compat only).
-    Dotnet,
-    /// Legacy Windows App Runtime token (no-op; wire compat only).
-    Winapp,
 }
 
 impl DownloadTarget {
@@ -85,8 +81,6 @@ impl DownloadTarget {
             DownloadTarget::Cuda => "cuda",
             DownloadTarget::DiarizationMlx => "diarization_mlx",
             DownloadTarget::Models => "models",
-            DownloadTarget::Dotnet => "dotnet",
-            DownloadTarget::Winapp => "winapp",
         }
     }
 
@@ -110,8 +104,6 @@ impl DownloadTarget {
             "cuda" => DownloadTarget::Cuda,
             "diarization_mlx" => DownloadTarget::DiarizationMlx,
             "models" => DownloadTarget::Models,
-            "dotnet" => DownloadTarget::Dotnet,
-            "winapp" => DownloadTarget::Winapp,
             _ => return None,
         })
     }
@@ -143,7 +135,6 @@ impl DownloadTarget {
                 any(target_os = "windows", target_os = "linux"),
                 target_arch = "x86_64"
             )),
-            DownloadTarget::Dotnet | DownloadTarget::Winapp => false,
             DownloadTarget::Onnxruntime
             | DownloadTarget::KokoroModel
             | DownloadTarget::KokoroFrontend
@@ -207,8 +198,6 @@ mod tests {
             DownloadTarget::Cuda,
             DownloadTarget::DiarizationMlx,
             DownloadTarget::Models,
-            DownloadTarget::Dotnet,
-            DownloadTarget::Winapp,
         ] {
             assert_eq!(DownloadTarget::parse(t.as_str()), Some(t), "{:?}", t);
         }
@@ -314,8 +303,6 @@ mod tests {
                 assert!(!t.is_supported_on_this_host(), "{t:?} is macOS-only");
             }
             assert!(!SepformerModel.is_supported_on_this_host());
-            assert!(!Dotnet.is_supported_on_this_host());
-            assert!(!Winapp.is_supported_on_this_host());
             assert_eq!(
                 Cuda.is_supported_on_this_host(),
                 cfg!(target_arch = "x86_64")
@@ -330,8 +317,6 @@ mod tests {
                 );
             }
             assert!(!SepformerModel.is_supported_on_this_host());
-            assert!(!Dotnet.is_supported_on_this_host());
-            assert!(!Winapp.is_supported_on_this_host());
             assert_eq!(
                 Cuda.is_supported_on_this_host(),
                 cfg!(target_arch = "x86_64")

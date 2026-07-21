@@ -1,11 +1,10 @@
 //! Startup update check against GitHub `releases/latest` (excludes drafts/prereleases).
 //! Semver compare of `tag_name` (strip leading `v`) vs running version — not string order.
-//! [`check_for_update_at`] takes the API base for httpmock; [`check_for_update`] is the
-//! production wrapper. Blocking `http_get_builder` — run off the UI thread.
+//! [`check_for_update_at`] takes the API base so tests point it at httpmock; production
+//! callers pass the real base. Blocking `http_get_builder` — run off the UI thread.
 
 use serde_json::Value;
 
-const GITHUB_API_BASE: &str = "https://api.github.com";
 const REPO_SLUG: &str = "delllusional/DontSpeak";
 
 /// Shape for `ds_update_check_json` / host "update available" UI.
@@ -30,11 +29,6 @@ impl UpdateInfo {
         })
         .to_string()
     }
-}
-
-/// Production check (pass running `ds-core::VERSION`). See [`check_for_update_at`].
-pub fn check_for_update(current_version: &str) -> std::io::Result<UpdateInfo> {
-    check_for_update_at(GITHUB_API_BASE, current_version)
 }
 
 /// GET + parse + compare; `api_base` is mockable. Same path as production.

@@ -94,22 +94,10 @@ fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> st
     Ok(())
 }
 
-/// Cache hit if SHA matches; else Range-resume download + atomic rename.
-pub fn ensure(spec: &ModelSpec) -> std::io::Result<PathBuf> {
-    ensure_with_retries(spec, DEFAULT_RETRIES, &|_, _| {})
-}
-
-/// [`ensure`] with `(downloaded, total)` progress.
+/// Cache hit if SHA matches; else Range-resume download + atomic rename, reporting
+/// `(downloaded, total)` progress.
 pub fn ensure_with_progress(
     spec: &ModelSpec,
-    progress: &dyn Fn(u64, u64),
-) -> std::io::Result<PathBuf> {
-    ensure_with_retries(spec, DEFAULT_RETRIES, progress)
-}
-
-fn ensure_with_retries(
-    spec: &ModelSpec,
-    retries: u32,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
     let final_path = model_path(&spec.file_name).ok_or_else(|| {
@@ -118,11 +106,11 @@ fn ensure_with_retries(
             "cannot resolve model_dir() (no data dir)",
         )
     })?;
-    ensure_at(&final_path, spec, retries, progress)?;
+    ensure_at(&final_path, spec, DEFAULT_RETRIES, progress)?;
     Ok(final_path)
 }
 
-/// [`ensure`] into an EXPLICIT directory instead of the flat `model_dir()` — the
+/// [`ensure_with_progress`] into an EXPLICIT directory instead of the flat `model_dir()` — the
 /// per-model subdirectory assets. Same flight-lock /
 /// Range-resume / sha-verify / atomic-rename path; creates `dir`. This is also the
 /// httpmock seam: tests point a spec's URL at a mock server and `dir` at a tempdir.

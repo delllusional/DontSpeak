@@ -75,10 +75,6 @@ pub fn espeak_library_path() -> Option<PathBuf> {
     Some(espeak_root_dir()?.join(name))
 }
 
-pub fn espeak_data_dir() -> Option<PathBuf> {
-    Some(espeak_root_dir()?.join("espeak-ng-data"))
-}
-
 pub fn japanese_dictionary_dir() -> Option<PathBuf> {
     frontend_dir(JAPANESE_DICTIONARY_DIR_NAME)
 }
@@ -216,10 +212,6 @@ pub fn ensure_espeak_loader_with_progress(progress: &dyn Fn(u64, u64)) -> std::i
     )
 }
 
-pub fn ensure_espeak_loader() -> std::io::Result<PathBuf> {
-    ensure_espeak_loader_with_progress(&|_, _| {})
-}
-
 pub fn ensure_japanese_dictionary_with_progress(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
@@ -234,10 +226,6 @@ pub fn ensure_japanese_dictionary_with_progress(
         "Japanese dictionary",
         progress,
     )
-}
-
-pub fn ensure_japanese_dictionary() -> std::io::Result<PathBuf> {
-    ensure_japanese_dictionary_with_progress(&|_, _| {})
 }
 
 #[cfg(test)]

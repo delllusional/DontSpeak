@@ -342,17 +342,13 @@ pub(crate) fn is_downloaded_onnxruntime_up_to_date(path: &Path) -> bool {
     }
 }
 
-/// Ensure the onnxruntime dylib exists locally under `model_dir()` (route A).
-/// If already present, returns its path. Otherwise downloads the version-matched
-/// `.tgz` to a temp file (verifying its pinned SHA-256), extracts the single
-/// `libonnxruntime*.dylib` (/.so/.dll) member, and atomically renames it onto
-/// the final dylib path. Returns an `Unsupported` error on a platform with no
-/// pinned distribution (the README documents route B there).
-pub fn ensure_onnxruntime() -> std::io::Result<PathBuf> {
-    ensure_onnxruntime_with_progress(&|_, _| {})
-}
-
-/// Like [`ensure_onnxruntime`] but reports the `.tgz` download progress.
+/// Ensure the onnxruntime dylib exists locally under `model_dir()` (route A),
+/// reporting `.tgz` download progress. If already present, returns its path.
+/// Otherwise downloads the version-matched `.tgz` to a temp file (verifying its
+/// pinned SHA-256), extracts the single `libonnxruntime*.dylib` (/.so/.dll)
+/// member, and atomically renames it onto the final dylib path. Returns an
+/// `Unsupported` error on a platform with no pinned distribution (the README
+/// documents route B there).
 pub fn ensure_onnxruntime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {
     let final_path = onnxruntime_dylib_path().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
