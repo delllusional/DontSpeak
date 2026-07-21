@@ -29,6 +29,8 @@ impl Drop for HealingGuard {
 struct PlayingClaim {
     source: ClientSource,
     session: Option<String>,
+    /// Speech, not a cue — the in-flight half of the depth the status reports.
+    speech: bool,
 }
 
 struct PlayingGuard<'a>(&'a Mutex<Option<PlayingClaim>>);
@@ -193,6 +195,14 @@ struct Item {
     resume_skip: usize,
 }
 
+/// Pending utterances in `q`. Earcons are cues rather than things to say, so they are not
+/// counted: the depth the status reports is "how much is there left to speak".
+fn speech_depth(q: &VecDeque<Item>) -> usize {
+    q.iter()
+        .filter(|item| item.action.speech_text().is_some())
+        .count()
+}
+
 /// Active terminal: last `MarkActive` (`explicit`), else most-recent enqueue.
 #[derive(Default)]
 struct ActiveSel {
@@ -289,9 +299,9 @@ struct PausedState {
 
 pub struct TtsQueue {
     /// Every mutation must publish the new depth via [`TtsQueue::publish_queue_depth`]
-    /// before releasing the guard — `queue_depth` mirrors `items.len()`.
+    /// before releasing the guard — `queue_depth` mirrors [`speech_depth`].
     items: Mutex<VecDeque<Item>>,
-    /// Lock-free mirror of pending depth for status reads. `items` is held across
+    /// Lock-free mirror of pending SPEECH depth for status reads. `items` is held across
     /// helper-child I/O (`hard_cancel_in_flight` → `stop_fade`), so a status read that
     /// took the lock would stall behind a wedged helper.
     queue_depth: AtomicU64,
@@ -610,14 +620,14 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
-        let before = q.len();
+        let before = speech_depth(&q);
         q.push_back(Item {
             action,
             source,
             session,
             resume_skip: 0,
         });
-        self.publish_queue_depth(before, q.len());
+        self.publish_queue_depth(before, speech_depth(&q));
         self.cv.notify_one();
         Ok(())
     }
@@ -682,13 +692,14 @@ impl TtsQueue {
     /// Claim under `items` lock: gen snapshot + playing publish so clears can't race mid-claim.
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> (Item, u64) {
         let gen0 = self.generation.load(Ordering::SeqCst);
-        let before = q.len();
+        let before = speech_depth(q);
         let item = q.remove(pos).expect("select_pos returns a valid index");
-        self.publish_queue_depth(before, q.len());
+        self.publish_queue_depth(before, speech_depth(q));
         self.in_flight.store(true, Ordering::SeqCst);
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
             session: item.session.clone(),
+            speech: item.action.speech_text().is_some(),
         });
         (item, gen0)
     }
@@ -720,9 +731,9 @@ impl TtsQueue {
     /// Global hard barge: clear queue, cancel in-flight, clear pause (fade out).
     pub fn clear(&self) {
         let mut items = self.items.lock().unwrap();
-        let before = items.len();
+        let before = speech_depth(&items);
         items.clear();
-        self.publish_queue_depth(before, items.len());
+        self.publish_queue_depth(before, speech_depth(&items));
         drop(items);
         *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
@@ -743,9 +754,9 @@ impl TtsQueue {
     pub fn clear_session(&self, session: Option<String>) {
         // items → playing same order as worker; prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
-        let before = items.len();
+        let before = speech_depth(&items);
         prune_session(&mut items, &session);
-        self.publish_queue_depth(before, items.len());
+        self.publish_queue_depth(before, speech_depth(&items));
         let cancel_current = self
             .playing
             .lock()
@@ -785,19 +796,19 @@ impl TtsQueue {
         };
         if cancel_current {
             let mut items = self.items.lock().unwrap();
-            let before = items.len();
+            let before = speech_depth(&items);
             prune_session(&mut items, &Some(target.clone()));
             // Voice submit path (not MarkActive): also drop sticky of same terminal.
             if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                 prune_session(&mut items, &Some(sticky));
             }
-            self.publish_queue_depth(before, items.len());
+            self.publish_queue_depth(before, speech_depth(&items));
             self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
             // Prune + playing snapshot under items (avoid claim race after return).
             let mut items = self.items.lock().unwrap();
-            let before = items.len();
+            let before = speech_depth(&items);
             let playing_is_other = self
                 .playing
                 .lock()
@@ -805,7 +816,7 @@ impl TtsQueue {
                 .as_ref()
                 .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
             retain_only_session(&mut items, &Some(target));
-            self.publish_queue_depth(before, items.len());
+            self.publish_queue_depth(before, speech_depth(&items));
             if playing_is_other {
                 self.hard_cancel_in_flight_locked(&items);
             }
@@ -936,33 +947,38 @@ impl TtsQueue {
         self.tts_active.load(Ordering::SeqCst)
     }
 
-    /// `(speaking, speaker, queued)` for `model_status` activity. Queued is pending-only.
+    /// `(speaking, speaker, queued)` for `model_status` activity. Queued counts utterances
+    /// still outstanding: those waiting plus the one being spoken.
     /// Reads only atomics + the short-lived `playing` lock: status must never wait on
     /// `items`, which cancel paths hold across helper-child I/O.
     pub fn tts_status_sample(&self) -> (bool, Option<ClientSource>, u64) {
         let active = self.is_tts_active();
-        let queued = self.queue_depth.load(Ordering::SeqCst);
+        let pending = self.queue_depth.load(Ordering::SeqCst);
         if !active {
-            return (false, None, queued);
+            return (false, None, pending);
         }
-        let source = self
+        let claim = self
             .playing
             .lock()
             .unwrap()
             .as_ref()
-            .map(|p| p.source)
-            .filter(|s| s.is_client());
-        (true, source, queued)
+            .map(|p| (p.source, p.speech));
+        let source = claim.map(|(source, _)| source).filter(|s| s.is_client());
+        // The utterance being spoken is outstanding work, so it counts. No extra publish:
+        // `set_tts_active` already bumps the gate on both edges of playback, which is
+        // exactly when this addend appears and disappears.
+        let speaking_utterance = u64::from(claim.is_some_and(|(_, speech)| speech));
+        (true, source, pending + speaking_utterance)
     }
 
-    /// Publish the new pending depth, then bump WaitModelStatus only when it changed.
+    /// Publish the new pending speech depth, then bump WaitModelStatus only when it changed.
     /// Store-before-bump so a woken waiter reads the depth that caused the wake.
     /// Call under the `items` guard from every site that mutates the queue.
     fn publish_queue_depth(&self, before: usize, after: usize) {
         let prev = self.queue_depth.swap(after as u64, Ordering::SeqCst);
         debug_assert_eq!(
             prev, before as u64,
-            "pending depth drifted: an `items` mutation skipped publish_queue_depth"
+            "pending speech depth drifted: an `items` mutation skipped publish_queue_depth"
         );
         if before != after {
             self.gate.bump();
@@ -977,9 +993,9 @@ impl TtsQueue {
         items: &mut VecDeque<Item>,
         f: impl FnOnce(&mut VecDeque<Item>) -> R,
     ) -> R {
-        let before = items.len();
+        let before = speech_depth(items);
         let out = f(items);
-        self.publish_queue_depth(before, items.len());
+        self.publish_queue_depth(before, speech_depth(items));
         out
     }
 
@@ -1578,9 +1594,9 @@ impl TtsQueue {
             return;
         }
         let mut q = self.items.lock().unwrap();
-        let before = q.len();
+        let before = speech_depth(&q);
         q.push_front(item);
-        self.publish_queue_depth(before, q.len());
+        self.publish_queue_depth(before, speech_depth(&q));
     }
 }
 
@@ -2598,27 +2614,81 @@ mod tests {
             let _ = q.claim_item(&mut items, 0);
         }
         q.set_active_for_test(true);
+        // Nothing waiting, but the claimed utterance is still outstanding → 1.
         assert_eq!(
             q.tts_status_sample(),
-            (true, Some(ClientSource::ClaudeCode), 0)
+            (true, Some(ClientSource::ClaudeCode), 1)
         );
 
         // Non-wireable producers (legacy DontSpeak self-talk) must not light a Usage card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::DontSpeak,
             session: None,
+            speech: true,
         });
-        assert_eq!(q.tts_status_sample(), (true, None, 0));
+        assert_eq!(q.tts_status_sample(), (true, None, 1));
 
         // GreetSession-style path: client source on the item lights the matching card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Grok,
             session: Some("open".into()),
+            speech: true,
         });
-        assert_eq!(q.tts_status_sample(), (true, Some(ClientSource::Grok), 0));
+        assert_eq!(q.tts_status_sample(), (true, Some(ClientSource::Grok), 1));
 
         q.set_active_for_test(false);
         assert_eq!(q.tts_status_sample(), (false, None, 0));
+    }
+
+    /// Only utterances count: cues share the queue but are not things to say.
+    #[test]
+    fn cues_never_count_toward_the_reported_depth() {
+        let q = mk_queue();
+        q.enqueue_earcon(
+            ds_earcon::EarconEvent::ReplyDone,
+            ClientSource::Unknown,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            q.tts_status_sample().2,
+            0,
+            "a pending cue is not an utterance"
+        );
+
+        // Playing that cue must not invent one either.
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.set_active_for_test(true);
+        assert_eq!(
+            q.tts_status_sample().2,
+            0,
+            "a cue in flight is not an utterance"
+        );
+
+        // …while speech in flight does count, and stops counting when playback ends.
+        q.enqueue(
+            "spoken".into(),
+            None,
+            None,
+            ClientSource::ClaudeCode,
+            Some("sess".into()),
+        )
+        .unwrap();
+        assert_eq!(q.tts_status_sample().2, 1, "waiting utterance");
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        assert_eq!(q.tts_status_sample().2, 1, "same utterance, now speaking");
+        q.set_active_for_test(false);
+        assert_eq!(
+            q.tts_status_sample().2,
+            0,
+            "silence reports nothing outstanding"
+        );
     }
 
     /// Queue-depth changes wake WaitModelStatus so hosts can render `activity.queued`.
@@ -2642,14 +2712,16 @@ mod tests {
         assert_eq!(seq1, seq0.wrapping_add(1), "enqueue must bump gate");
         assert_eq!(q.tts_status_sample(), (true, None, 1));
 
-        // Claim removes pending → depth 0, gate bumps again.
+        // Claim empties pending and bumps, but the count holds: the utterance moved from
+        // waiting to speaking, and both count.
         {
             let mut items = q.items.lock().unwrap();
             let _ = q.claim_item(&mut items, 0);
         }
         let seq2 = q.gate.seq();
         assert_eq!(seq2, seq1.wrapping_add(1), "claim must bump gate");
-        assert_eq!(q.tts_status_sample().2, 0);
+        assert_eq!(q.queue_depth.load(Ordering::SeqCst), 0, "nothing waits");
+        assert_eq!(q.tts_status_sample().2, 1, "the spoken utterance counts");
 
         // Failed enqueue (empty / oversize / full) must not bump.
         q.enqueue(
@@ -3129,6 +3201,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("a".into()),
+            speech: true,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
         q.clear_session(Some("a".into()));
@@ -3144,6 +3217,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("b".into()),
+            speech: true,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
         q2.clear_session(Some("a".into()));
@@ -3181,6 +3255,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("b".into()),
+            speech: true,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -3214,6 +3289,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("other".into()),
+            speech: true,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -3244,6 +3320,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("a".into()),
+            speech: true,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
 
@@ -3273,6 +3350,7 @@ mod tests {
         *q3.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("grok-stop:a".into()),
+            speech: true,
         });
         let gen_before3 = q3.generation.load(Ordering::SeqCst);
         q3.cancel_for_submit(Some("a".into()), false, true);
@@ -3610,6 +3688,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("cleared".into()),
+            speech: true,
         });
 
         let (selected_generation, final_generation) =
@@ -3629,6 +3708,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("current".into()),
+            speech: true,
         });
 
         let (selected_generation, final_generation) =
@@ -3648,6 +3728,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("other".into()),
+            speech: true,
         });
 
         let (selected_generation, final_generation) =
@@ -4186,6 +4267,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
             session: Some("s1".into()),
+            speech: true,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 

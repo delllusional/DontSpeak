@@ -83,8 +83,8 @@ pub struct Activity {
     /// is not a Usage agent (greet / unknown / DontSpeak).
     pub speaker: Option<ds_client::ClientSource>,
     pub muted: bool,
-    /// Pending TTS queue depth (speech + earcons). Excludes the in-flight item — `0` while
-    /// speaking with nothing waiting is correct.
+    /// Utterances still outstanding: those waiting plus the one being spoken. Cues are not
+    /// counted, so this is "how much is left to say" — `0` exactly when speech has stopped.
     pub queued: u64,
 }
 
