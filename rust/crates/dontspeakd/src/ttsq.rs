@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use ds_config::{ClientSource, Paths, VoiceConfig};
@@ -168,13 +168,15 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
 }
 
 /// Reuse if still in `pool`; else free; else least-loaded. `pool` non-empty; `roll(n) < n`.
+/// Load is counted only among agents holding a voice for the SAME language, so spreading
+/// voices across agents stays independent per language.
 fn pick_agent_voice(
-    assignments: &HashMap<ClientSource, String>,
+    assignments: &HashMap<(ClientSource, String), String>,
     pool: &[String],
-    agent: ClientSource,
+    agent: &(ClientSource, String),
     roll: &mut dyn FnMut(usize) -> usize,
 ) -> String {
-    if let Some(v) = assignments.get(&agent)
+    if let Some(v) = assignments.get(agent)
         && pool.iter().any(|p| p == v)
     {
         return v.clone();
@@ -182,7 +184,9 @@ fn pick_agent_voice(
     let load = |v: &str| {
         assignments
             .iter()
-            .filter(|(a, held)| **a != agent && held.as_str() == v)
+            .filter(|(held_by, held)| {
+                held_by != &agent && held_by.1 == agent.1 && held.as_str() == v
+            })
             .count()
     };
     let free: Vec<&String> = pool.iter().filter(|v| load(v) == 0).collect();
@@ -367,8 +371,12 @@ pub struct TtsQueue {
     /// Focus gate. Init false; first poll applies config.
     pause_bg: AtomicBool,
     config: Mutex<VoiceConfig>,
-    /// Lazy pool roll; SessionEnd keeps assignment. Bounded by ClientSource cardinality.
-    agent_voices: Mutex<HashMap<ClientSource, String>>,
+    /// Lazy pool roll; SessionEnd keeps assignment. Keyed per language so an agent holds one
+    /// voice per language it speaks instead of flapping when a reply switches language.
+    /// Bounded by ClientSource cardinality × languages spoken.
+    agent_voices: Mutex<HashMap<(ClientSource, String), String>>,
+    /// `say -v ?` enumeration, read once per process for System language matching.
+    system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
     /// Always acquired inside `items`.
     active: Mutex<ActiveSel>,
     playing: Mutex<Option<PlayingClaim>>,
@@ -406,6 +414,7 @@ impl TtsQueue {
             pause_bg: AtomicBool::new(false),
             config: Mutex::new(config),
             agent_voices: Mutex::new(HashMap::new()),
+            system_voices: OnceLock::new(),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -473,6 +482,7 @@ impl TtsQueue {
             pause_bg: AtomicBool::new(false),
             config: Mutex::new(VoiceConfig::load(&paths)),
             agent_voices: Mutex::new(HashMap::new()),
+            system_voices: OnceLock::new(),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -1137,32 +1147,86 @@ impl TtsQueue {
     }
 
     /// Get-or-assign agent voice ([`pick_agent_voice`]). Pool non-empty.
-    fn assign_agent_voice(&self, agent: ClientSource, pool: &[String]) -> String {
+    fn assign_agent_voice(&self, agent: ClientSource, language: &str, pool: &[String]) -> String {
+        let key = (agent, language.to_string());
         let mut map = self.agent_voices.lock().unwrap();
-        let voice = pick_agent_voice(&map, pool, agent, &mut |n| fastrand::usize(..n));
-        map.insert(agent, voice.clone());
+        let voice = pick_agent_voice(&map, pool, &key, &mut |n| fastrand::usize(..n));
+        map.insert(key, voice.clone());
         voice
     }
 
+    /// Enumerated System voices, read once per process. Reached only when a language actually
+    /// has to be matched, so `say -v ?` stays off the greeting path and out of tests.
+    fn system_voice_catalog(&self) -> &[ds_tts::SpeakerVoice] {
+        self.system_voices
+            .get_or_init(ds_tts::enumerate::system_voices)
+    }
+
     /// Shared greeting+worker resolver: `(engine, voice)`. None if TTS off / empty pool.
+    /// `language` is the detected language of the utterance; `None` (greeting) keeps the
+    /// agent's default assignment.
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
         source: ClientSource,
+        language: Option<&str>,
     ) -> Option<(ds_config::TtsEngine, String)> {
         let engine = cfg.resolved_tts()?;
         let voice = match engine {
             ds_config::TtsEngine::System if cfg.tts_voices.system.is_empty() => String::new(),
-            ds_config::TtsEngine::System => self.assign_agent_voice(source, &cfg.tts_voices.system),
+            ds_config::TtsEngine::System => self.pick_for_language(
+                || ds_tts::enumerate::VoiceCatalog::System(self.system_voice_catalog()),
+                source,
+                language,
+                &cfg.tts_voices.system,
+            ),
             ds_config::TtsEngine::BuiltIn => {
                 let pool = cfg.active_voices();
                 if pool.is_empty() {
                     return None;
                 }
-                self.assign_agent_voice(source, pool)
+                self.pick_for_language(
+                    || ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model),
+                    source,
+                    language,
+                    pool,
+                )
             }
         };
         Some((engine, voice))
+    }
+
+    /// Assign this agent a voice that can actually speak `language`.
+    ///
+    /// One path for every engine: catalogs whose voices are not locked to a language (System
+    /// names it cannot resolve, Chatterbox, Qwen, OmniVoice) hand back the whole pool, so the
+    /// narrowing is a no-op and the agent keeps its usual voice. Only Kokoro ids and located
+    /// System voices actually narrow. When the pool owns nothing for the language, a shipped
+    /// catalog voice for it beats speaking through a voice locked to another language.
+    /// `catalog` is built only when a language is known, so the greeting path never pays for
+    /// System voice enumeration.
+    fn pick_for_language<'a>(
+        &self,
+        catalog: impl FnOnce() -> ds_tts::enumerate::VoiceCatalog<'a>,
+        source: ClientSource,
+        language: Option<&str>,
+        pool: &[String],
+    ) -> String {
+        let Some(language) = language else {
+            return self.assign_agent_voice(source, "", pool);
+        };
+        let catalog = catalog();
+        let narrowed = catalog.pool_for_language(pool, language);
+        if !narrowed.is_empty() {
+            return self.assign_agent_voice(source, language, &narrowed);
+        }
+        match catalog.default_voice_for_language(language) {
+            Some(voice) => voice,
+            // Nothing owns the language anywhere: keep today's behaviour rather than drop the
+            // utterance. Synthesis still receives the detected language, so pronunciation is
+            // right even though the voice is not.
+            None => self.assign_agent_voice(source, "", pool),
+        }
     }
 
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
@@ -1171,7 +1235,7 @@ impl TtsQueue {
         if !cfg.greet {
             return;
         }
-        let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source) else {
+        let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source, None) else {
             return;
         };
         let name = ds_tts::enumerate::voice_display_name(engine, cfg.tts_model, &voice);
@@ -1293,7 +1357,7 @@ impl TtsQueue {
         let mut resume_skip = item.resume_skip;
         loop {
             let (engine, voice, rate) =
-                match self.gate_item(item, gen0, voice_override, rate_override) {
+                match self.gate_item(item, gen0, voice_override, rate_override, Some(&language)) {
                     GateOutcome::Play {
                         engine,
                         voice,
@@ -1347,6 +1411,7 @@ impl TtsQueue {
         gen0: u64,
         voice_override: Option<&String>,
         rate_override: Option<f32>,
+        language: Option<&str>,
     ) -> GateOutcome {
         loop {
             // Hold (don't drop): half-duplex mic live; focus gate (both duplex modes;
@@ -1378,7 +1443,8 @@ impl TtsQueue {
             // voice. Off / no usable rung / empty pool ⇒ a blank voice (speak_one no-ops,
             // value unused). A per-call `item.voice` (e.g. the MCP `speak` voice arg) then
             // overrides just the voice string within the chosen engine.
-            let (engine, base_voice) = match self.resolve_engine_voice(&cfg, item.source) {
+            let (engine, base_voice) = match self.resolve_engine_voice(&cfg, item.source, language)
+            {
                 Some((e, v)) => (Some(e), v),
                 None => (None, String::new()),
             };
@@ -1855,13 +1921,18 @@ mod tests {
         vec!["af_sarah".into(), "am_adam".into(), "bf_emma".into()]
     }
 
+    /// Assignment key for `agent` speaking English.
+    fn key(agent: ClientSource) -> (ClientSource, String) {
+        (agent, "en".to_string())
+    }
+
     #[test]
     fn fresh_pick_rolls_across_the_candidate_pool() {
         let p = pool();
         let a = HashMap::new();
         for (roll, expect) in [(0, "af_sarah"), (1, "am_adam"), (2, "bf_emma")] {
             assert_eq!(
-                pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| roll),
+                pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| roll),
                 expect
             );
         }
@@ -1881,12 +1952,12 @@ mod tests {
                 ClientSource::Codex,
                 ClientSource::QwenCode,
             ] {
-                let v = pick_agent_voice(&a, &p, agent, &mut roll);
+                let v = pick_agent_voice(&a, &p, &key(agent), &mut roll);
                 assert!(
                     !a.values().any(|held| held == &v),
                     "{agent:?} must get a voice no other agent holds"
                 );
-                a.insert(agent, v);
+                a.insert(key(agent), v);
             }
         }
     }
@@ -1897,16 +1968,35 @@ mod tests {
         // (new windows, later replies) return the SAME voice, whatever the roll says.
         let p = pool();
         let mut a = HashMap::new();
-        let first = pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| 1);
-        a.insert(ClientSource::ClaudeCode, first.clone());
-        a.insert(ClientSource::Codex, "am_adam".into());
+        let first = pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 1);
+        a.insert(key(ClientSource::ClaudeCode), first.clone());
+        a.insert(key(ClientSource::Codex), "am_adam".into());
         assert_eq!(
-            pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
             first
         );
         assert_eq!(
-            pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |n| n - 1),
+            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |n| n - 1),
             first
+        );
+    }
+
+    #[test]
+    fn load_spreading_is_scoped_to_one_language() {
+        // Another agent holding a voice for a DIFFERENT language must not make that voice look
+        // taken. It matters for language-agnostic models, where every language draws the same
+        // pool and cross-language load would starve agents of their assignment.
+        let p = pool();
+        let mut a = HashMap::new();
+        a.insert((ClientSource::Codex, "it".to_string()), "af_sarah".into());
+        assert_eq!(
+            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            "af_sarah"
+        );
+        a.insert((ClientSource::Codex, "en".to_string()), "af_sarah".into());
+        assert_eq!(
+            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            "am_adam"
         );
     }
 
@@ -1922,8 +2012,8 @@ mod tests {
             ClientSource::QwenCode,
             ClientSource::Grok,
         ] {
-            let v = pick_agent_voice(&a, &p, agent, &mut |_| 0);
-            a.insert(agent, v);
+            let v = pick_agent_voice(&a, &p, &key(agent), &mut |_| 0);
+            a.insert(key(agent), v);
         }
         for v in &p {
             assert_eq!(
@@ -1941,10 +2031,10 @@ mod tests {
         // the roll ranges over the free set only, so index 0 is not pool[0] here.
         let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
-        a.insert(ClientSource::ClaudeCode, "af_sarah".to_string()); // stale (old pool)
-        a.insert(ClientSource::Codex, "af_nicole".to_string()); // valid, holds af_nicole
+        a.insert(key(ClientSource::ClaudeCode), "af_sarah".to_string()); // stale (old pool)
+        a.insert(key(ClientSource::Codex), "af_nicole".to_string()); // valid, holds af_nicole
         let mut seen_n = usize::MAX;
-        let v = pick_agent_voice(&a, &p, ClientSource::ClaudeCode, &mut |n| {
+        let v = pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |n| {
             seen_n = n;
             0
         });
@@ -1957,7 +2047,9 @@ mod tests {
         let picks: Vec<String> = (0..2)
             .map(|_| {
                 let mut rng = fastrand::Rng::with_seed(7);
-                pick_agent_voice(&empty, &pool(), ClientSource::Grok, &mut |n| rng.usize(..n))
+                pick_agent_voice(&empty, &pool(), &key(ClientSource::Grok), &mut |n| {
+                    rng.usize(..n)
+                })
             })
             .collect();
         assert_eq!(picks[0], picks[1]);
@@ -1971,17 +2063,17 @@ mod tests {
         // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
         let mut a = HashMap::new();
-        a.insert(ClientSource::ClaudeCode, "af_sarah".to_string()); // old default
+        a.insert(key(ClientSource::ClaudeCode), "af_sarah".to_string()); // old default
         let new_pool = vec!["af_nicole".to_string()]; // user switched to Nicole-only
-        let v = pick_agent_voice(&a, &new_pool, ClientSource::ClaudeCode, &mut |_| 0);
+        let v = pick_agent_voice(&a, &new_pool, &key(ClientSource::ClaudeCode), &mut |_| 0);
         assert_eq!(
             v, "af_nicole",
             "a voice no longer in the pool must not be reused"
         );
         // And once re-recorded, the fresh pick is stable.
-        a.insert(ClientSource::ClaudeCode, v);
+        a.insert(key(ClientSource::ClaudeCode), v);
         assert_eq!(
-            pick_agent_voice(&a, &new_pool, ClientSource::ClaudeCode, &mut |_| 0),
+            pick_agent_voice(&a, &new_pool, &key(ClientSource::ClaudeCode), &mut |_| 0),
             "af_nicole"
         );
     }
@@ -4088,7 +4180,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             done_tx
-                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None))
+                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None, None))
                 .unwrap();
         });
         // The gate publishes in-flight once it passes the (currently clear) hold gate; give it
@@ -4200,10 +4292,10 @@ mod tests {
     #[test]
     fn end_session_barges_the_window_but_keeps_the_agent_assignment() {
         let q = mk_queue();
-        q.agent_voices
-            .lock()
-            .unwrap()
-            .insert(ClientSource::ClaudeCode, "af_sarah".to_string());
+        q.agent_voices.lock().unwrap().insert(
+            (ClientSource::ClaudeCode, String::new()),
+            "af_sarah".to_string(),
+        );
         q.edit_items_for_test(|q| q.extend([narr(Some("other")), narr(Some("s1"))]));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
@@ -4232,7 +4324,7 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&ClientSource::ClaudeCode),
+                .get(&(ClientSource::ClaudeCode, String::new())),
             Some(&"af_sarah".to_string())
         );
     }
@@ -4242,20 +4334,23 @@ mod tests {
         let q = mk_queue();
         let pool = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
-        let v1 = q.assign_agent_voice(ClientSource::ClaudeCode, &pool);
+        let v1 = q.assign_agent_voice(ClientSource::ClaudeCode, "en", &pool);
         assert!(pool.contains(&v1), "the pick comes from the pool");
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&ClientSource::ClaudeCode),
+                .get(&(ClientSource::ClaudeCode, "en".to_string())),
             Some(&v1)
         );
         // The same agent reuses its recorded pick.
-        assert_eq!(q.assign_agent_voice(ClientSource::ClaudeCode, &pool), v1);
+        assert_eq!(
+            q.assign_agent_voice(ClientSource::ClaudeCode, "en", &pool),
+            v1
+        );
         // A different agent picks among the remaining free voices — with one voice left,
         // that's deterministic: the other one.
-        let v2 = q.assign_agent_voice(ClientSource::Codex, &pool);
+        let v2 = q.assign_agent_voice(ClientSource::Codex, "en", &pool);
         assert!(pool.contains(&v2));
         assert_ne!(v2, v1, "a free voice remains, so agents must not share");
     }
@@ -4267,7 +4362,10 @@ mod tests {
             tts_engine_ladder: Vec::new(), // empty ladder = off
             ..VoiceConfig::default()
         };
-        assert_eq!(q.resolve_engine_voice(&cfg, ClientSource::Unknown), None);
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::Unknown, None),
+            None
+        );
     }
 
     // System is only buildable on macOS/Windows (see `system_tts_buildable_on`) — gated like
@@ -4286,7 +4384,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode),
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None),
             Some((ds_config::TtsEngine::System, "Ava (Premium)".to_string()))
         );
     }
@@ -4301,14 +4399,14 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode),
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None),
             Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
         );
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&ClientSource::ClaudeCode),
+                .get(&(ClientSource::ClaudeCode, String::new())),
             Some(&"default".to_string())
         );
     }
@@ -4329,7 +4427,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None)
             .expect("Kokoro is usable on this build");
         assert_eq!(engine, ds_config::TtsEngine::BuiltIn);
         assert!(cfg.tts_voices.kokoro.contains(&voice));
@@ -4338,20 +4436,81 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&ClientSource::ClaudeCode),
+                .get(&(ClientSource::ClaudeCode, String::new())),
             Some(&voice)
         );
         // Every later resolution for the same agent — any window, any request — reuses it.
         let (_, again) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode)
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None)
             .expect("Kokoro again");
         assert_eq!(again, voice);
         assert_eq!(q.agent_voices.lock().unwrap().len(), 1);
         // A second agent claims the remaining free voice — no sharing while one is free.
         let (_, other) = q
-            .resolve_engine_voice(&cfg, ClientSource::Codex)
+            .resolve_engine_voice(&cfg, ClientSource::Codex, None)
             .expect("Kokoro for Codex");
         assert_ne!(other, voice);
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn resolve_engine_voice_kokoro_picks_a_voice_that_owns_the_language() {
+        // The gap this closes: an Italian reply used to be spoken by whichever English voice
+        // the agent held. The pool is narrowed to voices that own the detected language before
+        // the agent assignment runs, and each language keeps its own sticky assignment.
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec![
+                    "af_sarah".to_string(),
+                    "bf_emma".to_string(),
+                    "if_sara".to_string(),
+                ],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let (_, italian) = q
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("it"))
+            .expect("Kokoro is usable on this build");
+        assert_eq!(italian, "if_sara");
+
+        let (_, english) = q
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+            .expect("Kokoro again");
+        assert!(["af_sarah", "bf_emma"].contains(&english.as_str()));
+
+        // Both assignments coexist: switching language back must not re-roll the other.
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("it"))
+                .map(|(_, v)| v),
+            Some(italian)
+        );
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+                .map(|(_, v)| v),
+            Some(english)
+        );
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn resolve_engine_voice_leaves_language_agnostic_models_alone() {
+        // Chatterbox conditions on the language argument, so its voice must survive narrowing
+        // untouched — the shared path must not strand models whose voices own no language.
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
+            tts_model: ds_config::TtsModel::Chatterbox,
+            ..VoiceConfig::default()
+        };
+        for language in ["en", "it", "ja"] {
+            assert_eq!(
+                q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some(language)),
+                Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
+            );
+        }
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
@@ -4369,7 +4528,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&empty_pool, ClientSource::ClaudeCode),
+            q.resolve_engine_voice(&empty_pool, ClientSource::ClaudeCode, None),
             None
         );
         assert!(q.agent_voices.lock().unwrap().is_empty());
@@ -4391,11 +4550,14 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (_, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::Unknown)
+            .resolve_engine_voice(&cfg, ClientSource::Unknown, None)
             .expect("Kokoro is usable on this build");
         assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
-            q.agent_voices.lock().unwrap().get(&ClientSource::Unknown),
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&(ClientSource::Unknown, String::new())),
             Some(&voice)
         );
     }
@@ -4415,11 +4577,14 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (_, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::DontSpeak)
+            .resolve_engine_voice(&cfg, ClientSource::DontSpeak, None)
             .expect("Kokoro is usable on this build");
         assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
-            q.agent_voices.lock().unwrap().get(&ClientSource::DontSpeak),
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&(ClientSource::DontSpeak, String::new())),
             Some(&voice)
         );
     }
@@ -4447,7 +4612,7 @@ mod tests {
             .agent_voices
             .lock()
             .unwrap()
-            .get(&ClientSource::Codex)
+            .get(&(ClientSource::Codex, String::new()))
             .cloned()
             .expect("greeting claims the agent voice at open");
         // The queued greeting carries the claimed voice as its per-item override.
@@ -4462,7 +4627,7 @@ mod tests {
         }
         // A later reply (any session of the same agent) speaks the same voice.
         let (_, later) = q
-            .resolve_engine_voice(&cfg, ClientSource::Codex)
+            .resolve_engine_voice(&cfg, ClientSource::Codex, None)
             .expect("Kokoro later reply");
         assert_eq!(later, claimed);
     }

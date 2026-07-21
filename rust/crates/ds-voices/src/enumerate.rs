@@ -262,6 +262,64 @@ pub fn built_in_choices(model: TtsModel, language: &str) -> Vec<VoiceChoice> {
         .collect()
 }
 
+/// Which catalog a voice pool is drawn from. `System` carries its enumerated voices so the
+/// language rules below stay pure — `say -v ?` is never run from here.
+#[derive(Debug, Clone, Copy)]
+pub enum VoiceCatalog<'a> {
+    BuiltIn(TtsModel),
+    System(&'a [SpeakerVoice]),
+}
+
+impl VoiceCatalog<'_> {
+    /// Language `voice` can only speak, or `None` when it speaks whichever language synthesis
+    /// is given. Kokoro encodes it in the id family char and System voices carry a locale tag;
+    /// Chatterbox, Qwen, and OmniVoice condition on the language argument instead, so their
+    /// voices are never locked. An id absent from the System catalog is treated as unlocked:
+    /// those names are freeform, and a name we cannot resolve is no evidence of a mismatch.
+    pub fn voice_language(&self, voice: &str) -> Option<String> {
+        match self {
+            Self::BuiltIn(TtsModel::Kokoro) => match kokoro_language(voice) {
+                "other" => None,
+                language => Some(language.to_string()),
+            },
+            Self::BuiltIn(_) => None,
+            Self::System(voices) => voices
+                .iter()
+                .find(|candidate| candidate.id == voice)
+                .map(|candidate| primary_subtag(&candidate.language_tag)),
+        }
+    }
+
+    /// Pool entries able to speak `language`. Unlocked voices always qualify, so a catalog of
+    /// them returns `pool` unchanged and callers need no per-engine branch. Empty only when
+    /// every entry is locked to some other language.
+    pub fn pool_for_language(&self, pool: &[String], language: &str) -> Vec<String> {
+        let want = primary_subtag(language);
+        pool.iter()
+            .filter(|voice| self.voice_language(voice).is_none_or(|owned| owned == want))
+            .cloned()
+            .collect()
+    }
+
+    /// Shipped voice to borrow when the pool holds nothing for `language`, so a language the
+    /// user never configured is still spoken by a voice that owns it. `None` when the catalog
+    /// has no such voice — including a fresh install whose Kokoro ids are still the static
+    /// English fallback — which leaves the caller on the agent's assigned voice.
+    pub fn default_voice_for_language(&self, language: &str) -> Option<String> {
+        let want = primary_subtag(language);
+        match self {
+            Self::BuiltIn(TtsModel::Kokoro) => {
+                kokoro_choices(&want).into_iter().next().map(|c| c.id)
+            }
+            Self::BuiltIn(_) => None,
+            Self::System(voices) => system_choices_from(voices, &want)
+                .into_iter()
+                .next()
+                .map(|c| c.id),
+        }
+    }
+}
+
 /// Whether `voice` is a real id for `model` — the full model catalog, not the configured pool
 /// (Kokoro ships many voices beyond a two-voice pool). Kokoro checks the ids actually on disk and
 /// accepts anything before they exist (same rule as `set_config`: never validate a pack voice
@@ -507,6 +565,81 @@ mod tests {
         assert_eq!(primary_subtag("de_DE"), "de");
         assert_eq!(primary_subtag("fr"), "fr");
         assert_eq!(primary_subtag("EN-gb"), "en");
+    }
+
+    fn system_fixture() -> Vec<SpeakerVoice> {
+        let mk = |id: &str, tag: &str| SpeakerVoice {
+            id: id.into(),
+            name: id.into(),
+            language_tag: tag.into(),
+            downloadable: false,
+            gender: None,
+            quality: None,
+        };
+        vec![
+            mk("Samantha", "en-US"),
+            mk("Alice", "it-IT"),
+            mk("Anna", "de-DE"),
+        ]
+    }
+
+    #[test]
+    fn locked_catalogs_report_a_voices_own_language() {
+        let kokoro = VoiceCatalog::BuiltIn(TtsModel::Kokoro);
+        assert_eq!(kokoro.voice_language("af_sarah").as_deref(), Some("en"));
+        assert_eq!(kokoro.voice_language("if_sara").as_deref(), Some("it"));
+        // An unparseable id must not claim a language it cannot back up.
+        assert_eq!(kokoro.voice_language("weird"), None);
+
+        let system = system_fixture();
+        let system = VoiceCatalog::System(&system);
+        assert_eq!(system.voice_language("Alice").as_deref(), Some("it"));
+        // Freeform names absent from the catalog stay eligible everywhere.
+        assert_eq!(system.voice_language("Unknown Voice"), None);
+    }
+
+    #[test]
+    fn unlocked_catalogs_never_narrow_the_pool() {
+        // Chatterbox/Qwen/OmniVoice condition on the language argument, so every voice stays
+        // eligible and the shared filter is a no-op for them — no per-engine branch needed.
+        let pool = vec!["sohee".to_string(), "ryan".to_string()];
+        for model in [TtsModel::Chatterbox, TtsModel::Qwen, TtsModel::OmniVoice] {
+            let catalog = VoiceCatalog::BuiltIn(model);
+            assert_eq!(catalog.voice_language("sohee"), None);
+            assert_eq!(catalog.pool_for_language(&pool, "it"), pool);
+            assert_eq!(catalog.default_voice_for_language("it"), None);
+        }
+    }
+
+    #[test]
+    fn pool_narrows_to_the_requested_language() {
+        let catalog = VoiceCatalog::BuiltIn(TtsModel::Kokoro);
+        let pool = vec![
+            "af_sarah".to_string(),
+            "bf_emma".to_string(),
+            "if_sara".to_string(),
+        ];
+        assert_eq!(catalog.pool_for_language(&pool, "it"), vec!["if_sara"]);
+        // Regional tags reduce to the primary subtag, and en-US/en-GB are one language.
+        assert_eq!(
+            catalog.pool_for_language(&pool, "en-GB"),
+            vec!["af_sarah", "bf_emma"]
+        );
+        // No entry owns Spanish: empty, so the caller falls back rather than guessing.
+        assert!(catalog.pool_for_language(&pool, "es").is_empty());
+    }
+
+    #[test]
+    fn system_pool_and_default_follow_the_locale_tag() {
+        let voices = system_fixture();
+        let catalog = VoiceCatalog::System(&voices);
+        let pool = vec!["Samantha".to_string(), "Alice".to_string()];
+        assert_eq!(catalog.pool_for_language(&pool, "it"), vec!["Alice"]);
+        assert_eq!(
+            catalog.default_voice_for_language("de").as_deref(),
+            Some("Anna")
+        );
+        assert_eq!(catalog.default_voice_for_language("fr"), None);
     }
 
     #[test]

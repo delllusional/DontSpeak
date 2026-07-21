@@ -110,10 +110,10 @@ impl SetConfigArgs {
     }
 
     /// [`apply`](Self::apply) with the Kokoro voice-id source injected (hermetic tests).
-    /// `Some(ids)` = enumerated disk voices: pool ids must be members AND match the
-    /// English language family. `None` = fresh install (no voices bin / MLX voices dir
-    /// yet): accept any id whose `kokoro_language` family matches English,
-    /// so lazily-downloaded pack voices aren't rejected against the static fallback.
+    /// `Some(ids)` = enumerated disk voices: pool ids must be members AND speak a language
+    /// this build routes. `None` = fresh install (no voices bin / MLX voices dir yet): skip
+    /// membership so lazily-downloaded pack voices aren't rejected against the static
+    /// fallback, but still require a routed language.
     /// Exhaustive destructure (no `..`) — new fields fail at compile.
     pub fn apply_with(
         self,
@@ -192,15 +192,27 @@ impl SetConfigArgs {
                     if model != TtsModel::Kokoro {
                         return !descriptor.voices.contains(&voice.as_str());
                     }
-                    let family_ok = ds_voices::enumerate::kokoro_language(voice) == "en";
-                    match kokoro_ids {
-                        Some(known) => !known.contains(voice) || !family_ok,
-                        None => !family_ok,
-                    }
+                    kokoro_ids.is_some_and(|known| !known.contains(voice))
                 }) {
                     return Err(format!(
                         "`{bad}` is not a {} voice; see voices",
                         model.as_str()
+                    ));
+                }
+                // Kokoro publishes voices whose frontend this build does not ship (German; and
+                // Japanese/Mandarin since those pipelines were dropped). They are real ids, so
+                // membership passes and only the language rules them out. Voices for the routed
+                // languages are admitted whatever their family: playback narrows the pool to the
+                // detected language, so a non-English voice is only ever picked for its own.
+                if model == TtsModel::Kokoro
+                    && let Some(bad) = voices.iter().find(|voice| {
+                        !descriptor
+                            .languages
+                            .contains(&ds_voices::enumerate::kokoro_language(voice))
+                    })
+                {
+                    return Err(format!(
+                        "`{bad}` speaks a language this build cannot route; see voices"
                     ));
                 }
                 changes.push(format!("{key}=[{}]", voices.join(", ")));
@@ -635,55 +647,58 @@ mod tests {
     }
 
     #[test]
-    fn set_config_args_non_english_voices_rejected() {
+    fn set_config_args_admit_every_routed_language_but_reject_unroutable_ones() {
         // Hermetic: a FIXED enumerated-id list via apply_with (never the developer's live
-        // model cache). English-only pool: a non-`a`/`b` family id is rejected even when
-        // enumerated, and an id absent from the enumeration is rejected too.
-        let known: Vec<String> = ["af_sarah", "bm_george", "ef_dora"]
+        // model cache). Membership still binds, and the language rule now admits any language
+        // the build routes — playback narrows the pool per utterance, so a non-English voice
+        // can only ever be picked for its own language.
+        let known: Vec<String> = ["af_sarah", "bm_george", "ef_dora", "if_sara", "jf_alpha"]
             .iter()
             .map(|s| s.to_string())
             .collect();
         let mut cfg = VoiceConfig::default();
-        let bad: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["ef_dora"] } }))
-                .unwrap();
-        assert!(bad.apply_with(&mut cfg, Some(&known)).is_err());
+        let mixed: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "kokoro": ["af_sarah", "if_sara", "ef_dora"] } }),
+        )
+        .unwrap();
+        assert!(mixed.apply_with(&mut cfg, Some(&known)).is_ok());
+        assert_eq!(cfg.tts_voices.kokoro, ["af_sarah", "if_sara", "ef_dora"]);
 
+        // Enumerated but unroutable: Japanese lost its frontend, so the voice cannot speak.
+        let unroutable: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["jf_alpha"] } }))
+                .unwrap();
+        assert!(unroutable.apply_with(&mut cfg, Some(&known)).is_err());
+
+        // Absent from the enumeration: still rejected, whatever its language.
         let unknown: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["af_nova"] } }))
                 .unwrap();
         assert!(unknown.apply_with(&mut cfg, Some(&known)).is_err());
-
-        let good: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "tts_voices": { "kokoro": ["af_sarah", "bm_george"] } }),
-        )
-        .unwrap();
-        assert!(good.apply_with(&mut cfg, Some(&known)).is_ok());
-        assert_eq!(cfg.tts_voices.kokoro, ["af_sarah", "bm_george"]);
     }
 
     #[test]
-    fn set_config_args_fresh_install_accepts_family_valid_kokoro_ids() {
+    fn set_config_args_fresh_install_accepts_routed_kokoro_ids() {
         // No enumeration source (None = fresh install, no voices bin / MLX dir yet):
-        // lazily-downloadable pack ids with a matching English family prefix are accepted
-        // instead of being rejected against the static fallback list; wrong-language and
-        // unknown-family shapes still reject.
+        // lazily-downloadable pack ids are accepted instead of being rejected against the
+        // static fallback list, provided their language is one this build routes.
         let mut cfg = VoiceConfig::default();
         let ok: SetConfigArgs = serde_json::from_value(
-            serde_json::json!({ "tts_voices": { "kokoro": ["af_nova", "bm_lewis"] } }),
+            serde_json::json!({ "tts_voices": { "kokoro": ["af_nova", "if_sara"] } }),
         )
         .unwrap();
         let changes = ok.apply_with(&mut cfg, None).expect("pack ids accepted");
-        assert_eq!(cfg.tts_voices.kokoro, ["af_nova", "bm_lewis"]);
+        assert_eq!(cfg.tts_voices.kokoro, ["af_nova", "if_sara"]);
         assert_eq!(
             changes,
-            vec!["tts_voices.kokoro=[af_nova, bm_lewis]".to_string()]
+            vec!["tts_voices.kokoro=[af_nova, if_sara]".to_string()]
         );
 
-        let wrong_language: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["ef_dora"] } }))
+        // German ships no frontend at all, so its family is never admissible.
+        let unroutable: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["df_anna"] } }))
                 .unwrap();
-        assert!(wrong_language.apply_with(&mut cfg, None).is_err());
+        assert!(unroutable.apply_with(&mut cfg, None).is_err());
 
         let unknown_family: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["xq_bogus"] } }))
