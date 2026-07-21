@@ -12,7 +12,7 @@ use ds_config::Paths;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::accum::Accum;
+use crate::accum::{Accum, SelectedUtterance};
 
 /// One streamed text batch — every adapter's payload maps onto this.
 #[derive(Debug, Clone, PartialEq)]
@@ -68,8 +68,12 @@ pub struct DisplayState {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 struct PendingUtterance {
     id: String,
+    /// Message/item id — reused as the engine language-pin `message_key`.
     key: String,
     text: String,
+    /// Cumulative so-far at selection; absent on old state files → detect on `text`.
+    #[serde(default)]
+    detection_text: String,
     after: DeliveryCheckpoint,
 }
 
@@ -86,12 +90,16 @@ enum DeliveryCheckpoint {
 pub struct NarrationUtterance {
     pub id: String,
     pub text: String,
+    /// Cumulative so-far for language detection (may be empty on legacy pending).
+    pub detection_text: String,
+    /// Message/item id for per-turn language pin (`pending.key` / `batch.key`).
+    pub message_key: String,
 }
 
 /// Pure batch effect (`write = None` ⇒ leave state file alone).
 pub struct DisplayStep {
     pub write: Option<DisplayState>,
-    pub speak: Vec<String>,
+    pub speak: Vec<SelectedUtterance>,
 }
 
 /// Pure: same inputs → same outputs. Per-message mic gate is keyed by `batch.key`.
@@ -218,10 +226,10 @@ pub fn deliver_batch(
             debug_assert!(newly_selected.is_empty());
             next.offset = selected_after;
         } else if block_count == newly_selected.len() {
-            for (index, text) in newly_selected.into_iter().enumerate() {
+            for (index, selected) in newly_selected.into_iter().enumerate() {
                 let after = DeliveryCheckpoint::Offset(selected_before + index + 1);
                 next.pending
-                    .push(pending_utterance(session, &next.key, text, after));
+                    .push(pending_utterance(session, &next.key, selected, after));
             }
             if block_count == 0 {
                 next.offset = selected_after;
@@ -287,6 +295,8 @@ fn admit_pending(
         let utterance = NarrationUtterance {
             id: pending.id.clone(),
             text: pending.text.clone(),
+            detection_text: pending.detection_text.clone(),
+            message_key: pending.key.clone(),
         };
         admit(&utterance)?;
         state.pending.remove(0);
@@ -305,11 +315,16 @@ fn admit_pending(
 fn pending_utterance(
     session: &str,
     key: &str,
-    text: String,
+    selected: SelectedUtterance,
     after: DeliveryCheckpoint,
 ) -> PendingUtterance {
+    // Id = session|key|text|after — detection_text must not enter the hash (retry stability).
     let mut hash = Sha256::new();
-    for part in [session.as_bytes(), key.as_bytes(), text.as_bytes()] {
+    for part in [
+        session.as_bytes(),
+        key.as_bytes(),
+        selected.text.as_bytes(),
+    ] {
         hash.update(part.len().to_le_bytes());
         hash.update(part);
     }
@@ -328,7 +343,8 @@ fn pending_utterance(
     PendingUtterance {
         id,
         key: key.to_string(),
-        text,
+        text: selected.text,
+        detection_text: selected.detection_text,
         after,
     }
 }
@@ -432,7 +448,11 @@ pub fn stop_utterances(
     else {
         return Vec::new();
     };
-    Accum::default().feed(0, text, None, true, messages_on, short_on)
+    Accum::default()
+        .feed(0, text, None, true, messages_on, short_on)
+        .into_iter()
+        .map(|u| u.text)
+        .collect()
 }
 
 // ── File plumbing ────────────────────────────────────────────────────────────────
@@ -539,7 +559,7 @@ mod tests {
             if let Some(next) = decided.write {
                 state = next;
             }
-            spoken.extend(decided.speak);
+            spoken.extend(decided.speak.into_iter().map(|u| u.text));
         }
         (state, spoken)
     }
@@ -636,12 +656,49 @@ mod tests {
         let fin = cumulative("m", REPLY, true);
         let s1 = step(&state, &fin, false, true, false);
         state = s1.write.unwrap();
-        assert_eq!(s1.speak, EXPECT);
+        assert_eq!(
+            s1.speak
+                .iter()
+                .map(|u| u.text.as_str())
+                .collect::<Vec<_>>(),
+            EXPECT
+        );
         let s2 = step(&state, &fin, false, true, false);
         assert!(
             s2.speak.is_empty(),
             "duplicate final batch re-speaks nothing"
         );
+    }
+
+    #[test]
+    fn selection_carries_cumulative_detection_text() {
+        let batches = [
+            delta("m", 0, "Preamble for language.\n\n> First quote.", false),
+            delta("m", 1, "\n\nBody.\n\n> Second quote.\n\nTail.", true),
+        ];
+        let mut state = DisplayState::default();
+        let mut selected = Vec::new();
+        for b in &batches {
+            let decided = step(&state, b, false, true, false);
+            if let Some(next) = decided.write {
+                state = next;
+            }
+            selected.extend(decided.speak);
+        }
+        assert_eq!(
+            selected
+                .iter()
+                .map(|u| u.text.as_str())
+                .collect::<Vec<_>>(),
+            ["First quote.", "Second quote."]
+        );
+        assert!(selected[0].detection_text.contains("Preamble for language."));
+        assert!(selected[0].detection_text.contains("First quote."));
+        assert!(
+            selected[1].detection_text.len() >= selected[0].detection_text.len(),
+            "later quote sees fuller so-far"
+        );
+        assert!(selected[1].detection_text.contains("Second quote."));
     }
 
     #[test]
@@ -674,7 +731,13 @@ mod tests {
         let first = step(&DisplayState::default(), &final_first, false, true, false);
         let state = first.write.expect("final batch persists state");
         let late = step(&state, &quote_late, true, true, false);
-        assert_eq!(late.speak, vec!["Spoken.".to_string()]);
+        assert_eq!(
+            late.speak
+                .iter()
+                .map(|u| u.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Spoken."]
+        );
         assert!(late.write.expect("late batch persists state").gate_on);
     }
 
@@ -746,8 +809,12 @@ mod tests {
         let paths = ds_config::Paths::rooted_at(dir.path());
         let fin = cumulative("m", "> Retry me.\n\nBody.", true);
         let mut rejected_id = None;
+        let mut rejected_detection = None;
+        let mut rejected_key = None;
         let error = deliver_batch(&paths, "s", &fin, false, true, false, |utt| {
             rejected_id = Some(utt.id.clone());
+            rejected_detection = Some(utt.detection_text.clone());
+            rejected_key = Some(utt.message_key.clone());
             Err("queue full".to_string())
         })
         .unwrap_err();
@@ -755,22 +822,79 @@ mod tests {
         let state = read_state(&display_state_path(&paths, "s"));
         assert_eq!(state.offset, 0, "rejection must not commit delivery");
         assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].detection_text, "> Retry me.\n\nBody.");
+        assert_eq!(state.pending[0].key, "m");
 
         let mut admitted = Vec::new();
         retry_pending(&paths, "s", |utt| {
-            admitted.push((utt.id.clone(), utt.text.clone()));
+            admitted.push((
+                utt.id.clone(),
+                utt.text.clone(),
+                utt.detection_text.clone(),
+                utt.message_key.clone(),
+            ));
             Ok(())
         })
         .unwrap();
         assert_eq!(
             admitted,
-            vec![(rejected_id.unwrap(), "Retry me.".to_string())]
+            vec![(
+                rejected_id.unwrap(),
+                "Retry me.".to_string(),
+                rejected_detection.unwrap(),
+                rejected_key.unwrap(),
+            )]
         );
+        assert_eq!(admitted[0].2, "> Retry me.\n\nBody.");
+        assert_eq!(admitted[0].3, "m");
         retry_pending(&paths, "s", |_| {
             panic!("committed retry must not be offered twice")
         })
         .unwrap();
         assert_eq!(read_state(&display_state_path(&paths, "s")).offset, 1);
+    }
+
+    #[test]
+    fn pending_without_detection_text_deserializes_and_id_ignores_it() {
+        // Old state files omit detection_text; serde default keeps retry ids stable.
+        let json = r#"{
+            "offset":0,
+            "key":"m",
+            "pending":[{
+                "id":"deadbeefdeadbeefdeadbeefdeadbeef",
+                "key":"m",
+                "text":"Retry me.",
+                "after":{"kind":"offset","value":1}
+            }]
+        }"#;
+        let state: DisplayState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].detection_text, "");
+        assert_eq!(state.pending[0].text, "Retry me.");
+
+        let with_det = pending_utterance(
+            "s",
+            "m",
+            SelectedUtterance {
+                text: "Retry me.".into(),
+                detection_text: "full corpus that must not change id".into(),
+            },
+            DeliveryCheckpoint::Offset(1),
+        );
+        let without_det = pending_utterance(
+            "s",
+            "m",
+            SelectedUtterance {
+                text: "Retry me.".into(),
+                detection_text: "different corpus".into(),
+            },
+            DeliveryCheckpoint::Offset(1),
+        );
+        assert_eq!(
+            with_det.id, without_det.id,
+            "pending id hash excludes detection_text"
+        );
+        assert_ne!(with_det.detection_text, without_det.detection_text);
     }
 
     #[test]

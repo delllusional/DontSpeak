@@ -59,6 +59,13 @@ pub enum Request {
     /// Mid-turn narration (barge/skip drops first); sentence-split on warm child.
     SpeakNarration {
         text: String,
+        /// Full reconstructed turn text so far for language detection (capped by engine).
+        /// Absent/empty → engine detects on `text` (legacy).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detection_text: Option<String>,
+        /// Message/item id for per-turn language pin. Absent → no pin map entry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_key: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         /// Admission dedup id; `None` for older hooks.
@@ -222,9 +229,19 @@ mod tests {
             },
             Request::SpeakNarration {
                 text: "working on it".into(),
+                detection_text: Some("full turn so far for language".into()),
+                message_key: Some("msg-1".into()),
                 session: None,
                 narration_id: Some("narration-1".into()),
                 source: ClientSource::QwenCode,
+            },
+            Request::SpeakNarration {
+                text: "legacy digest only".into(),
+                detection_text: None,
+                message_key: None,
+                session: Some("sess-1".into()),
+                narration_id: None,
+                source: ClientSource::ClaudeCode,
             },
             Request::Stop {
                 session: None,
@@ -399,6 +416,56 @@ mod tests {
             serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
                 .unwrap();
         assert!(matches!(old, Request::Earcon { session: None, .. }));
+    }
+
+    #[test]
+    fn speak_narration_optional_detection_fields_roundtrip_and_legacy_decodes() {
+        let with_fields = Request::SpeakNarration {
+            text: "digest".into(),
+            detection_text: Some("full so-far corpus".into()),
+            message_key: Some("item-9".into()),
+            session: Some("sess-1".into()),
+            narration_id: Some("n1".into()),
+            source: ClientSource::Codex,
+        };
+        let line = serde_json::to_string(&with_fields).unwrap();
+        assert!(line.contains(r#""detection_text":"full so-far corpus""#));
+        assert!(line.contains(r#""message_key":"item-9""#));
+        let back: Request = serde_json::from_str(&line).unwrap();
+        assert!(matches!(
+            back,
+            Request::SpeakNarration {
+                ref text,
+                detection_text: Some(ref det),
+                message_key: Some(ref key),
+                ..
+            } if text == "digest" && det == "full so-far corpus" && key == "item-9"
+        ));
+
+        // Absent fields (older CLI) → None; engine detects on spoken text.
+        let legacy = r#"{"cmd":"speak_narration","text":"hi","source":"claude_code"}"#;
+        let old: Request = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            old,
+            Request::SpeakNarration {
+                detection_text: None,
+                message_key: None,
+                ..
+            }
+        ));
+
+        // Serialize without fields omits them (skip_serializing_if).
+        let bare = Request::SpeakNarration {
+            text: "hi".into(),
+            detection_text: None,
+            message_key: None,
+            session: None,
+            narration_id: None,
+            source: ClientSource::ClaudeCode,
+        };
+        let bare_line = serde_json::to_string(&bare).unwrap();
+        assert!(!bare_line.contains("detection_text"));
+        assert!(!bare_line.contains("message_key"));
     }
 
     /// Unknown `ok` tag → terminal `Response::Unknown` (see variant docs).

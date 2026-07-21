@@ -1306,6 +1306,8 @@ pub(crate) fn spawn_supervisor(
                     ds_config::ClientSource::Codex,
                     Some(session.to_string()),
                     Some(utterance.id.clone()),
+                    Some(utterance.detection_text.clone()).filter(|s| !s.is_empty()),
+                    Some(utterance.message_key.clone()),
                 )
             };
             supervise(

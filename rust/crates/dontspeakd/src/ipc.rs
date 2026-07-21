@@ -208,6 +208,8 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::SpeakNarration {
                     text,
+                    detection_text,
+                    message_key,
                     session,
                     narration_id,
                     source,
@@ -218,7 +220,14 @@ pub(crate) fn spawn_ipc_server(
                     // Success is deliberately NOT logged: it fires once per blockquote and
                     // would spam the activity log. Identified retries return the same success
                     // without adding a second queue item.
-                    match ttsq.enqueue_narration(text, source, session, narration_id) {
+                    match ttsq.enqueue_narration(
+                        text,
+                        source,
+                        session,
+                        narration_id,
+                        detection_text,
+                        message_key,
+                    ) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => {
                             log_client(&paths, source, &format!("narration rejected: {e}"));

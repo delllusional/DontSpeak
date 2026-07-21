@@ -7,6 +7,14 @@
 
 use std::collections::BTreeMap;
 
+/// One newly speakable run plus the reconstructed message-so-far for language detection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedUtterance {
+    pub text: String,
+    /// Full reconstructed turn text at selection time (engine may cap).
+    pub detection_text: String,
+}
+
 /// Feed batches → newly speakable blockquote runs. One per session under a lock.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Accum {
@@ -31,7 +39,7 @@ impl Accum {
         is_final: bool,
         messages_on: bool,
         short_on: bool,
-    ) -> Vec<String> {
+    ) -> Vec<SelectedUtterance> {
         self.seen_final |= is_final;
 
         let cumulative = match displayed_text {
@@ -59,7 +67,10 @@ impl Accum {
         let mut spoken = Vec::new();
         if messages_on {
             for (text, _) in runs.into_iter().take(speakable).skip(self.emitted) {
-                spoken.push(text);
+                spoken.push(SelectedUtterance {
+                    text,
+                    detection_text: cumulative.clone(),
+                });
             }
         }
         self.emitted = speakable.max(self.emitted);
@@ -68,7 +79,10 @@ impl Accum {
         if short_on && self.seen_final && total == 0 && !self.short_done {
             self.short_done = true;
             if !cumulative.trim().is_empty() {
-                spoken.push(cumulative);
+                spoken.push(SelectedUtterance {
+                    text: cumulative.clone(),
+                    detection_text: cumulative,
+                });
             }
         }
 
@@ -84,6 +98,10 @@ impl Accum {
 mod tests {
     use super::*;
 
+    fn texts(selected: &[SelectedUtterance]) -> Vec<&str> {
+        selected.iter().map(|u| u.text.as_str()).collect()
+    }
+
     #[test]
     fn speaks_the_leading_line_once_when_complete() {
         let mut a = Accum::default();
@@ -95,9 +113,11 @@ mod tests {
             a.feed(1, "\n\n> The spoken line.", None, false, true, false)
                 .is_empty()
         );
+        let out = a.feed(2, "\n\nBody.", None, true, true, false);
+        assert_eq!(texts(&out), ["The spoken line."]);
         assert_eq!(
-            a.feed(2, "\n\nBody.", None, true, true, false),
-            vec!["The spoken line."]
+            out[0].detection_text,
+            "Preamble prose.\n\n> The spoken line.\n\nBody."
         );
         // Past high-water mark → no-op.
         assert!(a.feed(3, " more body.", None, true, true, false).is_empty());
@@ -107,26 +127,62 @@ mod tests {
     fn speaks_every_blockquote_in_order_each_once() {
         // Multi-emit: every blockquote, document order, each once as it closes.
         let mut a = Accum::default();
-        assert_eq!(
-            a.feed(
-                0,
-                "> One.\n\nbody one.\n\n> Two.\n\n",
-                None,
-                false,
-                true,
-                false
-            ),
-            vec!["One.", "Two."]
+        let first = a.feed(
+            0,
+            "> One.\n\nbody one.\n\n> Two.\n\n",
+            None,
+            false,
+            true,
+            false,
         );
+        assert_eq!(texts(&first), ["One.", "Two."]);
+        assert_eq!(first[0].detection_text, "> One.\n\nbody one.\n\n> Two.\n\n");
+        assert_eq!(first[1].detection_text, first[0].detection_text);
         assert!(
             a.feed(1, "more.\n\n> Three.", None, false, true, false)
                 .is_empty()
         ); // Three still open
-        assert_eq!(
-            a.feed(2, "\n\ntail.", None, true, true, false),
-            vec!["Three."]
+        let third = a.feed(2, "\n\ntail.", None, true, true, false);
+        assert_eq!(texts(&third), ["Three."]);
+        assert!(
+            third[0]
+                .detection_text
+                .contains("> One.\n\nbody one.\n\n> Two.\n\nmore.\n\n> Three.\n\ntail.")
         );
         assert!(a.feed(3, " extra.", None, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn detection_text_grows_monotonically_across_quotes() {
+        let mut a = Accum::default();
+        let first = a.feed(
+            0,
+            "English preamble with enough body to classify.\n\n> Short digest one.",
+            None,
+            false,
+            true,
+            false,
+        );
+        assert!(first.is_empty(), "open quote waits for close");
+        let first = a.feed(1, "\n\nMore English body for context.\n\n", None, false, true, false);
+        assert_eq!(texts(&first), ["Short digest one."]);
+        let first_det = first[0].detection_text.clone();
+        let second = a.feed(
+            2,
+            "> Short digest two.\n\nClosing English prose for the turn.",
+            None,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(texts(&second), ["Short digest two."]);
+        assert!(
+            second[0].detection_text.starts_with(&first_det)
+                || second[0].detection_text.len() >= first_det.len(),
+            "second quote's detection corpus is fuller so-far"
+        );
+        assert!(second[0].detection_text.contains("Short digest two."));
+        assert!(second[0].detection_text.contains("Closing English prose"));
     }
 
     #[test]
@@ -134,10 +190,12 @@ mod tests {
         // Non-streaming (`Stop`): one final batch must match the streamed multi-emit.
         let reply = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.\n\n> Closing ask?";
         let mut a = Accum::default();
+        let out = a.feed(0, reply, None, true, true, false);
         assert_eq!(
-            a.feed(0, reply, None, true, true, false),
-            vec!["First point.", "Second point.", "Closing ask?"]
+            texts(&out),
+            ["First point.", "Second point.", "Closing ask?"]
         );
+        assert!(out.iter().all(|u| u.detection_text == reply));
         assert!(a.feed(0, reply, None, true, true, false).is_empty());
     }
 
@@ -146,12 +204,11 @@ mod tests {
         // Short on + no blockquote → whole once; short off → silent.
         let reply = "Done — all three tests pass.";
         let mut a = Accum::default();
-        assert_eq!(
-            a.feed(
-                0, reply, None, true, /*messages*/ false, /*short*/ true
-            ),
-            vec!["Done — all three tests pass."]
+        let out = a.feed(
+            0, reply, None, true, /*messages*/ false, /*short*/ true
         );
+        assert_eq!(texts(&out), [reply]);
+        assert_eq!(out[0].detection_text, reply);
         let mut b = Accum::default();
         assert!(
             b.feed(0, reply, None, true, false, false).is_empty(),
@@ -171,17 +228,19 @@ mod tests {
             a.feed(0, "Preamble first.", None, false, true, false)
                 .is_empty()
         );
-        assert_eq!(
-            a.feed(
-                1,
-                "\n\n> Spoken even out of order.",
-                None,
-                false,
-                true,
-                false
-            ),
-            vec!["Spoken even out of order."]
+        let out = a.feed(
+            1,
+            "\n\n> Spoken even out of order.",
+            None,
+            false,
+            true,
+            false,
         );
+        assert_eq!(texts(&out), ["Spoken even out of order."]);
+        // Early final batch frees `parts` when no quotes yet, so later assembly only
+        // has chunks that arrived after that free — detection still tracks so-far.
+        assert!(out[0].detection_text.contains("Spoken even out of order."));
+        assert!(!out[0].detection_text.is_empty());
     }
 
     #[test]
@@ -201,10 +260,9 @@ mod tests {
     fn short_mode_speaks_a_blockquoteless_final_reply_once() {
         let mut a = Accum::default();
         assert!(a.feed(0, "Yes, ", None, false, true, true).is_empty()); // not final yet
-        assert_eq!(
-            a.feed(1, "that's the `default`.", None, true, true, true),
-            vec!["Yes, that's the `default`."]
-        );
+        let out = a.feed(1, "that's the `default`.", None, true, true, true);
+        assert_eq!(texts(&out), ["Yes, that's the `default`."]);
+        assert_eq!(out[0].detection_text, "Yes, that's the `default`.");
         // Latched against late duplicates.
         assert!(a.feed(2, " dup", None, true, true, true).is_empty());
     }
@@ -212,16 +270,10 @@ mod tests {
     #[test]
     fn short_mode_reads_code_paths_and_long_text_whole() {
         // Selection preserves content; the single TTS frontend owns prose cleanup.
-        assert_eq!(
-            Accum::default().feed(0, "Run ```cargo build```", None, true, true, true),
-            vec!["Run ```cargo build```"],
-            "code fence is forwarded intact"
-        );
-        assert_eq!(
-            Accum::default().feed(0, "See rust/crates/lib.rs now", None, true, true, true),
-            vec!["See rust/crates/lib.rs now"],
-            "path → read whole"
-        );
+        let code = Accum::default().feed(0, "Run ```cargo build```", None, true, true, true);
+        assert_eq!(texts(&code), ["Run ```cargo build```"]);
+        let path = Accum::default().feed(0, "See rust/crates/lib.rs now", None, true, true, true);
+        assert_eq!(texts(&path), ["See rust/crates/lib.rs now"]);
         let long = "word ".repeat(80); // ~400 chars
         assert_eq!(
             Accum::default()
@@ -245,8 +297,8 @@ mod tests {
         let digest_out = Accum::default().feed(0, &format!("> {raw}"), None, true, true, false);
         let short_out = Accum::default().feed(0, raw, None, true, true, true);
 
-        assert_eq!(digest_out, short_out);
-        assert_eq!(digest_out, vec![raw]);
+        assert_eq!(texts(&digest_out), texts(&short_out));
+        assert_eq!(texts(&digest_out), [raw]);
     }
 
     #[test]
@@ -256,10 +308,9 @@ mod tests {
             a.feed(0, "", Some("> Spoken."), false, true, false)
                 .is_empty()
         );
-        assert_eq!(
-            a.feed(1, "", Some("> Spoken.\n\nBody."), false, true, false),
-            vec!["Spoken."]
-        );
+        let out = a.feed(1, "", Some("> Spoken.\n\nBody."), false, true, false);
+        assert_eq!(texts(&out), ["Spoken."]);
+        assert_eq!(out[0].detection_text, "> Spoken.\n\nBody.");
     }
 
     #[test]
@@ -275,10 +326,8 @@ mod tests {
     fn final_drains_buffer_but_keeps_high_water_mark() {
         // Free buffer when drained; high-water mark still silences late duplicates.
         let mut a = Accum::default();
-        assert_eq!(
-            a.feed(0, "> Once.\n\nbody", None, true, true, false),
-            vec!["Once."]
-        );
+        let out = a.feed(0, "> Once.\n\nbody", None, true, true, false);
+        assert_eq!(texts(&out), ["Once."]);
         assert!(a.parts.is_empty(), "buffer freed once final + drained");
         assert!(
             a.feed(1, " duplicate tail", None, true, true, false)

@@ -12,6 +12,14 @@ Speaks top-level `>` digests (plus shorts fallback) while the reply streams. Cor
 
 All build `StreamBatch` → `ds_narrate::deliver_batch`.
 
+Each admitted utterance carries spoken `text` plus `detection_text` (cumulative
+message-so-far at selection) and `message_key` (`batch.key` / pending key). Adapters
+forward both on `SpeakNarration` / `enqueue_narration` so the engine can pin one ISO
+language per turn while still speaking mid-turn digests as they complete. Stop paths
+pass the full assistant body as `detection_text` and a stable per-reply
+`stop:{sha256_prefix}` key shared by every line of that reply. See
+[TTS-PIPELINE.md](TTS-PIPELINE.md) for the pin policy.
+
 ## Witness file
 
 Per-session `narrate-display-<session>.json` (engine state dir):

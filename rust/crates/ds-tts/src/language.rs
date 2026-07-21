@@ -1,4 +1,10 @@
-//! Shared per-utterance language detection for every TTS backend.
+//! Shared language detection for every TTS backend.
+//!
+//! Callers pass a detection **corpus** (full turn text when available, else the spoken
+//! digest). The engine pins one ISO language per `(session, message_key)` once the
+//! normalized corpus is solid (≥ 64 chars); short-only turns stay best-effort and may
+//! still false-positive. See `docs/TTS-PIPELINE.md` and the turn-language pin policy
+//! in `dontspeakd::ttsq`.
 
 use std::sync::OnceLock;
 
@@ -236,6 +242,24 @@ mod tests {
         for model in TtsModel::ALL.iter().copied() {
             assert!(model_allowlist(model).contains(&Lang::Eng));
         }
+    }
+
+    #[test]
+    fn english_preamble_plus_short_false_friend_digest_detects_english_for_kokoro() {
+        // Regression: short digests alone ("Bon courage.") can false-positive as FR/PT;
+        // the full turn corpus must keep Kokoro on English (engine pin policy).
+        let full = concat!(
+            "This assistant reply is written entirely in clear English prose so language ",
+            "detection has a solid corpus for the whole turn.\n\n> Bon courage.\n\n",
+            "More English body after the short digest keeps the pin stable."
+        );
+        assert_eq!(
+            detect_language(full, TtsModel::Kokoro),
+            "en",
+            "full turn corpus must classify as English"
+        );
+        // Short digest alone is best-effort (may still false-positive); not a regression.
+        let _ = detect_language("Bon courage.", TtsModel::Kokoro);
     }
 
     #[test]

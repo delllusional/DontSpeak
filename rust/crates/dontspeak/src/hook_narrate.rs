@@ -877,12 +877,24 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     // Deterministic ids collapse concurrent Stop at admission (fp alone is sequential).
     let narration_fp = direct_fp.or_else(|| grok_selection.as_ref().and_then(|s| s.digest_fp));
     let real_sess = session.as_deref().unwrap_or("-");
+    // Stable per-reply pin key shared by every line of this Stop body.
+    let stop_message_key = assistant_text.as_deref().map(|body| {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(body.as_bytes());
+        let prefix: String = digest[..8]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!("stop:{prefix}")
+    });
     for (i, line) in speak.into_iter().enumerate() {
         let narration_id = narration_fp.map(|fp| format!("grok-stop:{real_sess}:{fp}:{i}"));
         match ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
                 text: line,
+                detection_text: assistant_text.clone(),
+                message_key: stop_message_key.clone(),
                 session: admit_session.clone(),
                 narration_id,
                 source: client,
@@ -1007,6 +1019,8 @@ fn admit_narration(
         &paths.engine_sock,
         &ds_ipc::Request::SpeakNarration {
             text: utterance.text.clone(),
+            detection_text: Some(utterance.detection_text.clone()).filter(|s| !s.is_empty()),
+            message_key: Some(utterance.message_key.clone()).filter(|s| !s.is_empty()),
             session,
             narration_id: Some(utterance.id.clone()),
             source: client,
@@ -1116,7 +1130,7 @@ mod tests {
             if let Some(next) = step.write {
                 state = next;
             }
-            spoken.extend(step.speak);
+            spoken.extend(step.speak.into_iter().map(|u| u.text));
         }
         (state, spoken)
     }
@@ -1171,7 +1185,13 @@ mod tests {
             /*digests*/ false,
             /*shorts*/ true,
         );
-        assert_eq!(step.speak, vec!["Done — build is green.".to_string()]);
+        assert_eq!(
+            step.speak
+                .iter()
+                .map(|u| u.text.as_str())
+                .collect::<Vec<_>>(),
+            ["Done — build is green."]
+        );
     }
 
     // Stop double-narration witness (pure stop_utterances lives in ds-narrate).
