@@ -287,13 +287,13 @@ sign_app_dist() {
   }
   local ent="$BUNDLE_LIB_DIR/Bundle/DontSpeak.entitlements"
 
-  # Bundle matching-arch onnxruntime (Gatekeeper). DONTSPEAK_ORT_DYLIB or AS search.
+  # onnxruntime ships OUT of the bundle: ds-model fetches the pinned dist into the model
+  # cache (SHA-256 verified, Microsoft Developer-ID signed, no quarantine xattr — and the
+  # hardened runtime already entitles disable-library-validation for exactly this dylib).
+  # DONTSPEAK_ORT_DYLIB opts a build into embedding one instead; releases don't, so every
+  # published app is the same artifact.
   mkdir -p "$app/Contents/Frameworks"
   local ort="${DONTSPEAK_ORT_DYLIB:-}"
-  if [ -z "$ort" ]; then
-    # find may exit nonzero on TCC dirs — don't kill set -e.
-    ort="$(find "$HOME/Library/Application Support" -name libonnxruntime.dylib 2>/dev/null | head -1 || true)"
-  fi
   local app_arch
   app_arch="$(lipo -archs "$app/Contents/MacOS/DontSpeak" 2>/dev/null | awk '{print $1}' || true)"
   if [ -n "$ort" ] && [ -f "$ort" ] && [ -n "$app_arch" ] \
@@ -305,8 +305,7 @@ sign_app_dist() {
     cp "$ort" "$app/Contents/Frameworks/libonnxruntime.dylib"
     echo "   bundled onnxruntime ← $ort"
   else
-    echo "   WARN: libonnxruntime.dylib not found — NOT bundled; the distributed app will download it" >&2
-    echo "         at runtime (may be Gatekeeper-blocked). Set DONTSPEAK_ORT_DYLIB to bundle it." >&2
+    echo "   onnxruntime: fetched at first run (set DONTSPEAK_ORT_DYLIB to embed one instead)"
   fi
 
   local opts=(--force --options runtime --timestamp --sign "$sign")
