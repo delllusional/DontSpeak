@@ -47,3 +47,9 @@ ds-status = { path = "../../../rust/crates/ds-status" }
 # Logs-tab parse/filter pure rules (same as ds_logs_json wire) + `log` sink via ds_log::init.
 ds-log = { path = "../../../rust/crates/ds-log" }
 log = "0.4"
+
+# The GTK host is a separate workspace, so it does NOT inherit rust/Cargo.toml's release
+# profile — cargo defaults left ~5 MB of symbols in the shipped binary. `strip` only;
+# `panic = "abort"` would defeat ds-core's catch_unwind FFI guard in this in-process host.
+[profile.release]
+strip = true
