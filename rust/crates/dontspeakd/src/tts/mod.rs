@@ -600,7 +600,7 @@ impl TtsManager {
     /// Spawn `ds-helper --serve` and wait — bounded by [`READY_HANDSHAKE_TIMEOUT`] —
     /// for its `READY` line (model warm). On any failure (including a child that
     /// never answers) the manager stays "not running": the queue worker surfaces the
-    /// error and the utterance is dropped. Hooks never synthesize (`docs/HOOKS.md`),
+    /// error and the utterance is dropped. Hooks never synthesize,
     /// so there is no fallback path.
     fn start(&self) {
         let _lifecycle = self.lifecycle.lock().unwrap();
