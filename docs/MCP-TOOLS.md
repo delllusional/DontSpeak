@@ -106,7 +106,7 @@ Atomically update and reload persistent settings.
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
 | `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | Built-in model: "kokoro", "chatterbox", "qwen", or "omnivoice". |
-| `tts_voices` | object | Voice arrays keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. |
+| `tts_voices` | object | Voice arrays keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. A pool may mix languages: each utterance is spoken by a pooled voice for its detected language, or by one of the model's own voices for that language when the pool has none. |
 | `rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. Model support is validated. |
 
 **Narration**

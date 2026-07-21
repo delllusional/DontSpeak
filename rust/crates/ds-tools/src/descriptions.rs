@@ -42,7 +42,9 @@ pub const SET_CONFIG_TTS_ENGINE: &str = "Speech: \"built_in\", \"system\", or \
 pub const SET_CONFIG_TTS_MODEL: &str = "Built-in model: \"kokoro\", \"chatterbox\", \"qwen\", \
     or \"omnivoice\".";
 pub const SET_CONFIG_TTS_VOICES: &str = "Voice arrays keyed by `system`, `kokoro`, `chatterbox`, \
-`qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty.";
+`qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. A pool \
+may mix languages: each utterance is spoken by a pooled voice for its detected language, or by \
+one of the model's own voices for that language when the pool has none.";
 pub const SET_CONFIG_TTS_RATE: &str = "Speech rate. 1.0 = normal. Model support is validated.";
 pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\" = long-reply \
     summaries; \"shorts\" = short replies whole. [] off.";

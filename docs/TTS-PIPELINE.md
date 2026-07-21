@@ -33,7 +33,8 @@ cleanup once. Backend normalization starts from that prose; it does not duplicat
 The `whatlang` detector sees that normalized prose, scoped to the selected model's
 supported languages, so detection only ever yields a language that model can speak (or
 the English fallback for ambiguous or unspeakable input). No utterance is refused for
-language — the model is never changed to fit a detected language.
+language — the model is never changed to fit a detected language, but the **voice** is
+(see [Voice selection](#voice-selection)).
 
 **Turn-level language pin.** Streaming and Stop narration admit each spoken digest with
 optional `detection_text` (reconstructed message-so-far, capped at 10 KiB) and
@@ -94,6 +95,35 @@ All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 Chatterbox caches transient reference-voice conditioning and uses named/model-derived KV
 caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice performs
 32-step confidence-weighted unmasking before Higgs decoding. All long loops poll cancel.
+
+### Voice selection
+
+The detected language picks the voice as well as the frontend. `ds_voices::VoiceCatalog`
+is the one place that answers "can this voice speak this language", for every engine:
+
+| Catalog | Owns a language? | From |
+|---|---|---|
+| Kokoro | yes | id family char (`if_sara` → `it`) |
+| System | yes | `say -v ?` locale tag, primary subtag |
+| Chatterbox, Qwen, OmniVoice | no | conditioned by the language argument at synthesis |
+
+`resolve_engine_voice` narrows the configured pool to the voices that own the detected
+language. A catalog whose voices own none returns the pool unnarrowed, so this is a no-op
+for those models rather than a per-engine branch. When the pool owns nothing for the
+language, the catalog's own voices for it (the same list the picker and the `voices` tool
+show) stand in, so a language the user configured nothing for is still spoken by a voice
+that owns it. Either way the candidates go through `pick_agent_voice`, keeping the roll
+random, the assignment sticky, and agents on distinct voices while spares remain.
+
+Assignments are keyed by `(agent, language)`: one voice per language per agent, so a reply
+that switches language does not re-roll the other. Nothing owning the language anywhere —
+a fresh install whose Kokoro ids are still the static English fallback — keeps the agent's
+usual voice; synthesis still receives the detected language, so pronunciation is right
+even when the voice is not, and `g2p` logs that mismatch.
+
+Pool membership is validated against routed languages, not English: Kokoro publishes
+German, Japanese, and Mandarin voices whose frontends this build does not ship, and those
+stay rejected.
 
 ## Queue and focus
 
