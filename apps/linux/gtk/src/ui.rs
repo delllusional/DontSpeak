@@ -357,8 +357,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     let tts = &s.stats.tts;
     w.tts_runtime
         .set_text(&runtime_text(s.tts.provider.as_deref()));
-    w.tts_queue
-        .set_text(&s.activity.queued.to_string());
+    w.tts_queue.set_text(&s.activity.queued.to_string());
     w.tts_realtime.set_text(&crate::ffi::stats_range(
         tts.rtf_min,
         tts.rtf_avg,

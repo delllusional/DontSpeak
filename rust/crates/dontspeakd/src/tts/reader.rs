@@ -443,6 +443,61 @@ mod reader_eof_tests {
         assert!(fatal, "a waiting speak must be unblocked as fatal");
     }
 
+    /// Drive `reader_loop` over canned stdout WITH a real gate and return how far `seq`
+    /// advanced — the only observable effect of the end-of-utterance bumps.
+    fn reader_gate_bumps(stdout: &[u8]) -> u64 {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = crate::status::StatusGate::new();
+        let before = gate.seq();
+        reader_loop(
+            stdout,
+            ReaderSlots {
+                speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
+                listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
+                diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
+                enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
+            },
+            ReaderStats {
+                tts: Arc::new(crate::stats::TtsStats::new()),
+                stt: Arc::new(crate::stats::SttStats::new()),
+                lifetime: Arc::new(crate::stats::LifetimeSeconds::load(
+                    dir.path().join("ds-stats-reader-gate-test.json"),
+                )),
+            },
+            ReaderModelState {
+                tts_model: loaded_slot(),
+                stt_model: loaded_slot(),
+                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                gate: Some(gate.clone()),
+                child: canned_slot(true),
+            },
+        );
+        gate.seq().wrapping_sub(before)
+    }
+
+    #[test]
+    fn end_of_utterance_stats_lines_bump_the_status_gate() {
+        // The bump is the whole point of these two arms: hosts long-polling WaitModelStatus
+        // repaint per-utterance stats even though `speaking` never edges.
+        assert_eq!(
+            reader_gate_bumps(b"STATS synth_ms=11.0 audio_ms=20.0 first_ms=2.0\n"),
+            1,
+            "a TTS stats line must bump once"
+        );
+        assert_eq!(
+            reader_gate_bumps(b"STTSTATS transcribe_ms=120.0 audio_ms=500.0\n"),
+            1,
+            "an STT stats line must bump once"
+        );
+        // Unrecorded lines (audio_ms=0 / garbage / unrelated chatter) must not wake waiters.
+        assert_eq!(
+            reader_gate_bumps(b"STATS synth_ms=11.0 audio_ms=0.0\nSTTSTATS audio_ms=0.0\nSTATS junk\nPROGRESS 3\n"),
+            0,
+            "lines that record no audio must not bump"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn unexpected_eof_reads_the_real_exit_status_through_the_shared_child_handle() {

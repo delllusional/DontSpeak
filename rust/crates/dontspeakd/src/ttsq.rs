@@ -2669,13 +2669,14 @@ mod tests {
             .unwrap_err();
         assert_eq!(q.gate.seq(), seq2, "oversize reject must not bump");
 
-        // Empty clear (nothing pending) must not depth-bump.
+        // Empty clear (nothing pending): the ONE bump is the speaking edge from
+        // hard_cancel_in_flight's set_tts_active(false), never a depth bump.
         q.clear();
-        // clear also hard-cancels; tts_active was true so speaking edge may bump once.
         let after_clear = q.gate.seq();
-        assert!(
-            after_clear == seq2 || after_clear == seq2.wrapping_add(1),
-            "empty clear: only speaking edge may bump, not depth"
+        assert_eq!(
+            after_clear,
+            seq2.wrapping_add(1),
+            "empty clear: speaking edge bumps exactly once, depth does not"
         );
         q.clear();
         assert_eq!(
@@ -2683,6 +2684,34 @@ mod tests {
             after_clear,
             "second empty clear must not bump depth"
         );
+
+        // Per-session prune: only a prune that actually drops an item bumps.
+        q.items.lock().unwrap().push_back(narr(Some("a")));
+        let before_prune = q.gate.seq();
+        q.clear_session(Some("nobody".into()));
+        assert_eq!(
+            q.gate.seq(),
+            before_prune,
+            "clear_session that prunes nothing must not bump"
+        );
+        q.clear_session(Some("a".into()));
+        assert_eq!(
+            q.gate.seq(),
+            before_prune.wrapping_add(1),
+            "clear_session that prunes must bump once"
+        );
+        assert_eq!(q.tts_status_sample().2, 0);
+
+        // Resume push_front re-grows pending depth.
+        let before_requeue = q.gate.seq();
+        q.cancel_kind.lock().unwrap().insert(7, true);
+        q.requeue_if_resuming(narr(Some("a")), 7);
+        assert_eq!(
+            q.gate.seq(),
+            before_requeue.wrapping_add(1),
+            "resume push_front must bump"
+        );
+        assert_eq!(q.tts_status_sample().2, 1);
     }
 
     #[test]
@@ -3530,9 +3559,10 @@ mod tests {
         let selected_generation = match q.items.try_lock() {
             // This is the buggy ordering: the queue lock escaped before the generation bump.
             Ok(mut items) => {
-                let (_, generation) = q.claim_item(&mut items, 0);
-                drop(items);
+                // try_lock already recorded the regression; release `seq` before claiming,
+                // because `claim_item`'s depth bump re-locks it (std mutexes aren't reentrant).
                 drop(transition);
+                let (_, generation) = q.claim_item(&mut items, 0);
                 generation
             }
             // The fixed ordering: let the cancellation finish, then claim its survivor.
