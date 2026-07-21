@@ -912,7 +912,17 @@ test("amend preserves the proven pair only when the message is kept", (t) => {
 
 test("the Claude wrapper forwards commit payloads byte-intact", (t) => {
   const settingsPath = join(sourceScripts, "..", "..", ".claude", "settings.json");
-  const command = JSON.parse(readFileSync(settingsPath, "utf8")).hooks.PreToolUse[0].hooks[0].command;
+  const hook = JSON.parse(readFileSync(settingsPath, "utf8")).hooks.PreToolUse
+    .find((entry) => entry.matcher.includes("run_terminal_command"))
+    .hooks[0];
+  if (hook.command === "node") {
+    assert.deepEqual(hook.args, [
+      "${CLAUDE_PROJECT_DIR}/scripts/agents/capture-agent-attribution.mjs",
+      "auto",
+    ]);
+    return;
+  }
+  const command = hook.command;
   // Pins safe read + unquoted heredoc (expansion without re-scanning).
   assert.match(command, /IFS= read -rd ''/);
   assert.match(command, /<<DONTSPEAK_JSON\n/);
