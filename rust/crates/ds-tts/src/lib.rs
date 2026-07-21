@@ -1,8 +1,8 @@
 //! ds-tts — text-to-speech synthesis stages for dontspeak (ARCHITECTURE §A.1).
 //!
-//! The warm `ds-helper` process owns speaking (own process group + single-speaker
-//! pidfile); this crate supplies the pure stages it runs plus the one System-TTS command
-//! seam, [`system::speech_command`] (empty prose is a successful no-op).
+//! The warm `ds-helper` process owns speaking and playback; this crate supplies the
+//! pure stages it runs plus the one System-TTS command seam,
+//! [`system::speech_command`] (empty prose is a successful no-op).
 //!
 //! Helper pipeline: markdown → prose ([`spoken`]) → numbers → G2P ([`g2p`]) → vocab
 //! tokens → clause batches ([`batch`]) → synth ([`synth`] / MLX) → trim →

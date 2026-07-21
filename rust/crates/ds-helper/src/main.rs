@@ -1,7 +1,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")] // engine pipes stdio; no console
 //! Built-in TTS/STT warm helper (registry model + Parakeet) and one-shot synth.
 //!
-//! - one-shot: `ds-helper <text> <voice> <rate>` — own process group (pidfile/barge)
+//! - one-shot: `ds-helper <text> <voice> <rate>` — synth + play one utterance, then
+//!   exit (manual/dev; the engine always spawns `--serve`)
 //! - `--serve`: load once; NDJSON stdin; `READY`/`DONE`/`ERR`; listen ends `LDONE`
 //!
 //! Fail-quiet if assets/audio missing. Exit via `_exit` (ort/cpal abort on Drop).

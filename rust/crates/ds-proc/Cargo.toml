@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Pidfile and process-group management for DontSpeak's single-speaker barge-in contract."
+description = "Pid liveness, parsing, and process-group lifecycle primitives for DontSpeak."
 
 [dependencies]
 tempfile = { workspace = true }

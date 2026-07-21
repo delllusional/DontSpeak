@@ -145,7 +145,6 @@ enum PressState {
 pub(crate) struct Engine<P: Platform + 'static> {
     pub(crate) plat: Rc<P>,
     pub(crate) stt: Box<dyn Stt>,
-    pidfile: std::path::PathBuf,
 
     /// INVARIANT: every `self.gesture = …` is followed by `sync_caps_led` (or a helper that does).
     gesture: GestureState,
@@ -193,48 +192,32 @@ pub(crate) struct Engine<P: Platform + 'static> {
 impl<P: Platform + 'static> Engine<P> {
     /// Default ClaudeNative STT (tests + fallback). Production: [`Engine::with_config`].
     #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn new(plat: P, pidfile: std::path::PathBuf, long_press_ms: u64) -> Self {
+    pub(crate) fn new(plat: P, long_press_ms: u64) -> Self {
         let plat = Rc::new(plat);
         // Space chord — real engine reads Claude Code binding via `with_config`/factory.
         let stt: Box<dyn Stt> = Box::new(ds_stt::ClaudeNative::new(
             plat.clone(),
             ds_platform::KeyChord::default(),
         ));
-        Self::assemble(
-            plat,
-            stt,
-            VoiceConfig::default(),
-            pidfile,
-            long_press_ms,
-            None,
-        )
+        Self::assemble(plat, stt, VoiceConfig::default(), long_press_ms, None)
     }
 
     /// STT from config via factory (no silent engine substitution).
     pub(crate) fn with_config(
         plat: P,
         cfg: &VoiceConfig,
-        pidfile: std::path::PathBuf,
         long_press_ms: u64,
         paths: Option<&ds_config::Paths>,
     ) -> Self {
         let plat = Rc::new(plat);
         let stt = ds_engines::make_stt_at(cfg, plat.clone(), &ds_engines::RealAvailability, paths);
-        Self::assemble(
-            plat,
-            stt,
-            cfg.clone(),
-            pidfile,
-            long_press_ms,
-            paths.cloned(),
-        )
+        Self::assemble(plat, stt, cfg.clone(), long_press_ms, paths.cloned())
     }
 
     fn assemble(
         plat: Rc<P>,
         stt: Box<dyn Stt>,
         cfg: VoiceConfig,
-        pidfile: std::path::PathBuf,
         long_press_ms: u64,
         paths: Option<ds_config::Paths>,
     ) -> Self {
@@ -242,7 +225,6 @@ impl<P: Platform + 'static> Engine<P> {
         let mut engine = Self {
             plat,
             stt,
-            pidfile,
             gesture: GestureState::Idle,
             voice_paused: false,
             caps_phys_prev: false,
@@ -381,14 +363,6 @@ impl<P: Platform + 'static> Engine<P> {
             .unwrap_or(false)
     }
 
-    /// Full-duplex AEC coexist (dictation + TTS overlap). False in tests / half-duplex.
-    fn is_full_duplex(&self) -> bool {
-        self.ttsq
-            .as_ref()
-            .map(|q| q.is_full_duplex())
-            .unwrap_or(false)
-    }
-
     /// Paste finalized transcript (any focused app); Enter when `enter_after_paste`.
     /// LED sync via `disarm_confirm`.
     fn confirm_paste(&mut self) {
@@ -447,7 +421,7 @@ impl<P: Platform + 'static> Engine<P> {
         }
     }
 
-    /// Long-press cancel: abort dictation (no partial inject), clear TTS + barge cold speaker,
+    /// Long-press cancel: abort dictation (no partial inject), clear TTS,
     /// idle + LED off. Hold is cancel only — not hold-to-dictate.
     fn cancel_all(&mut self) {
         self.pending_tap_at = None;
@@ -459,7 +433,6 @@ impl<P: Platform + 'static> Engine<P> {
         if let Some(q) = &self.ttsq {
             q.clear();
         }
-        let _ = ds_proc::barge_in(&self.pidfile);
         self.gesture = GestureState::Idle;
         self.sync_caps_led();
         self.set_stt_active(false);
@@ -1158,13 +1131,8 @@ impl<P: Platform + 'static> Engine<P> {
     /// recording. ClaudeNative posts the focus-gated initial Ctrl+G key-DOWN. A
     /// long-press (`cancel_all`) cancels everything.
     ///
-    /// COEXIST (full-duplex): a dictation tap runs the listen ALONGSIDE an in-flight
-    /// reply — the warm helper does concurrent speak+listen (engine stdout demux)
-    /// and the VPIO AEC keeps the playback out of the mic. So in full-duplex we do
-    /// NOT barge here; only a long-press (`cancel_all`) cancels the speech.
-    /// Half-duplex keeps interrupt-and-dictate: ONE tap barges any TTS (clears the
-    /// warm queue + kills the cold-path speaker) and opens the mic, because the
-    /// device cannot capture and render at once there.
+    /// A tap pauses the warm queue in both duplex modes and the voice resumes when
+    /// dictation stops; only a long-press (`cancel_all`) clears with no resume.
     fn start_recording(&mut self) {
         if self.is_recording() {
             return;
@@ -1182,13 +1150,6 @@ impl<P: Platform + 'static> Engine<P> {
         // Hands-free always-listening never calls this path, so it keeps coexisting.
         if let Some(q) = &self.ttsq {
             q.pause_for_record();
-        }
-        // Half-duplex only: barge the COLD external speak-hook (the engine-down
-        // fallback), which can't be paused. No cold path exists in full-duplex.
-        if !self.is_full_duplex()
-            && let Some(pgid) = ds_proc::barge_in(&self.pidfile)
-        {
-            log::debug!(target: "engine", "barge-in: killed TTS pgid={pgid}");
         }
         // Entering `Recording` structurally drops any armed confirm sub-state (the
         // old disarm-before-record contract, now a single assignment).
@@ -1666,11 +1627,7 @@ mod tests {
     }
 
     fn mk(long_press_ms: u64) -> Engine<MockPlatform> {
-        let mut d = Engine::new(
-            MockPlatform::default(),
-            std::path::PathBuf::from("/tmp/ds-test-nonexistent.pid"),
-            long_press_ms,
-        );
+        let mut d = Engine::new(MockPlatform::default(), long_press_ms);
         // Zero the paste-submit delay so submit-path tests can assert
         // `press_enter_calls` synchronously instead of waiting out a real
         // Instant-based timer — mirrors `listener.rs`'s `for_test` doing the same.
@@ -2741,11 +2698,7 @@ mod tests {
             preflight_denied: Cell::new(true),
             ..Default::default()
         };
-        let d = Engine::new(
-            plat,
-            std::path::PathBuf::from("/tmp/ds-test-nonexistent.pid"),
-            600,
-        );
+        let d = Engine::new(plat, 600);
         assert!(!d.caps, "preflight denied — caps loop starts off");
         assert_eq!(
             d.plat.acquire_caps_key_calls.get(),

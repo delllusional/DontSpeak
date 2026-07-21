@@ -61,7 +61,7 @@ impl TtsStats {
         }
     }
 
-    /// Record a failed warm-speak (the engine then falls back to the cold path).
+    /// Record a failed warm-speak (the utterance is dropped; there is no fallback path).
     pub fn record_failure(&self) {
         self.inner.lock().unwrap().failures += 1;
     }

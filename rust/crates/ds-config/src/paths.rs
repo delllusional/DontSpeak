@@ -10,8 +10,6 @@ use directories::BaseDirs;
 pub struct Paths {
     pub home: PathBuf,
     pub claude_dir: PathBuf,
-    /// Speaker pidfile — TTS process-group id (single-speaker barge-in).
-    pub pidfile: PathBuf,
     /// Unified activity log (per-OS logs dir); shared via `ds_log`.
     pub log_file: PathBuf,
     pub settings_json: PathBuf,
@@ -21,7 +19,7 @@ pub struct Paths {
     pub claude_code_config: PathBuf,
     /// Running `ds-narrate` pid.
     pub narrate_pid: PathBuf,
-    /// Engine pid (reload/liveness). Not the speaker `pidfile` or `narrate_pid`.
+    /// Engine pid (reload/liveness). Not `narrate_pid`.
     pub engine_pid: PathBuf,
     /// Engine IPC socket (`ds-ipc`); absence ⇒ engine down.
     pub engine_sock: PathBuf,
@@ -124,7 +122,6 @@ impl Paths {
         Some(Self {
             // Runtime/state files live under the LOCAL state root (machine-specific, never
             // roamed); settings live under the roaming config root.
-            pidfile: state_dir.join("speak-hook.pid"),
             log_file: log_path(&base, &state_dir),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),
@@ -170,7 +167,6 @@ impl Paths {
         let hermes_dir = home.join(".hermes");
         let ds_dir = home.join(".dontspeak");
         Self {
-            pidfile: ds_dir.join("speak-hook.pid"),
             log_file: home.join("dontspeak.log"),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),

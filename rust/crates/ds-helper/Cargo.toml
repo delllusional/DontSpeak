@@ -10,7 +10,7 @@ publish.workspace = true
 description = "DontSpeak's warm helper process: unions TTS synth, local STT, and duplex AEC into one process sharing the audio device."
 
 # ONE binary, mode-selected by argv (see src/main.rs):
-#   ds-helper <text> <voice> <rate>   one-shot synth+play, then exit (engine-down fallback)
+#   ds-helper <text> <voice> <rate>   one-shot synth+play, then exit (manual/dev; not spawned by the engine)
 #   ds-helper --serve                 warm server: load model once, read speak/stop/listen ops on stdin
 #   ds-helper --prefetch|--print-manifest|--install-prefetched   installer model-asset hooks (via ds-model)
 #   ds-helper --coexist-probe         VPIO + cpal capture dev diagnostic

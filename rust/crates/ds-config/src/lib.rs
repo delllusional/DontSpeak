@@ -1,8 +1,5 @@
 //! Paths and runtime config for the dontspeak Rust workspace.
 //!
-//! Fixed location (do not relocate — single-speaker contract for barge-in + hooks):
-//!   speak-hook.pid (per-OS state dir)  process-GROUP id of the current speaker
-//!
 //! Unified activity log (per-OS logs dir; `ds-log` size rotation, #6).
 //! In-process Kokoro (`ds-tts`); models in per-OS data dir — `model_dir()`.
 //!

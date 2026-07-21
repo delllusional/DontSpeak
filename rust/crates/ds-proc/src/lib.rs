@@ -1,17 +1,12 @@
-//! Speaker arbitration/barge-in and Unix process-group lifecycle.
+//! Pid parsing (fail-closed) plus process lifecycle primitives.
 //!
-//! Contract (shared with engine barge-in):
-//! - Pidfile holds process-**group** id (unix: own group via setsid/`set -m`).
-//! - Preempt: SIGTERM negative pgid (`killpg`).
-//! - Atomic write (temp + rename).
-//!
-//! Windows: leaf PID via `OpenProcess`/`TerminateProcess`.
+//! [`read_pid`] is the canonical pidfile codec; its consumer is `ds-config`'s
+//! engine pidfile. Unix spawns can take their own session/group via
+//! [`set_new_process_group`] and be reaped as a group; Windows has no `killpg`,
+//! so [`kill_group`] there is a leaf `TerminateProcess`.
 
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-
-use tempfile::NamedTempFile;
+use std::path::Path;
 
 /// Make a Unix child the leader of a new session/process group before `exec`.
 /// Callers can then terminate the complete child tree with [`kill_group`].
@@ -35,46 +30,6 @@ pub fn read_pid(pidfile: &Path) -> Option<i32> {
     let s = fs::read_to_string(pidfile).ok()?;
     let n: i32 = s.trim().parse().ok()?;
     if n > 0 { Some(n) } else { None }
-}
-
-/// Atomically write `pgid` (tempfile in same dir + rename).
-pub fn write_speaker(pidfile: &Path, pgid: i32) -> std::io::Result<()> {
-    let dir: PathBuf = pidfile
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    fs::create_dir_all(&dir)?;
-    let mut tmp = NamedTempFile::new_in(&dir)?;
-    write!(tmp, "{pgid}")?;
-    tmp.flush()?;
-    // persist() = atomic rename onto the final path.
-    tmp.persist(pidfile).map_err(|e| e.error)?;
-    Ok(())
-}
-
-/// Record spawned speaker pgid, or kill it.
-///
-/// Post-spawn: record before sound (ARCHITECTURE §0.2) — write failure kills the
-/// group so untracked spawn leaves no orphan audio. Caller owns `Child`.
-pub fn record_or_kill(pidfile: &Path, child: &std::process::Child) -> std::io::Result<i32> {
-    // setsid ⇒ pgid == pid.
-    let pid = child.id() as i32;
-    if let Err(e) = write_speaker(pidfile, pid) {
-        kill_group(pid);
-        return Err(e);
-    }
-    Ok(pid)
-}
-
-/// Preempt recorded speaker if alive; returns signalled pgid.
-pub fn barge_in(pidfile: &Path) -> Option<i32> {
-    let pgid = read_pid(pidfile)?;
-    if group_alive(pgid) {
-        kill_group(pgid);
-        Some(pgid)
-    } else {
-        None
-    }
 }
 
 // ---- platform: process-group liveness + kill -------------------------------
@@ -115,8 +70,8 @@ mod imp {
 
 #[cfg(windows)]
 mod imp {
-    // No killpg: pidfile holds the leaf PID. Current speakers are single-process
-    // (PowerShell System.Speech / in-process ds-helper) — no Job Object yet.
+    // No killpg: callers pass a leaf PID. The children we terminate are
+    // single-process (PowerShell System.Speech, ds-helper) — no Job Object yet.
     use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
@@ -188,10 +143,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_then_read_roundtrip() {
+    fn reads_a_written_pid_and_none_when_absent() {
         let dir = tempfile::tempdir().unwrap();
-        let pf = dir.path().join("speak-hook.pid");
-        write_speaker(&pf, 4242).unwrap();
+        let pf = dir.path().join("dontspeakd.pid");
+        fs::write(&pf, "4242\n").unwrap();
         assert_eq!(read_pid(&pf), Some(4242));
         fs::remove_file(&pf).unwrap();
         assert_eq!(read_pid(&pf), None);
@@ -207,29 +162,5 @@ mod tests {
         assert_eq!(read_pid(&pf), None);
         fs::write(&pf, "notanum\n").unwrap();
         assert_eq!(read_pid(&pf), None);
-    }
-
-    #[test]
-    fn barge_in_none_when_no_file() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(barge_in(&dir.path().join("missing.pid")), None);
-    }
-
-    #[test]
-    fn record_or_kill_writes_pid_and_returns_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let pf = dir.path().join("speak-hook.pid");
-        #[cfg(unix)]
-        let mut child = std::process::Command::new("true").spawn().unwrap();
-        #[cfg(windows)]
-        let mut child = std::process::Command::new("cmd")
-            .args(["/c", "exit"])
-            .spawn()
-            .unwrap();
-        let expected = child.id() as i32;
-        let pid = record_or_kill(&pf, &child).unwrap();
-        assert_eq!(pid, expected);
-        assert_eq!(read_pid(&pf), Some(expected));
-        let _ = child.wait();
     }
 }

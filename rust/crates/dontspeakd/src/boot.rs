@@ -233,7 +233,6 @@ pub fn engine_run(
     let mut daemon = Engine::with_config(
         plat,
         &cfg,
-        paths.pidfile.clone(),
         normalize_long_press(long_press_ms),
         Some(&paths),
     );
