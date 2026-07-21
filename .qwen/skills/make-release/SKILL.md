@@ -76,9 +76,9 @@ after publish, CI patches **only** the Lines table's Binaries size cells
   (cd apps/macos && swift test)
   ```
   Release also runs WinUI xunit on Windows.
-- **Release notes ready** (real releases only — before tagging). Write the body that
-  will become the GitHub Release description into a **local temp file** (never commit
-  it). See step 2 for format.
+- **Release notes ready** before tagging — real releases and `-dev` drafts alike. Write
+  the body that will become the GitHub Release description into a **local temp file**
+  (never commit it). See step 2 for format.
 - Push account with write to `delllusional/DontSpeak`.
 
 ## 2 — Notes, annotated tag, and trigger
@@ -223,8 +223,10 @@ commit, annotated-tag, push. Missed sync fails only at **next** tag.
 
 ## 8 — On-demand `-dev` draft
 
-Same full matrix, `--draft` so `releases/latest` ignores it. Replace prior draft tag
-in place. Notes optional — lightweight is OK (body falls back to commit message):
+Same full matrix, `--draft` so `releases/latest` ignores it. Replace prior draft tag in
+place. **Same notes as a real release** — step 2's format, on an annotated tag: a draft
+is what testers install, so it has to say what changed. A lightweight tag makes the body
+the commit message, which reads as an accident.
 
 ```bash
 ver="$(python3 scripts/release/sync-workspace-version.py --print)"
@@ -232,13 +234,19 @@ case "$ver" in
   *-dev*) ;;
   *) echo "not a -dev version — use step 2 for real release" >&2; exit 1 ;;
 esac
+# notes_file: step 2's format. `<prev>` = last PUBLISHED release, not the prior draft —
+# a draft is disposable, so a draft-to-draft range hides everything since the last ship.
 git push origin ":refs/tags/v$ver" 2>/dev/null || true
 git tag -d "v$ver" 2>/dev/null || true
-git tag "v$ver"   # lightweight OK for disposable drafts
+git -c core.commentChar=';' tag -a "v$ver" -F "$notes_file"
 git push origin main "v$ver"
 ```
 
-Monitor + verify; confirm `isDraft == true`. Skip version bump.
+Also delete the superseded draft **release** (step 2's query loop) — removing only the
+tag leaves an orphan draft still holding the old assets.
+
+Monitor + verify; confirm `isDraft == true`. Skip version bump. Title is
+`DontSpeak v<ver>` for drafts and real releases alike; GitHub badges the draft itself.
 Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correct.
 
 ## Caveats
