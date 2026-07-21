@@ -816,10 +816,10 @@ public sealed partial class MainWindow : Window
         TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.TtsEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.TtsEngine.Provider);
         TtsSystemSettingsRow.Visibility = Visibility.Collapsed;
-        // Queue stays visible for system voice / no_data (outside TtsStatsGrid).
-        TtsQueueRow.Visibility = ttsTrouble ? Visibility.Collapsed : Visibility.Visible;
-        if (!ttsTrouble)
-            TtsQueue.Text = s.Activity.Queued.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        // Queue sits outside TtsStatsGrid so depth survives every non-stats path — system
+        // voice, no_data, and trouble. A download is when utterances actually pile up.
+        TtsQueueRow.Visibility = Visibility.Visible;
+        TtsQueue.Text = s.Activity.Queued.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (ttsTrouble)
             ShowMsg(TtsStatsMsg, TtsStatsGrid, ttsInfo.Word);
         else if (ttsSystem)

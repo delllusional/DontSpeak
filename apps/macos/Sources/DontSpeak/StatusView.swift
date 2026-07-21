@@ -154,13 +154,13 @@ struct StatusView: View {
         case "system":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
-                status: core.tts.status
+                status: core.tts.status, showsQueue: true
             ) { TtsStatsContent() }
         case "built_in":
             if let model = core.tts.model {
                 EngineStatRow(
                     role: L.t("status.engine.role_tts"), detail: ttsModelName(model),
-                    status: core.tts.status
+                    status: core.tts.status, showsQueue: true
                 ) { TtsStatsContent() }
             } else {
                 OffEngineRow(role: L.t("status.engine.role_tts"))
@@ -211,7 +211,11 @@ private struct EngineStatRow<Stats: View>: View {
     let role: String
     let detail: String
     let status: EngineStatus
+    /// TTS only: queue depth renders above the trouble note, since a download is
+    /// exactly when utterances pile up.
+    var showsQueue = false
     @ViewBuilder var stats: () -> Stats
+    @Environment(Core.self) private var core
     @State private var expanded = false
 
     var body: some View {
@@ -231,6 +235,9 @@ private struct EngineStatRow<Stats: View>: View {
             if expanded {
                 PlatterDivider()
                 statusDetailBlock {
+                    if showsQueue {
+                        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
+                    }
                     if let note = status.troubleNote {
                         Text(note).glassCaption()
                     } else {
@@ -423,8 +430,6 @@ private struct LifetimeContent: View {
 private struct TtsStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
-        // Queue is outside system / no_data branches so depth stays visible.
-        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
         if core.tts.engine == "system" {
             // Whole row opens Spoken Content (no local RTF for `say`).
             LabeledContent {
