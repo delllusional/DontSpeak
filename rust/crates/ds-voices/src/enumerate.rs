@@ -301,21 +301,20 @@ impl VoiceCatalog<'_> {
             .collect()
     }
 
-    /// Shipped voice to borrow when the pool holds nothing for `language`, so a language the
-    /// user never configured is still spoken by a voice that owns it. `None` when the catalog
-    /// has no such voice — including a fresh install whose Kokoro ids are still the static
-    /// English fallback — which leaves the caller on the agent's assigned voice.
-    pub fn default_voice_for_language(&self, language: &str) -> Option<String> {
-        let want = primary_subtag(language);
+    /// Every shipped voice that can speak `language` — the stand-in pool for a language the
+    /// user configured no voice for. Same listing the picker UI and the `voices` tool show, so
+    /// a borrowed voice is always one the catalog actually offers. Empty when the catalog has
+    /// none, including a fresh install whose Kokoro ids are still the static English fallback.
+    pub fn voices_for_language(&self, language: &str) -> Vec<String> {
         match self {
-            Self::BuiltIn(TtsModel::Kokoro) => {
-                kokoro_choices(&want).into_iter().next().map(|c| c.id)
-            }
-            Self::BuiltIn(_) => None,
-            Self::System(voices) => system_choices_from(voices, &want)
+            Self::BuiltIn(model) => built_in_choices(*model, language)
                 .into_iter()
-                .next()
-                .map(|c| c.id),
+                .map(|choice| choice.id)
+                .collect(),
+            Self::System(voices) => system_choices_from(voices, &primary_subtag(language))
+                .into_iter()
+                .map(|choice| choice.id)
+                .collect(),
         }
     }
 }
@@ -607,7 +606,9 @@ mod tests {
             let catalog = VoiceCatalog::BuiltIn(model);
             assert_eq!(catalog.voice_language("sohee"), None);
             assert_eq!(catalog.pool_for_language(&pool, "it"), pool);
-            assert_eq!(catalog.default_voice_for_language("it"), None);
+            // Their whole catalog speaks every language they support, so a stand-in pool is
+            // the full voice list rather than a language-filtered slice.
+            assert_eq!(catalog.voices_for_language("it"), model.descriptor().voices);
         }
     }
 
@@ -635,11 +636,8 @@ mod tests {
         let catalog = VoiceCatalog::System(&voices);
         let pool = vec!["Samantha".to_string(), "Alice".to_string()];
         assert_eq!(catalog.pool_for_language(&pool, "it"), vec!["Alice"]);
-        assert_eq!(
-            catalog.default_voice_for_language("de").as_deref(),
-            Some("Anna")
-        );
-        assert_eq!(catalog.default_voice_for_language("fr"), None);
+        assert_eq!(catalog.voices_for_language("de"), vec!["Anna"]);
+        assert!(catalog.voices_for_language("fr").is_empty());
     }
 
     #[test]

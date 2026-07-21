@@ -1198,13 +1198,16 @@ impl TtsQueue {
 
     /// Assign this agent a voice that can actually speak `language`.
     ///
-    /// One path for every engine: catalogs whose voices are not locked to a language (System
-    /// names it cannot resolve, Chatterbox, Qwen, OmniVoice) hand back the whole pool, so the
-    /// narrowing is a no-op and the agent keeps its usual voice. Only Kokoro ids and located
-    /// System voices actually narrow. When the pool owns nothing for the language, a shipped
-    /// catalog voice for it beats speaking through a voice locked to another language.
-    /// `catalog` is built only when a language is known, so the greeting path never pays for
-    /// System voice enumeration.
+    /// One path for every engine. The configured pool is narrowed to the voices that own the
+    /// language; a language the user configured nothing for substitutes the model's whole
+    /// catalog for it, so the choice is still made among that language's own voices. Either
+    /// way the result goes through [`pick_agent_voice`], which keeps the roll random, the
+    /// assignment sticky per agent, and agents on distinct voices while spares remain.
+    ///
+    /// Catalogs whose voices are not locked to a language (Chatterbox, Qwen, OmniVoice, and
+    /// System names that cannot be resolved) return the pool unnarrowed, so this is a no-op
+    /// for them rather than a per-engine branch. `catalog` is built only once a language is
+    /// known, keeping System voice enumeration off the greeting path.
     fn pick_for_language<'a>(
         &self,
         catalog: impl FnOnce() -> ds_tts::enumerate::VoiceCatalog<'a>,
@@ -1216,17 +1219,17 @@ impl TtsQueue {
             return self.assign_agent_voice(source, "", pool);
         };
         let catalog = catalog();
-        let narrowed = catalog.pool_for_language(pool, language);
-        if !narrowed.is_empty() {
-            return self.assign_agent_voice(source, language, &narrowed);
+        let mut candidates = catalog.pool_for_language(pool, language);
+        if candidates.is_empty() {
+            candidates = catalog.voices_for_language(language);
         }
-        match catalog.default_voice_for_language(language) {
-            Some(voice) => voice,
-            // Nothing owns the language anywhere: keep today's behaviour rather than drop the
-            // utterance. Synthesis still receives the detected language, so pronunciation is
-            // right even though the voice is not.
-            None => self.assign_agent_voice(source, "", pool),
+        if candidates.is_empty() {
+            // No voice anywhere owns the language (fresh install, or a language the catalog
+            // does not cover). Keep the agent's usual voice rather than drop the utterance:
+            // synthesis still receives the detected language, so pronunciation stays right.
+            return self.assign_agent_voice(source, "", pool);
         }
+        self.assign_agent_voice(source, language, &candidates)
     }
 
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
@@ -4491,6 +4494,54 @@ mod tests {
             q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
                 .map(|(_, v)| v),
             Some(english)
+        );
+    }
+
+    // System is only buildable on macOS/Windows, and seeding `system_voices` keeps `say -v ?`
+    // out of the test — the borrow path is otherwise identical for every catalog.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn resolve_engine_voice_borrows_a_catalog_voice_for_an_unconfigured_language() {
+        let q = mk_queue();
+        let mk = |id: &str, tag: &str| ds_tts::SpeakerVoice {
+            id: id.into(),
+            name: id.into(),
+            language_tag: tag.into(),
+            downloadable: false,
+            gender: None,
+            quality: None,
+        };
+        q.system_voices
+            .set(vec![
+                mk("Samantha", "en-US"),
+                mk("Anna", "de-DE"),
+                mk("Otto", "de-DE"),
+            ])
+            .expect("fresh queue");
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::System],
+            tts_voices: ds_config::TtsVoicePools {
+                system: vec!["Samantha".to_string()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        // The pool owns no German, so the choice is made among the catalog's German voices.
+        let (_, german) = q
+            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("de"))
+            .expect("System is usable on this build");
+        assert!(["Anna", "Otto"].contains(&german.as_str()));
+        // Borrowed voices are sticky too: the roll happens once per agent and language.
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("de"))
+                .map(|(_, v)| v),
+            Some(german)
+        );
+        // The configured pool still serves the language it does own.
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+                .map(|(_, v)| v),
+            Some("Samantha".to_string())
         );
     }
 
