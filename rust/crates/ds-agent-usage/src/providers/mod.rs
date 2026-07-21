@@ -15,17 +15,24 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
-/// Internal; FFI surfaces Guarded as `UsageCard.needs_auth`.
+/// Internal; FFI surfaces Guarded/Unauthorized as `UsageCard.needs_auth`.
 #[derive(Debug)]
 pub(crate) enum FetchError {
     /// Silent keychain read blocked (macOS Claude only).
     Guarded,
-    // Tests assert kinds; prod branches on Guarded only.
+    /// Provider rejected the token (stale/revoked) — re-auth, not a transport failure.
+    Unauthorized,
+    // Tests assert kinds; prod branches on the re-auth variants only.
     Io(#[allow(dead_code)] std::io::Error),
 }
 
 impl From<std::io::Error> for FetchError {
     fn from(error: std::io::Error) -> Self {
+        // Credentials refused (provider 401/403, unreadable credential file) — the card
+        // must ask for re-auth instead of going rowless and being dropped by the hosts.
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return Self::Unauthorized;
+        }
         Self::Io(error)
     }
 }
@@ -56,15 +63,31 @@ fn request(method: ds_http::Method, url: &str) -> std::io::Result<ds_http::Reque
     ))
 }
 
+/// 401/403 → `PermissionDenied`, which [`FetchError`] turns into a re-auth prompt.
 fn send_json<B: ds_http::body::Body>(
     builder: ds_http::RequestBuilder<B>,
 ) -> std::io::Result<Value> {
     let response = builder
         .send()
         .map_err(|error| std::io::Error::other(format!("provider request failed: {error}")))?;
+    reject_unauthorized(response.status())?;
     let body = ds_http::read_utf8_limited(response, MAX_JSON_BYTES)?;
     serde_json::from_str(&body)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+/// Message stays credential-free (statuses only).
+fn reject_unauthorized(status: ds_http::StatusCode) -> std::io::Result<()> {
+    if matches!(status.as_u16(), 401 | 403) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "provider rejected the credential (HTTP {})",
+                status.as_u16()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn read_json_file(path: &Path) -> std::io::Result<Value> {
@@ -313,6 +336,58 @@ mod tests {
             .unwrap();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert!(request(ds_http::Method::GET, "HTTPS://provider.test/usage").is_ok());
+    }
+
+    /// Loopback only; `request()` refuses plain HTTP, so build the probe directly.
+    fn probe(url: &str) -> ds_http::RequestBuilder {
+        ds_http::request(
+            ds_http::Method::GET,
+            url,
+            CONNECT_TIMEOUT,
+            READ_TIMEOUT,
+            Some(TOTAL_TIMEOUT),
+        )
+    }
+
+    #[test]
+    fn rejected_credential_becomes_a_reauth_fetch_error() {
+        let server = httpmock::MockServer::start();
+        for status in [401, 403] {
+            let mut endpoint = server.mock(|when, then| {
+                when.path("/usage");
+                then.status(status)
+                    .body(r#"{"error":{"message":"OAuth token has expired"}}"#);
+            });
+            let error = send_json(probe(&server.url("/usage"))).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(matches!(FetchError::from(error), FetchError::Unauthorized));
+            endpoint.assert();
+            endpoint.delete();
+        }
+    }
+
+    #[test]
+    fn successful_probe_still_parses_json() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.path("/usage");
+            then.status(200).body(r#"{"five_hour":{"utilization":7}}"#);
+        });
+        let json = send_json(probe(&server.url("/usage"))).unwrap();
+        assert_eq!(json["five_hour"]["utilization"], 7);
+    }
+
+    /// A JSON body on a 5xx must not read as usage data.
+    #[test]
+    fn server_errors_stay_io_errors() {
+        let server = httpmock::MockServer::start();
+        server.mock(|when, then| {
+            when.path("/usage");
+            then.status(503).body(r#"{"five_hour":{"utilization":7}}"#);
+        });
+        let error = send_json(probe(&server.url("/usage"))).unwrap_err();
+        assert_ne!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(FetchError::from(error), FetchError::Io(_)));
     }
 
     #[test]

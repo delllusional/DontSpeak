@@ -160,6 +160,11 @@ public sealed partial class MainWindow : Window
     /// <summary>Session-only email reveal (not persisted).</summary>
     private readonly HashSet<string> _usageAccountRevealed = new(StringComparer.Ordinal);
     private readonly Dictionary<string, UsageCardDto> _usageCards = new();
+    /// <summary>Last card seen per agent, painted or not — source for a card
+    /// materialized by speech (keeps its account label).</summary>
+    private readonly Dictionary<string, UsageCardDto> _usageKnown = new();
+    /// <summary>Agents heard this launch; each keeps a card even without quota rows.</summary>
+    private readonly HashSet<string> _spokenAgents = new(StringComparer.Ordinal);
 
     private async System.Threading.Tasks.Task LoadUsageOnTabSelectedAsync()
     {
@@ -186,8 +191,11 @@ public sealed partial class MainWindow : Window
         _usageAgentOrder.AddRange(agentsToLoad);
 
         ReconcileUsageAgents(agentsToLoad);
+        foreach (var card in all)
+            _usageKnown[card.Agent] = card;
         foreach (var card in cachedWithData)
             ApplyUsageCard(card);
+        MaterializeSpokenUsageCards();
 
         if (agentsToLoad.Count == 0)
         {
@@ -209,8 +217,13 @@ public sealed partial class MainWindow : Window
                 DispatcherQueue.TryEnqueue(() =>
                 {
                     if (generation != _usageGeneration) return;
-                    if (updated != null && (updated.Rows.Count > 0 || updated.NeedsAuth))
-                        ApplyUsageCard(updated);
+                    if (updated != null)
+                    {
+                        _usageKnown[updated.Agent] = updated;
+                        // Empty results refresh a statless card but never blank a good one.
+                        if (updated.Rows.Count > 0 || updated.NeedsAuth || IsUsageStatless(updated.Agent))
+                            ApplyUsageCard(updated);
+                    }
                     if (--pending == 0)
                         ShowUsageUnavailableIfEmpty();
                 });
@@ -229,8 +242,26 @@ public sealed partial class MainWindow : Window
             _usageCardAccounts.Remove(agent);
             _usageAccountRevealed.Remove(agent);
             _usageCards.Remove(agent);
+            _usageKnown.Remove(agent);
         }
     }
+
+    /// <summary>Speech proves the agent is live, so give it a card even when the provider
+    /// reports no quota (Qwen Code signed in to z.ai). Painted cards stay painted.</summary>
+    private void MaterializeSpokenUsageCards()
+    {
+        foreach (string agent in _spokenAgents)
+        {
+            if (!_usageAgentOrder.Contains(agent) || _usageCards.ContainsKey(agent)) continue;
+            ApplyUsageCard(_usageKnown.TryGetValue(agent, out var known)
+                ? known
+                : new UsageCardDto(agent, new List<UsageRowDto>()));
+        }
+    }
+
+    /// <summary>Painted, but with nothing to show yet.</summary>
+    private bool IsUsageStatless(string agent)
+        => _usageCards.TryGetValue(agent, out var card) && card.Rows.Count == 0 && !card.NeedsAuth;
 
     private void ShowUsageUnavailableIfEmpty()
     {
@@ -406,6 +437,8 @@ public sealed partial class MainWindow : Window
         };
         foreach (var row in card.Rows)
             rows.Children.Add(BuildUsageRow(row));
+        if (card.Rows.Count == 0 && !card.NeedsAuth)
+            rows.Children.Add(BuildUsageNoDataRow());
         if (card.NeedsAuth)
             rows.Children.Add(BuildUsageAuthRow(card.Agent));
         body.Content = rows;
@@ -441,6 +474,15 @@ public sealed partial class MainWindow : Window
         TextBlock Remaining);
 
     private sealed record UsageAuthRowView(Button Authorize);
+
+    /// <summary>Placeholder row for a plan the provider publishes no quota for.</summary>
+    private static TextBlock BuildUsageNoDataRow()
+        => new()
+        {
+            Text = Loc.T("usage.no_data"),
+            Opacity = 0.65,
+            HorizontalAlignment = HorizontalAlignment.Left,
+        };
 
     /// <summary>Authorize row — sole UI path that may prompt.</summary>
     private Grid BuildUsageAuthRow(string agent)
@@ -711,9 +753,15 @@ public sealed partial class MainWindow : Window
     /// <summary>From App's WaitModelStatus thread (already on UI). No-op while hidden.</summary>
     internal void ApplyPushed(HealthSnapshot s)
     {
+        // Tray-resident: utterances land while hidden, and the Agents tab needs them later.
+        NoteSpokenAgent(s.Activity.Speaker);
         if (!AppWindow.IsVisible) return;
         try { ApplyStatus(s); } catch { /* one bad frame must not kill the push */ }
     }
+
+    /// <summary>Speaker is null unless speaking (Native), so this only latches utterances.</summary>
+    private bool NoteSpokenAgent(string? agent)
+        => agent is { Length: > 0 } && _spokenAgents.Add(agent);
 
     private void ApplyStatus(HealthSnapshot s)
     {
@@ -880,6 +928,7 @@ public sealed partial class MainWindow : Window
     /// <summary>Pastel wash on speaking agent card (top bar stays brand purple).</summary>
     private void ApplyUsageSpeakingAccent(string? agent)
     {
+        if (NoteSpokenAgent(agent)) MaterializeSpokenUsageCards();
         if (string.Equals(_speakingUsageAgent, agent, StringComparison.Ordinal)) return;
         _speakingUsageAgent = agent;
         _speakingWash = agent is null ? null : Brand.RandomPastelWash();

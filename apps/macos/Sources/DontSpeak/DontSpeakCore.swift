@@ -94,6 +94,9 @@ final class Core {
     var screen: AppScreen = .agents
 
     var activity = Activity()
+    /// Agents heard this launch. The Agents tab keeps a card for them even when the
+    /// provider publishes no quota; view state alone wouldn't survive a tab switch.
+    var spokenAgents: Set<String> = []
     var tts = TtsEngine()
     var stt = SttEngine()
     var diarization = Diarization()
@@ -236,6 +239,9 @@ final class Core {
     /// Assign only when != so @Observable invalidation stays granular. Perms polled separately.
     private func apply(_ s: HealthSnapshot) {
         if activity != s.activity { activity = s.activity }
+        if let speaker = s.activity.speakingSource, !spokenAgents.contains(speaker) {
+            spokenAgents.insert(speaker)
+        }
         if tts != s.tts { tts = s.tts }
         if stt != s.stt { stt = s.stt }
         if diarization != s.diarization { diarization = s.diarization }

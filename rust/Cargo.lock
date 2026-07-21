@@ -1084,6 +1084,7 @@ dependencies = [
  "ds-client",
  "ds-config",
  "ds-http",
+ "httpmock",
  "security-framework",
  "serde",
  "serde_json",

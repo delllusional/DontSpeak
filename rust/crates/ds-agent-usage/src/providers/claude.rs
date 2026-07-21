@@ -9,14 +9,35 @@ use crate::{Period, UsageRow};
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 #[cfg(target_os = "macos")]
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+
+/// Which copy a token came from — a rejected file token earns one keychain retry.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum CredentialSource {
+    File,
+    Keychain,
+}
+
 /// `interactive` only from authorize FFI; implicit paths pass `false`.
 pub(crate) fn fetch(
     paths: &ds_config::Paths,
     interactive: bool,
 ) -> Result<Vec<UsageRow>, FetchError> {
-    let credentials = read_credentials(paths, interactive)?;
-    let token = string_at(&credentials, &["claudeAiOauth", "accessToken"])
-        .or_else(|| string_at(&credentials, &["claude_ai_oauth", "access_token"]))
+    let (credentials, source) = read_credentials(paths, interactive)?;
+    let rows = usage_rows(&credentials);
+    // Rotation/re-login leaves a revoked token in the file while the keychain copy
+    // stays current — its `expiresAt` can't reveal that, only the 401 can.
+    if matches!(rows, Err(FetchError::Unauthorized))
+        && source == CredentialSource::File
+        && let Some(keychain) = keychain_credentials(interactive)
+    {
+        return usage_rows(&keychain);
+    }
+    rows
+}
+
+fn usage_rows(credentials: &Value) -> Result<Vec<UsageRow>, FetchError> {
+    let token = string_at(credentials, &["claudeAiOauth", "accessToken"])
+        .or_else(|| string_at(credentials, &["claude_ai_oauth", "access_token"]))
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -57,44 +78,110 @@ pub(crate) enum KeychainProbe {
     Absent,
 }
 
-fn read_credentials(paths: &ds_config::Paths, interactive: bool) -> Result<Value, FetchError> {
+fn read_credentials(
+    paths: &ds_config::Paths,
+    interactive: bool,
+) -> Result<(Value, CredentialSource), FetchError> {
     let file = read_json_file(&paths.claude_dir.join(".credentials.json"));
+    resolve_credentials(file, now_unix_millis(), || probe_keychain(interactive))
+}
+
+/// Non-macOS keeps credentials in the file alone (Guarded unreachable).
+fn probe_keychain(interactive: bool) -> KeychainProbe {
     #[cfg(target_os = "macos")]
     {
-        resolve_credentials(file, || keychain_probe(interactive))
+        keychain_probe(interactive)
     }
-    // Non-macOS: file-only (Guarded unreachable).
     #[cfg(not(target_os = "macos"))]
     {
         let _ = interactive;
-        resolve_credentials(file, || KeychainProbe::Absent)
+        KeychainProbe::Absent
     }
 }
 
-/// File wins; probe only on file miss.
+/// Keychain copy alone, for the retry after the file token was refused.
+fn keychain_credentials(interactive: bool) -> Option<Value> {
+    match probe_keychain(interactive) {
+        KeychainProbe::Data(bytes) => credentials_from_bytes(bytes).ok(),
+        KeychainProbe::ItemPresent | KeychainProbe::Absent => None,
+    }
+}
+
+/// A live file token wins; probe on file miss — and on a lapsed file token, since
+/// Claude Code refreshes the keychain copy and can leave the file behind for days.
 fn resolve_credentials(
     file: std::io::Result<Value>,
+    now_ms: i64,
     probe: impl FnOnce() -> KeychainProbe,
-) -> Result<Value, FetchError> {
-    let file_error = match file {
-        Ok(credentials) => return Ok(credentials),
-        Err(error) => error,
+) -> Result<(Value, CredentialSource), FetchError> {
+    // No keychain to fall back on: a lapsed token wants re-auth, a missing one has
+    // nothing to authorize.
+    let no_keychain = match file {
+        Ok(credentials) if !is_expired(&credentials, now_ms) => {
+            return Ok((credentials, CredentialSource::File));
+        }
+        Ok(_) => FetchError::Unauthorized,
+        Err(error) => FetchError::Io(error),
     };
     match probe() {
         KeychainProbe::Data(bytes) => {
-            if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "credential payload exceeds size limit",
-                )
-                .into());
-            }
-            serde_json::from_slice(&bytes)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+            credentials_from_bytes(bytes).map(|value| (value, CredentialSource::Keychain))
         }
         KeychainProbe::ItemPresent => Err(FetchError::Guarded),
-        KeychainProbe::Absent => Err(FetchError::Io(file_error)),
+        KeychainProbe::Absent => Err(no_keychain),
     }
+}
+
+fn credentials_from_bytes(bytes: Vec<u8>) -> Result<Value, FetchError> {
+    if bytes.len() as u64 > MAX_CREDENTIAL_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credential payload exceeds size limit",
+        )
+        .into());
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error).into())
+}
+
+/// Absent `expiresAt` counts as live — staleness must be proven, not assumed. The
+/// grace window keeps a fast local clock from condemning a good token.
+fn is_expired(credentials: &Value, now_ms: i64) -> bool {
+    const GRACE_MS: i64 = 5 * 60 * 1000;
+    expires_at_ms(credentials).is_some_and(|expiry| expiry.saturating_add(GRACE_MS) <= now_ms)
+}
+
+/// Claude Code writes unix ms; a seconds-valued file is rescaled rather than read
+/// as 1970 (which would condemn every token).
+fn expires_at_ms(credentials: &Value) -> Option<i64> {
+    /// Unix ms in 2001 — anything smaller is a seconds timestamp.
+    const SECONDS_CEILING_MS: i64 = 1_000_000_000_000;
+    let raw = credentials
+        .get("claudeAiOauth")
+        .and_then(|oauth| oauth.get("expiresAt"))
+        .or_else(|| {
+            credentials
+                .get("claude_ai_oauth")
+                .and_then(|oauth| oauth.get("expires_at"))
+        })?;
+    let value = raw
+        .as_i64()
+        .or_else(|| raw.as_f64().map(|number| number as i64))
+        .or_else(|| raw.as_str()?.trim().parse().ok())?;
+    Some(if value.abs() < SECONDS_CEILING_MS {
+        value.saturating_mul(1000)
+    } else {
+        value
+    })
+}
+
+fn now_unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(i64::MAX)
 }
 
 /// Only interactive data search may prompt (ACL dialog). Silent + attributes: no UI.
@@ -250,6 +337,8 @@ mod tests {
 
     // resolve_credentials table — synthetic probes, no live keychain.
 
+    const NOW_MS: i64 = 1_784_600_000_000;
+
     fn miss() -> std::io::Result<Value> {
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -257,23 +346,93 @@ mod tests {
         ))
     }
 
+    fn file_token(expires_at_ms: i64) -> std::io::Result<Value> {
+        Ok(serde_json::json!({
+            "claudeAiOauth": { "accessToken": "file", "expiresAt": expires_at_ms }
+        }))
+    }
+
+    /// Past the expiry *and* the grace window.
+    fn expired_file_token() -> std::io::Result<Value> {
+        file_token(NOW_MS - 60 * 60 * 1000)
+    }
+
+    fn token_of(resolved: &Result<(Value, CredentialSource), FetchError>) -> Option<&str> {
+        let (value, _) = resolved.as_ref().ok()?;
+        string_at(value, &["claudeAiOauth", "accessToken"])
+    }
+
     #[test]
     fn readable_file_wins_and_probe_never_runs() {
-        let resolved = resolve_credentials(Ok(serde_json::json!({"claudeAiOauth": {}})), || {
-            panic!("probe must not run when the file read succeeds")
-        });
+        let resolved =
+            resolve_credentials(Ok(serde_json::json!({"claudeAiOauth": {}})), NOW_MS, || {
+                panic!("probe must not run when the file read succeeds")
+            });
         assert!(resolved.is_ok());
+        let live = resolve_credentials(file_token(NOW_MS + 1), NOW_MS, || {
+            panic!("probe must not run while the file token is live")
+        });
+        assert_eq!(
+            live.as_ref().map(|(_, source)| *source).ok(),
+            Some(CredentialSource::File)
+        );
+    }
+
+    #[test]
+    fn expired_file_token_defers_to_the_keychain_copy() {
+        let resolved = resolve_credentials(expired_file_token(), NOW_MS, || {
+            KeychainProbe::Data(br#"{"claudeAiOauth":{"accessToken":"keychain"}}"#.to_vec())
+        });
+        assert_eq!(token_of(&resolved), Some("keychain"));
+        assert_eq!(
+            resolved.map(|(_, source)| source).ok(),
+            Some(CredentialSource::Keychain)
+        );
+    }
+
+    #[test]
+    fn expired_file_token_without_a_keychain_asks_for_reauth() {
+        let resolved = resolve_credentials(expired_file_token(), NOW_MS, || KeychainProbe::Absent);
+        assert!(matches!(resolved, Err(FetchError::Unauthorized)));
+    }
+
+    /// A fast local clock must not condemn a token that is still good.
+    #[test]
+    fn expiry_inside_the_grace_window_still_counts_as_live() {
+        let resolved = resolve_credentials(file_token(NOW_MS - 60_000), NOW_MS, || {
+            panic!("probe must not run for a token inside the grace window")
+        });
+        assert_eq!(token_of(&resolved), Some("file"));
+    }
+
+    #[test]
+    fn string_and_seconds_expiries_are_read_like_millis() {
+        let stale_string = Ok(serde_json::json!({
+            "claude_ai_oauth": { "access_token": "file", "expires_at": "1784500000000" }
+        }));
+        assert!(matches!(
+            resolve_credentials(stale_string, NOW_MS, || KeychainProbe::Absent),
+            Err(FetchError::Unauthorized)
+        ));
+        // Seconds-valued (10 digits) and still in the future — not expired.
+        let seconds = Ok(serde_json::json!({
+            "claudeAiOauth": { "accessToken": "file", "expiresAt": NOW_MS / 1000 + 3600 }
+        }));
+        let resolved = resolve_credentials(seconds, NOW_MS, || {
+            panic!("a future seconds-valued expiry must not read as 1970")
+        });
+        assert_eq!(token_of(&resolved), Some("file"));
     }
 
     #[test]
     fn file_miss_with_present_item_is_guarded() {
-        let resolved = resolve_credentials(miss(), || KeychainProbe::ItemPresent);
+        let resolved = resolve_credentials(miss(), NOW_MS, || KeychainProbe::ItemPresent);
         assert!(matches!(resolved, Err(FetchError::Guarded)));
     }
 
     #[test]
     fn file_miss_with_absent_item_keeps_the_file_error() {
-        let resolved = resolve_credentials(miss(), || KeychainProbe::Absent);
+        let resolved = resolve_credentials(miss(), NOW_MS, || KeychainProbe::Absent);
         match resolved {
             Err(FetchError::Io(error)) => {
                 assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
@@ -284,21 +443,16 @@ mod tests {
 
     #[test]
     fn probe_data_parses_or_maps_to_invalid_data() {
-        let ok = resolve_credentials(miss(), || {
+        let ok = resolve_credentials(miss(), NOW_MS, || {
             KeychainProbe::Data(br#"{"claudeAiOauth":{"accessToken":"t"}}"#.to_vec())
         });
-        assert_eq!(
-            ok.ok()
-                .as_ref()
-                .and_then(|v| string_at(v, &["claudeAiOauth", "accessToken"])),
-            Some("t")
-        );
+        assert_eq!(token_of(&ok), Some("t"));
 
         for bad in [
             b"not json".to_vec(),
             vec![b'x'; (MAX_CREDENTIAL_BYTES + 1) as usize],
         ] {
-            match resolve_credentials(miss(), || KeychainProbe::Data(bad)) {
+            match resolve_credentials(miss(), NOW_MS, || KeychainProbe::Data(bad)) {
                 Err(FetchError::Io(error)) => {
                     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
                 }

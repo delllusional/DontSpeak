@@ -78,4 +78,53 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertFalse(plain.hasSameWireValue(as: guarded))
         XCTAssertTrue(guarded.hasSameWireValue(as: guarded))
     }
+
+    private func card(_ agent: String, rows: Int = 0, needsAuth: Bool = false) -> UsageCard {
+        UsageCard(
+            agent: agent,
+            rows: (0..<rows).map { UsageRow(period: "week", usedPercent: Double($0), resetsAtUnix: 1) },
+            needsAuth: needsAuth
+        )
+    }
+
+    /// An empty refresh refreshes a statless card but never blanks a card with rows.
+    func testEmptyRefreshOnlyReplacesAStatlessCard() {
+        let statless = card("qwen_code")
+        let withRows = card("qwen_code", rows: 1)
+        XCTAssertTrue(UsagePaint.replaces(painted: statless, with: card("qwen_code")))
+        XCTAssertFalse(UsagePaint.replaces(painted: withRows, with: card("qwen_code")))
+        XCTAssertTrue(UsagePaint.replaces(painted: withRows, with: card("qwen_code", rows: 2)))
+        XCTAssertTrue(
+            UsagePaint.replaces(painted: withRows, with: card("qwen_code", needsAuth: true)))
+        // An auth prompt is data too: it must not be overwritten by an empty result.
+        XCTAssertFalse(
+            UsagePaint.replaces(painted: card("qwen_code", needsAuth: true), with: card("qwen_code")))
+    }
+
+    /// Unpainted agents stay unpainted on an empty result — speech is what materializes them.
+    func testEmptyRefreshDoesNotCreateACard() {
+        XCTAssertFalse(UsagePaint.replaces(painted: nil, with: card("qwen_code")))
+        XCTAssertTrue(UsagePaint.replaces(painted: nil, with: card("qwen_code", rows: 1)))
+    }
+
+    func testMaterializableIsCanonicalOrderedInstalledAndIdempotent() {
+        let canonical = ["claude_code", "codex", "qwen_code"]
+        XCTAssertEqual(
+            UsagePaint.materializable(
+                spoken: ["qwen_code", "claude_code", "grok"],
+                canonical: canonical,
+                painted: []
+            ),
+            ["claude_code", "qwen_code"]
+        )
+        // Already painted → nothing owed; unknown agents never materialize.
+        XCTAssertEqual(
+            UsagePaint.materializable(
+                spoken: ["qwen_code", "grok"],
+                canonical: canonical,
+                painted: ["qwen_code"]
+            ),
+            []
+        )
+    }
 }

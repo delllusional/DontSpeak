@@ -19,7 +19,7 @@ pub(crate) struct UsageCard {
     #[serde(default)]
     pub(crate) account: Option<String>,
     pub(crate) rows: Vec<UsageRow>,
-    /// Skip-when-false; true = guarded credentials (authorize unlocks).
+    /// Skip-when-false; true = credentials unreadable or refused (authorize retries).
     #[serde(default)]
     pub(crate) needs_auth: bool,
 }

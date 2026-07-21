@@ -1,7 +1,7 @@
 //! Health panel — AdwApplicationWindow of preference rows (macOS StatusView / Windows status).
 //! Read-only; control is MCP. Strings from ds-i18n; state via colored dots.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use adw::prelude::*;
 use ds_status::{
@@ -703,6 +703,11 @@ struct UsagePage {
     /// ClientSource::CLIENTS order from the skeleton deck.
     canonical_agents: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     latest: std::rc::Rc<std::cell::RefCell<Vec<UsageCard>>>,
+    /// Last card seen per agent, painted or not — source for a card materialized
+    /// by speech (keeps its account label).
+    known: std::rc::Rc<std::cell::RefCell<HashMap<String, UsageCard>>>,
+    /// Agents heard this launch; each keeps a card even without quota rows.
+    spoken_agents: std::rc::Rc<std::cell::RefCell<HashSet<String>>>,
     rendered: std::rc::Rc<std::cell::RefCell<HashMap<String, MountedUsageCard>>>,
     empty_label: gtk::Label,
     generation: std::rc::Rc<std::cell::Cell<u64>>,
@@ -741,6 +746,8 @@ impl UsagePage {
             list,
             canonical_agents: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             latest: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
+            known: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
+            spoken_agents: std::rc::Rc::new(std::cell::RefCell::new(HashSet::new())),
             rendered: std::rc::Rc::new(std::cell::RefCell::new(HashMap::new())),
             empty_label,
             generation: std::rc::Rc::new(std::cell::Cell::new(0)),
@@ -751,6 +758,11 @@ impl UsagePage {
     }
 
     fn set_speaking_agent(&self, agent: Option<&str>) {
+        let first_time =
+            agent.is_some_and(|agent| self.spoken_agents.borrow_mut().insert(agent.to_string()));
+        if first_time {
+            self.materialize_spoken();
+        }
         let next = agent.map(str::to_string);
         if *self.speaking_agent.borrow() == next {
             return;
@@ -795,6 +807,42 @@ impl UsagePage {
         }
     }
 
+    /// Speech proves the agent is live, so give it a card even when the provider
+    /// reports no quota (Qwen Code signed in to z.ai). Painted cards stay painted.
+    fn materialize_spoken(&self) {
+        let pending: Vec<UsageCard> = {
+            let canonical = self.canonical_agents.borrow();
+            let latest = self.latest.borrow();
+            let known = self.known.borrow();
+            self.spoken_agents
+                .borrow()
+                .iter()
+                .filter(|agent| {
+                    canonical.contains(*agent) && !latest.iter().any(|card| &card.agent == *agent)
+                })
+                .map(|agent| {
+                    known.get(agent).cloned().unwrap_or_else(|| UsageCard {
+                        agent: agent.clone(),
+                        account: None,
+                        rows: Vec::new(),
+                        needs_auth: false,
+                    })
+                })
+                .collect()
+        };
+        for card in pending {
+            self.apply_card(card);
+        }
+    }
+
+    /// Painted, but with nothing to show yet.
+    fn is_statless(&self, agent: &str) -> bool {
+        self.latest
+            .borrow()
+            .iter()
+            .any(|card| card.agent == agent && card.rows.is_empty() && !card.needs_auth)
+    }
+
     fn cancel_visible_request(&self) {
         self.generation.set(self.generation.get().saturating_add(1));
     }
@@ -814,6 +862,9 @@ impl UsagePage {
         self.latest
             .borrow_mut()
             .retain(|card| installed.contains(&card.agent));
+        self.known
+            .borrow_mut()
+            .retain(|agent, _| installed.contains(agent));
         let stale: Vec<String> = self
             .rendered
             .borrow()
@@ -953,9 +1004,15 @@ impl UsagePage {
             let agents: Vec<String> = deck.cards.iter().map(|c| c.agent.clone()).collect();
             *page.canonical_agents.borrow_mut() = agents.clone();
             page.reconcile_agents(&agents);
-            for cached in deck.cards.into_iter().filter(|card| !card.rows.is_empty()) {
-                page.apply_card(cached);
+            for cached in deck.cards {
+                page.known
+                    .borrow_mut()
+                    .insert(cached.agent.clone(), cached.clone());
+                if !cached.rows.is_empty() {
+                    page.apply_card(cached);
+                }
             }
+            page.materialize_spoken();
             page.update_empty_state(agents.is_empty());
 
             if agents.is_empty() {
@@ -981,10 +1038,17 @@ impl UsagePage {
                     if page.generation.get() != generation {
                         return;
                     }
-                    if let Some(updated) = updated
-                        && (!updated.rows.is_empty() || updated.needs_auth)
-                    {
-                        page.apply_card(updated);
+                    if let Some(updated) = updated {
+                        page.known
+                            .borrow_mut()
+                            .insert(updated.agent.clone(), updated.clone());
+                        // Empty results refresh a statless card but never blank a good one.
+                        if !updated.rows.is_empty()
+                            || updated.needs_auth
+                            || page.is_statless(&updated.agent)
+                        {
+                            page.apply_card(updated);
+                        }
                     }
                     finish_one(&page, &remaining, generation);
                 });
@@ -1098,6 +1162,9 @@ impl UsagePage {
             group.add(&widget);
             rows.push(view);
         }
+        if card.rows.is_empty() && !card.needs_auth {
+            group.add(&usage_no_data_row());
+        }
         if card.needs_auth {
             group.add(&self.usage_auth_row(&card.agent));
         }
@@ -1162,6 +1229,27 @@ impl UsagePage {
         });
         row.upcast()
     }
+}
+
+/// Placeholder row for a plan the provider publishes no quota for.
+fn usage_no_data_row() -> gtk::Widget {
+    let row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    let label = gtk::Label::builder()
+        .label(t("usage.no_data"))
+        .halign(gtk::Align::Start)
+        .hexpand(true)
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    label.add_css_class("dim-label");
+    row.append(&label);
+    row.upcast()
 }
 
 fn set_usage_account_label(label: &gtk::Label, account: Option<&str>) {

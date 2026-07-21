@@ -22,6 +22,7 @@ time = { workspace = true }
 security-framework = { workspace = true }
 
 [dev-dependencies]
+httpmock = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

@@ -6,7 +6,7 @@ use std::io::Read;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-pub use attohttpc::{Method, RequestBuilder, Response, body};
+pub use attohttpc::{Method, RequestBuilder, Response, StatusCode, body};
 
 /// Cap on preserved init diagnostics (paths stripped at source; this bounds text only).
 const MAX_ROOTS_DIAGNOSTIC_LEN: usize = 256;

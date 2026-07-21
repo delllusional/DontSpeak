@@ -57,7 +57,8 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
-    /// macOS keychain ACL blocks silent read; [`authorize_card`] unlocks.
+    /// Credentials unreadable (macOS keychain ACL) or rejected (401/403);
+    /// [`authorize_card`] retries interactively.
     /// Skip-when-false on wire; never cached (`UsageCache::store`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub needs_auth: bool,
@@ -82,7 +83,7 @@ impl UsageCard {
         account: Option<String>,
         result: Result<Vec<UsageRow>, FetchError>,
     ) -> Self {
-        let needs_auth = matches!(result, Err(FetchError::Guarded));
+        let needs_auth = matches!(result, Err(FetchError::Guarded | FetchError::Unauthorized));
         let mut card = Self {
             agent,
             account,
@@ -298,13 +299,15 @@ fn fetch_rows(
     agent: ClientSource,
     interactive: bool,
 ) -> Result<Vec<UsageRow>, FetchError> {
+    // `From<io::Error>`, not `FetchError::Io`: a refused credential (401/403) must stay
+    // a re-auth signal for every provider, not just Claude.
     match agent {
         ClientSource::ClaudeCode => providers::claude::fetch(paths, interactive),
-        ClientSource::Codex => providers::codex::fetch(paths).map_err(FetchError::Io),
-        ClientSource::QwenCode => providers::qwen::fetch(paths).map_err(FetchError::Io),
-        ClientSource::Grok => providers::grok::fetch(paths).map_err(FetchError::Io),
-        ClientSource::KimiCode => providers::kimi::fetch(paths).map_err(FetchError::Io),
-        ClientSource::Hermes => providers::hermes::fetch(paths).map_err(FetchError::Io),
+        ClientSource::Codex => providers::codex::fetch(paths).map_err(FetchError::from),
+        ClientSource::QwenCode => providers::qwen::fetch(paths).map_err(FetchError::from),
+        ClientSource::Grok => providers::grok::fetch(paths).map_err(FetchError::from),
+        ClientSource::KimiCode => providers::kimi::fetch(paths).map_err(FetchError::from),
+        ClientSource::Hermes => providers::hermes::fetch(paths).map_err(FetchError::from),
         ClientSource::DontSpeak | ClientSource::Unknown => Err(FetchError::Io(
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a usage agent"),
         )),

@@ -4,12 +4,15 @@ import SwiftUI
 
 /// Agents tab — card model shared with WinUI/GTK.
 /// Tab select: paint cached rows, then async force-load each installed agent.
-/// No cache: empty until at least one agent returns data.
+/// No cache: empty until at least one agent returns data — or an agent speaks.
 struct UsageView: View {
     @Environment(Core.self) private var core
     @State private var cards: [UsageCard] = []
     /// ClientSource::CLIENTS order from the skeleton deck.
     @State private var canonicalAgents: [String] = []
+    /// Last card seen per agent, painted or not — the source for a card
+    /// materialized by speech (keeps its account label).
+    @State private var known: [String: UsageCard] = [:]
     @State private var settled = false
     @State private var generation = 0
 
@@ -42,6 +45,7 @@ struct UsageView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task { await onTabSelected() }
+        .onChange(of: core.spokenAgents) { _, _ in materializeSpoken() }
     }
 
     @MainActor private func onTabSelected() async {
@@ -60,9 +64,14 @@ struct UsageView: View {
         canonicalAgents = allAgents
         let installed = Set(allAgents)
         cards.removeAll { !installed.contains($0.agent) }
-        for cached in deck.cards where !cached.rows.isEmpty {
-            applyCard(cached, animated: false)
+        known = known.filter { installed.contains($0.key) }
+        for cached in deck.cards {
+            known[cached.agent] = cached
+            if !cached.rows.isEmpty {
+                applyCard(cached, animated: false)
+            }
         }
+        materializeSpoken()
 
         if allAgents.isEmpty {
             settled = true
@@ -78,13 +87,30 @@ struct UsageView: View {
                     group.cancelAll()
                     return
                 }
-                if let updated, !updated.rows.isEmpty || updated.needsAuth {
-                    applyCard(updated)
+                if let updated {
+                    known[updated.agent] = updated
+                    let painted = cards.first { $0.agent == updated.agent }
+                    if UsagePaint.replaces(painted: painted, with: updated) {
+                        applyCard(updated)
+                    }
                 }
             }
         }
         guard !Task.isCancelled, gen == generation else { return }
         settled = true
+    }
+
+    /// Speech proves the agent is live, so give it a card even when the provider
+    /// reports no quota (Qwen Code signed in to z.ai). Painted cards stay painted.
+    @MainActor private func materializeSpoken() {
+        let owed = UsagePaint.materializable(
+            spoken: core.spokenAgents,
+            canonical: canonicalAgents,
+            painted: cards.map(\.agent)
+        )
+        for agent in owed {
+            applyCard(known[agent] ?? UsageCard(agent: agent, rows: []))
+        }
     }
 
     /// User-click authorize: blocking FFI off main actor, generation-checked apply.
@@ -174,6 +200,9 @@ private struct UsageCardView: View {
                     if index > 0 { PlatterDivider() }
                     UsageRowView(row: row)
                 }
+                if card.rows.isEmpty && !card.needsAuth {
+                    UsageNoDataRowView()
+                }
                 if card.needsAuth {
                     if !card.rows.isEmpty { PlatterDivider() }
                     UsageAuthRowView(authorizing: authorizing) {
@@ -230,6 +259,19 @@ private func prettifyUsageToken(_ token: String) -> String {
             return String(first).uppercased() + part.dropFirst()
         }
         .joined(separator: " ")
+}
+
+/// Placeholder for a card the provider has no quota for (plan without published stats).
+private struct UsageNoDataRowView: View {
+    var body: some View {
+        HStack {
+            Text(L.t("usage.no_data"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+        }
+        .platterRow()
+    }
 }
 
 /// Authorize row — sole UI path that may prompt.

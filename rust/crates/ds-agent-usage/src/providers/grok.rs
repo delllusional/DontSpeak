@@ -134,6 +134,7 @@ fn fetch_web(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
         .bytes(GRPC_WEB_EMPTY_FRAME.to_vec())
         .send()
         .map_err(|error| std::io::Error::other(format!("Grok web billing failed: {error}")))?;
+    super::reject_unauthorized(response.status())?;
     let body = ds_http::read_bytes_limited(response, MAX_WEB_BODY)?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)

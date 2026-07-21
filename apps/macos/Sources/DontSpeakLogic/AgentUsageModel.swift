@@ -52,7 +52,8 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card (Rust UsageCard). `needsAuth`: skip-when-false; true = keychain ACL.
+/// One card (Rust UsageCard). `needsAuth`: skip-when-false; true = credentials
+/// unreadable (keychain ACL) or refused by the provider — authorize retries.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String
@@ -92,6 +93,27 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
             && zip(rows, other.rows).allSatisfy { pair in
                 pair.0.hasSameWireValue(as: pair.1)
             }
+    }
+}
+
+/// Agents-tab paint rules; the WinUI/GTK ports mirror them inline.
+public enum UsagePaint {
+    /// A refresh result replaces the painted card when it carries rows or an auth
+    /// prompt — or when the painted card has nothing to lose (materialized by speech).
+    public static func replaces(painted: UsageCard?, with updated: UsageCard) -> Bool {
+        if !updated.rows.isEmpty || updated.needsAuth { return true }
+        guard let painted, painted.agent == updated.agent else { return false }
+        return painted.rows.isEmpty && !painted.needsAuth
+    }
+
+    /// Spoken agents still owed a card, in canonical order: installed and unpainted.
+    public static func materializable(
+        spoken: Set<String>,
+        canonical: [String],
+        painted: [String]
+    ) -> [String] {
+        let shown = Set(painted)
+        return canonical.filter { spoken.contains($0) && !shown.contains($0) }
     }
 }
 
