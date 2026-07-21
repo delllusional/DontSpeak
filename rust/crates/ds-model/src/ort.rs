@@ -38,7 +38,7 @@ pub(crate) struct OrtDist {
 
 /// The onnxruntime archive distribution for THIS target, or `None` on an
 /// unsupported platform (the caller then documents route B / a manual dylib).
-/// Pins are ONNX Runtime **1.27.0**, except Intel macOS on **1.23.2** — Microsoft's last
+/// Pins are ONNX Runtime **1.27.1**, except Intel macOS on **1.23.2** — Microsoft's last
 /// x86_64 macOS build. The workspace `ort` pin is api-23, the level that floor can serve, and
 /// a NEWER runtime serves an older API request — `GetApi(23)` succeeds on a 1.27 dylib
 /// (verified on-device). We moved OFF 1.24.2 because its model loader DEADLOCKS while

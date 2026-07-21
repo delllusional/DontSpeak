@@ -173,7 +173,7 @@ arboard = "3"
 # `ORT_API_VERSION = 17 + (#enabled api-N)` and calls `GetApi(ORT_API_VERSION)` at runtime,
 # which returns NULL when the library is OLDER than the request. Intel macOS is the floor:
 # Microsoft's last x86_64 macOS build is 1.23.2 (1.24+ is arm64-only in every channel), so
-# api-24 would hand Intel a NULL API table. Every other target ships 1.27.0 and serves a v23
+# api-24 would hand Intel a NULL API table. Every other target ships 1.27.1 and serves a v23
 # request fine — newer runtimes are backward-compatible. 1.27 rather than 1.24 because 1.24's
 # loader DEADLOCKS on the SepFormer speaker-separation graph.
 #

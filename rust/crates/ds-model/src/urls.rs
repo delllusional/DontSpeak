@@ -194,7 +194,7 @@ pub const SEPFORMER_FILE: &str = SEPFORMER.file_name;
 // ── ONNX Runtime — microsoft/onnxruntime releases ────────────────────────────
 // The shared `load-dynamic` inference dylib (built-in ORT TTS + Parakeet paths). The per-OS
 // SELECTION + extraction lives in `ort.rs`; this holds the pinned dist URL + digest. Pins
-// are 1.27.0 (a NEWER runtime serves the workspace's api-23 request; 1.24.2's loader
+// are 1.27.1 (a NEWER runtime serves the workspace's api-23 request; 1.24.2's loader
 // deadlocks on the SepFormer graph) — except Intel macOS, which pins 1.23.2: Microsoft's
 // LAST x86_64 macOS build, in any channel. That cap is why the workspace `ort` binds api-23
 // (1.27 serves it too); requesting api-24 there would hand back a NULL API table.
@@ -204,32 +204,35 @@ pub const SEPFORMER_FILE: &str = SEPFORMER.file_name;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_VERSION: &str = "1.23.2";
 #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-pub const ONNXRUNTIME_VERSION: &str = "1.27.0";
+pub const ONNXRUNTIME_VERSION: &str = "1.27.1";
 
-/// Size (bytes) of the onnxruntime dist archive, for the up-front manifest total. The
-/// win-arm64 zip is larger than the osx-arm64 / win-x64 dists, and the linux-x64 tgz is much
-/// smaller, so each is sized separately.
+/// Size (bytes) of the onnxruntime dist archive, for the up-front manifest total. Sized per
+/// target: the Windows zips are ~77 MB, the macOS tgz ~32 MB, the Linux tgz ~8 MB.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 77_242_362;
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 78_593_089;
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 78_590_093;
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 8_831_605;
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 8_828_892;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 7_797_972;
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 7_812_402;
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 11_676_322;
+// macOS arm64 (and any target without its own dist above).
 #[cfg(not(any(
+    all(target_os = "windows", target_arch = "x86_64"),
     all(target_os = "windows", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64")
 )))]
-pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 31_604_221;
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 31_959_937;
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-osx-arm64-1.27.0.tgz";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-osx-arm64-1.27.1.tgz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
-    "545e81c58152353acb0d1e8bd6ce4b62f830c0961f5b3acfedc790ffd76e477a";
+    "e42b77a7281cc6e55141bf44fcfbac2c782b823a491bbb6ac33c781dd991f8a6";
 
 // Intel macOS — Microsoft's LAST x86_64 macOS archive (1.24+ is arm64-only, and PyPI's
 // wheels stop at the same release). Self-contained: system frameworks only, no Homebrew
@@ -241,36 +244,36 @@ pub const ONNXRUNTIME_DIST_SHA256: &str =
     "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6";
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
-pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-x64-1.27.0.zip";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-win-x64-1.27.1.zip";
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
-    "c5c81710938e68079ff1a192b04897faabe4b43830d48f39f27ecd4e16138bfc";
+    "2e00414a63fdef0914cd5a5ede6c707844878e0c08e1b6693842f0451b2df2a1";
 
 // Windows on ARM (native arm64) — Microsoft's official win-arm64 build.
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-arm64-1.27.0.zip";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-win-arm64-1.27.1.zip";
 #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
-    "a32f2650575b3c20df462e337519fd1cc4105356130d11dba9771c6f374d952f";
+    "6e22c2061ba6400b42a59663d700c8694e4e8fe654cf452c4700c24237407ae1";
 
 // Linux x86_64 — Microsoft's official linux-x64 build: a .tgz whose
-// lib/libonnxruntime.so.1.27.0 is the dynamic runtime `ort` (load-dynamic) dlopens via
+// lib/libonnxruntime.so.1.27.1 is the dynamic runtime `ort` (load-dynamic) dlopens via
 // ORT_DYLIB_PATH (the bare libonnxruntime.so is a symlink; see archive::extract_dylib_member).
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-linux-x64-1.27.0.tgz";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-linux-x64-1.27.1.tgz";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
-    "547e40a48f1fe73e3f812d7c88a948612c23f896b91e4e2ee1e232d7b468246f";
+    "25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af";
 
 // Linux aarch64 — Microsoft's official linux-aarch64 build (same .tgz layout as linux-x64).
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-linux-aarch64-1.27.0.tgz";
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.1/onnxruntime-linux-aarch64-1.27.1.tgz";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
-    "3e4d83ac06924a32a07b6d7f91ce6f852876153fc0bbdf931bf517a140bfbe48";
+    "33c67e33d1e25b816878366ea276589a024f71f000e7ff955c4b33224d639edd";
 
 /// The onnxruntime-gpu version shipped for the CUDA path — DELIBERATELY decoupled from the CPU
-/// [`ONNXRUNTIME_VERSION`] (1.27.0): onnxruntime-gpu ≥ 1.27 requires CUDA 13 (a newer driver than
+/// [`ONNXRUNTIME_VERSION`] (1.27.1): onnxruntime-gpu ≥ 1.27 requires CUDA 13 (a newer driver than
 /// Pascal-era cards run), so the GPU path stays on the LAST CUDA-12 line. The `CUDA_WHEELS`
 /// `onnxruntime_gpu` URL MUST embed this version — enforced by
 /// `cuda_pin_tests::cuda_wheels_are_consistent_and_complete`.
