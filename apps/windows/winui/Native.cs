@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -19,11 +18,9 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_skeleton_json();
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent, byte refresh);
     [DllImport(Dll)] private static extern IntPtr ds_agent_usage_card_authorize_json([MarshalAs(UnmanagedType.LPUTF8Str)] string agent);
-    [DllImport(Dll)] private static extern IntPtr ds_agent_usage_json(byte refresh);
     [DllImport(Dll)] private static extern IntPtr ds_tools_json();
     [DllImport(Dll)] private static extern IntPtr ds_libraries_json();
     [DllImport(Dll)] private static extern IntPtr ds_logs_json(uint maxBytes);
-    [DllImport(Dll)] private static extern IntPtr ds_logs_wait(uint maxBytes, uint timeoutMs);
     [DllImport(Dll)] private static extern void ds_logs_clear();
     [DllImport(Dll)] private static extern IntPtr ds_version();
     [DllImport(Dll)] private static extern IntPtr ds_homepage_url();
@@ -39,7 +36,6 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_stats_range(double lo, double avg, double hi, uint precision, [MarshalAs(UnmanagedType.LPUTF8Str)] string unitKey);
     [DllImport(Dll)] private static extern IntPtr ds_stats_count(ulong count, double audioSecs);
     [DllImport(Dll)] private static extern IntPtr ds_human_size(ulong bytes);
-    [DllImport(Dll)] private static extern IntPtr ds_tray_icon_kind(byte sttActive, byte ttsActive, [MarshalAs(UnmanagedType.LPUTF8Str)] string trayIndicatorJson);
     [DllImport(Dll)] private static extern byte ds_diarization_ui_enabled();
     [DllImport(Dll)] private static extern void ds_string_free(IntPtr s);
     [DllImport(Dll)] private static extern byte ds_set_muted(byte on);
@@ -62,12 +58,6 @@ internal static class Native
     public static string StatsCount(ulong count, double audioSecs) => TakeString(ds_stats_count(count, audioSecs));
     /// <summary>Decimal size string — byte-for-byte parity with macOS/Linux Libraries.</summary>
     public static string HumanSize(ulong bytes) => TakeString(ds_human_size(bytes));
-
-    public static string TrayIconKind(bool sttActive, bool ttsActive, string[] trayIndicator)
-    {
-        var json = JsonSerializer.Serialize(trayIndicator ?? Array.Empty<string>());
-        return TakeString(ds_tray_icon_kind((byte)(sttActive ? 1 : 0), (byte)(ttsActive ? 1 : 0), json));
-    }
 
     /// <summary><c>ds_diarization_ui_enabled</c> — single source; do not re-mirror.</summary>
     public static bool DiarizationUiEnabled() => ds_diarization_ui_enabled() != 0;
@@ -130,10 +120,6 @@ internal static class Native
     public static string AgentUsageAuthorizeCardJson(string agent)
         => TakeString(ds_agent_usage_card_authorize_json(agent));
 
-    /// <summary>BLOCKING aggregate deck (diagnostics).</summary>
-    public static string AgentUsageJson(bool refresh)
-        => TakeString(ds_agent_usage_json((byte)(refresh ? 1 : 0)));
-
     /// <summary>BLOCKS until seq ≠ since or timeout. Background only; since=0 first. "{}" if down.</summary>
     public static string ModelStatusWait(ulong since, uint timeoutMs) => TakeString(ds_model_status_wait(since, timeoutMs));
 
@@ -145,9 +131,6 @@ internal static class Native
 
     /// <summary>Activity-log tail; "[]" if none.</summary>
     public static string LogsJson(uint maxBytes) => TakeString(ds_logs_json(maxBytes));
-
-    /// <summary>LogsJson + BLOCKS on log-dir change (fs watch) or timeout. Background only.</summary>
-    public static string LogsWait(uint maxBytes, uint timeoutMs) => TakeString(ds_logs_wait(maxBytes, timeoutMs));
 
     /// <summary>Erase on-disk activity log. Irreversible — confirm first.</summary>
     public static void LogsClear() => ds_logs_clear();

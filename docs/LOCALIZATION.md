@@ -13,7 +13,7 @@ C ABI:
 - `ds_t(key)` — string (missing key → key itself)
 - `ds_t_args(key, args_json)` — `%{name}` from JSON; numbers formatted by each UI as
   strings; templates stay in catalog
-- `ds_set_locale(bcp47)` / `ds_locale()`
+- `ds_set_locale(bcp47)`
 
 Wrappers: macOS `L.t(...)`, Windows `Loc.T(...)` / `{loc:Loc Key=...}`, Linux GTK
 via same FFI.

@@ -63,20 +63,11 @@ uint8_t ds_engine_start(void);
 // 1 if was running. Safe on quit.
 uint8_t ds_engine_stop(void);
 
-// 1 if ok.
-uint8_t ds_engine_reload(void);
-
 // Mute (`on != 0`); playback drains. 1 if IPC delivered.
 uint8_t ds_set_muted(uint8_t on);
 
 // OS voice settings. 0 on Linux (#74). HANDLE-FREE.
 uint8_t ds_open_voice_settings(void);
-
-// Kokoro present+valid? Disk probe. HANDLE-FREE.
-uint8_t ds_kokoro_present_global(void);
-
-// Full Parakeet-ONNX set present+valid? HANDLE-FREE.
-uint8_t ds_parakeet_onnx_present_global(void);
 
 // Pidfile probe. HANDLE-FREE, off-main-thread ok.
 uint8_t ds_engine_running_global(void);
@@ -95,14 +86,8 @@ char *ds_agent_usage_skeleton_json(void);
 // Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_card_json(const char *agent, uint8_t refresh);
 
-// USER-INITIATED authorize + forced card refresh. BLOCKING: network plus, on
-// macOS, possibly the keychain ACL credential dialog. Host contract: off the UI
-// thread, explicit click only — never startup / tab paint / MCP. Owned `char*`.
-// HANDLE-FREE.
+// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_card_authorize_json(const char *agent);
-
-// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
-char *ds_agent_usage_json(uint8_t refresh);
 
 // Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
 // same `ds-tools` catalog as MCP (no drift). Each param gets localized `detail` via
@@ -158,9 +143,6 @@ char *ds_update_check_json(void);
 // HANDLE-FREE.
 void ds_set_locale(const char *locale);
 
-// Active UI locale tag (for matching native number formatters). Owned `char*`. HANDLE-FREE.
-char *ds_locale(void);
-
 // Localized string by `key`; missing key returns the key. Owned `char*`. HANDLE-FREE.
 char *ds_t(const char *key);
 
@@ -202,8 +184,8 @@ char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray
 uint8_t ds_diarization_ui_enabled(void);
 
 // Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
-// Restarts the warm helper + resets TTS stats only if the realized provider changes.
-// 1 if delivered; new provider/stats via `ds_model_status_json`.
+// Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if
+// delivered; new provider/stats via `ds_model_status_json`.
 uint8_t ds_set_provider(const char *provider);
 
 // Free a `char*` from any ds_* function. NULL no-op.

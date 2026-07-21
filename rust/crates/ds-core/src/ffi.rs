@@ -6,7 +6,7 @@
 use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::{engine, models};
+use crate::engine;
 
 // release-ffi: panic=unwind — catch_unwind is a no-op under abort.
 #[cfg(panic = "abort")]
@@ -30,12 +30,6 @@ pub extern "C" fn ds_engine_start() -> u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_stop() -> u8 {
     guard_val(0, || crate::host::engine_stop() as u8)
-}
-
-/// 1 if ok.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_engine_reload() -> u8 {
-    guard_val(0, || crate::host::engine_reload() as u8)
 }
 
 /// Mute (`on != 0`); playback drains. 1 if IPC delivered.
@@ -93,18 +87,6 @@ fn cstr_or(p: *const c_char, default: &str) -> String {
         .to_str()
         .unwrap_or(default)
         .to_string()
-}
-
-/// Kokoro present+valid? Disk probe. HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_kokoro_present_global() -> u8 {
-    guard_val(0, || models::is_kokoro_present() as u8)
-}
-
-/// Full Parakeet-ONNX set present+valid? HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_parakeet_onnx_present_global() -> u8 {
-    guard_val(0, || models::is_parakeet_onnx_present() as u8)
 }
 
 /// Pidfile probe. HANDLE-FREE, off-main-thread ok.
@@ -175,15 +157,6 @@ pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *m
         let token = cstr_or_empty(agent);
         let source = ds_agent_usage::parse_agent(&token);
         to_cstring(ds_agent_usage::authorize_card(source).to_json())
-    })
-}
-
-/// Aggregate refresh (tests/tooling). Owned `char*`. HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_agent_usage_json(refresh: u8) -> *mut c_char {
-    const EMPTY: &str = r#"{"cards":[]}"#;
-    guard_str(EMPTY, || {
-        to_cstring(ds_agent_usage::snapshot(refresh != 0).to_json())
     })
 }
 
@@ -329,12 +302,6 @@ pub extern "C" fn ds_set_locale(locale: *const c_char) {
             ds_i18n::set_locale(&loc);
         }
     });
-}
-
-/// Active UI locale tag (for matching native number formatters). Owned `char*`. HANDLE-FREE.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_locale() -> *mut c_char {
-    guard_str("en", || to_cstring(ds_i18n::locale()))
 }
 
 /// Localized string by `key`; missing key returns the key. Owned `char*`. HANDLE-FREE.

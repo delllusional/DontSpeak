@@ -84,9 +84,6 @@ status:
   diarization_no_speakers: "No voices enrolled"
   diarization_enrolled: Enrolled
   diarization_sensitivity: Sensitivity
-  action:
-    download: Download
-    retry: Retry
 
   caps_lock: Caps Lock
   caps_hint: "Tap start/stop · double-tap skips · long-press cancels"

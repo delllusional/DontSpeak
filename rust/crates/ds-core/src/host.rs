@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 struct EngineHandle {
     running: Arc<AtomicBool>,
-    reload: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -71,8 +70,10 @@ pub(crate) fn engine_start() -> bool {
     }
 
     let running = Arc::new(AtomicBool::new(true));
-    let reload = Arc::new(AtomicBool::new(false));
-    let (r, rl) = (running.clone(), reload.clone());
+    // engine_run's reload flag: dontspeakd's own config watch owns hot-reload, so nothing
+    // on this side ever raises it.
+    let rl = Arc::new(AtomicBool::new(false));
+    let r = running.clone();
     // engine_run returns Err instead of process::exit (would kill the host app). Clear
     // `running` on failure so a later start can retry.
     let thread = std::thread::Builder::new()
@@ -87,11 +88,7 @@ pub(crate) fn engine_start() -> bool {
     if thread.is_none() {
         return false;
     }
-    *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = Some(EngineHandle {
-        running,
-        reload,
-        thread,
-    });
+    *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = Some(EngineHandle { running, thread });
     true
 }
 
@@ -104,17 +101,6 @@ pub(crate) fn engine_stop() -> bool {
             if let Some(t) = h.thread.take() {
                 join_stale(t, STALE_JOIN_TIMEOUT);
             }
-            true
-        }
-        None => false,
-    }
-}
-
-/// Ask the running engine to re-read config (no restart). True if an engine is up.
-pub(crate) fn engine_reload() -> bool {
-    match ENGINE.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        Some(h) => {
-            h.reload.store(true, Ordering::SeqCst);
             true
         }
         None => false,

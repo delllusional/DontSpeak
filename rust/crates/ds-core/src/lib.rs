@@ -4,7 +4,6 @@
 pub mod engine;
 pub mod ffi;
 pub(crate) mod host;
-pub mod models;
 pub mod pastel;
 pub mod status_fmt;
 

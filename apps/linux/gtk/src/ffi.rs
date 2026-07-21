@@ -49,25 +49,10 @@ pub fn engine_start() -> bool {
 pub fn engine_stop() -> bool {
     sys::ds_engine_stop() != 0
 }
-#[allow(dead_code)]
-pub fn engine_reload() -> bool {
-    sys::ds_engine_reload() != 0
-}
-
 pub fn set_muted(on: bool) -> bool {
     sys::ds_set_muted(on as u8) != 0
 }
-#[allow(dead_code)]
-pub fn set_provider(which: &str) -> bool {
-    let c = CString::new(which).unwrap_or_default();
-    sys::ds_set_provider(c.as_ptr()) != 0
-}
 
-// BLOCKING (same ds_ipc round-trip as wait). Host-parity only — GTK main thread must not call.
-#[allow(dead_code)]
-pub fn model_status_json() -> String {
-    take(sys::ds_model_status_json())
-}
 /// BLOCKING until status seq ≠ `since` or timeout. Background thread only.
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
@@ -90,11 +75,6 @@ pub fn agent_usage_card(agent: &str, refresh: bool) -> Option<UsageCard> {
 pub fn agent_usage_card_authorize(agent: &str) -> Option<UsageCard> {
     let c = CString::new(agent).unwrap_or_default();
     serde_json::from_str(&take(sys::ds_agent_usage_card_authorize_json(c.as_ptr()))).ok()
-}
-/// BLOCKING aggregate deck refresh (diagnostics).
-#[allow(dead_code)]
-pub fn agent_usage(refresh: bool) -> Option<UsageDeck> {
-    serde_json::from_str(&take(sys::ds_agent_usage_json(refresh as u8))).ok()
 }
 pub fn tools_json() -> String {
     take(sys::ds_tools_json())
