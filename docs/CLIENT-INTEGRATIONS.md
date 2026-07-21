@@ -138,41 +138,118 @@ dontspeak wire <client> --print-only
 
 Pins record last check, not minimum version.
 
-## Usage statistics
+## Usage statistics (Agents tab)
 
-Full spec: [AGENT-USAGE-PLAN.md](AGENT-USAGE-PLAN.md). Summary:
+Desktop **Agents** tab (nav order: Agents → Status → Tools → Log → Credits;
+cold-start default). Independent of the speech engine: works with the engine
+stopped and does not extend `model_status`. Domain crate `ds-agent-usage`; hosts
+call `ds-core` FFI only.
 
-**Model:** `UsageDeck` → `cards[]` of `UsageCard` (`agent` + `rows[]` +
-`needs_auth`, present only when true: macOS keychain ACL); each `UsageRow` has
-`period` (`session` | `week` | `month`),
-`used_percent`, `resets_at_unix`.
+### Model
 
-**ABI (off UI thread):**
+`UsageDeck` → `cards[]` of `UsageCard` (`agent` wire token + optional `account` +
+`needs_auth` only when true + `rows[]`); each `UsageRow` has `period`
+(`session` | `week` | `month`), `used_percent` (0…100), `resets_at_unix`.
 
-1. `ds_agent_usage_skeleton_json()` — installed agents + last-good memory/disk cache; no network
-2. `ds_agent_usage_card_json(agent, force)` — blocking load for one agent; never prompts
-3. `ds_agent_usage_card_authorize_json(agent)` — user-click authorize + force load; may ACL-prompt on macOS
-4. `ds_usage_resets_in(unix)` — remaining duration string (`2d 05h`, no seconds, no prefix)
+Card order is `ClientSource::CLIENTS`. Probe only agents with
+`ClientSpec::present`. At most one row per period; missing periods omitted, never
+shown as `0%`. Require percent + reset timestamp to emit a row. Never serialize
+credentials, provider bodies, or raw error strings.
 
-**Tab select:** paint only cards that already have rows (cache); force-load each
-installed agent async; transition a card only when its typed value changes. First
-visit with no cache shows no shells until a load succeeds. No Refresh button /
-loading spinner. Empty probes never wipe the atomically persisted last-good cache,
-and overlapping refreshes for one agent share a probe. Hosts decode ABI JSON in
-their lowest-level data-source adapter; views receive typed cards only. Install gate
-= wire `ClientSpec::present`.
+Optional **account** (email) is display-only from local credentials:
 
-On macOS/Linux, Codex and Grok CLI probes search an explicit `CODEX_CLI_PATH` /
-`GROK_CLI_PATH`, the login-shell PATH, the process PATH, then known install roots.
-Qwen Coding Plan keys are read in client order from the process environment,
-`$QWEN_HOME/.env`, `~/.env`, then the `env` object in Qwen settings.
+| Agent | Account source |
+| --- | --- |
+| Claude Code | `~/.claude.json` → `oauthAccount.emailAddress` |
+| Codex | `~/.codex/auth.json` JWT `id_token` → `email` |
+| Grok | `~/.grok/auth.json` session → `email` |
+| Qwen / Kimi / Hermes | none |
 
-**Layout (all hosts):** agent title → for each row: period + remaining (top-right),
-progress bar (percent as bar only). Strings from `ds-i18n` (`usage.*`).
+Transparent by default; click toggles opacity for this UI session only (not
+persisted).
 
-**Speaking highlight:** while TTS plays, `model_status.activity.speaker` is the
-wireable client token of the in-flight utterance (`claude_code` / `codex` /
-`qwen_code` / `grok` / `kimi_code` / `hermes`; `null` when idle or non-client). Hosts wash
-that agent’s Usage card with a random pastel from `ds_random_pastel_wash_json` (top-bar
-speaking stripe stays brand purple). Source is retained on each TTS queue item at enqueue
-(hooks `source`, stream adapters, `GreetSession`) — not inferred from session id.
+### ABI (hosts call off the UI thread)
+
+| Symbol | Behavior |
+| --- | --- |
+| `ds_agent_usage_skeleton_json()` | Installed agents + last-good cache; **no network** |
+| `ds_agent_usage_card_json(agent, force)` | Blocking single-card load; never prompts |
+| `ds_agent_usage_card_authorize_json(agent)` | User-click authorize + force load; may ACL-prompt on macOS |
+| `ds_agent_usage_json(refresh)` | Aggregate all cards (tests/tooling) |
+| `ds_usage_resets_in(unix)` | Remaining duration (`2d 05h`, no seconds, no “Resets in” prefix) |
+| `ds_random_pastel_wash_json()` | One pastel wash `{"r","g","b","a"}` (HSV: random H, S=0.42, V=0.92, α=0.30) |
+
+Mirrors: `ds-core` FFI, `dontspeak.h`, `Native.cs`, GTK `ffi.rs`. Hosts decode ABI
+JSON in the data-source adapter; views receive typed cards only. Generation
+counters drop stale completions after leave-tab.
+
+### Tab select flow
+
+1. Skeleton paints only cards that already have rows (cache hits). Empty shells
+   are not shown; first open with no cache stays blank (not “loading…”).
+2. Force-load each installed agent async; transition a card only when its typed
+   value changes. Identical / failed / empty probes do not remount or wipe a
+   prior good value.
+3. After all loads finish with no data, show `usage.unavailable`.
+
+No Refresh button, no loading spinner. Re-select repeats the flow. Soft TTL for
+non-force tooling refresh is **60s**; the tab always force-loads after skeleton.
+
+### Cache
+
+One typed in-memory cache keyed by `ClientSource`, atomically mirrored to
+`agent-usage-cache.json` under the OS cache directory (normalized rows, optional
+account labels, fetch timestamps — never secrets or provider bodies). Empty
+probes never overwrite a good entry. Concurrent refreshes for one agent share a
+probe. The file **never** stores `needs_auth: true`, so skeleton never paints
+authorize.
+
+### Layout (all hosts)
+
+Agent title (left) + optional account (top-right) → for each row: period label +
+remaining duration (top-right), progress bar (percent as bar only). Strings from
+`ds-i18n` (`usage.*` / `usage.provider.<token>`). No plan names, costs, balances,
+charts, or raw provider errors.
+
+### Speaking highlight
+
+While TTS plays, `model_status.activity.speaker` is the wireable client of the
+in-flight utterance (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code` /
+`hermes`; `null` when idle or non-client). Hosts wash that agent’s card with a
+random pastel from `ds_random_pastel_wash_json` (new color when speaker becomes
+non-null or changes; frozen until idle). Top-bar speaking stripe and progress
+bars stay brand purple.
+
+Pipe: enqueue keeps `source: ClientSource` on each TTS item → worker claim
+publishes `PlayingClaim { source, session }` → `tts_running()` exposes
+`(tts_active, Option<source>)` → host matches `speaker == card.agent`. Not
+inferred from session id. Earcons under focus hold do not claim playback.
+
+### Provider matrix
+
+| Agent | Source | Session | Week | Month |
+| --- | --- | --- | --- | --- |
+| Claude Code | OAuth `GET …/api/oauth/usage` + macOS Keychain or `~/.claude/.credentials.json` | API `five_hour` → `session` | API `seven_day` → `week` | — |
+| Codex | short-lived `codex app-server` → `account/rateLimits/read` | 300 min or session label | 10080 min or weekly label | explicit monthly label only |
+| Qwen Code | Alibaba Coding Plan HTTP + env/settings API keys | `per5Hour*` | `perWeek*` | `perBillMonth*` / `perMonth*` |
+| Grok | try `x.ai/billing` via `grok agent stdio`; else gRPC-web `GetGrokCreditsConfig` + Bearer from `~/.grok/auth.json` | — | web: full cycle ~4–12 days | CLI monthly-named; web else → month |
+| Kimi Code | `GET https://api.kimi.com/coding/v1/usages` + Bearer from `~/.kimi-code/credentials/kimi-code.json` | `limits[]` 5h window | top-level `usage` weekly | — |
+| Hermes Agent | stub (no public quota API yet) | — | — | — |
+
+Claude: accept fractional `resets_at`; `utilization` is percent 0…100 (same scale
+as `limits[].percent` — do not treat `1.0` as a full fraction); on HTTP
+failure/empty keep last good card. Windows resolves CLI binaries via `.exe`/`.cmd`
+(never extensionless npm shebangs). On macOS/Linux, Codex and Grok CLI probes
+search `CODEX_CLI_PATH` / `GROK_CLI_PATH`, login-shell PATH, process PATH, then
+known install roots. Qwen Coding Plan keys: process env, `$QWEN_HOME/.env`,
+`~/.env`, then the `env` object in Qwen settings.
+
+### Security
+
+- Credential reads are read-only, size-bounded, documented paths only.
+- Implicit reads (tab paint, MCP `usage`, skeleton/card FFI) never prompt. Sole
+  prompter: `ds_agent_usage_card_authorize_json` (click-only). On macOS, silent
+  search skips ACL items; guarded → `needs_auth: true` (stale rows kept).
+- “Always Allow” persists via OS keychain ACL (no config flag — Claude may
+  recreate the item). Production HTTPS only for live probes; tests use fixtures /
+  loopback. Secrets and raw payloads never appear in FFI JSON or logs.

@@ -40,9 +40,10 @@ one and let the failures walk you forward.
    templates; reuse `jsonl_tail`). Streaming clients get `hook_streaming: true`
    + witness seeding instead.
 8. **Usage stats** — `rust/crates/ds-agent-usage/src/providers/<client>.rs` plus
-   arms in `fetch_rows` / `fetch_account`; provider-matrix row + token
-   enumerations in [AGENT-USAGE-PLAN.md](AGENT-USAGE-PLAN.md). Tests use
-   httpmock/tempdir only — never live network or credentials (repo invariant).
+   arms in `fetch_rows` / `fetch_account`; provider-matrix row +
+   `usage.provider.<token>` in [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md)
+   (Usage statistics). Tests use httpmock/tempdir only — never live network or
+   credentials (repo invariant).
 9. **i18n** — `usage.provider.<token>` in
    `rust/crates/ds-i18n/locales/en.yml` (test-enforced); all new UI strings via
    the catalog.
