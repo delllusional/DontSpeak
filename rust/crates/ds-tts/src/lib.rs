@@ -1,26 +1,18 @@
-//! ds-tts — pluggable text-to-speech engines for dontspeak (ARCHITECTURE §A.1).
+//! ds-tts — text-to-speech synthesis stages for dontspeak (ARCHITECTURE §A.1).
 //!
-//! One trait [`Tts`] behind dynamic dispatch (`VoiceConfig::resolved_tts`). Implementors:
-//!   * [`KokoroTts`] — DEFAULT. Native multilingual Kokoro (ort + G2P + rodio) via the
-//!     `ds-helper` bin in its own process group + single-speaker pidfile. No Python.
-//!   * [`SystemTts`] — macOS `say`; Windows System.Speech + Linux spd-say behind cfg.
+//! The warm `ds-helper` process owns speaking (own process group + single-speaker
+//! pidfile); this crate supplies the pure stages it runs plus the one System-TTS command
+//! seam, [`system::speech_command`] (empty prose is a successful no-op).
 //!
 //! Helper pipeline: markdown → prose ([`spoken`]) → numbers → G2P ([`g2p`]) → vocab
 //! tokens → clause batches ([`batch`]) → synth ([`synth`] / MLX) → trim →
 //! play. Pure stages unit-tested without audio/model/network.
-//!
-//! Single-speaker pidfile is sacred: every engine spawns in its OWN process group and
-//! returns pgid for barge-in (`killpg`). Live `Child` via `kokoro::spawn` or the optional
-//! result of `system::spawn` (empty prose is a successful no-op).
-
-use std::io;
 
 /// Model-bounded phoneme batching (helper bin).
 pub mod batch;
 /// Chatterbox Multilingual AR backend.
 pub mod chatterbox;
 pub mod g2p;
-pub(crate) mod kokoro;
 mod language;
 pub(crate) mod numbers;
 pub mod omnivoice;
@@ -40,9 +32,7 @@ pub(crate) mod vocab;
 #[doc(hidden)]
 pub mod wav;
 
-pub use kokoro::KokoroTts;
 pub use language::{DEFAULT_LANGUAGE, detect_language, supported_language};
-pub use system::SystemTts;
 pub use vocab::SAMPLE_RATE;
 
 /// Re-export from `ds-voices` (issue #5) — CLI lists voices without this heavy crate.
@@ -60,45 +50,6 @@ pub fn normalize_spoken_text(text: &str) -> String {
 /// defensively outside the helper.
 pub fn normalize_kokoro_text(text: &str) -> String {
     numbers::expand_numbers(&normalize_spoken_text(text))
-}
-
-/// Process-GROUP id of a spawned speaker — pidfile records it for caps-ON barge-in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpeakHandle {
-    pub pgid: i32,
-}
-
-/// TTS backend. Object-safe for `Box<dyn Tts>`.
-pub trait Tts: Send {
-    /// Speak at `rate` (1.0 = normal). Spawns in own process group; caller records
-    /// pgid and owns wait + pidfile-clear.
-    fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> io::Result<SpeakHandle>;
-
-    /// Default no-op: pidfile `killpg` owns preemption.
-    fn stop(&self) {}
-
-    /// Settings-picker voices. Empty where enumeration unsupported.
-    fn voices(&self) -> Vec<SpeakerVoice> {
-        Vec::new()
-    }
-
-    /// Can open OS voice installer (§B.3).
-    fn can_manage_voices(&self) -> bool {
-        false
-    }
-
-    /// Open OS voice installer / settings (§B.3).
-    fn manage_voices(&self) {}
-
-    /// Short picker hint ("Spoken Content > System Voice > …").
-    fn manage_voices_hint(&self) -> Option<&str> {
-        None
-    }
-
-    /// Debug tag for tests / logs.
-    fn kind(&self) -> &'static str {
-        "tts"
-    }
 }
 
 /// Map a normalized `rate` (1.0 = normal) to a system-TTS words-per-minute

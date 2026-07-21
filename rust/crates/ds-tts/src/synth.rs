@@ -105,13 +105,6 @@ impl KokoroSynth {
         })
     }
 
-    /// The available voice names (sorted), for a picker.
-    pub fn voice_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.voices.keys().cloned().collect();
-        v.sort();
-        v
-    }
-
     /// Synthesize a whole utterance: phoneme string → trimmed 24 kHz mono PCM,
     /// batching at sentence marks (`split_phonemes`) and concatenating. `voice`
     /// must be a key from the voices file; `speed` is clamped to [0.5, 2.0].

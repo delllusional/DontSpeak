@@ -1,38 +1,11 @@
-//! SystemTts — OS built-in speech synthesizer.
+//! OS built-in speech synthesizer — command construction only; the warm helper owns
+//! spawning and playback.
 //!
-//!   * macOS (compiled): `say -r <wpm> [-v <name>] <text>`, own process group + pidfile.
-//!     `voices()` → [`crate::enumerate::system_voices`]; manage → Spoken Content.
-//!   * Windows (cfg): PowerShell `System.Speech`; manage → `ms-settings:speech`.
-//!   * Linux (cfg): `spd-say`; voices empty; no manage.
+//!   * macOS (compiled): `say -r <wpm> [-v <name>] <text>`; settings → Spoken Content.
+//!   * Windows (cfg): PowerShell `System.Speech`; settings → `ms-settings:speech`.
+//!   * Linux (cfg): `spd-say`; no settings deep link.
 
 use std::process::Command;
-
-use ds_config::Paths;
-
-use crate::{SpeakHandle, SpeakerVoice, Tts};
-
-/// System TTS engine.
-pub struct SystemTts {
-    paths: Paths,
-}
-
-impl SystemTts {
-    pub fn new(paths: Paths) -> Self {
-        Self { paths }
-    }
-
-    /// Available on this build target? macOS/Windows yes; Linux not wired yet.
-    pub fn available() -> bool {
-        cfg!(any(target_os = "macos", target_os = "windows"))
-    }
-}
-
-/// Own session/process group so recorded pgid kills the whole tree on barge-in.
-/// Shared with `kokoro::spawn`.
-#[cfg(unix)]
-pub(crate) fn set_new_pgroup(cmd: &mut Command) {
-    ds_proc::set_new_process_group(cmd);
-}
 
 /// Build a platform speech command from raw agent text. This is the only System-TTS
 /// command seam: every caller gets the canonical prose cleanup and the same empty no-op.
@@ -102,65 +75,6 @@ fn platform_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     cmd
 }
 
-/// Spawn macOS `say` as live `Child` in own process group; return `(Child, pgid)`.
-/// Counterpart to `kokoro::spawn` for foreground hooks that keep the Child.
-#[cfg(target_os = "macos")]
-pub fn spawn(
-    paths: &ds_config::Paths,
-    txt: &str,
-    voice_id: &str,
-    rate: f32,
-) -> std::io::Result<Option<(std::process::Child, i32)>> {
-    let Some(mut cmd) = speech_command(Some(voice_id), rate, txt) else {
-        return Ok(None);
-    };
-    set_new_pgroup(&mut cmd);
-    let child = cmd.spawn()?;
-    // SACRED single-speaker post-spawn (ARCHITECTURE §0.2) — ds_proc::record_or_kill.
-    let pgid = ds_proc::record_or_kill(&paths.pidfile, &child)?;
-    Ok(Some((child, pgid)))
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// macOS (compiled & verified on the build host)
-// ─────────────────────────────────────────────────────────────────────────────
-#[cfg(target_os = "macos")]
-impl Tts for SystemTts {
-    fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let Some(mut cmd) = speech_command(voice_id, rate, text) else {
-            return Ok(SpeakHandle { pgid: 0 });
-        };
-        set_new_pgroup(&mut cmd);
-
-        let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2). Trait path drops Child;
-        // caller waits by pgid / pidfile.
-        let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
-        drop(child);
-        Ok(SpeakHandle { pgid })
-    }
-
-    fn voices(&self) -> Vec<SpeakerVoice> {
-        crate::enumerate::system_voices()
-    }
-
-    fn can_manage_voices(&self) -> bool {
-        true
-    }
-
-    fn manage_voices(&self) {
-        let _ = open_voice_settings();
-    }
-
-    fn manage_voices_hint(&self) -> Option<&str> {
-        Some("Spoken Content > System Voice > Manage Voices…")
-    }
-
-    fn kind(&self) -> &'static str {
-        "system"
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Windows (cfg, NOT built on the macOS host)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -213,37 +127,6 @@ fn platform_command(voice: Option<&str>, rate: f32, text: &str) -> Command {
     cmd
 }
 
-#[cfg(target_os = "windows")]
-impl Tts for SystemTts {
-    fn speak(&self, text: &str, voice_id: Option<&str>, rate: f32) -> std::io::Result<SpeakHandle> {
-        let Some(mut cmd) = speech_command(voice_id, rate, text) else {
-            return Ok(SpeakHandle { pgid: 0 });
-        };
-        let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
-        let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
-        drop(child);
-        Ok(SpeakHandle { pgid })
-    }
-
-    fn voices(&self) -> Vec<SpeakerVoice> {
-        crate::enumerate::system_voices()
-    }
-
-    fn can_manage_voices(&self) -> bool {
-        true
-    }
-    fn manage_voices(&self) {
-        let _ = open_voice_settings();
-    }
-    fn manage_voices_hint(&self) -> Option<&str> {
-        Some("Time & Language > Speech > Manage voices (Add voices)")
-    }
-    fn kind(&self) -> &'static str {
-        "system"
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Linux (cfg, NOT built on the macOS host)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,35 +147,6 @@ fn platform_command(_voice: Option<&str>, rate: f32, text: &str) -> Command {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     cmd
-}
-
-#[cfg(target_os = "linux")]
-impl Tts for SystemTts {
-    fn speak(
-        &self,
-        text: &str,
-        _voice_id: Option<&str>,
-        rate: f32,
-    ) -> std::io::Result<SpeakHandle> {
-        let Some(mut cmd) = speech_command(None, rate, text) else {
-            return Ok(SpeakHandle { pgid: 0 });
-        };
-        set_new_pgroup(&mut cmd);
-        let child = cmd.spawn()?;
-        // SACRED single-speaker post-spawn (ARCHITECTURE §0.2).
-        let pgid = ds_proc::record_or_kill(&self.paths.pidfile, &child)?;
-        drop(child);
-        Ok(SpeakHandle { pgid })
-    }
-
-    fn voices(&self) -> Vec<SpeakerVoice> {
-        crate::enumerate::system_voices()
-    }
-
-    // No installer on Linux (§B.3).
-    fn kind(&self) -> &'static str {
-        "system"
-    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
