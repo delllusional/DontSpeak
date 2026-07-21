@@ -264,8 +264,9 @@ fn cache_root(base: &BaseDirs) -> PathBuf {
     base.cache_dir().join(APP_DIR)
 }
 
-/// Homebrew onnxruntime dylib on Intel mac (None elsewhere). Single source for loader +
-/// `intel_mac_builtin_ort_available`. Versioned file ≥ 1.27 (older deadlocks on SepFormer).
+/// Homebrew onnxruntime dylib on Intel mac (None elsewhere) — the loader's last resort behind
+/// the app-bundled and downloaded copies. Floor 1.23 = the workspace `ort` api level; SepFormer,
+/// which wanted 1.27, is Apple-Silicon-only (its diarizer rung is MLX).
 pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
@@ -282,7 +283,7 @@ pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
                 if let Some(v) = name
                     .strip_prefix("libonnxruntime.")
                     .and_then(|r| r.strip_suffix(".dylib"))
-                    && parse_dylib_version(v).is_some_and(|ver| ver >= (1, 27, 0))
+                    && parse_dylib_version(v).is_some_and(|ver| ver >= (1, 23, 0))
                     && e.path().is_file()
                 {
                     return Some(e.path());
@@ -423,14 +424,15 @@ mod tests {
         );
     }
 
-    /// The brew-probe version gate: full versions parse and compare against the 1.27 floor; the
-    /// bare major-only symlink ("1") and junk are rejected (no minor to gate on).
+    /// The brew-probe version gate: full versions parse and compare against the 1.23 floor (the
+    /// `ort` api level); the bare major-only symlink ("1") and junk are rejected (no minor to
+    /// gate on).
     #[test]
     fn brew_dylib_version_gate() {
         assert_eq!(parse_dylib_version("1.27.0"), Some((1, 27, 0)));
         assert_eq!(parse_dylib_version("1.27"), Some((1, 27, 0)));
-        assert!(parse_dylib_version("1.28.1").is_some_and(|v| v >= (1, 27, 0)));
-        assert!(parse_dylib_version("1.24.2").is_some_and(|v| v < (1, 27, 0)));
+        assert!(parse_dylib_version("1.23.2").is_some_and(|v| v >= (1, 23, 0)));
+        assert!(parse_dylib_version("1.22.0").is_some_and(|v| v < (1, 23, 0)));
         assert_eq!(parse_dylib_version("1"), None); // major-only symlink
         assert_eq!(parse_dylib_version("1.27.0.extra"), None);
         assert_eq!(parse_dylib_version("current"), None);

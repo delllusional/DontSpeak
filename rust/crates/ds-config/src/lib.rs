@@ -36,7 +36,7 @@ pub use ds_client::ClientSource;
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,
     SttEngine, TrayKind, TtsEngine, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
-    default_provider, intel_mac_builtin_ort_available, normalize_tray, provider_pref_wants_gpu,
+    default_provider, normalize_tray, provider_pref_wants_gpu,
 };
 pub use grok_rules::{
     GROK_NARRATE_BEGIN, GROK_NARRATE_END, apply_grok_narrate_section, sync_grok_narrate_agents_md,

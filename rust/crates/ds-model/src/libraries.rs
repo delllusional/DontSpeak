@@ -323,15 +323,13 @@ mod tests {
             assert!(urls::PARAKEET.runs_on(p), "Parakeet must apply on {p:?}");
         }
 
-        // ONNX Runtime — everywhere EXCEPT Intel macOS (no pinned dist there).
-        assert!(urls::ONNX_RUNTIME.runs_on(WindowsX64));
-        assert!(urls::ONNX_RUNTIME.runs_on(WindowsArm64));
-        assert!(urls::ONNX_RUNTIME.runs_on(LinuxX64));
-        assert!(urls::ONNX_RUNTIME.runs_on(MacArm64));
-        assert!(
-            !urls::ONNX_RUNTIME.runs_on(MacX64),
-            "Intel macOS has no ONNX Runtime dist, so it must not list it"
-        );
+        // ONNX Runtime — every shipped target; Intel macOS on its own older pin.
+        for p in urls::Platform::ALL.iter().copied() {
+            assert!(
+                urls::ONNX_RUNTIME.runs_on(p),
+                "ONNX Runtime must apply on {p:?}"
+            );
+        }
 
         // CUDA / cuDNN — x64 Windows + Linux only; never Windows-on-ARM or any Mac.
         for proj in [&urls::NVIDIA_CUDA, &urls::NVIDIA_CUDNN] {

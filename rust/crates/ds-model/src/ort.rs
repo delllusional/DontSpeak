@@ -28,8 +28,8 @@ pub fn onnxruntime_dylib_file() -> &'static str {
 }
 
 /// Source for the prebuilt onnxruntime `.tgz`/`.zip` (route A): URL + pinned
-/// SHA-256 of the archive. ONNX Runtime 1.27.0 (see `onnxruntime_dist` for the
-/// api-24 compatibility rationale).
+/// SHA-256 of the archive. See `onnxruntime_dist` for the per-target versions and the
+/// api-level rationale.
 pub(crate) struct OrtDist {
     pub(crate) url: &'static str,
     /// SHA-256 of the downloaded archive (`.tgz` on macOS, `.zip` on Windows).
@@ -38,9 +38,9 @@ pub(crate) struct OrtDist {
 
 /// The onnxruntime archive distribution for THIS target, or `None` on an
 /// unsupported platform (the caller then documents route B / a manual dylib).
-/// All pins are ONNX Runtime **1.27.0**. The workspace `ort` pin is still api-24
-/// (ORT_API_VERSION 24, what ort-sys 2.0.0-rc.12 / transcribe-rs compile against), and a
-/// NEWER runtime serves an older API request — `GetApi(24)` succeeds on a 1.27 dylib
+/// Pins are ONNX Runtime **1.27.0**, except Intel macOS on **1.23.2** — Microsoft's last
+/// x86_64 macOS build. The workspace `ort` pin is api-23, the level that floor can serve, and
+/// a NEWER runtime serves an older API request — `GetApi(23)` succeeds on a 1.27 dylib
 /// (verified on-device). We moved OFF 1.24.2 because its model loader DEADLOCKS while
 /// loading the SepFormer speaker-separation graph (the dictation speaker-lock); 1.27 loads
 /// it in <1 s. Kokoro/Parakeet are unaffected (backward-compatible; on Apple Silicon they
@@ -48,6 +48,14 @@ pub(crate) struct OrtDist {
 pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
     // Official Microsoft dynamic ORT only (pyke ships static `.a` — load-dynamic can't dlopen).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return Some(OrtDist {
+            url: crate::urls::ONNXRUNTIME_DIST_URL,
+            archive_sha256: crate::urls::ONNXRUNTIME_DIST_SHA256,
+        });
+    }
+    // Intel macOS rides Microsoft's last x86_64 archive (1.23.2) — see the urls.rs pin.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
         return Some(OrtDist {
             url: crate::urls::ONNXRUNTIME_DIST_URL,
@@ -89,19 +97,22 @@ pub(crate) fn onnxruntime_dist() -> Option<OrtDist> {
 
 /// The resolved path the onnxruntime dylib lives at, for the caller to set `ORT_DYLIB_PATH`.
 ///
-/// Prefers an externally supplied `ORT_DYLIB_PATH` when it points at an existing file — a notarized
-/// macOS build bundles the dylib in the app and sets this to `Contents/Frameworks/libonnxruntime.dylib`
-/// (signed + notarized with the app, so there's no runtime download to be Gatekeeper-quarantined).
-/// When the env var is unset/missing it falls back to the downloaded copy under `model_dir()`, so the
-/// default (local) behaviour is unchanged. `None` only if neither resolves.
+/// Order: an externally supplied `ORT_DYLIB_PATH` pointing at a real file, then the copy the
+/// macOS app bundles beside itself (signed + notarized with the app, so a build can ship a
+/// runtime the target platform has no download for), then the managed download under
+/// `model_dir()`, then a Homebrew install. `None` only if nothing resolves.
 pub fn onnxruntime_dylib_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from)
         && p.is_file()
     {
         return Some(p);
     }
+    if let Some(bundled) = bundled_onnxruntime_dylib() {
+        return Some(bundled);
+    }
     let downloaded = model_path(onnxruntime_dylib_file());
-    // Intel macOS: no pinned dist; brew path from ds-config (shared with usability gate).
+    // Last resort on Intel macOS, whose pinned dist stops at Microsoft's final x86_64 build:
+    // a Homebrew runtime is newer and equally acceptable (version-gated like any other).
     if !downloaded.as_deref().is_some_and(|p| p.is_file())
         && let Some(brew) = ds_config::brew_onnxruntime_dylib()
     {
@@ -110,7 +121,29 @@ pub fn onnxruntime_dylib_path() -> Option<PathBuf> {
     downloaded
 }
 
-/// The onnxruntime version the workspace `ort` pin (api-24) requires at runtime —
+/// `Contents/Frameworks/libonnxruntime.dylib` of the running app bundle, when the executable
+/// sits in one. Same shape as the MLX shim's bundled lookup; no signature check here because
+/// this path only selects WHICH dylib `ort` dlopens, and a caller that can rewrite the bundle
+/// can rewrite the executable next to it.
+fn bundled_onnxruntime_dylib() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
+        let contents = executable
+            .parent()
+            .filter(|dir| dir.file_name().is_some_and(|name| name == "MacOS"))?
+            .parent()
+            .filter(|dir| dir.file_name().is_some_and(|name| name == "Contents"))?;
+        let dylib = contents.join("Frameworks/libonnxruntime.dylib");
+        dylib.is_file().then_some(dylib)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// The onnxruntime version the workspace `ort` pin (api-23) requires at runtime —
 /// it's embedded in the dylib's `LC_ID_DYLIB` name (`libonnxruntime.<VER>.dylib`).
 /// Defined in the download registry (`urls.rs`); re-exported here for the historical path.
 pub use crate::urls::ONNXRUNTIME_VERSION;

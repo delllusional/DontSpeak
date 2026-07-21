@@ -49,28 +49,7 @@ impl SttEngine {
     /// Static only — runtime model/auth still apply. `built_in` needs MLX or ONNX; `system`
     /// macOS-only; `claude_code` always.
     pub fn is_stt_usable(self) -> bool {
-        // Intel mac: built-in ONNX is runtime (Homebrew/ORT_DYLIB_PATH), not in (os,arch).
-        let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
-            && matches!(self, SttEngine::BuiltIn)
-            && intel_mac_builtin_ort_available();
-        self.stt_usable_with_intel_mac_ort(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            intel_mac_ort_available,
-        )
-    }
-
-    fn stt_usable_with_intel_mac_ort(
-        self,
-        os: &str,
-        arch: &str,
-        intel_mac_ort_available: bool,
-    ) -> bool {
-        if matches!(self, SttEngine::BuiltIn) && os == "macos" && arch == "x86_64" {
-            intel_mac_ort_available
-        } else {
-            self.stt_usable_on(os, arch)
-        }
+        self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
     /// Pure `(os, arch)` form of [`is_stt_usable`](SttEngine::is_stt_usable).
@@ -114,28 +93,7 @@ impl TtsEngine {
     /// Usable on this build/platform? ([`crate::VoiceConfig::resolved_tts`]).
     /// `built_in` needs MLX or ONNX; `system` macOS+Windows only.
     pub fn is_tts_usable(self) -> bool {
-        // Intel mac: ONNX synth availability is runtime (Homebrew/ORT_DYLIB_PATH).
-        let intel_mac_ort_available = cfg!(all(target_os = "macos", target_arch = "x86_64"))
-            && matches!(self, TtsEngine::BuiltIn)
-            && intel_mac_builtin_ort_available();
-        self.tts_usable_with_intel_mac_ort(
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            intel_mac_ort_available,
-        )
-    }
-
-    fn tts_usable_with_intel_mac_ort(
-        self,
-        os: &str,
-        arch: &str,
-        intel_mac_ort_available: bool,
-    ) -> bool {
-        if matches!(self, TtsEngine::BuiltIn) && os == "macos" && arch == "x86_64" {
-            intel_mac_ort_available
-        } else {
-            self.tts_usable_on(os, arch)
-        }
+        self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
     /// Pure `(os, arch)` form of [`is_tts_usable`](TtsEngine::is_tts_usable).
@@ -666,17 +624,10 @@ where
 // Engine LADDER (config-file Vec; empty = off; first usable rung wins) + PREFERENCE
 // (`Option<Vec>` tri-state: None=ladder, Some([])=off, Some([e])=force, no auto-sub).
 // See VoiceConfig::resolved_tts / resolved_stt. Pure (os, arch) helpers for cross-platform tests.
-fn built_in_usable_on(os: &str, arch: &str) -> bool {
-    !(os == "macos" && arch == "x86_64")
-}
-
-/// Intel-mac runtime fact: can built-in ONNX load? (Homebrew or `ORT_DYLIB_PATH`.) Not in the
-/// pure `(os,arch)` matrix — without it ladders skip `built_in`.
-pub fn intel_mac_builtin_ort_available() -> bool {
-    std::env::var_os("ORT_DYLIB_PATH")
-        .map(|p| std::path::Path::new(&p).is_file())
-        .unwrap_or(false)
-        || crate::brew_onnxruntime_dylib().is_some()
+/// Every target has an ONNX Runtime it can fetch — Intel macOS on Microsoft's last x86_64
+/// build, the rest on the current pin (see ds-model's `onnxruntime_dist`).
+fn built_in_usable_on(_os: &str, _arch: &str) -> bool {
+    true
 }
 /// System STT is macOS-any-arch (static); runtime probe handles auth/locale.
 fn system_stt_buildable_on(os: &str, arch: &str) -> bool {
@@ -891,23 +842,18 @@ mod tests {
         toml::Value::String(tok.to_string())
     }
 
+    /// Intel macOS stopped being a runtime special case once ds-model pinned it a dist.
     #[test]
-    fn engine_usability_uses_mocked_intel_mac_ort_availability() {
-        // Exercise both Intel-macOS runtime branches without reading ORT_DYLIB_PATH or scanning
-        // Homebrew. Other targets ignore that injected capability and follow the static matrix.
-        assert!(!TtsEngine::BuiltIn.tts_usable_with_intel_mac_ort("macos", "x86_64", false));
-        assert!(TtsEngine::BuiltIn.tts_usable_with_intel_mac_ort("macos", "x86_64", true));
-        assert!(!SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", false));
-        assert!(SttEngine::BuiltIn.stt_usable_with_intel_mac_ort("macos", "x86_64", true));
+    fn engine_usability_is_the_static_matrix_on_every_target() {
+        assert!(TtsEngine::BuiltIn.tts_usable_on("macos", "x86_64"));
+        assert!(SttEngine::BuiltIn.stt_usable_on("macos", "x86_64"));
 
         let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
-        if !(os == "macos" && arch == "x86_64") {
-            for e in TtsEngine::ALL.iter().copied() {
-                assert_eq!(e.is_tts_usable(), e.tts_usable_on(os, arch), "{e:?}");
-            }
-            for e in SttEngine::ALL.iter().copied() {
-                assert_eq!(e.is_stt_usable(), e.stt_usable_on(os, arch), "{e:?}");
-            }
+        for e in TtsEngine::ALL.iter().copied() {
+            assert_eq!(e.is_tts_usable(), e.tts_usable_on(os, arch), "{e:?}");
+        }
+        for e in SttEngine::ALL.iter().copied() {
+            assert_eq!(e.is_stt_usable(), e.stt_usable_on(os, arch), "{e:?}");
         }
     }
 
@@ -917,9 +863,8 @@ mod tests {
         // target, walk the DEFAULT ladders with the pure `_on` predicates and assert what
         // resolves. This is the whole point of the ladder: Windows / Linux run the built-in
         // (Parakeet) engines for both TTS and STT; macOS (any arch) prefers the OS recognizer
-        // for STT (`system` is macOS-only-usable and now sits first in the STT ladder) while
-        // still preferring Kokoro for TTS on Apple Silicon — an x86_64 mac (no ONNX, no MLX
-        // stack) falls through to `say` for TTS too.
+        // for STT (`system` is macOS-only-usable and now sits first in the STT ladder) and
+        // Kokoro for TTS.
         let resolve_tts = |os: &str, arch: &str| -> Option<TtsEngine> {
             default_tts_engine_ladder()
                 .into_iter()
@@ -937,10 +882,12 @@ mod tests {
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::System),
             ),
+            // Intel macOS reaches built-in TTS now that it has a pinned ONNX Runtime; STT
+            // still prefers the system recognizer, same as Apple silicon.
             (
                 "macos",
                 "x86_64",
-                Some(TtsEngine::System),
+                Some(TtsEngine::BuiltIn),
                 Some(SttEngine::System),
             ),
             (

@@ -191,14 +191,19 @@ pub const PARAKEET_JOINER_FILE: &str = PARAKEET_JOINER.file_name;
 pub const PARAKEET_TOKENS_FILE: &str = PARAKEET_TOKENS.file_name;
 pub const SEPFORMER_FILE: &str = SEPFORMER.file_name;
 
-// ── ONNX Runtime 1.27.0 — microsoft/onnxruntime releases ─────────────────────
+// ── ONNX Runtime — microsoft/onnxruntime releases ────────────────────────────
 // The shared `load-dynamic` inference dylib (built-in ORT TTS + Parakeet paths). The per-OS
 // SELECTION + extraction lives in `ort.rs`; this holds the pinned dist URL + digest. Pins
-// are 1.27.0 (a NEWER runtime serves the workspace's api-24 request; 1.24.2's loader
-// deadlocks on the SepFormer graph). No dist for Intel macOS — Microsoft ships arm64-only
-// macOS archives; there `ort.rs` falls back to a Homebrew-installed runtime (version-gated).
+// are 1.27.0 (a NEWER runtime serves the workspace's api-23 request; 1.24.2's loader
+// deadlocks on the SepFormer graph) — except Intel macOS, which pins 1.23.2: Microsoft's
+// LAST x86_64 macOS build, in any channel. That cap is why the workspace `ort` binds api-23
+// (1.27 serves it too); requesting api-24 there would hand back a NULL API table.
 
-/// The onnxruntime version the workspace `ort` pin (api-24) needs at runtime.
+/// The onnxruntime version this target's pinned dist installs — it's embedded in the macOS
+/// dylib's `LC_ID_DYLIB` name and written to the sidecar version marker.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ONNXRUNTIME_VERSION: &str = "1.23.2";
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
 pub const ONNXRUNTIME_VERSION: &str = "1.27.0";
 
 /// Size (bytes) of the onnxruntime dist archive, for the up-front manifest total. The
@@ -210,10 +215,13 @@ pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 78_593_089;
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 8_831_605;
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 7_797_972;
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 11_676_322;
 #[cfg(not(any(
     all(target_os = "windows", target_arch = "aarch64"),
     all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64")
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "macos", target_arch = "x86_64")
 )))]
 pub const ONNXRUNTIME_DIST_SIZE_BYTES: u64 = 31_604_221;
 
@@ -222,6 +230,15 @@ pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 pub const ONNXRUNTIME_DIST_SHA256: &str =
     "545e81c58152353acb0d1e8bd6ce4b62f830c0961f5b3acfedc790ffd76e477a";
+
+// Intel macOS — Microsoft's LAST x86_64 macOS archive (1.24+ is arm64-only, and PyPI's
+// wheels stop at the same release). Self-contained: system frameworks only, no Homebrew
+// closure, so it drops into the app the way the arm64 dist does.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-x86_64-1.23.2.tgz";
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+pub const ONNXRUNTIME_DIST_SHA256: &str =
+    "d10359e16347b57d9959f7e80a225a5b4a66ed7d7e007274a15cae86836485a6";
 
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 pub const ONNXRUNTIME_DIST_URL: &str = "https://github.com/microsoft/onnxruntime/releases/download/v1.27.0/onnxruntime-win-x64-1.27.0.zip";
@@ -416,14 +433,15 @@ impl Platform {
         Platform::MacX64,
     ];
 
-    /// Targets with a bundled ONNX Runtime dist — everywhere except Intel macOS.
-    /// Mirrors `ort::onnxruntime_dist` returning `Some`.
+    /// Targets with a pinned ONNX Runtime dist. Mirrors `ort::onnxruntime_dist` returning
+    /// `Some` — every supported target, Intel macOS on its own older pin.
     pub const WITH_ONNX_RUNTIME: &'static [Platform] = &[
         Platform::WindowsX64,
         Platform::WindowsArm64,
         Platform::LinuxX64,
         Platform::LinuxArm64,
         Platform::MacArm64,
+        Platform::MacX64,
     ];
 
     /// Targets with the optional NVIDIA CUDA / cuDNN GPU runtime (x64 Windows + Linux only;

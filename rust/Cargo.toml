@@ -169,21 +169,20 @@ arboard = "3"
 # `#[cfg(feature = "api-18")]` in rc.12. `load-dynamic` alone pulls no api-N level,
 # so the EP code referenced a field that didn't exist → E0609 (pykeio/ort#547).
 #
-# We pin `api-24` (rc.12's default level). NOTE: the shipped onnxruntime dylib must be
-# ≥ this api level, because ort-sys computes `ORT_API_VERSION = 17 + (#enabled api-N)` and
-# at runtime calls `GetApi(ORT_API_VERSION)`, which returns NULL only if the library is
-# OLDER than the requested version. api-24 ⇒ requests v24; ds-model ships ONNX
-# Runtime 1.27.0, which serves the v24 request fine (a NEWER runtime is backward-compatible
-# with an older API request). We ship 1.27 (not 1.24) because 1.24's loader DEADLOCKS on
-# the SepFormer speaker-separation graph; 1.27 loads it cleanly. We can't pin the api level
-# LOWER than 24 anyway: `transcribe-rs` depends on ort with its DEFAULT features (api-24),
-# and cargo unifies features additively. So the dylib VERSION is the knob, not the api level.
+# We pin `api-23`, the level the OLDEST shipped runtime can serve. ort-sys computes
+# `ORT_API_VERSION = 17 + (#enabled api-N)` and calls `GetApi(ORT_API_VERSION)` at runtime,
+# which returns NULL when the library is OLDER than the request. Intel macOS is the floor:
+# Microsoft's last x86_64 macOS build is 1.23.2 (1.24+ is arm64-only in every channel), so
+# api-24 would hand Intel a NULL API table. Every other target ships 1.27.0 and serves a v23
+# request fine — newer runtimes are backward-compatible. 1.27 rather than 1.24 because 1.24's
+# loader DEADLOCKS on the SepFormer speaker-separation graph.
 #
-# `load-dynamic` still wins the build (it sets `ort-sys/disable-linking`, so the
-# build script returns before any download even though transcribe-rs co-enables
-# `download-binaries`). If ds-model's onnxruntime pin changes, keep it ≥ the ORT
-# release whose API version == this `api-N` (api-24 ⇒ ≥ 1.24).
-ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-24", "coreml", "cuda", "half"] }
+# The api level IS pinnable here: `transcribe-rs` takes ort with default-features = false
+# (ds-stt keeps it for the VAD only), so nothing co-enables a higher level additively —
+# `cargo tree -e features -i ort` is the check. `load-dynamic` wins the build either way
+# (it sets `ort-sys/disable-linking`, so the build script returns before any download).
+# If ds-model's onnxruntime pins change, keep every one of them ≥ this `api-N`.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-23", "coreml", "cuda", "half"] }
 # f16 tensor I/O for the FP16 model exports (Chatterbox LM, OmniVoice/Qwen audio sub-models).
 half = "2"
 # Released Misaki-compatible English frontend. DontSpeak supplies OOV pronunciations
