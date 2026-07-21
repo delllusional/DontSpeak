@@ -120,20 +120,49 @@
     </None>
   </ItemGroup>
 
-  <!-- Strip the Windows App SDK's bundled Windows-AI / ML runtime from the publish
-       output: onnxruntime.dll + DirectML.dll + the Microsoft.Windows.AI.* projections
-       (~42 MB). DontSpeak never calls the Windows ML APIs — it ships its OWN onnxruntime
-       to the model dir at runtime — so these are dead weight in a self-contained build.
-       Verified: the app + engine run without them. -->
+  <!-- Strip WinAppSDK payload a self-contained publish always emits but this app never
+       activates: the Windows-AI / ML runtime (~42 MB; DontSpeak ships its OWN onnxruntime
+       to the model dir at runtime), WebView2, and Widgets. Deletion is by design safe —
+       none of it is reachable from any code path here, so a missed file is dead weight
+       and a wrongly-deleted one fails loudly at launch. Verified: app + engine run without.
+       Keep the debugger/diagnostics set (mscordaccore, mscordbi, createdump) — crash-dump
+       analysis needs it. -->
+  <!-- Verified on Windows: publish output drops ~7.4 MB compressed (see build-portable.ps1). -->
   <Target Name="StripUnusedWindowsAI" AfterTargets="Publish">
     <ItemGroup>
       <_UnusedAI Include="$(PublishDir)onnxruntime.dll" />
       <_UnusedAI Include="$(PublishDir)onnxruntime_providers_*.dll" />
       <_UnusedAI Include="$(PublishDir)DirectML.dll" />
       <_UnusedAI Include="$(PublishDir)Microsoft.Windows.AI.*" />
+      <!-- Rest of the same Windows-AI payload the four globs above miss: the managed ORT
+           wrapper, the NPU/workload probes, and the semantic-search projections. -->
+      <_UnusedAI Include="$(PublishDir)Microsoft.ML.OnnxRuntime.dll" />
+      <_UnusedAI Include="$(PublishDir)PerceptiveStreaming.dll" />
+      <_UnusedAI Include="$(PublishDir)NPUDetect.dll" />
+      <_UnusedAI Include="$(PublishDir)Microsoft.Windows.Workloads*" />
+      <_UnusedAI Include="$(PublishDir)Microsoft.Windows.Private.Workloads.*" />
+      <_UnusedAI Include="$(PublishDir)workloads*.json" />
+      <_UnusedAI Include="$(PublishDir)Microsoft.Windows.Internal.AI.*" />
+      <_UnusedAI Include="$(PublishDir)*SemanticSearch*.winmd" />
+      <!-- WinAppSDK ships WebView2 and Widgets in every self-contained app. DontSpeak
+           hosts no web content and registers no widget provider. -->
+      <_UnusedAI Include="$(PublishDir)Microsoft.Web.WebView2.*.dll" />
+      <_UnusedAI Include="$(PublishDir)WebView2Loader.dll" />
+      <_UnusedAI Include="$(PublishDir)Microsoft.Windows.Widgets.*" />
+      <!-- Our own debug symbols: the portable zip is not a symbol drop. -->
+      <_UnusedAI Include="$(PublishDir)$(AssemblyName).pdb" />
+      <!-- Experimental GC, selected only by DOTNET_GCName which we never set. -->
+      <_UnusedAI Include="$(PublishDir)clrgcexp.dll" />
     </ItemGroup>
-    <Delete Files="@(_UnusedAI)" />
-    <Message Importance="high" Text="Stripped @(_UnusedAI->Count()) unused Windows-AI/ML files from $(PublishDir)" />
+    <!-- WinAppSDK's own localized control strings, 85 locales. Every user-facing string
+         DontSpeak renders comes from ds-i18n, so these only cover framework-internal
+         messages; en-us stays as the fallback the loader resolves to. -->
+    <ItemGroup>
+      <_UnusedMui Include="$(PublishDir)*\*.mui" Exclude="$(PublishDir)en-us\*.mui" />
+    </ItemGroup>
+    <Delete Files="@(_UnusedAI);@(_UnusedMui)" />
+    <RemoveDir Directories="@(_UnusedMui->'%(RootDir)%(Directory)')" />
+    <Message Importance="high" Text="Stripped @(_UnusedAI->Count()) unused WinAppSDK files and @(_UnusedMui->Count()) satellite resources from $(PublishDir)" />
   </Target>
 
 </Project>

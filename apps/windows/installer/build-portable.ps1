@@ -97,6 +97,10 @@ Write-Host "==> 4/4  zip → Output\$zipName" -ForegroundColor Cyan
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $zip = "$outDir\$zipName"
 if (Test-Path $zip) { Remove-Item $zip -Force }
-Compress-Archive -Path "$stage\*" -DestinationPath $zip -CompressionLevel Optimal
+# ZipFile, not Compress-Archive: the cmdlet's `Optimal` is deflate level 6 and it exposes no
+# way to ask for level 9. Same container/method, ~3.5% smaller, and `includeBaseDirectory:$false`
+# reproduces `-Path "$stage\*"` so install.ps1's Expand-Archive sees the same top-level layout.
+[System.IO.Compression.ZipFile]::CreateFromDirectory(
+    $stage, $zip, [System.IO.Compression.CompressionLevel]::SmallestSize, $false)
 $mb = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ("DONE → {0} ({1} MB)" -f $zip, $mb) -ForegroundColor Green
