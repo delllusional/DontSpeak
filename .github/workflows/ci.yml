@@ -23,7 +23,12 @@ name: CI
 
 on:
   # Per-commit + PR test runs (Linux-only — the fast, platform-agnostic majority).
+  # tags-ignore: a tag push carries a commit that already ran this workflow on its branch,
+  # and release.yml re-runs it via workflow_call as the full-matrix gate. Without the
+  # filter both land on the SAME ref, so `concurrency` (cancel-in-progress: false)
+  # serializes them and the redundant run delays the release.
   push:
+    tags-ignore: ['**']
   pull_request:
   # Manual runs (workflow_dispatch) and the release gate (workflow_call from release.yml)
   # also run tests; the release passes full-matrix: true for all three OSes. Manual runs
@@ -46,8 +51,7 @@ on:
 # Never cancel a run: every per-commit check should FINISH (green), so a commit on the
 # branch page never shows a cancelled (red) mark. Grouped per ref, so the release's
 # full-matrix gate (a tag ref) is independent of the per-commit branch check — they run in
-# parallel and both go green. Deliberate trade-off: when a commit and its tag are pushed
-# together, the quick Linux per-commit check runs alongside the release's full gate.
+# parallel and both go green.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: false
@@ -67,9 +71,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            rust -> target
-            apps/linux/gtk -> target
+          # Only `rust`: this job's GTK step is `cargo fmt`, which builds nothing, so a
+          # gtk workspace entry would cache an empty target dir and drag that crate's
+          # Cargo.lock into the hygiene cache key.
+          workspaces: rust -> target
       - name: cargo fmt --check (rust workspace)
         working-directory: rust
         run: cargo fmt --all --check
