@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex};
 pub(crate) const PARALLEL_DOWNLOADS: usize = 4;
 
 /// One unit of work that reports local `(done, _)` bytes via the callback.
-pub(crate) type DownloadJob =
-    Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()> + Send>;
+pub(crate) type DownloadJob = Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()> + Send>;
 
 enum Event {
     Progress,
@@ -182,17 +181,15 @@ mod tests {
         let jobs: Vec<DownloadJob> = vec![
             Box::new(|p| {
                 p(10, 50);
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "bad",
-                ))
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "bad"))
             }),
             Box::new(|p| {
                 p(50, 50);
                 Ok(())
             }),
         ];
-        let err = run_jobs_parallel(&|d, _| seen.lock().unwrap().push(d), 100, 0, jobs).unwrap_err();
+        let err =
+            run_jobs_parallel(&|d, _| seen.lock().unwrap().push(d), 100, 0, jobs).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         let seen = seen.lock().unwrap();
         assert!(
@@ -229,10 +226,15 @@ mod tests {
                 }) as DownloadJob
             })
             .collect();
-        run_jobs_parallel(&|d, t| {
-            assert_eq!(t, 60);
-            seen.lock().unwrap().push(d);
-        }, 60, 0, jobs)
+        run_jobs_parallel(
+            &|d, t| {
+                assert_eq!(t, 60);
+                seen.lock().unwrap().push(d);
+            },
+            60,
+            0,
+            jobs,
+        )
         .unwrap();
         let seen = seen.lock().unwrap();
         assert!(seen.windows(2).all(|w| w[1] >= w[0]), "monotonic: {seen:?}");

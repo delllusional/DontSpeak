@@ -20,8 +20,7 @@ use crate::spec::{
 /// One file fetch in a multi-step set (model + ORT fetchers share one list).
 /// Also used by CUDA wheel download (same aggregator). `Send` so steps can run on the
 /// multi-file worker pool ([`crate::parallel`]).
-pub(crate) type DownloadStep =
-    Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()> + Send>;
+pub(crate) type DownloadStep = Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()> + Send>;
 
 /// Monotonic aggregate `(done, total)` across steps. Uses actual transferred bytes (not
 /// manifest estimates) so size drift can't regress the bar. Already-present steps stream
