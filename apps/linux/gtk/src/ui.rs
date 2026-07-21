@@ -110,8 +110,6 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     let tts_dot = expander_indicator(&tts_row);
     let tts_runtime = value_label();
     tts_row.add_row(&action_row(&t("status.engine.role_runtime"), &tts_runtime));
-    let tts_queue = value_label();
-    tts_row.add_row(&action_row(&t("status.stats.queue"), &tts_queue));
     let tts_realtime = value_label();
     tts_row.add_row(&action_row(&t("status.stats.realtime"), &tts_realtime));
     let tts_first = value_label();
@@ -122,6 +120,8 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     tts_failures.add_css_class("error");
     let tts_failures_row = action_row(&t("status.stats.failures"), &tts_failures);
     tts_row.add_row(&tts_failures_row);
+    let tts_queue = value_label();
+    tts_row.add_row(&action_row(&t("status.stats.queue"), &tts_queue));
     voice_group.add(&tts_row);
 
     let stt_row = adw::ExpanderRow::builder()

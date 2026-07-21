@@ -166,14 +166,14 @@
                                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
                                     </Grid>
                                 </loc:CursorHyperlinkButton>
-                                <!-- Queue is outside TtsStatsGrid so system-voice / no_data paths still show depth. -->
-                                <Grid x:Name="TtsQueueRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.stats.queue}" Opacity="0.6" /><TextBlock x:Name="TtsQueue" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                 <StackPanel x:Name="TtsStatsGrid" Spacing="6">
                                     <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.realtime}" Opacity="0.6" /><TextBlock x:Name="TtsSpeed" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                     <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.first_audio}" Opacity="0.6" /><TextBlock x:Name="TtsFirst" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                     <Grid ColumnDefinitions="Auto,*"><TextBlock Text="{loc:Loc Key=status.stats.spoken}" Opacity="0.6" /><TextBlock x:Name="TtsSpoken" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                                     <Grid x:Name="TtsFailuresRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.stats.failures}" Opacity="0.6" /><TextBlock x:Name="TtsFailures" Grid.Column="1" HorizontalAlignment="Right" Foreground="#E84646" /></Grid>
                                 </StackPanel>
+                                <!-- Queue is outside TtsStatsGrid so system-voice / no_data paths still show depth. -->
+                                <Grid x:Name="TtsQueueRow" ColumnDefinitions="Auto,*" Visibility="Collapsed"><TextBlock Text="{loc:Loc Key=status.stats.queue}" Opacity="0.6" /><TextBlock x:Name="TtsQueue" Grid.Column="1" HorizontalAlignment="Right" /></Grid>
                             </StackPanel>
 
                             <!-- STT (Parakeet) -->

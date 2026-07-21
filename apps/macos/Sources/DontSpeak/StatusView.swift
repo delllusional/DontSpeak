@@ -211,8 +211,7 @@ private struct EngineStatRow<Stats: View>: View {
     let role: String
     let detail: String
     let status: EngineStatus
-    /// TTS only: queue depth renders above the trouble note, since a download is
-    /// exactly when utterances pile up.
+    /// TTS only: queue depth renders last, below the stats or trouble note.
     var showsQueue = false
     @ViewBuilder var stats: () -> Stats
     @Environment(Core.self) private var core
@@ -235,13 +234,13 @@ private struct EngineStatRow<Stats: View>: View {
             if expanded {
                 PlatterDivider()
                 statusDetailBlock {
-                    if showsQueue {
-                        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
-                    }
                     if let note = status.troubleNote {
                         Text(note).glassCaption()
                     } else {
                         stats()
+                    }
+                    if showsQueue {
+                        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
                     }
                 }
             }
