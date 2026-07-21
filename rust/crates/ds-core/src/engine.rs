@@ -1,5 +1,4 @@
-//! Engine liveness via pidfile (`Paths::engine_pid`). Reload is in-process
-//! (`ds_engine_reload`), not a signal. Read failure → false.
+//! Engine liveness via pidfile (`Paths::engine_pid`). Read failure → false.
 
 /// Pidfile probe. Access-denied = alive (EPERM); not `ds_proc::group_alive`.
 pub fn is_running() -> bool {

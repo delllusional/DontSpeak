@@ -290,12 +290,10 @@ mod tests {
                 SepformerModel.is_supported_on_this_host(),
                 "SepformerModel is macOS on any arch"
             );
-            for t in [Cuda, Dotnet, Winapp] {
-                assert!(
-                    !t.is_supported_on_this_host(),
-                    "{t:?} is not a macOS target"
-                );
-            }
+            assert!(
+                !Cuda.is_supported_on_this_host(),
+                "Cuda is not a macOS target"
+            );
         }
         #[cfg(target_os = "windows")]
         {

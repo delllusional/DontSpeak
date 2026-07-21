@@ -253,23 +253,3 @@ mod windows_tests {
         assert!(fast[3].contains("$s.Rate = 10"));
     }
 }
-
-// Fallback Tts impl for any other target (keeps the type usable; never built in
-// practice). Compiled only off macOS/windows/linux.
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-impl Tts for SystemTts {
-    fn speak(
-        &self,
-        _text: &str,
-        _voice_id: Option<&str>,
-        _rate: f32,
-    ) -> std::io::Result<SpeakHandle> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "system TTS unsupported on this target",
-        ))
-    }
-    fn kind(&self) -> &'static str {
-        "system"
-    }
-}
