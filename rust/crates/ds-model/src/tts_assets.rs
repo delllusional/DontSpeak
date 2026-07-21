@@ -301,6 +301,26 @@ hf_asset!(
     "59aa22f43d7b501d9ce64183106e60b65f97fb67e92f5d9e088d07504cf63383",
     296_484_864
 );
+// The CUDA LLM decoder keeps its own subdirectory: both variants reference their external
+// weights by the literal name `llm_decoder.onnx.data`, so they cannot share one dir.
+hf_asset!(
+    OMNI_LLM_CUDA,
+    "cuda/llm_decoder.onnx",
+    "onnx-community/OmniVoice-Onnx",
+    OMNIVOICE_REV,
+    "cuda/llm_decoder.onnx",
+    "edc74683639fce5a3082327a096d49d505750d362ccd3f828a02711a0b258aa8",
+    247_030
+);
+hf_asset!(
+    OMNI_LLM_CUDA_DATA,
+    "cuda/llm_decoder.onnx.data",
+    "onnx-community/OmniVoice-Onnx",
+    OMNIVOICE_REV,
+    "cuda/llm_decoder.onnx.data",
+    "b4f1f7444adbb68bd781c3c8e7f0f75fda6f2023aa5e6e5420e61c7b7fc2170c",
+    891_420_672
+);
 hf_asset!(
     OMNI_TOKENIZER,
     "tokenizer.json",
@@ -401,12 +421,16 @@ static OMNIVOICE_FILES: [Download; 11] = [
     OMNI_WAVE_DECODER,
     OMNI_WAVE_DECODER_DATA,
 ];
+static OMNIVOICE_CUDA_FILES: [Download; 2] = [OMNI_LLM_CUDA, OMNI_LLM_CUDA_DATA];
 
 #[derive(Debug)]
 pub struct TtsOrtAssetSet {
     pub model: TtsModel,
     pub dir_name: Option<&'static str>,
+    /// Files every provider needs. CUDA additionally needs [`Self::cuda_files`].
     pub files: &'static [Download],
+    /// Assets only a CUDA-realized load reads (empty when the model ships one profile).
+    pub cuda_files: &'static [Download],
     pub display_name: &'static str,
     /// Explicit project page for the Libraries-tab attribution — never derived from a
     /// file URL's shape, and never the license URL.
@@ -420,6 +444,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         model: TtsModel::Kokoro,
         dir_name: None,
         files: &KOKORO_FILES,
+        cuda_files: &[],
         display_name: "Kokoro",
         homepage: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX",
         license: "Apache-2.0",
@@ -429,6 +454,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         model: TtsModel::Chatterbox,
         dir_name: Some("chatterbox-multilingual"),
         files: &CHATTERBOX_FILES,
+        cuda_files: &[],
         display_name: "Chatterbox Multilingual",
         homepage: "https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX",
         license: "MIT",
@@ -438,6 +464,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         model: TtsModel::Qwen,
         dir_name: Some("qwen3-tts"),
         files: &QWEN_FILES,
+        cuda_files: &[],
         display_name: "Qwen3-TTS",
         homepage: "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
         license: "Apache-2.0",
@@ -447,6 +474,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         model: TtsModel::OmniVoice,
         dir_name: Some("omnivoice"),
         files: &OMNIVOICE_FILES,
+        cuda_files: &OMNIVOICE_CUDA_FILES,
         display_name: "OmniVoice",
         homepage: "https://huggingface.co/onnx-community/OmniVoice-Onnx",
         license: "Apache-2.0",
@@ -454,8 +482,52 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
     },
 ];
 
+impl TtsOrtAssetSet {
+    /// Every file a load needs under the given effective provider. ONE iterator for the byte
+    /// total and the step list: split, the progress ring would hit 100 % with the CUDA
+    /// weights still pending.
+    pub fn files_for(&self, cuda_assets: bool) -> impl Iterator<Item = &'static Download> {
+        let extra: &'static [Download] = if cuda_assets { self.cuda_files } else { &[] };
+        self.files.iter().chain(extra)
+    }
+}
+
 pub fn tts_ort_asset_set(model: TtsModel) -> &'static TtsOrtAssetSet {
     &TTS_ORT_ASSETS[model as usize]
+}
+
+/// Whether the CUDA runtime this build can load is installed. Always false where no CUDA
+/// runtime is published for the target.
+pub fn cuda_runtime_available() -> bool {
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    {
+        crate::ort::is_cuda_runtime_present()
+    }
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
+    {
+        false
+    }
+}
+
+/// The EFFECTIVE provider question every presence/download path must ask: does this model
+/// pin CUDA-only assets, does config prefer a GPU, AND is the CUDA runtime actually here?
+/// The configured preference alone is not enough — `auto` prefers CUDA on every
+/// Windows/Linux box, which would fetch weights those hosts can never load.
+pub fn tts_wants_cuda_assets(model: TtsModel, preference: &str) -> bool {
+    tts_wants_cuda_assets_with(model, preference, cuda_runtime_available())
+}
+
+/// Pure form of [`tts_wants_cuda_assets`] with the runtime probe injected. Shared with
+/// `TtsManager::resolve_provider_with_availability` so asset presence and the realized
+/// provider cannot drift apart.
+pub fn tts_wants_cuda_assets_with(model: TtsModel, preference: &str, cuda_available: bool) -> bool {
+    model.descriptor().wants_cuda(preference) && cuda_available
 }
 
 pub fn tts_model_dir(model: TtsModel) -> Option<PathBuf> {
@@ -470,23 +542,25 @@ pub fn tts_model_file_path(model: TtsModel, file_name: &str) -> Option<PathBuf> 
     Some(tts_model_dir(model)?.join(file_name))
 }
 
-pub fn tts_model_files_present(model: TtsModel) -> bool {
+/// `cuda_assets` is the EFFECTIVE provider ([`tts_wants_cuda_assets`]), never the configured
+/// preference. Pass `false` to ask only for the shared set — the CUDA extras are optional at
+/// load time, since a missing pair falls back to CPU rather than failing.
+pub fn tts_model_files_present(model: TtsModel, cuda_assets: bool) -> bool {
     let Some(dir) = tts_model_dir(model) else {
         return false;
     };
     tts_ort_asset_set(model)
-        .files
-        .iter()
+        .files_for(cuda_assets)
         .all(|file| dir.join(file.file_name).is_file())
 }
 
-pub fn is_tts_model_present(model: TtsModel) -> bool {
+/// Checksum-verified counterpart of [`tts_model_files_present`]; same `cuda_assets` contract.
+pub fn is_tts_model_present(model: TtsModel, cuda_assets: bool) -> bool {
     let Some(dir) = tts_model_dir(model) else {
         return false;
     };
     tts_ort_asset_set(model)
-        .files
-        .iter()
+        .files_for(cuda_assets)
         .all(|file| verify_sha256_cached(&dir.join(file.file_name), file.sha256))
         && crate::ort::is_onnxruntime_dylib_version_ok()
 }
@@ -499,21 +573,24 @@ fn spec(file: &Download) -> ModelSpec {
     }
 }
 
+/// Fetch the set for `model`. `cuda_assets` is the EFFECTIVE provider
+/// ([`tts_wants_cuda_assets`]); the total and the steps must come from the same
+/// [`TtsOrtAssetSet::files_for`] call.
 pub fn run_setup_tts_model_with_progress(
     model: TtsModel,
+    cuda_assets: bool,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
     let set = tts_ort_asset_set(model);
     let dir = tts_model_dir(model).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
     })?;
-    let mut total: u64 = set.files.iter().map(|file| file.size_bytes).sum();
+    let mut total: u64 = set.files_for(cuda_assets).map(|file| file.size_bytes).sum();
     if crate::ort::onnxruntime_dist().is_some() {
         total += crate::urls::ONNXRUNTIME_DIST_SIZE_BYTES;
     }
     let mut steps: Vec<DownloadStep> = set
-        .files
-        .iter()
+        .files_for(cuda_assets)
         .map(|file| {
             let dir = dir.clone();
             let spec = spec(file);
@@ -541,7 +618,7 @@ mod tests {
             assert!(!set.files.is_empty());
             assert!(set.homepage.starts_with("https://"), "{}", set.display_name);
             assert_ne!(set.homepage, set.license_url, "{}", set.display_name);
-            for file in set.files {
+            for file in set.files_for(true) {
                 assert!(file.url.starts_with("https://"));
                 assert!(!file.url.contains("/resolve/main/"));
                 assert_eq!(file.sha256.len(), 64, "{}", file.file_name);
@@ -583,6 +660,82 @@ mod tests {
         }));
     }
 
+    /// The two OmniVoice LLM exports name their external weights identically
+    /// (`llm_decoder.onnx.data`), so flattening the CUDA pair into the shared directory would
+    /// collide them and silently load the wrong precision.
+    #[test]
+    fn the_cuda_llm_variant_keeps_its_own_subdirectory() {
+        let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
+        for file in omnivoice.cuda_files {
+            assert!(
+                file.file_name.starts_with("cuda/"),
+                "CUDA asset `{}` must land under cuda/",
+                file.file_name
+            );
+            assert!(file.url.contains("/cuda/"), "{}", file.url);
+        }
+        assert_eq!(
+            omnivoice
+                .cuda_files
+                .iter()
+                .map(|file| file.file_name)
+                .collect::<Vec<_>>(),
+            ["cuda/llm_decoder.onnx", "cuda/llm_decoder.onnx.data"]
+        );
+        // The shared set stays the portable profile: no CUDA-only bytes for a CPU host.
+        for set in &TTS_ORT_ASSETS {
+            for file in set.files {
+                assert!(!file.file_name.starts_with("cuda/"), "{}", file.file_name);
+                assert!(!file.url.contains("/cuda/"), "{}", file.url);
+            }
+        }
+    }
+
+    /// Presence, byte totals, and download steps all read `files_for`, so the CUDA extras are
+    /// listed only for a CUDA-effective load — and never for a model with one pinned profile.
+    #[test]
+    fn cuda_extras_are_listed_only_for_a_cuda_effective_load() {
+        for model in TtsModel::ALL.iter().copied() {
+            let set = tts_ort_asset_set(model);
+            assert_eq!(set.files_for(false).count(), set.files.len(), "{model:?}");
+            assert_eq!(
+                set.files_for(true).count(),
+                set.files.len() + set.cuda_files.len(),
+                "{model:?}"
+            );
+        }
+        assert!(tts_ort_asset_set(TtsModel::Qwen).cuda_files.is_empty());
+    }
+
+    /// The configured preference is not the effective provider: `auto` prefers CUDA on every
+    /// Windows/Linux box, so gating downloads on it alone would fetch GPU weights hosts
+    /// without a CUDA runtime can never load.
+    #[test]
+    fn cuda_assets_need_the_runtime_not_just_the_preference() {
+        for preference in ["auto", "cuda"] {
+            assert!(tts_wants_cuda_assets_with(
+                TtsModel::OmniVoice,
+                preference,
+                true
+            ));
+            assert!(!tts_wants_cuda_assets_with(
+                TtsModel::OmniVoice,
+                preference,
+                false
+            ));
+        }
+        assert!(!tts_wants_cuda_assets_with(
+            TtsModel::OmniVoice,
+            "cpu",
+            true
+        ));
+        assert!(!tts_wants_cuda_assets_with(
+            TtsModel::OmniVoice,
+            "mlx",
+            true
+        ));
+    }
+
     #[test]
     fn model_subdirectories_do_not_collide() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -598,7 +751,8 @@ mod tests {
             tts_model_dir(TtsModel::Qwen),
             Some(tmp.path().join("qwen3-tts"))
         );
-        assert!(!tts_model_files_present(TtsModel::OmniVoice));
+        assert!(!tts_model_files_present(TtsModel::OmniVoice, false));
+        assert!(!tts_model_files_present(TtsModel::OmniVoice, true));
         // SAFETY: restore the environment before releasing the serialization guard.
         unsafe {
             match previous {

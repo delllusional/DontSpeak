@@ -1,11 +1,12 @@
-//! OmniVoice int4 ONNX inference with confidence-weighted iterative unmasking.
+//! OmniVoice ONNX inference with confidence-weighted iterative unmasking. Two pinned LLM
+//! decoder exports — INT4 for CPU, all-FP16 under `cuda/` — share the rest of the graph set.
 
 use half::f16;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
 /// Extract a float output as f32, accepting either f32 or f16 — the FP16 audio sub-models
-/// (embeddings/heads/decoder) emit float16 while the int4 LLM path emits float32.
+/// (embeddings/heads/decoder) and the CUDA LLM emit float16, the INT4 CPU LLM float32.
 fn extract_floats(value: &ort::value::DynValue, label: &str) -> Result<Vec<f32>, String> {
     if let Ok((_, data)) = value.try_extract_tensor::<f32>() {
         return Ok(data.to_vec());
@@ -89,7 +90,18 @@ impl OmniVoiceSynth {
             preference,
         );
         let embeddings = sessions.load_file(&dir.join("audio_embeddings_encoder.onnx"))?;
-        let llm = sessions.load_file(&dir.join("llm_decoder.onnx"))?;
+        // The LLM variant is keyed on the REALIZED provider, so a realizing load (the
+        // embeddings above) must stay ahead of it — the error below fires if one is ever
+        // moved after this point, instead of silently loading the CPU INT4 LLM on CUDA.
+        // Both exports name their weights `llm_decoder.onnx.data`, hence separate dirs.
+        let realized = sessions
+            .realized()
+            .ok_or("omnivoice: the LLM variant must be chosen after a realizing load")?;
+        let llm_dir = match realized {
+            ds_config::RealizedProvider::Cuda => dir.join("cuda"),
+            _ => dir.clone(),
+        };
+        let llm = sessions.load_file(&llm_dir.join("llm_decoder.onnx"))?;
         let heads = sessions.load_file(&dir.join("audio_heads_decoder.onnx"))?;
         let decoder = sessions.load_file(&dir.join("higgs_decoder.onnx"))?;
         let provider = sessions.provider();

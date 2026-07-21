@@ -91,7 +91,7 @@ All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 | Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
 | Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
 | Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
-| OmniVoice | auto (any detected language) | default voice | ORT CPU, MLX (no CUDA — pinned int4 export) | no / no |
+| OmniVoice | auto (any detected language) | default voice | ORT CPU/CUDA, MLX | no / no |
 
 Chatterbox caches transient reference-voice conditioning and uses named/model-derived KV
 caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice performs

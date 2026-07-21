@@ -301,6 +301,8 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         // never the whole multi-GB set. The ORT dylib is `DownloadTarget::Onnxruntime`'s
         // concern, not a condition here. (`spec_item` can't be reused: it resolves through
         // the flat `model_path`, wrong for the per-model subdirectory sets.)
+        // Staged manifests are the SHARED set only — the installer runs before any host
+        // CUDA probe, and `ds-helper --install-prefetched` asks for the same set.
         DownloadTarget::KokoroModel
         | DownloadTarget::ChatterboxModel
         | DownloadTarget::QwenModel
@@ -397,7 +399,7 @@ mod tests {
         // the Chatterbox/Qwen/OmniVoice sets — no separate kokoro_*_spec() pushes.
         let mut urls: Vec<String> = crate::tts_assets::TTS_ORT_ASSETS
             .iter()
-            .flat_map(|set| set.files.iter())
+            .flat_map(|set| set.files_for(true))
             .map(|file| file.url.to_string())
             .collect();
         urls.extend([
@@ -499,6 +501,42 @@ mod tests {
             assert_eq!(item.url, file.url);
             assert_eq!(item.file_name, prefetch_key(file.url));
             assert_eq!(item.sha256, file.sha256);
+        }
+    }
+
+    /// The installer stages the shared profile only: it runs before any CUDA probe, so a
+    /// staged `cuda/` asset would be dead weight, and `--install-prefetched` asking for one
+    /// would fall through to the network mid-install.
+    #[test]
+    fn omnivoice_prefetch_manifest_stages_no_cuda_asset() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
+        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
+
+        let items = prefetch_items(DownloadTarget::OmniVoiceModel);
+
+        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+        }
+
+        let set = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::OmniVoice);
+        assert_eq!(items.len(), set.files.len());
+        assert!(
+            !set.cuda_files.is_empty(),
+            "the CUDA profile must be pinned"
+        );
+        for item in &items {
+            assert!(
+                !item.url.contains("/cuda/"),
+                "staged CUDA asset: {}",
+                item.url
+            );
         }
     }
 

@@ -24,7 +24,7 @@ fn load_kokoro() -> Result<KokoroSynth, String> {
         ds_model::model_path(ds_model::KOKORO_ONNX_FILE).ok_or("cannot resolve model_dir()")?;
     let voices_path =
         ds_model::model_path(ds_model::KOKORO_VOICES_FILE).ok_or("cannot resolve model_dir()")?;
-    if !ds_model::is_tts_model_present(ds_config::TtsModel::Kokoro) {
+    if !ds_model::is_tts_model_present(ds_config::TtsModel::Kokoro, false) {
         return Err("kokoro model not downloaded".into());
     }
     ensure_ort(ds_config::TtsModel::Kokoro)?;
@@ -34,7 +34,9 @@ fn load_kokoro() -> Result<KokoroSynth, String> {
 }
 
 fn ensure_ort(model: ds_config::TtsModel) -> Result<(), String> {
-    if !ds_model::is_tts_model_present(model) {
+    // Shared set only: absent CUDA-only assets must not block the load, which falls back to
+    // the CPU profile (`ort_session::load_with_fallback`).
+    if !ds_model::is_tts_model_present(model, false) {
         return Err(format!("{} model not downloaded", model.as_str()));
     }
     let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_else(|_| "auto".into());

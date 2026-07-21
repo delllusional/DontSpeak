@@ -84,7 +84,9 @@ fn tts_project_obj(set: &crate::tts_assets::TtsOrtAssetSet) -> Value {
             "homepage": set.homepage,
             "license": set.license,
             "license_url": set.license_url,
-            "files": set.files.iter().map(download_file).collect::<Vec<_>>(),
+            // Attribution covers every pinned file of the project, CUDA-only assets included:
+            // a downloaded asset missing from this list would show up licence-less.
+            "files": set.files_for(true).map(download_file).collect::<Vec<_>>(),
         }),
         set.model,
     )
@@ -257,7 +259,7 @@ mod tests {
             .collect();
         let mut downloads: Vec<_> = crate::tts_assets::TTS_ORT_ASSETS
             .iter()
-            .flat_map(|set| set.files.iter())
+            .flat_map(|set| set.files_for(true))
             .copied()
             .chain([
                 urls::PARAKEET_ENCODER,

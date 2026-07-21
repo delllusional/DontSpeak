@@ -30,8 +30,11 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Some(DownloadTarget::Onnxruntime) => {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
+        // Shared set only, matching the staged `prefetch_items` manifest: the installer has no
+        // host CUDA probe, and asking for an unstaged asset would hit the network mid-install.
         Some(DownloadTarget::KokoroModel) => {
-            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, &p).map(|_| ())
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, false, &p)
+                .map(|_| ())
         }
         Some(DownloadTarget::KokoroFrontend) => {
             ds_model::run_setup_kokoro_frontend_with_progress(&p).map(|_| ())
@@ -40,14 +43,15 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
             ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
         }
         Some(DownloadTarget::ChatterboxModel) => {
-            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Chatterbox, &p)
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Chatterbox, false, &p)
                 .map(|_| ())
         }
         Some(DownloadTarget::QwenModel) => {
-            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Qwen, &p).map(|_| ())
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Qwen, false, &p)
+                .map(|_| ())
         }
         Some(DownloadTarget::OmniVoiceModel) => {
-            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::OmniVoice, &p)
+            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::OmniVoice, false, &p)
                 .map(|_| ())
         }
         Some(

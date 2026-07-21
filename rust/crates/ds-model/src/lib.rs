@@ -83,8 +83,9 @@ pub use spec::{
 };
 pub use target::DownloadTarget;
 pub use tts_assets::{
-    TTS_ORT_ASSETS, TtsOrtAssetSet, is_tts_model_present, run_setup_tts_model_with_progress,
-    tts_model_dir, tts_model_file_path, tts_model_files_present, tts_ort_asset_set,
+    TTS_ORT_ASSETS, TtsOrtAssetSet, cuda_runtime_available, is_tts_model_present,
+    run_setup_tts_model_with_progress, tts_model_dir, tts_model_file_path, tts_model_files_present,
+    tts_ort_asset_set, tts_wants_cuda_assets, tts_wants_cuda_assets_with,
 };
 pub use update_check::UpdateInfo;
 

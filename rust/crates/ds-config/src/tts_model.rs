@@ -166,9 +166,10 @@ const DEFAULT_VOICE: &[&str] = &["default"];
 const QWEN_DEFAULT_VOICE: &[&str] = &["sohee"];
 const OMNIVOICE_VOICES: &[&str] = &["warm, clear female voice"];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
-// The portable OmniVoice profile uses FP16 audio sub-models and an INT4 LLM because
-// ONNX Runtime GenAI has no FP16 CPU LLM profile. The all-FP16 export is CUDA-only.
-const OMNIVOICE_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCpu];
+// Two pinned OmniVoice ONNX profiles differing only in the LLM decoder: the portable one
+// pairs FP16 audio sub-models with an INT4 LLM (ONNX Runtime GenAI has no FP16 CPU LLM
+// profile), and the CUDA one is the all-FP16 export published under `cuda/`.
+const OMNIVOICE_PROVIDERS: &[Provider] = MLX_CUDA_CPU_PROVIDERS;
 
 pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
     TtsModelDescriptor {
@@ -365,18 +366,19 @@ mod tests {
         for model in TtsModel::ALL {
             assert!(model.descriptor().supports_provider(Provider::Mlx));
             assert!(model.descriptor().supports_provider(Provider::OrtCpu));
-        }
-        for model in [TtsModel::Kokoro, TtsModel::Chatterbox, TtsModel::Qwen] {
             assert!(model.descriptor().supports_provider(Provider::OrtCuda));
         }
         assert!(
-            !TtsModel::OmniVoice
+            TtsModel::Kokoro
                 .descriptor()
-                .supports_provider(Provider::OrtCuda)
+                .supports_provider(Provider::OrtCoreMl)
         );
         assert!(TtsModel::Chatterbox.descriptor().wants_cuda("auto"));
         assert!(TtsModel::Qwen.descriptor().wants_cuda("cuda"));
-        assert!(!TtsModel::OmniVoice.descriptor().wants_cuda("auto"));
-        assert!(!TtsModel::OmniVoice.descriptor().wants_cuda("cuda"));
+        // Declaring the CUDA profile is not the same as fetching it: whether the CUDA-only
+        // assets are downloaded is `ds_model::tts_wants_cuda_assets`'s effective-provider call.
+        assert!(TtsModel::OmniVoice.descriptor().wants_cuda("auto"));
+        assert!(TtsModel::OmniVoice.descriptor().wants_cuda("cuda"));
+        assert!(!TtsModel::OmniVoice.descriptor().wants_cuda("cpu"));
     }
 }

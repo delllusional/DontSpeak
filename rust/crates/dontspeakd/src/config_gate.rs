@@ -120,10 +120,12 @@ pub(crate) fn tts_model_files_present(cfg: &VoiceConfig) -> bool {
                 cfg.tts_model,
             ))
     } else {
-        ds_model::tts_model_files_present(cfg.tts_model)
-            && ds_model::onnxruntime_dylib_path()
-                .map(|path| path.is_file())
-                .unwrap_or(false)
+        ds_model::tts_model_files_present(
+            cfg.tts_model,
+            ds_model::tts_wants_cuda_assets(cfg.tts_model, cfg.tts_provider_token()),
+        ) && ds_model::onnxruntime_dylib_path()
+            .map(|path| path.is_file())
+            .unwrap_or(false)
     }
 }
 

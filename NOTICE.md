@@ -121,8 +121,9 @@ Each carries its upstream license:
 - **Qwen3-TTS 12 Hz 0.6B CustomVoice** (Qwen), downloaded as either the onnx-community
   FP16 profile or the mlx-community 8-bit conversion — **Apache-2.0**.
   https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
-- **OmniVoice / Prince-1** TTS model (onnx-community CPU profile: FP16 audio sub-models
-  and Higgs decoder with an INT4 LLM; mlx-community BF16 conversion) — **Apache-2.0**.
+- **OmniVoice / Prince-1** TTS model (onnx-community FP16 audio sub-models and Higgs decoder
+  with either the INT4 CPU LLM decoder or, on an NVIDIA GPU, the FP16 one published under
+  `cuda/`; mlx-community BF16 conversion) — **Apache-2.0**.
   https://huggingface.co/onnx-community/OmniVoice-Onnx
 - **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
   words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license

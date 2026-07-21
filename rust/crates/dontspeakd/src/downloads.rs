@@ -186,6 +186,17 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 *p = DownloadProgress { done, total };
             }
         };
+        // `which` carries no provider, so the effective one is read from config here. It MUST
+        // match `compute_needs`: a narrower set leaves presence unsatisfied and the boot
+        // autofetch re-queues this target forever.
+        let cuda_assets = |model: ds_config::TtsModel| {
+            paths.as_ref().is_some_and(|paths| {
+                ds_model::tts_wants_cuda_assets(
+                    model,
+                    VoiceConfig::load(paths).tts_provider_token(),
+                )
+            })
+        };
         // One shared host gate — not per-arm cfg error strings (uniform red-dot path).
         let result: std::io::Result<()> = if !which.is_supported_on_this_host() {
             Err(std::io::Error::other(format!(
@@ -194,10 +205,12 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             )))
         } else {
             match which {
-                DownloadTarget::KokoroModel => {
-                    ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, &prog)
-                        .map(|_| ())
-                }
+                DownloadTarget::KokoroModel => ds_model::run_setup_tts_model_with_progress(
+                    ds_config::TtsModel::Kokoro,
+                    cuda_assets(ds_config::TtsModel::Kokoro),
+                    &prog,
+                )
+                .map(|_| ()),
                 // MLX frontend: vocabulary + OOV G2P + ORT (not the synth graph).
                 DownloadTarget::KokoroFrontend => {
                     ds_model::run_setup_kokoro_frontend_with_progress(&prog).map(|_| ())
@@ -207,15 +220,19 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 }
                 DownloadTarget::ChatterboxModel => ds_model::run_setup_tts_model_with_progress(
                     ds_config::TtsModel::Chatterbox,
+                    cuda_assets(ds_config::TtsModel::Chatterbox),
                     &prog,
                 )
                 .map(|_| ()),
-                DownloadTarget::QwenModel => {
-                    ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Qwen, &prog)
-                        .map(|_| ())
-                }
+                DownloadTarget::QwenModel => ds_model::run_setup_tts_model_with_progress(
+                    ds_config::TtsModel::Qwen,
+                    cuda_assets(ds_config::TtsModel::Qwen),
+                    &prog,
+                )
+                .map(|_| ()),
                 DownloadTarget::OmniVoiceModel => ds_model::run_setup_tts_model_with_progress(
                     ds_config::TtsModel::OmniVoice,
+                    cuda_assets(ds_config::TtsModel::OmniVoice),
                     &prog,
                 )
                 .map(|_| ()),
@@ -404,7 +421,9 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))
     } else {
         let target = DownloadTarget::portable_for_tts(cfg.tts_model);
-        (!(ds_model::tts_model_files_present(cfg.tts_model)
+        // Same effective-provider predicate `start_download` fetches with, or the pair loops.
+        let cuda_assets = ds_model::tts_wants_cuda_assets(cfg.tts_model, cfg.tts_provider_token());
+        (!(ds_model::tts_model_files_present(cfg.tts_model, cuda_assets)
             && exists(ds_model::onnxruntime_dylib_path())))
         .then_some(target)
     };

@@ -493,18 +493,12 @@ impl TtsManager {
         #[cfg(not(target_os = "macos"))]
         let mlx_available = None;
 
-        #[cfg(all(
-            any(target_os = "windows", target_os = "linux"),
-            target_arch = "x86_64"
-        ))]
-        let cuda_available = ds_model::is_cuda_runtime_present();
-        #[cfg(not(all(
-            any(target_os = "windows", target_os = "linux"),
-            target_arch = "x86_64"
-        )))]
-        let cuda_available = false;
-
-        Self::resolve_provider_with_availability(which, model, mlx_available, cuda_available)
+        Self::resolve_provider_with_availability(
+            which,
+            model,
+            mlx_available,
+            ds_model::cuda_runtime_available(),
+        )
     }
 
     fn resolve_provider_with_availability(
@@ -531,7 +525,9 @@ impl TtsManager {
                 RealizedProvider::Cpu
             };
         }
-        if descriptor.wants_cuda(which) && cuda_available {
+        // One predicate with the asset-presence paths: a CUDA-realized child must find the
+        // CUDA-only files already downloaded.
+        if ds_model::tts_wants_cuda_assets_with(model, which, cuda_available) {
             return RealizedProvider::Cuda;
         }
         RealizedProvider::Cpu
@@ -545,10 +541,12 @@ impl TtsManager {
             frontend_ready
                 && ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(model))
         } else {
-            ds_model::tts_model_files_present(model)
-                && ds_model::onnxruntime_dylib_path()
-                    .map(|path| path.is_file())
-                    .unwrap_or(false)
+            ds_model::tts_model_files_present(
+                model,
+                ds_model::tts_wants_cuda_assets(model, &prefs.provider),
+            ) && ds_model::onnxruntime_dylib_path()
+                .map(|path| path.is_file())
+                .unwrap_or(false)
         }
     }
 
@@ -2420,12 +2418,23 @@ mod status_gate_tests {
             ),
             ds_config::RealizedProvider::Cpu
         );
+        // OmniVoice ships a CUDA profile too, but only a present runtime realizes it — the
+        // same predicate that decides whether its CUDA-only assets are downloaded.
         assert_eq!(
             TtsManager::resolve_provider_with_availability(
                 "cuda",
                 ds_config::TtsModel::OmniVoice,
                 None,
                 true,
+            ),
+            ds_config::RealizedProvider::Cuda
+        );
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "cuda",
+                ds_config::TtsModel::OmniVoice,
+                None,
+                false,
             ),
             ds_config::RealizedProvider::Cpu
         );
