@@ -408,13 +408,12 @@ jobs:
             # moved to a runner or shell with Windows-native text output.
             printf '%s  %s\n' "$hash" "$(basename "$f")" >> "$GITHUB_WORKSPACE/checksums.txt"
           done
+          # One title shape for both kinds — GitHub already badges a draft as a draft.
           TITLE="DontSpeak ${TAG}"
-          if [ ${#DRAFT_ARGS[@]} -gt 0 ]; then
-            TITLE="DontSpeak ${TAG} (dev draft — not a release)"
-          fi
-          # Notes from the annotated tag body (written at tag time by make-release).
-          # --generate-notes only lists merged PRs and is empty for direct-to-main.
-          # Lightweight tags: gh falls back to the pointed-at commit message.
+          # Notes from the annotated tag body (written at tag time by make-release), for
+          # dev drafts too. --generate-notes only lists merged PRs and is empty for
+          # direct-to-main. Lightweight tag ⇒ gh falls back to the commit message, which
+          # is why make-release annotates every tag it pushes.
           # Do NOT pass --repo here: gh rejects `--notes-from-tag` together with
           # `--repo` ("using --notes-from-tag with --repo is not supported"). The
           # job already runs in this repository; GH_TOKEN + default context is enough.
