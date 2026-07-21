@@ -7,18 +7,6 @@
     "baseRef": "fresh"
   },
   "hooks": {
-    "WorktreeCreate": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node",
-            "args": ["${CLAUDE_PROJECT_DIR}/scripts/agents/task-worktree.mjs", "claude-hook"],
-            "timeout": 60
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Bash|Shell|run_terminal_command",
@@ -42,6 +30,18 @@
             "args": ["${CLAUDE_PROJECT_DIR}/.claude/hooks/fmt-on-edit.cjs"],
             "timeout": 30,
             "async": true
+          }
+        ]
+      }
+    ],
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PROJECT_DIR}/scripts/agents/task-worktree.mjs", "claude-hook"],
+            "timeout": 60
           }
         ]
       }
