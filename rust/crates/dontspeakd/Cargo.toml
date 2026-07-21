@@ -74,10 +74,6 @@ notify = { workspace = true }
 # The per-agent voice roll (`ttsq::pick_agent_voice`'s production `roll`).
 fastrand = { workspace = true }
 
-# unix signal handling (SIGTERM/SIGINT) via type-safe sigaction wrapper.
-[target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
-
 # Kill-on-close Job Object for the engine-owned Windows Codex app-server. This is what
 # cleans the child even if the WinUI host crashes or is force-terminated.
 [target.'cfg(windows)'.dependencies]

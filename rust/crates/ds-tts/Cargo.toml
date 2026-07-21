@@ -7,15 +7,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "Pluggable TTS engines for DontSpeak: Kokoro (native in-process synth, default) and System (OS voice)."
+description = "TTS synthesis stages for DontSpeak: Kokoro (native in-process synth, default) and the System (OS voice) command seam."
 
 [dependencies]
 ds-config = { workspace = true }
-ds-proc = { workspace = true }
 # Voice/language enumeration + Gender/Quality/SpeakerVoice (issue #5): split out so the
 # `dontspeak` CLI can list voices without the heavy synth deps below. Re-exported under
-# this crate's old `enumerate`/`Gender`/`Quality`/`SpeakerVoice` paths (see lib.rs) so
-# every existing call site keeps compiling unchanged.
+# this crate's `enumerate`/`Gender`/`Quality`/`SpeakerVoice` paths (see lib.rs).
 ds-voices = { workspace = true }
 # The shared ORT session builder + the Apple MLX Audio shim loader (used by
 # synth_mlx). The warm-media helper that unions synth + dictation + AEC is its OWN

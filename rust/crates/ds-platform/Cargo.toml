@@ -18,14 +18,12 @@ log = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Ctrl+G via CGEventPost (CGEvent + CGEventSource).
 core-graphics = "0.25"
-# Bridge to Objective-C for NSWorkspace frontmost app. Uses the workspace pins
-# (current objc2 0.6 / app-kit + foundation 0.3), adding only the classes we need.
-objc2 = { workspace = true }
+# Bridge to Objective-C for NSWorkspace frontmost app. Uses the workspace pin
+# (current objc2-app-kit 0.3), adding only the classes we need.
 objc2-app-kit = { workspace = true, features = [
     "NSWorkspace",
     "NSRunningApplication",
 ] }
-objc2-foundation = { workspace = true, features = ["NSString"] }
 # CoreAudio bindings (is_mic_active probe): AudioObjectGetPropertyData + the property
 # selector constants, instead of hand-declaring the extern + FourCharCodes. Part of
 # the objc2 0.6.x release train (objc2 >=0.6.2, matching the =0.6.4 pin above); the
