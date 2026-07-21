@@ -117,6 +117,7 @@ status:
     first_audio: First audio
     spoken: Spoken
     transcribed: Transcribed
+    queue: Queue
     audio_secs: "%{secs} s"
     failures: Failures
     unit:

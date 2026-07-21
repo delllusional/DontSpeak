@@ -83,6 +83,10 @@ pub struct Activity {
     /// is not a Usage agent (greet / unknown / DontSpeak).
     pub speaker: Option<ds_client::ClientSource>,
     pub muted: bool,
+    /// Pending TTS queue depth (speech + earcons). Excludes the in-flight item — same
+    /// contract as IPC `Status.queued` / `TtsQueue::snapshot().1`. `0` while speaking with
+    /// nothing waiting is correct.
+    pub queued: u64,
 }
 
 /// Dictation confirm-panel content and canonical [`DictationState`] mode.
@@ -181,6 +185,7 @@ mod tests {
                 speaking: false,
                 speaker: None,
                 muted: false,
+                queued: 0,
             },
             tts: TtsStatus {
                 engine: StatusTtsEngine::System,
@@ -235,7 +240,8 @@ mod tests {
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert_eq!(v["activity"].as_object().unwrap().len(), 6);
+        assert_eq!(v["activity"].as_object().unwrap().len(), 7);
+        assert_eq!(v["activity"]["queued"], 0);
         assert_eq!(v["tts"].as_object().unwrap().len(), 5);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
@@ -366,6 +372,7 @@ mod tests {
             speaking in any::<bool>(),
             speaker in prop::option::of(client_source_strategy()),
             muted in any::<bool>(),
+            queued in any::<u64>(),
         ) -> Activity {
             Activity {
                 caps,
@@ -374,6 +381,7 @@ mod tests {
                 speaking,
                 speaker,
                 muted,
+                queued,
             }
         }
     }

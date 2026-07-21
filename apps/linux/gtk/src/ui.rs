@@ -23,6 +23,7 @@ pub struct Widgets {
     tts_row: adw::ExpanderRow,
     tts_dot: gtk::Image,
     tts_runtime: gtk::Label,
+    tts_queue: gtk::Label,
     tts_realtime: gtk::Label,
     tts_first: gtk::Label,
     tts_spoken: gtk::Label,
@@ -109,6 +110,8 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     let tts_dot = expander_indicator(&tts_row);
     let tts_runtime = value_label();
     tts_row.add_row(&action_row(&t("status.engine.role_runtime"), &tts_runtime));
+    let tts_queue = value_label();
+    tts_row.add_row(&action_row(&t("status.stats.queue"), &tts_queue));
     let tts_realtime = value_label();
     tts_row.add_row(&action_row(&t("status.stats.realtime"), &tts_realtime));
     let tts_first = value_label();
@@ -286,6 +289,7 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         tts_row,
         tts_dot,
         tts_runtime,
+        tts_queue,
         tts_realtime,
         tts_first,
         tts_spoken,
@@ -316,6 +320,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         w.stt_row.set_subtitle("");
         for l in [
             &w.tts_runtime,
+            &w.tts_queue,
             &w.tts_realtime,
             &w.tts_first,
             &w.tts_spoken,
@@ -352,6 +357,8 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     let tts = &s.stats.tts;
     w.tts_runtime
         .set_text(&runtime_text(s.tts.provider.as_deref()));
+    w.tts_queue
+        .set_text(&s.activity.queued.to_string());
     w.tts_realtime.set_text(&crate::ffi::stats_range(
         tts.rtf_min,
         tts.rtf_avg,

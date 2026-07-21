@@ -651,12 +651,14 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
+        let before = q.len();
         q.push_back(Item {
             action,
             source,
             session,
             resume_skip: 0,
         });
+        self.bump_queue_depth_if_changed(before, q.len());
         self.cv.notify_one();
         Ok(())
     }
@@ -755,7 +757,9 @@ impl TtsQueue {
     /// Claim under `items` lock: gen snapshot + playing publish so clears can't race mid-claim.
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> (Item, u64) {
         let gen0 = self.generation.load(Ordering::SeqCst);
+        let before = q.len();
         let item = q.remove(pos).expect("select_pos returns a valid index");
+        self.bump_queue_depth_if_changed(before, q.len());
         self.in_flight.store(true, Ordering::SeqCst);
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
@@ -790,7 +794,11 @@ impl TtsQueue {
 
     /// Global hard barge: clear queue, cancel in-flight, clear pause (fade out).
     pub fn clear(&self) {
-        self.items.lock().unwrap().clear();
+        let mut items = self.items.lock().unwrap();
+        let before = items.len();
+        items.clear();
+        self.bump_queue_depth_if_changed(before, items.len());
+        drop(items);
         *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
         self.cv.notify_one();
@@ -810,7 +818,9 @@ impl TtsQueue {
     pub fn clear_session(&self, session: Option<String>) {
         // items → playing same order as worker; prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
+        let before = items.len();
         prune_session(&mut items, &session);
+        self.bump_queue_depth_if_changed(before, items.len());
         let cancel_current = self
             .playing
             .lock()
@@ -850,16 +860,19 @@ impl TtsQueue {
         };
         if cancel_current {
             let mut items = self.items.lock().unwrap();
+            let before = items.len();
             prune_session(&mut items, &Some(target.clone()));
             // Voice submit path (not MarkActive): also drop sticky of same terminal.
             if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                 prune_session(&mut items, &Some(sticky));
             }
+            self.bump_queue_depth_if_changed(before, items.len());
             self.hard_cancel_in_flight_locked(&items);
         }
         if cancel_other {
             // Prune + playing snapshot under items (avoid claim race after return).
             let mut items = self.items.lock().unwrap();
+            let before = items.len();
             let playing_is_other = self
                 .playing
                 .lock()
@@ -867,6 +880,7 @@ impl TtsQueue {
                 .as_ref()
                 .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
             retain_only_session(&mut items, &Some(target));
+            self.bump_queue_depth_if_changed(before, items.len());
             if playing_is_other {
                 self.hard_cancel_in_flight_locked(&items);
             }
@@ -1008,11 +1022,12 @@ impl TtsQueue {
         self.tts_active.load(Ordering::SeqCst)
     }
 
-    /// `(active, wireable client source)` for model_status.
-    pub fn tts_running(&self) -> (bool, Option<ClientSource>) {
+    /// `(speaking, speaker, queued)` for `model_status` activity. Queued is pending-only.
+    pub fn tts_status_sample(&self) -> (bool, Option<ClientSource>, u64) {
         let active = self.is_tts_active();
+        let queued = self.items.lock().unwrap().len() as u64;
         if !active {
-            return (false, None);
+            return (false, None, queued);
         }
         let source = self
             .playing
@@ -1021,7 +1036,14 @@ impl TtsQueue {
             .as_ref()
             .map(|p| p.source)
             .filter(|s| s.is_client());
-        (true, source)
+        (true, source, queued)
+    }
+
+    /// Bump WaitModelStatus only when pending depth actually changed.
+    fn bump_queue_depth_if_changed(&self, before: usize, after: usize) {
+        if before != after {
+            self.gate.bump();
+        }
     }
 
     /// Sole `tts_active` writer; bumps gate only on real transitions.
@@ -1575,7 +1597,9 @@ impl TtsQueue {
             return;
         }
         let mut q = self.items.lock().unwrap();
+        let before = q.len();
         q.push_front(item);
+        self.bump_queue_depth_if_changed(before, q.len());
     }
 }
 
@@ -2554,9 +2578,9 @@ mod tests {
     /// In-flight claim carries the producer's `ClientSource` so `activity.speaker`
     /// can highlight the matching Usage card. Non-client producers stay null.
     #[test]
-    fn tts_running_exposes_wireable_playing_source_only() {
+    fn tts_status_sample_exposes_wireable_playing_source_only() {
         let q = mk_queue();
-        assert_eq!(q.tts_running(), (false, None));
+        assert_eq!(q.tts_status_sample(), (false, None, 0));
 
         q.enqueue(
             "hello".into(),
@@ -2571,24 +2595,94 @@ mod tests {
             let _ = q.claim_item(&mut items, 0);
         }
         q.set_active_for_test(true);
-        assert_eq!(q.tts_running(), (true, Some(ClientSource::ClaudeCode)));
+        assert_eq!(
+            q.tts_status_sample(),
+            (true, Some(ClientSource::ClaudeCode), 0)
+        );
 
         // Non-wireable producers (legacy DontSpeak self-talk) must not light a Usage card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::DontSpeak,
             session: None,
         });
-        assert_eq!(q.tts_running(), (true, None));
+        assert_eq!(q.tts_status_sample(), (true, None, 0));
 
         // GreetSession-style path: client source on the item lights the matching card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Grok,
             session: Some("open".into()),
         });
-        assert_eq!(q.tts_running(), (true, Some(ClientSource::Grok)));
+        assert_eq!(q.tts_status_sample(), (true, Some(ClientSource::Grok), 0));
 
         q.set_active_for_test(false);
-        assert_eq!(q.tts_running(), (false, None));
+        assert_eq!(q.tts_status_sample(), (false, None, 0));
+    }
+
+    /// Queue-depth changes wake WaitModelStatus so hosts can render `activity.queued`.
+    /// Failed enqueue / no-op prune must not spam the gate.
+    #[test]
+    fn queue_depth_changes_bump_status_gate() {
+        let q = mk_queue();
+        let seq0 = q.gate.seq();
+
+        // Successful enqueue while TTS is already active (pending grows).
+        q.set_active_for_test(true);
+        q.enqueue(
+            "waiting".into(),
+            None,
+            None,
+            ClientSource::ClaudeCode,
+            Some("a".into()),
+        )
+        .unwrap();
+        let seq1 = q.gate.seq();
+        assert_eq!(seq1, seq0.wrapping_add(1), "enqueue must bump gate");
+        assert_eq!(q.tts_status_sample(), (true, None, 1));
+
+        // Claim removes pending → depth 0, gate bumps again.
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        let seq2 = q.gate.seq();
+        assert_eq!(seq2, seq1.wrapping_add(1), "claim must bump gate");
+        assert_eq!(q.tts_status_sample().2, 0);
+
+        // Failed enqueue (empty / oversize / full) must not bump.
+        q.enqueue(
+            "   ".into(),
+            None,
+            None,
+            ClientSource::ClaudeCode,
+            Some("a".into()),
+        )
+        .unwrap();
+        assert_eq!(q.gate.seq(), seq2, "empty text must not bump");
+        let _ = q
+            .enqueue(
+                "x".repeat(MAX_SPEAK_BYTES + 1),
+                None,
+                None,
+                ClientSource::ClaudeCode,
+                Some("a".into()),
+            )
+            .unwrap_err();
+        assert_eq!(q.gate.seq(), seq2, "oversize reject must not bump");
+
+        // Empty clear (nothing pending) must not depth-bump.
+        q.clear();
+        // clear also hard-cancels; tts_active was true so speaking edge may bump once.
+        let after_clear = q.gate.seq();
+        assert!(
+            after_clear == seq2 || after_clear == seq2.wrapping_add(1),
+            "empty clear: only speaking edge may bump, not depth"
+        );
+        q.clear();
+        assert_eq!(
+            q.gate.seq(),
+            after_clear,
+            "second empty clear must not bump depth"
+        );
     }
 
     #[test]

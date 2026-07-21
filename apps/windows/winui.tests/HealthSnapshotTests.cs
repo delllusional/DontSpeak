@@ -32,7 +32,7 @@ public class HealthSnapshotTests
     {
         var s = Parse("""
             {"seq":42,"activity":{"caps":true,"caps_active":true,
-             "recording":true,"speaking":false,"speaker":null,"muted":true}}
+             "recording":true,"speaking":false,"speaker":null,"muted":true,"queued":4}}
             """);
         Assert.True(s.Activity.EngineRunning);
         Assert.Equal(42UL, s.StatusSeq);
@@ -42,6 +42,7 @@ public class HealthSnapshotTests
         Assert.False(s.Activity.Speaking);
         Assert.Null(s.Activity.Speaker);
         Assert.True(s.Activity.Muted);
+        Assert.Equal(4UL, s.Activity.Queued);
     }
 
     [Fact]

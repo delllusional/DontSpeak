@@ -261,6 +261,10 @@ pub(super) fn reader_loop(
                     log::debug!(target: "engine", "TTS speak {rest}");
                     if let Some(secs) = stats.record_stats_line(rest) {
                         lifetime.add_tts(secs);
+                        // End-of-utterance: refresh stats UI even if speaking flag doesn't edge.
+                        if let Some(g) = gate.as_ref() {
+                            g.bump();
+                        }
                     }
                 } else if let Some(rest) = l.strip_prefix(proto::PROGRESS_PREFIX) {
                     // Batch-granular resume mark: intermediate, never terminal (no
@@ -294,6 +298,9 @@ pub(super) fn reader_loop(
                     log::debug!(target: "engine", "STT listen {rest}");
                     if let Some(secs) = stt_stats.record_stt_line(rest) {
                         lifetime.add_stt(secs);
+                        if let Some(g) = gate.as_ref() {
+                            g.bump();
+                        }
                     }
                 } else if let Some(rest) = l.strip_prefix(proto::STTERR_PREFIX) {
                     push_listen(ListenEvt::Err(rest.to_string()));

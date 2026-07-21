@@ -89,13 +89,13 @@ pub(crate) struct EngineShared {
 }
 
 /// Model presence report. `read_tts` runs under gate.snapshot so mid-report
-/// transitions stay unacked.
+/// transitions stay unacked. Returns `(speaking, speaker, queued)`.
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
-    read_tts: impl FnOnce() -> (bool, Option<ds_config::ClientSource>),
+    read_tts: impl FnOnce() -> (bool, Option<ds_config::ClientSource>, u64),
 ) -> serde_json::Value {
-    let ((tts_active, tts_source), seq) = shared.gate.snapshot(read_tts);
+    let ((tts_active, tts_source, tts_queued), seq) = shared.gate.snapshot(read_tts);
     let EngineShared {
         tts,
         caps_active,
@@ -340,6 +340,7 @@ pub(crate) fn model_status_json(
             speaking: tts_active,
             speaker: tts_source,
             muted: tts.is_muted(),
+            queued: tts_queued,
         },
         tts: TtsStatus {
             engine: status_tts_engine(resolved_tts),
@@ -672,9 +673,10 @@ mod tests {
             gate,
         };
 
-        let value = model_status_json(&shared, &paths, || (true, None));
+        let value = model_status_json(&shared, &paths, || (true, None, 3));
         // caps events are logged (see `Engine::record_caps`) but never serialized here.
         assert!(value.get("caps_events").is_none());
+        assert_eq!(value["activity"]["queued"], 3);
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {
@@ -704,6 +706,7 @@ mod tests {
         assert!(!status.activity.caps);
         assert!(status.activity.recording);
         assert!(status.activity.speaking);
+        assert_eq!(status.activity.queued, 3);
         assert_eq!(status.dictation.text, "live words");
         assert!(!status.dictation.can_paste);
         assert_eq!(status.dictation.state, DictationState::Hidden);

@@ -36,6 +36,8 @@ struct Activity: Sendable, Equatable {
     var speakingSource: String? = nil
     /// Playback continues but silenced; menu-bar slash.
     var muted = false
+    /// Pending TTS queue depth (speech + earcons); excludes in-flight.
+    var queued: UInt64 = 0
     /// Color/animate tokens; [] = never color. Default: static mic + breathing voice.
     var trayIndicator = ["stt", "tts_animated"]
 }
@@ -347,6 +349,7 @@ final class Core {
         s.activity.speaking = dto.activity.speaking
         s.activity.speakingSource = dto.activity.speaking ? dto.activity.speaker : nil
         s.activity.muted = dto.activity.muted
+        s.activity.queued = dto.activity.queued
         s.activity.trayIndicator = dto.tray
         s.stats = EngineStats.from(dto.stats)
         s.dictation.state = dto.dictation.state
@@ -412,6 +415,7 @@ struct ActivityDTO: Decodable {
     var speaking: Bool
     var speaker: String?
     var muted: Bool
+    var queued: UInt64
 
     enum CodingKeys: String, CodingKey {
         case caps
@@ -420,6 +424,7 @@ struct ActivityDTO: Decodable {
         case speaking
         case speaker
         case muted
+        case queued
     }
 }
 

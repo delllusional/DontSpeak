@@ -423,6 +423,8 @@ private struct LifetimeContent: View {
 private struct TtsStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
+        // Queue is outside system / no_data branches so depth stays visible.
+        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
         if core.tts.engine == "system" {
             // Whole row opens Spoken Content (no local RTF for `say`).
             LabeledContent {

@@ -160,6 +160,8 @@ public sealed record Activity
     public bool Muted;
     /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
     public string? Speaker;
+    /// Pending TTS queue depth (speech + earcons); excludes in-flight.
+    public ulong Queued;
     // Tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Host fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
@@ -281,6 +283,7 @@ internal sealed class HealthSnapshot
                 s.Activity.Speaking = activity.Speaking;
                 s.Activity.Speaker = activity.Speaking ? activity.Speaker : null;
                 s.Activity.Muted = activity.Muted;
+                s.Activity.Queued = activity.Queued;
             }
             // Keep host default when key absent.
             if (dto.TrayIndicator is { } ti)
@@ -392,6 +395,7 @@ internal sealed record ActivityDto
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
     [JsonPropertyName("speaker")] public string? Speaker { get; init; }
     [JsonPropertyName("muted")] public bool Muted { get; init; }
+    [JsonPropertyName("queued")] public ulong Queued { get; init; }
 }
 
 internal sealed record TtsStatusDto
