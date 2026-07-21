@@ -68,7 +68,7 @@ public partial class App : Application
     /// <summary>
     /// Only user-facing string outside <see cref="Loc.T(string)"/>: Loc.T P/Invokes ds_core, and
     /// this path only runs when that DLL is unloadable. Permanent exception to "no hardcoded UI
-    /// strings" (LOCALIZATION.md).
+    /// strings".
     /// </summary>
     private static string DllLoadFailureMessage() =>
         CultureInfo.CurrentUICulture.TwoLetterISOLanguageName switch

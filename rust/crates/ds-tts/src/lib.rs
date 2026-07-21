@@ -1,4 +1,4 @@
-//! ds-tts — text-to-speech synthesis stages for dontspeak (ARCHITECTURE §A.1).
+//! ds-tts — text-to-speech synthesis stages for dontspeak.
 //!
 //! The warm `ds-helper` process owns speaking and playback; this crate supplies the
 //! pure stages it runs plus the one System-TTS command seam,

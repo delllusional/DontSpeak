@@ -1,4 +1,4 @@
-//! ds-model — locate & download model assets for dontspeak (ARCHITECTURE §C.1 / §D).
+//! ds-model — locate & download model assets for dontspeak.
 //!
 //! Assets: the Parakeet STT model (encoder + decoder + joiner + tokens) AND the native
 //! Kokoro TTS set — `kokoro-v1.0-fp32.onnx`, voices, the tiny English G2P encoder/decoder,

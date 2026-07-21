@@ -55,8 +55,7 @@ windows = { workspace = true, features = [
 # rodio keeps rendering TTS; the server taps the render endpoint as the echo reference
 # itself, making this backend capture-only (`owns_render() == false`), like Windows WASAPI.
 # (A future deterministic alternative — linking the WebRTC APM in-process, `owns_render()
-# == true` — is the alternative noted in docs/AEC.md's "Why native OS AEC" section; the
-# server-module path ships first.)
+# == true` — remains open; the server-module path ships first.)
 [target.'cfg(target_os = "linux")'.dependencies]
 libpulse-binding = "2.30"
 libpulse-simple-binding = "2.29"

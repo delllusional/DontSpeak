@@ -1,4 +1,4 @@
-//! Always-listening pure core (no I/O). docs/ALWAYS-LISTENING.md.
+//! Always-listening pure core (no I/O).
 //! [`Endpointer`] energy-VAD; [`match_submit_word`]; [`TurnLogic`] stopword + silence.
 
 /// Default energy gate (RMS of f32 PCM in [-1, 1]). Speech RMS is typically

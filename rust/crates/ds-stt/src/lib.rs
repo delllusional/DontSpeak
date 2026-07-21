@@ -1,4 +1,4 @@
-//! ds-stt — pluggable speech-to-text engines for dontspeak (ARCHITECTURE §A.2).
+//! ds-stt — pluggable speech-to-text engines for dontspeak.
 //!
 //! One trait [`Stt`] behind dynamic dispatch, selected by config via the
 //! `ds-engines` factory. The engine boundary lives INSIDE the Caps-Lock state

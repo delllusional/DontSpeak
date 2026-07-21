@@ -1,4 +1,4 @@
-//! Acoustic-echo-cancelled duplex audio (docs/AEC.md).
+//! Acoustic-echo-cancelled duplex audio.
 //!
 //! One platform unit owns speaker + mic so the OS subtracts TTS (far-end) from the mic:
 //! full-duplex STT while speaking (vs half-duplex with mic closed during TTS).
@@ -7,7 +7,7 @@
 //! - **Windows** — WASAPI Communications capture (capture-side AEC APO). `owns_render() == false`;
 //!   rodio renders; OS taps the render endpoint as reference.
 //! - **Linux** — PulseAudio/PipeWire `module-echo-cancel` source via Pulse simple API.
-//!   Capture-side only like Windows. (In-process WebRTC APM is a future option in docs/AEC.md.)
+//!   Capture-side only like Windows. (In-process WebRTC APM is a future option.)
 //! - **other** — stub; caller degrades to half-duplex.
 //!
 //! macOS [`DuplexAudio`] is `!Send` (AudioUnit): open/consume on one helper thread.

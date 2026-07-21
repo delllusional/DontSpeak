@@ -8,7 +8,7 @@
 //! Opened via the Pulse simple API (works with Pulse and PipeWire/`pipewire-pulse`).
 //! Source name: `$DONTSPEAK_AEC_SOURCE`, else `ds_ec_source`, else `echo-cancel-source`.
 //! Connect/format failure → `open()` Err → half-duplex. (In-process WebRTC APM is a
-//! future option in docs/AEC.md.)
+//! future option.)
 //!
 //! Dedicated thread owns the blocking `Simple` stream, reads ~20 ms chunks, pushes mono
 //! f32 into a bounded buffer a [`CaptureHandle`] drains.

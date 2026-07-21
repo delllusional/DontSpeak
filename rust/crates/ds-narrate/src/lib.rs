@@ -5,10 +5,9 @@
 //! in `narrate-display-<session>.json`, which is also the cross-process **streaming
 //! witness** that keeps `Stop` silent after mid-turn narration.
 //!
-//! Adapters (see `docs/STREAMING-NARRATION.md`): Claude Code (delta by content-block
-//! `index`, racing processes + state lock), Qwen Code (cumulative snapshots), OpenAI
-//! Codex (`dontspeakd::codex_stream`, in-process) and Grok (`dontspeakd::grok_stream`,
-//! updates.jsonl tail). All use [`deliver_batch`] so the
+//! Adapters: Claude Code (delta by content-block `index`, racing processes + state lock),
+//! Qwen Code (cumulative snapshots), OpenAI Codex (`dontspeakd::codex_stream`, in-process)
+//! and Grok (`dontspeakd::grok_stream`, updates.jsonl tail). All use [`deliver_batch`] so the
 //! on-disk `offset` prevents double-speak on reconnect.
 
 mod accum;

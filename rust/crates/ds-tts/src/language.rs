@@ -4,7 +4,6 @@
 //! when the text is all they have. [`chunk_language`] decides what a *spoken chunk* is
 //! spoken in: the engine calls it once per queued utterance, so a reply that switches
 //! language mid-way is voiced per utterance rather than under one turn-wide verdict.
-//! See `docs/TTS-PIPELINE.md`.
 
 use std::sync::OnceLock;
 

@@ -135,7 +135,7 @@ fn main() {
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn main() {
     eprintln!(
-        "ds-aec-probe: native duplex AEC not implemented on this platform (see docs/AEC.md's per-platform sections)"
+        "ds-aec-probe: native duplex AEC not implemented on this platform"
     );
     std::process::exit(1);
 }

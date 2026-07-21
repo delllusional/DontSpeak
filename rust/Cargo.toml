@@ -103,7 +103,7 @@ winresource = "0.1"
 # `prop_compose!`), not the optional proc-macro attribute variant. MIT OR Apache-2.0.
 proptest = "1"
 # Local HTTP mock server (dev-only): every outbound-HTTP test points here, never a
-# real endpoint (see AGENTS.md's no-real-network invariant).
+# real endpoint (no-real-network invariant).
 httpmock = "0.8.3"
 # Sync WebSocket framing for the Codex app-server subscriber (dontspeakd::codex_stream).
 # The client is generic over `Read + Write`, so it runs over a `UnixStream` (the codex

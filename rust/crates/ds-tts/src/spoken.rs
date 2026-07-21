@@ -176,10 +176,10 @@ mod tests {
     fn drops_hashes_without_mangling_identifiers_paths_or_anchors() {
         assert_eq!(
             SpokenText::from_markdown(
-                "Edit foo_bar in src/main at eedfc57; see docs/TTS-PIPELINE.md#shared-english-frontend."
+                "Edit foo_bar in src/main at eedfc57; see src/pipeline.rs#shared-english-frontend."
             )
             .as_str(),
-            "Edit foo_bar in src/main at see docs/TTS-PIPELINE.md#shared-english-frontend."
+            "Edit foo_bar in src/main at see src/pipeline.rs#shared-english-frontend."
         );
         assert_eq!(
             SpokenText::from_markdown("Line 1234567 of 2026 tests pass.").as_str(),

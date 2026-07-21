@@ -1,4 +1,4 @@
-//! Always-listening runtime glue over pure [`crate::listen`]. docs/ALWAYS-LISTENING.md.
+//! Always-listening runtime glue over pure [`crate::listen`].
 //! Capture/endpoint/infer on workers; poll thread drains events + paste/submit.
 //! Half-duplex: mic closed while TTS busy.
 

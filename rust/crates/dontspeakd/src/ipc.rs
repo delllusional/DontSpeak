@@ -95,7 +95,7 @@ pub(crate) fn spawn_ipc_server(
                 ClientSource::Unknown,
                 &format!(
                     "{detail} — caller and engine are out of sync; \
-                     reinstall the CLI and restart the app (docs/BUILD-DEPLOY.md)"
+                     reinstall the CLI and restart the app"
                 ),
             );
         };

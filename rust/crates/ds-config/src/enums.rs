@@ -105,8 +105,7 @@ impl TtsEngine {
     }
 }
 
-/// Voice input mode. Default `RecordSubmit` (Caps PTT). `Always` = hands-free loop
-/// (see docs/ALWAYS-LISTENING.md).
+/// Voice input mode. Default `RecordSubmit` (Caps PTT). `Always` = hands-free loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ListenMode {
     #[default]

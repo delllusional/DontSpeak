@@ -2,7 +2,7 @@
 # makes this its own resolver root, invisible to the parent `rust/` workspace's
 # `cargo build/clippy/test --workspace` — no entry needed in rust/Cargo.toml's
 # `members`). Fuzzes ds-ipc's hand-tagged serde wire types against arbitrary byte
-# input; see fuzz/README.md for how to run it and .github/workflows/fuzz.yml for the
+# input; see the fuzz crate docs and .github/workflows/fuzz.yml for the
 # scheduled CI job. Never shipped, never linked into any release artifact.
 [workspace]
 

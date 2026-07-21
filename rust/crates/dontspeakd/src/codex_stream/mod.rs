@@ -1,4 +1,4 @@
-//! Codex app-server mid-turn narration (#10; docs/STREAMING-NARRATION.md).
+//! Codex app-server mid-turn narration (#10).
 //! Session-keyed only; witness parity; no double-speak (HWM); cleanup here (no SessionEnd).
 
 mod client;

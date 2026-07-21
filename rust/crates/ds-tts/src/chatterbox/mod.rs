@@ -5,8 +5,7 @@
 //! `embed_tokens` → `language_model` (greedy + rep penalty, KV cache) →
 //! `conditional_decoder` → 24 kHz PCM. 1:1 MIT reference pipeline.
 //!
-//! Plain-text frontend ([`crate::chatterbox::frontend`]); shared markdown→prose only
-//! (docs/TTS-PIPELINE.md).
+//! Plain-text frontend ([`crate::chatterbox::frontend`]); shared markdown→prose only.
 //!
 //! `rate` is a no-op for this backend.
 //!

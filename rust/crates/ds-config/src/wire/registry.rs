@@ -179,8 +179,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         detect_dir: |p| &p.codex_dir,
         gate_on_presence: true,
         // TOML hooks: SessionStart greet-only, UserPromptSubmit notify+provide, Stop.
-        // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber
-        // (docs/STREAMING-NARRATION.md). MCP same config.toml. session id = thread id.
+        // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber.
+        // MCP same config.toml. session id = thread id.
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeTomlHooks,
