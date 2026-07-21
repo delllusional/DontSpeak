@@ -19,36 +19,20 @@ use crate::spec::{
 };
 
 /// One file fetch in a multi-step set (model + ORT fetchers share one list).
-/// Also used by CUDA wheel download (same aggregator).
-pub(crate) type DownloadStep = Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()>>;
+/// Also used by CUDA wheel download (same aggregator). `Send` so steps can run on the
+/// multi-file worker pool ([`crate::parallel`]).
+pub(crate) type DownloadStep =
+    Box<dyn FnOnce(&dyn Fn(u64, u64)) -> std::io::Result<()> + Send>;
 
-/// Monotonic aggregate `(done, total)` across steps. `base` uses actual transferred
-/// bytes (not manifest estimates) so size drift can't regress the bar. Already-present
-/// steps stream nothing; forced final emit still lands on 100%. Sole progress synthesizer.
+/// Monotonic aggregate `(done, total)` across steps. Uses actual transferred bytes (not
+/// manifest estimates) so size drift can't regress the bar. Already-present steps stream
+/// nothing; forced final emit still lands on 100%. Steps run with a bounded thread pool.
 pub(crate) fn run_download_set(
     progress: &dyn Fn(u64, u64),
     total: u64,
     steps: Vec<DownloadStep>,
 ) -> std::io::Result<()> {
-    use std::cell::Cell;
-    let base = Cell::new(0u64);
-    let cur = Cell::new(0u64);
-    let last = Cell::new(0u64);
-    for step in steps {
-        cur.set(0);
-        let emit = |done: u64, _total: u64| {
-            if done > cur.get() {
-                cur.set(done);
-            }
-            let v = (base.get() + done).min(total).max(last.get());
-            last.set(v);
-            progress(v, total);
-        };
-        step(&emit)?;
-        base.set((base.get() + cur.get()).min(total));
-    }
-    progress(total, total);
-    Ok(())
+    crate::parallel::run_jobs_parallel(progress, total, 0, steps)
 }
 
 /// Full Parakeet set + shared ORT dylib. Returns model dir.

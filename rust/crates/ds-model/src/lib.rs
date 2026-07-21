@@ -23,7 +23,7 @@
 //! large model downloads, which intentionally omit a wall-clock total timeout),
 //! `sha2`, `tempfile` (atomic rename), plus `flate2`+`tar` ONLY for the one-member
 //! ORT `.tgz` extraction (model paths come from ds-config). No async runtime in the
-//! engine.
+//! engine. Multi-file asset sets fetch with a bounded thread pool (same client).
 //!
 //! A stalled download retains its partial temp file and resumes with a validated HTTP Range
 //! request. Download progress is exposed by the engine. The pure fns below are network-free
@@ -39,6 +39,7 @@ pub mod hash;
 mod kokoro_frontend;
 pub mod libraries;
 pub mod mlx_repo;
+mod parallel;
 /// MLX Audio shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
 #[cfg(target_os = "macos")]
 pub mod mlx_shim;

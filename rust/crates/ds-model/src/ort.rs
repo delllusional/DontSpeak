@@ -637,9 +637,8 @@ pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     }
     std::fs::create_dir_all(&dir)?;
     let total: u64 = crate::urls::CUDA_WHEEL_SIZES.iter().sum();
-    // One step per wheel — same download-to-temp / sha-verify / extract body and retry loop as
-    // before, just wired through `run_download_set`'s per-step callback (real bytes) instead of
-    // the old no-op `&|_, _| {}` + manual `progress(idx, total)` wheel-count bookkeeping.
+    // One step per wheel through `run_download_set` (bounded parallel pool). Concurrent extract
+    // is safe: each DLL/SO is atomic temp→rename to a unique basename in this dir.
     let steps: Vec<crate::setup::DownloadStep> = CUDA_WHEELS
         .iter()
         .map(|&(url, sha)| -> crate::setup::DownloadStep {

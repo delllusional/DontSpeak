@@ -385,20 +385,8 @@ fn keep(repo: &MlxRepo, path: &str) -> bool {
     included && !excluded
 }
 
-/// GET the HF tree API at the pinned revision and return the kept files. The revision is
-/// immutable, so this list is stable. Network — only called during a download, never on the
-/// status poll (that uses the local marker).
-fn fetch_tree(repo: &MlxRepo) -> std::io::Result<Vec<TreeFile>> {
-    let url = format!(
-        "{HF_HOST}/api/models/{}/tree/{}?recursive=true",
-        repo.repo, repo.revision
-    );
-    fetch_tree_at(&url, repo)
-}
-
-/// The GET + parse half of [`fetch_tree`], taking the tree-API URL as a parameter so tests can
-/// point it at a local mock server instead of the real `huggingface.co` — everything below this
-/// is the exact production code path (same `http_get_builder`, same JSON shape, same filters).
+/// GET + parse the HF tree API. `url` is full tree URL so tests can point at httpmock
+/// instead of `huggingface.co` — same `http_get_builder`, JSON shape, and filters.
 fn fetch_tree_at(url: &str, repo: &MlxRepo) -> std::io::Result<Vec<TreeFile>> {
     let body = crate::download::http_get_builder(url)
         .send()
@@ -500,25 +488,8 @@ fn verify_downloaded(path: &Path, f: &TreeFile) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Download one tree file to `dest` (atomic temp→rename), verifying it against the pinned
-/// revision's tree metadata (see [`verify_downloaded`]) before persisting. Transient failures
-/// retry; a verification failure / 404 fails fast (same policy as the ONNX path).
-fn download_one(
-    repo: &MlxRepo,
-    f: &TreeFile,
-    dest: &Path,
-    progress: &dyn Fn(u64, u64),
-) -> std::io::Result<()> {
-    let url = format!(
-        "{HF_HOST}/{}/resolve/{}/{}",
-        repo.repo, repo.revision, f.path
-    );
-    download_one_at(&url, f, dest, progress)
-}
-
-/// The GET-and-verify half of [`download_one`], taking the resolve URL as a parameter so tests
-/// can point it at a local mock server instead of the real `huggingface.co` — everything below
-/// this is the exact production code path (temp→rename, retry, [`verify_downloaded`]).
+/// GET-and-verify one tree file (temp→rename, retry, [`verify_downloaded`]). Resolve URL is a
+/// parameter so tests can point at httpmock instead of `huggingface.co`.
 fn download_one_at(
     url: &str,
     f: &TreeFile,
@@ -563,8 +534,18 @@ pub fn ensure_mlx_repo(repo: &MlxRepo, progress: &dyn Fn(u64, u64)) -> std::io::
 /// `progress(done_bytes, total_bytes)` where BOTH are summed across every file of every repo —
 /// so the UI shows a single monotonic "Downloading `<pct>`%" over the WHOLE set (a true global
 /// percent, not a per-file percent that resets each file). Writes each repo's completion marker
-/// once its files are all present.
+/// once its files are all present. Missing files fetch concurrently (bounded pool).
 pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
+    ensure_mlx_repos_at(HF_HOST, repos, progress)
+}
+
+/// Same as [`ensure_mlx_repos`] but tree + resolve URLs are rooted at `host` (production:
+/// [`HF_HOST`]; tests: httpmock base URL).
+pub(crate) fn ensure_mlx_repos_at(
+    host: &str,
+    repos: &[&MlxRepo],
+    progress: &dyn Fn(u64, u64),
+) -> std::io::Result<()> {
     // Resolve every not-yet-present repo's tree first so the total byte count is exact up front.
     let mut plan: Vec<(&MlxRepo, PathBuf, Vec<TreeFile>)> = Vec::new();
     for r in repos {
@@ -574,7 +555,11 @@ pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std:
         let target = (r.target)().ok_or_else(|| {
             std::io::Error::other(format!("cannot resolve target dir for {}", r.name))
         })?;
-        let files = fetch_tree(r)?;
+        let tree_url = format!(
+            "{host}/api/models/{}/tree/{}?recursive=true",
+            r.repo, r.revision
+        );
+        let files = fetch_tree_at(&tree_url, r)?;
         plan.push((r, target, files));
     }
     // Denominator = sum of every file's size across the whole set (each floored at 1 so a
@@ -588,9 +573,9 @@ pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std:
         progress(1, 1);
         return Ok(());
     }
-    // Numerator = bytes finished so far: every completed file's full size plus the current
-    // file's in-flight bytes, so the overall percent only ever moves forward.
-    let mut done_bytes: u64 = 0;
+
+    let mut pre_credit: u64 = 0;
+    let mut jobs: Vec<crate::parallel::DownloadJob> = Vec::new();
     for (r, target, files) in &plan {
         for f in files {
             let relative = Path::new(&f.path);
@@ -605,19 +590,45 @@ pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std:
             }
             let dest = target.join(relative);
             let size = f.size.max(1);
-            let base = done_bytes;
             if already_have(&dest, f) {
-                done_bytes = base + size;
-                progress(done_bytes, total_bytes);
+                pre_credit = pre_credit.saturating_add(size);
                 continue;
             }
-            download_one(r, f, &dest, &|done, _t| {
-                progress((base + done.min(size)).min(total_bytes), total_bytes);
-            })?;
-            done_bytes = base + size;
-            progress(done_bytes, total_bytes);
+            let host = host.to_string();
+            let repo_id = r.repo;
+            let revision = r.revision;
+            let path = f.path.clone();
+            let sha256 = f.sha256.clone();
+            let git_blob_sha1 = f.git_blob_sha1.clone();
+            let file_size = f.size;
+            jobs.push(Box::new(move |p| {
+                let tree = TreeFile {
+                    path: path.clone(),
+                    size: file_size,
+                    sha256,
+                    git_blob_sha1,
+                };
+                // Local progress is file bytes; pool sums high-waters + pre_credit.
+                let emit = |done: u64, _t: u64| p(done.min(size), size);
+                let url = format!("{host}/{repo_id}/resolve/{revision}/{path}");
+                download_one_at(&url, &tree, &dest, &emit)
+            }));
         }
-        // Persist the exact file set so a missing asset invalidates presence and self-repairs.
+    }
+
+    crate::parallel::run_jobs_parallel(progress, total_bytes, pre_credit.min(total_bytes), jobs)?;
+
+    // Markers only after the full set of missing files succeeded (no marker on partial fail).
+    for (r, target, files) in &plan {
+        for f in files {
+            let dest = target.join(Path::new(&f.path));
+            if !already_have(&dest, f) {
+                return Err(std::io::Error::other(format!(
+                    "missing verified file after download: {}",
+                    f.path
+                )));
+            }
+        }
         let mut marker = String::with_capacity(
             r.revision.len() + files.iter().map(|f| f.path.len() + 1).sum::<usize>() + 1,
         );
@@ -1105,6 +1116,216 @@ mod tests {
         mock.assert();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert!(!dest.exists(), "a failed verify must not persist the file");
+    }
+
+    /// Parallel multi-file orchestrator: tree + blobs via httpmock; marker only after all files.
+    #[test]
+    fn ensure_mlx_repos_at_downloads_files_and_writes_marker() {
+        let server = httpmock::MockServer::start();
+        let a = b"alpha-bytes";
+        let b = b"beta-bytes!!";
+        let a_sha = crate::hash::sha256_hex(a);
+        let b_sha = crate::hash::sha256_hex(b);
+        let rev = "abc123rev00000000000000000000000000001";
+        let repo_id = "test-org/test-model";
+
+        let tree = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/api/models/{repo_id}/tree/{rev}"))
+                .query_param("recursive", "true");
+            then.status(200).json_body(serde_json::json!([
+                {
+                    "type": "file",
+                    "path": "a.bin",
+                    "size": a.len(),
+                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
+                },
+                {
+                    "type": "file",
+                    "path": "b.bin",
+                    "size": b.len(),
+                    "lfs": { "oid": format!("sha256:{b_sha}"), "size": b.len() }
+                }
+            ]));
+        });
+        let blob_a = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
+            then.status(200).body(a);
+        });
+        let blob_b = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/b.bin"));
+            then.status(200).body(b);
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let repo = MlxRepo {
+            name: "orch_ok",
+            repo: repo_id,
+            revision: rev,
+            include_prefixes: &[],
+            exclude_substrings: &[],
+            target: test_target,
+            display_name: "",
+            usage: "",
+            license: "",
+            license_url: "",
+        };
+
+        let seen = std::sync::Mutex::new(Vec::<u64>::new());
+        ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|d, t| {
+            seen.lock().unwrap().push(d);
+            assert_eq!(t, (a.len() + b.len()) as u64);
+        })
+        .expect("orchestrator succeeds");
+        tree.assert();
+        blob_a.assert();
+        blob_b.assert();
+        assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), a);
+        assert_eq!(std::fs::read(tmp.path().join("b.bin")).unwrap(), b);
+        let marker = std::fs::read_to_string(tmp.path().join(READY_MARKER)).unwrap();
+        assert!(marker.starts_with(rev));
+        assert!(marker.contains("a.bin"));
+        assert!(marker.contains("b.bin"));
+        let seen = seen.lock().unwrap();
+        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "monotonic: {seen:?}");
+        assert_eq!(*seen.last().unwrap(), (a.len() + b.len()) as u64);
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
+    }
+
+    /// Already-present files pre-credit the bar; only missing blobs are fetched.
+    #[test]
+    fn ensure_mlx_repos_at_precredits_present_files() {
+        let server = httpmock::MockServer::start();
+        let a = b"present-aaa";
+        let b = b"missing-bbb";
+        let a_sha = crate::hash::sha256_hex(a);
+        let b_sha = crate::hash::sha256_hex(b);
+        let rev = "abc123rev00000000000000000000000000002";
+        let repo_id = "test-org/precredit";
+
+        let tree = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/api/models/{repo_id}/tree/{rev}"))
+                .query_param("recursive", "true");
+            then.status(200).json_body(serde_json::json!([
+                {
+                    "type": "file",
+                    "path": "a.bin",
+                    "size": a.len(),
+                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
+                },
+                {
+                    "type": "file",
+                    "path": "b.bin",
+                    "size": b.len(),
+                    "lfs": { "oid": format!("sha256:{b_sha}"), "size": b.len() }
+                }
+            ]));
+        });
+        let blob_a = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
+            then.status(200).body(a);
+        });
+        let blob_b = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/b.bin"));
+            then.status(200).body(b);
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.bin"), a).unwrap();
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let repo = MlxRepo {
+            name: "orch_pre",
+            repo: repo_id,
+            revision: rev,
+            include_prefixes: &[],
+            exclude_substrings: &[],
+            target: test_target,
+            display_name: "",
+            usage: "",
+            license: "",
+            license_url: "",
+        };
+
+        ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {})
+            .expect("precredit path succeeds");
+        tree.assert();
+        assert_eq!(blob_a.calls(), 0, "present file must not re-fetch");
+        blob_b.assert();
+        assert!(tmp.path().join(READY_MARKER).is_file());
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
+    }
+
+    /// Permanent blob failure must not write `.ds-ready`.
+    #[test]
+    fn ensure_mlx_repos_at_fails_without_marker() {
+        let server = httpmock::MockServer::start();
+        let a = b"ok-file";
+        let a_sha = crate::hash::sha256_hex(a);
+        let rev = "abc123rev00000000000000000000000000003";
+        let repo_id = "test-org/fail-set";
+
+        let tree = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/api/models/{repo_id}/tree/{rev}"))
+                .query_param("recursive", "true");
+            then.status(200).json_body(serde_json::json!([
+                {
+                    "type": "file",
+                    "path": "a.bin",
+                    "size": a.len(),
+                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
+                },
+                {
+                    "type": "file",
+                    "path": "bad.bin",
+                    "size": 10,
+                    "lfs": {
+                        "oid": format!("sha256:{}", "0".repeat(64)),
+                        "size": 10
+                    }
+                }
+            ]));
+        });
+        let _blob_a = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
+            then.status(200).body(a);
+        });
+        let _blob_bad = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{repo_id}/resolve/{rev}/bad.bin"));
+            then.status(200).body(b"wrong-size");
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let repo = MlxRepo {
+            name: "orch_fail",
+            repo: repo_id,
+            revision: rev,
+            include_prefixes: &[],
+            exclude_substrings: &[],
+            target: test_target,
+            display_name: "",
+            usage: "",
+            license: "",
+            license_url: "",
+        };
+
+        let err = ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {}).unwrap_err();
+        tree.assert();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            !tmp.path().join(READY_MARKER).exists(),
+            "partial fail must not write .ds-ready"
+        );
+        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
     }
 
     #[test]
