@@ -1267,6 +1267,10 @@ pub(crate) fn serve() -> ! {
         // model can change between that detection and this warm run. An unsupported code
         // falls back to the model's default rather than dropping the utterance.
         let language = ds_tts::supported_language(&language, model);
+        // Same model-switch race on the voice axis: the engine gated the voice against the
+        // model active at enqueue time, so a voice from the old model's catalog must not reach
+        // this model's backend (which has no per-voice fallback and would drop the utterance).
+        let voice = ds_tts::enumerate::supported_voice(model, &voice);
         let cancelled = || cancel.load(Ordering::SeqCst);
         let batches =
             match frontend_batches_with_cancel(model, &text, &voice, &language, &cancelled) {

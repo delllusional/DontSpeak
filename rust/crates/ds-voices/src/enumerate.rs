@@ -269,6 +269,38 @@ pub fn built_in_choices(model: TtsModel, language: &str) -> Vec<VoiceChoice> {
         .collect()
 }
 
+/// Whether `voice` is a real id for `model` — the full model catalog, not the configured pool
+/// (Kokoro ships many voices beyond a two-voice pool). Kokoro checks the ids actually on disk and
+/// accepts anything before they exist (same rule as `set_config`: never validate a pack voice
+/// against the static fallback); every other model checks its registry `voices`. Used to reject a
+/// stale per-utterance voice that outlived a model switch (e.g. Chatterbox's `"default"` reaching
+/// Kokoro) before it is handed to the synth backend.
+pub fn is_model_voice(model: TtsModel, voice: &str) -> bool {
+    if model == TtsModel::Kokoro {
+        return kokoro_disk_voice_ids().is_none_or(|ids| ids.iter().any(|id| id == voice));
+    }
+    model.descriptor().voices.contains(&voice)
+}
+
+/// Non-refusing clamp of a per-utterance voice to `model` — the voice-axis twin of
+/// `ds_tts::supported_language`. The engine gates a voice against the model active when the
+/// utterance was queued, but the model can change before the warm helper synthesizes it. A voice
+/// that no longer belongs to `model` is replaced with the model's first default voice rather than
+/// dropped — Chatterbox/Qwen/OmniVoice have no per-voice fallback and would drop the utterance. A
+/// voice already valid for `model` (including any voice on a fresh install, before the Kokoro
+/// catalog is on disk) is returned unchanged.
+pub fn supported_voice(model: TtsModel, voice: &str) -> String {
+    if is_model_voice(model, voice) {
+        return voice.to_string();
+    }
+    model
+        .descriptor()
+        .default_voices
+        .first()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| voice.to_string())
+}
+
 fn model_voice_label(model: TtsModel, voice: &str) -> String {
     if voice == "default" {
         return "Default".to_string();
@@ -339,6 +371,35 @@ mod tests {
         // without making ds-model a real dependency.
         assert_eq!(KOKORO_VOICES_FILE, ds_model::KOKORO_VOICES_FILE);
         assert_eq!(KOKORO_MLX_DIR_NAME, ds_model::mlx_repo::KOKORO_MLX_DIR_NAME);
+    }
+
+    #[test]
+    fn is_model_voice_rejects_ids_from_a_different_model() {
+        // The stale-voice leak this guards: a `"default"` (Chatterbox/OmniVoice pool) or a Kokoro
+        // id must not read as valid for a model that does not own it. Non-Kokoro membership is a
+        // pure registry check (no disk), so this stays hermetic.
+        assert!(is_model_voice(TtsModel::Chatterbox, "default"));
+        assert!(!is_model_voice(TtsModel::Chatterbox, "af_sarah"));
+        assert!(is_model_voice(TtsModel::Qwen, "sohee"));
+        assert!(!is_model_voice(TtsModel::Qwen, "default"));
+        assert!(is_model_voice(TtsModel::OmniVoice, "warm, clear female voice"));
+        assert!(!is_model_voice(TtsModel::OmniVoice, "sohee"));
+    }
+
+    #[test]
+    fn supported_voice_clamps_a_foreign_voice_to_the_model_default() {
+        // A voice the model owns survives; one it does not is clamped to the model's first
+        // default voice (never dropped, never passed through). Non-Kokoro membership is a pure
+        // registry check, so this stays hermetic.
+        assert_eq!(supported_voice(TtsModel::Qwen, "ryan"), "ryan");
+        assert_eq!(
+            supported_voice(TtsModel::Qwen, "default"),
+            TtsModel::Qwen.descriptor().default_voices[0]
+        );
+        assert_eq!(
+            supported_voice(TtsModel::Chatterbox, "sohee"),
+            TtsModel::Chatterbox.descriptor().default_voices[0]
+        );
     }
 
     #[test]

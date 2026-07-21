@@ -1165,7 +1165,27 @@ impl TtsQueue {
                 Some((e, v)) => (Some(e), v),
                 None => (None, String::new()),
             };
-            let voice = voice_override.cloned().unwrap_or(base_voice);
+            // A per-item voice (MCP `speak` arg, greeting, queued narration) is captured under the
+            // model active at enqueue time. If the model changed before playback, a built-in voice
+            // that belongs to another model must NOT reach the shim — Kokoro would waste a synth on
+            // it and fall back, and Chatterbox/Qwen/OmniVoice have no fallback and would drop the
+            // utterance. Fall back to the voice resolved for the ACTIVE model instead. System voices
+            // are freeform names, so only built-in ids are validated.
+            let voice = match voice_override {
+                Some(v)
+                    if engine == Some(ds_config::TtsEngine::BuiltIn)
+                        && !ds_tts::enumerate::is_model_voice(cfg.tts_model, v) =>
+                {
+                    log::debug!(
+                        target: "ttsq",
+                        "dropping stale voice '{v}' not in the {} catalog; using '{base_voice}'",
+                        cfg.tts_model.as_str()
+                    );
+                    base_voice
+                }
+                Some(v) => v.clone(),
+                None => base_voice,
+            };
             let rate = rate_override.unwrap_or(cfg.rate);
 
             // Never send built-in TTS work before its model is ready. Accepted work is HELD
