@@ -68,7 +68,7 @@ pub struct DisplayState {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 struct PendingUtterance {
     id: String,
-    /// Message/item id — reused as the engine language-pin `message_key`.
+    /// Message/item id: matches this pending against the state it commits.
     key: String,
     text: String,
     /// Cumulative so-far at selection; absent on old state files → detect on `text`.
@@ -90,10 +90,9 @@ enum DeliveryCheckpoint {
 pub struct NarrationUtterance {
     pub id: String,
     pub text: String,
-    /// Cumulative so-far for language detection (may be empty on legacy pending).
+    /// Cumulative so-far, the fallback corpus when this utterance is too short for the
+    /// engine to classify on its own (may be empty on legacy pending).
     pub detection_text: String,
-    /// Message/item id for per-turn language pin (`pending.key` / `batch.key`).
-    pub message_key: String,
 }
 
 /// Pure batch effect (`write = None` ⇒ leave state file alone).
@@ -296,7 +295,6 @@ fn admit_pending(
             id: pending.id.clone(),
             text: pending.text.clone(),
             detection_text: pending.detection_text.clone(),
-            message_key: pending.key.clone(),
         };
         admit(&utterance)?;
         state.pending.remove(0);
@@ -804,11 +802,9 @@ mod tests {
         let fin = cumulative("m", "> Retry me.\n\nBody.", true);
         let mut rejected_id = None;
         let mut rejected_detection = None;
-        let mut rejected_key = None;
         let error = deliver_batch(&paths, "s", &fin, false, true, false, |utt| {
             rejected_id = Some(utt.id.clone());
             rejected_detection = Some(utt.detection_text.clone());
-            rejected_key = Some(utt.message_key.clone());
             Err("queue full".to_string())
         })
         .unwrap_err();
@@ -821,12 +817,7 @@ mod tests {
 
         let mut admitted = Vec::new();
         retry_pending(&paths, "s", |utt| {
-            admitted.push((
-                utt.id.clone(),
-                utt.text.clone(),
-                utt.detection_text.clone(),
-                utt.message_key.clone(),
-            ));
+            admitted.push((utt.id.clone(), utt.text.clone(), utt.detection_text.clone()));
             Ok(())
         })
         .unwrap();
@@ -836,11 +827,9 @@ mod tests {
                 rejected_id.unwrap(),
                 "Retry me.".to_string(),
                 rejected_detection.unwrap(),
-                rejected_key.unwrap(),
             )]
         );
         assert_eq!(admitted[0].2, "> Retry me.\n\nBody.");
-        assert_eq!(admitted[0].3, "m");
         retry_pending(&paths, "s", |_| {
             panic!("committed retry must not be offered twice")
         })

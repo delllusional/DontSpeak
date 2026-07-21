@@ -1,14 +1,14 @@
 //! Shared language detection for every TTS backend.
 //!
-//! Callers pass a detection **corpus** (full turn text when available, else the spoken
-//! digest). The engine pins one ISO language per `(session, message_key)` once the
-//! normalized corpus is solid (≥ 64 chars); short-only turns stay best-effort and may
-//! still false-positive. See `docs/TTS-PIPELINE.md` and the turn-language pin policy
-//! in `dontspeakd::ttsq`.
+//! Two entry points. [`detect_language`] classifies one text and is what backends use
+//! when the text is all they have. [`chunk_language`] decides what a *spoken chunk* is
+//! spoken in: the engine calls it once per queued utterance, so a reply that switches
+//! language mid-way is voiced per utterance rather than under one turn-wide verdict.
+//! See `docs/TTS-PIPELINE.md`.
 
 use std::sync::OnceLock;
 
-use whatlang::{Detector, Lang};
+use whatlang::{Detector, Info, Lang};
 
 pub const DEFAULT_LANGUAGE: &str = "en";
 
@@ -99,26 +99,74 @@ fn detector_for(model: ds_config::TtsModel) -> &'static Detector {
     DETECTORS[model as usize].get_or_init(|| Detector::with_allowlist(model_allowlist(model)))
 }
 
-/// Detect the language of `text` scoped to `model`'s supported set; ambiguous / unspeakable
-/// → `en`. Because the allowlist is derived from `descriptor().languages` and
-/// `language_code` is its exact inverse, every non-fallback result is a language the model
-/// can speak. The `en` fallback is valid because every built-in model supports `en`.
-pub fn detect_language(text: &str, model: ds_config::TtsModel) -> String {
+/// One whatlang verdict scoped to `model`: the ISO code plus how much evidence backs it.
+struct Classified {
+    code: &'static str,
+    /// `0.0` when nothing matched — the `en` below is a default, not a reading.
+    confidence: f64,
+    /// whatlang's own bar. Strict by design: it wants paragraph-length prose.
+    reliable: bool,
+}
+
+fn classify(text: &str, model: ds_config::TtsModel) -> Classified {
     let prose = crate::normalize_spoken_text(text);
-    let detected = detector_for(model).detect_lang(&prose);
-    let code = detected.map(language_code).unwrap_or(DEFAULT_LANGUAGE);
+    let detected: Option<Info> = detector_for(model).detect(&prose);
+    let code = detected
+        .as_ref()
+        .map(|info| language_code(info.lang()))
+        .unwrap_or(DEFAULT_LANGUAGE);
     // Which language an utterance got is the first thing to check when speech comes out in
     // the wrong voice, and the fallback to `en` is otherwise indistinguishable from a
     // confident English detection. Logs the classified prose length rather than the prose,
     // which is user speech content.
     log::debug!(
         target: "tts",
-        "whatlang detected {code} for {}{} over {} chars",
+        "whatlang detected {code} for {}{} at confidence {:.2} over {} chars",
         model.as_str(),
         if detected.is_none() { " (no match, default)" } else { "" },
+        detected.as_ref().map_or(0.0, Info::confidence),
         prose.chars().count()
     );
-    code.to_string()
+    Classified {
+        code,
+        confidence: detected.as_ref().map_or(0.0, Info::confidence),
+        reliable: detected.as_ref().is_some_and(Info::is_reliable),
+    }
+}
+
+/// Detect the language of `text` scoped to `model`'s supported set; ambiguous / unspeakable
+/// → `en`. Because the allowlist is derived from `descriptor().languages` and
+/// `language_code` is its exact inverse, every non-fallback result is a language the model
+/// can speak. The `en` fallback is valid because every built-in model supports `en`.
+pub fn detect_language(text: &str, model: ds_config::TtsModel) -> String {
+    classify(text, model).code.to_string()
+}
+
+/// Evidence a chunk needs to be voiced in the language it reads as. whatlang's own
+/// `is_reliable` wants roughly a paragraph, which a one-line digest never has, but below
+/// that bar its confidence still separates the two failure directions at digest length:
+/// English lines that mis-top-1 as a Romance language sit under 0.25, while short prose
+/// that really is Italian, Spanish, French, or Portuguese lands at 0.3 and above
+/// (`digest_confidence_separates_english_from_the_rest` holds the measured table). Below
+/// this, weak evidence loses to the turn's language or to English — the safer error,
+/// since these replies are overwhelmingly English and a foreign voice on English text is
+/// the failure users hear first.
+const MIN_CHUNK_CONFIDENCE: f64 = 0.3;
+
+/// Language for one spoken chunk. Each chunk is classified on its own text, so a reply
+/// that switches language is voiced per utterance. `corpus` is the surrounding turn text
+/// when the caller has it (narration sends the message-so-far); it is consulted only when
+/// the chunk's own evidence is too thin to stand, letting a bare digest inherit the
+/// language of the reply it came from instead of taking a coin flip.
+pub fn chunk_language(chunk: &str, corpus: Option<&str>, model: ds_config::TtsModel) -> String {
+    let own = classify(chunk, model);
+    if own.reliable || own.confidence >= MIN_CHUNK_CONFIDENCE {
+        return own.code.to_string();
+    }
+    match corpus.map(|text| classify(text, model)) {
+        Some(turn) if turn.reliable => turn.code.to_string(),
+        _ => DEFAULT_LANGUAGE.to_string(),
+    }
 }
 
 /// Non-refusing clamp for an already-scoped code — used by the engine before it speaks an
@@ -245,22 +293,92 @@ mod tests {
         }
     }
 
+    /// Reply that opens in Italian and closes in English, as narration delivers it: one
+    /// utterance per blockquote, each with the message-so-far as its corpus.
+    const ITALIAN_QUOTE: &str = concat!(
+        "Oggi è una giornata tranquilla e luminosa, e mi fa davvero piacere poter ",
+        "scambiare due parole con te in italiano, una lingua che ha un ritmo caldo e ",
+        "musicale che si sente subito quando viene letta ad alta voce."
+    );
+    const ENGLISH_QUOTE: &str = concat!(
+        "Today has been a calm and bright sort of day, and it is genuinely a pleasure to ",
+        "be able to trade a few words with you in English, a language whose rhythm sounds ",
+        "quite different once it is read aloud."
+    );
+
     #[test]
-    fn english_preamble_plus_short_false_friend_digest_detects_english_for_kokoro() {
-        // Regression: short digests alone ("Bon courage.") can false-positive as FR/PT;
-        // the full turn corpus must keep Kokoro on English (engine pin policy).
-        let full = concat!(
+    fn a_chunk_with_prose_of_its_own_outranks_the_turn_corpus() {
+        // The bug this policy exists for: the English quote arrives with a corpus whose
+        // first (and longer) half is Italian, and must still be spoken in English.
+        let corpus = format!("> {ITALIAN_QUOTE}\n\n> {ENGLISH_QUOTE}");
+        for model in [TtsModel::Kokoro, TtsModel::Chatterbox] {
+            assert_eq!(chunk_language(ITALIAN_QUOTE, Some(&corpus), model), "it");
+            assert_eq!(chunk_language(ENGLISH_QUOTE, Some(&corpus), model), "en");
+            // A mixed corpus resolves to a single language (here English) — whichever it
+            // is, one of the two quotes would be voiced wrong under a turn-wide verdict.
+            assert_eq!(detect_language(&corpus, model), "en");
+        }
+    }
+
+    #[test]
+    fn a_digest_too_short_to_classify_inherits_the_turn() {
+        // Regression: short digests alone ("Bon courage.") false-positive as FR/PT. With an
+        // English turn behind them they stay English; with an Italian one they follow it.
+        let english_turn = concat!(
             "This assistant reply is written entirely in clear English prose so language ",
             "detection has a solid corpus for the whole turn.\n\n> Bon courage.\n\n",
-            "More English body after the short digest keeps the pin stable."
+            "More English body after the short digest keeps the turn unambiguous."
         );
-        assert_eq!(
-            detect_language(full, TtsModel::Kokoro),
-            "en",
-            "full turn corpus must classify as English"
-        );
-        // Short digest alone is best-effort (may still false-positive); not a regression.
-        let _ = detect_language("Bon courage.", TtsModel::Kokoro);
+        let italian_turn = format!("{ITALIAN_QUOTE}\n\n> Grazie mille.");
+        for model in [TtsModel::Kokoro, TtsModel::Chatterbox] {
+            assert_eq!(detect_language(english_turn, model), "en");
+            assert_eq!(
+                chunk_language("Bon courage.", Some(english_turn), model),
+                "en"
+            );
+            assert_eq!(
+                chunk_language("Grazie mille.", Some(&italian_turn), model),
+                "it"
+            );
+            // No corpus and nothing solid of its own → English, never a coin flip.
+            assert_eq!(chunk_language("Grazie mille.", None, model), "en");
+        }
+    }
+
+    #[test]
+    fn digest_confidence_separates_english_from_the_rest() {
+        // Measured basis for `MIN_CHUNK_CONFIDENCE`: one-line digests, no corpus. English
+        // lines never leave English (some top-1 as `fr` under 0.2); non-English lines with
+        // enough trigram evidence get their language, and the rest fall back to English —
+        // wrong voice for that line, but never a foreign voice on English text.
+        const DIGESTS: &[(&str, &str)] = &[
+            ("en", "Hello, it is nice to meet you."),
+            ("en", "Let me check the logs."),
+            ("en", "Two files changed, one test added."),
+            ("en", "That should do it."),
+            ("en", "Done."),
+            ("en", "The build is green and all tests pass."),
+            ("it", "Ciao, è un piacere conoscerti."),
+            ("it", "Buongiorno, come stai oggi?"),
+            ("it", "Ecco quello che ho trovato."),
+            ("en", "Ciao!"),
+            ("es", "Hola, encantado de conocerte."),
+            ("es", "Todas las pruebas han pasado."),
+            ("fr", "Bonjour, comment allez-vous ?"),
+            ("en", "Bon courage."),
+            ("pt", "Olá, prazer em conhecê-lo."),
+            ("pt", "Todos os testes passaram."),
+        ];
+        for model in [TtsModel::Kokoro, TtsModel::Chatterbox] {
+            for (want, digest) in DIGESTS {
+                assert_eq!(
+                    &chunk_language(digest, None, model),
+                    want,
+                    "{digest:?} on {}",
+                    model.as_str()
+                );
+            }
+        }
     }
 
     #[test]

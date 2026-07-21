@@ -200,7 +200,6 @@ pub(crate) fn spawn_ipc_server(
                 ds_ipc::Request::SpeakNarration {
                     text,
                     detection_text,
-                    message_key,
                     session,
                     narration_id,
                     source,
@@ -217,7 +216,6 @@ pub(crate) fn spawn_ipc_server(
                         session,
                         narration_id,
                         detection_text,
-                        message_key,
                     ) {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => {

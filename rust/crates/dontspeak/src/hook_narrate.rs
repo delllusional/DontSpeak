@@ -877,14 +877,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     // Deterministic ids collapse concurrent Stop at admission (fp alone is sequential).
     let narration_fp = direct_fp.or_else(|| grok_selection.as_ref().and_then(|s| s.digest_fp));
     let real_sess = session.as_deref().unwrap_or("-");
-    // Stable per-reply pin key shared by every line of this Stop body.
-    // Key hashes the full body; detection_text is capped for the IPC line limit.
-    let stop_message_key = assistant_text.as_deref().map(|body| {
-        use sha2::Digest;
-        let digest = sha2::Sha256::digest(body.as_bytes());
-        let prefix: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
-        format!("stop:{prefix}")
-    });
+    // Every line of this Stop body shares the same corpus, capped for the IPC line limit.
     let stop_detection = assistant_text
         .as_ref()
         .map(|body| ds_narrate::cap_detection_text(body.clone()))
@@ -896,7 +889,6 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
             &ds_ipc::Request::SpeakNarration {
                 text: line,
                 detection_text: stop_detection.clone(),
-                message_key: stop_message_key.clone(),
                 session: admit_session.clone(),
                 narration_id,
                 source: client,
@@ -1022,7 +1014,6 @@ fn admit_narration(
         &ds_ipc::Request::SpeakNarration {
             text: utterance.text.clone(),
             detection_text: Some(utterance.detection_text.clone()).filter(|s| !s.is_empty()),
-            message_key: Some(utterance.message_key.clone()).filter(|s| !s.is_empty()),
             session,
             narration_id: Some(utterance.id.clone()),
             source: client,

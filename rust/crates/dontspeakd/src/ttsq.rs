@@ -49,13 +49,6 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
 /// Admission IDs outlive playback (producer retry); SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
-/// Per-turn language pins share the accepted-id cap. SessionEnd prunes, but an admit
-/// racing it can still insert after the prune (detection runs off-lock), so FIFO
-/// eviction — not SessionEnd — is what bounds the map. Such a pin is never read: the
-/// session's items are already gone.
-const LANGUAGE_PINS_MAX: usize = 8192;
-/// Normalized prose length required before a solid pin is stored (short turns stay best-effort).
-const SOLID_PIN_MIN_CHARS: usize = 64;
 
 #[derive(Default)]
 struct AcceptedNarrations {
@@ -79,49 +72,6 @@ impl AcceptedNarrations {
     fn forget_session(&mut self, session: &str) {
         self.order
             .retain(|(id, owner)| owner.as_deref() != Some(session) || !self.seen.remove(id));
-    }
-}
-
-/// First solid detect wins per `(session_tag, message_key)` for the turn.
-#[derive(Default)]
-struct LanguagePins {
-    map: HashMap<(String, String), String>,
-    order: VecDeque<(String, String)>,
-}
-
-impl LanguagePins {
-    fn get(&self, session: &str, message_key: &str) -> Option<&str> {
-        self.map
-            .get(&(session.to_string(), message_key.to_string()))
-            .map(String::as_str)
-    }
-
-    /// Insert only when absent. FIFO-evict at cap.
-    fn try_insert(&mut self, session: String, message_key: String, language: String) {
-        let key = (session, message_key);
-        if self.map.contains_key(&key) {
-            return;
-        }
-        self.map.insert(key.clone(), language);
-        self.order.push_back(key);
-        while self.order.len() > LANGUAGE_PINS_MAX {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
-        }
-    }
-
-    /// Drop pins for `session` and sticky sibling `grok-stop:{session}`.
-    fn forget_session(&mut self, session: &str) {
-        let sticky = format!("{GROK_STOP_STICKY_PREFIX}{session}");
-        self.order.retain(|(s, k)| {
-            if s == session || s == sticky.as_str() {
-                self.map.remove(&(s.clone(), k.clone()));
-                false
-            } else {
-                true
-            }
-        });
     }
 }
 
@@ -203,11 +153,8 @@ fn pick_agent_voice(
 enum QueueAction {
     Speech {
         text: String,
-        /// Turn-so-far corpus for language detect when no pin yet; capped at enqueue.
-        /// Does not count toward `pending_bytes`.
-        detection_text: Option<String>,
-        /// Per-turn pin key; absent → no pin map entry (MCP Speak path).
-        message_key: Option<String>,
+        /// ISO code detected for this chunk at admit; clamped to the live model at play.
+        language: String,
         voice: Option<String>,
         rate: Option<f32>,
     },
@@ -217,7 +164,6 @@ enum QueueAction {
 impl QueueAction {
     fn pending_bytes(&self) -> usize {
         match self {
-            // detection_text is not counted (pin/detect context only).
             Self::Speech { text, .. } => text.len(),
             Self::Earcon(_) => 0,
         }
@@ -351,8 +297,6 @@ pub struct TtsQueue {
     queue_depth: AtomicU64,
     /// Lock before `items` (see enqueue_narration).
     accepted_narrations: Mutex<AcceptedNarrations>,
-    /// Per-turn language pins. Never hold with `items`; take after `accepted_narrations` drops.
-    language_pins: Mutex<LanguagePins>,
     cv: Condvar,
     /// Barge/pause gen; worker abandons when gen advances.
     generation: AtomicU64,
@@ -402,7 +346,6 @@ impl TtsQueue {
             items: Mutex::new(VecDeque::new()),
             queue_depth: AtomicU64::new(0),
             accepted_narrations: Mutex::new(AcceptedNarrations::default()),
-            language_pins: Mutex::new(LanguagePins::default()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
             paused: Mutex::new(PausedState::default()),
@@ -470,7 +413,6 @@ impl TtsQueue {
             items: Mutex::new(VecDeque::new()),
             queue_depth: AtomicU64::new(0),
             accepted_narrations: Mutex::new(AcceptedNarrations::default()),
-            language_pins: Mutex::new(LanguagePins::default()),
             cv: Condvar::new(),
             generation: AtomicU64::new(0),
             paused: Mutex::new(PausedState::default()),
@@ -514,12 +456,11 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(());
         }
-        // MCP Speak / oneshot: detection corpus is the spoken text; no pin map entry.
+        // MCP Speak / greeting: the chunk is all there is, so it stands on its own text.
         self.enqueue_action(
             QueueAction::Speech {
+                language: self.chunk_language(&text, None),
                 text,
-                detection_text: None,
-                message_key: None,
                 voice,
                 rate,
             },
@@ -682,7 +623,7 @@ impl TtsQueue {
     }
 
     /// Admit narration by id once. Dup id → Ok even if queue full; rejected first stays retryable.
-    /// Optional `detection_text` / `message_key` drive turn-level language pin-at-admit.
+    /// Optional `detection_text` is the turn corpus behind this chunk's language.
     pub fn enqueue_narration(
         &self,
         text: String,
@@ -690,7 +631,6 @@ impl TtsQueue {
         session: Option<String>,
         narration_id: Option<String>,
         detection_text: Option<String>,
-        message_key: Option<String>,
     ) -> Result<(), String> {
         if text.len() > MAX_SPEAK_BYTES {
             return Err(format!("text exceeds the {MAX_SPEAK_BYTES}-byte limit"));
@@ -703,11 +643,9 @@ impl TtsQueue {
         let detection_text = detection_text
             .filter(|s| !s.trim().is_empty())
             .map(ds_narrate::cap_detection_text);
-        let message_key = message_key.filter(|k| !k.is_empty());
         let action = QueueAction::Speech {
-            text: text.clone(),
-            detection_text: detection_text.clone(),
-            message_key: message_key.clone(),
+            language: self.chunk_language(&text, detection_text.as_deref()),
+            text,
             voice: None,
             rate: None,
         };
@@ -719,49 +657,19 @@ impl TtsQueue {
             }
             // Lock order: accepted_narrations before items (existing).
             self.enqueue_action(action, source, session.clone())?;
-            accepted.insert(id, session.clone());
-            drop(accepted);
+            accepted.insert(id, session);
         } else {
-            self.enqueue_action(action, source, session.clone())?;
+            self.enqueue_action(action, source, session)?;
         }
-
-        // Pin only after items is released (see the `language_pins` field).
-        let corpus = detection_text.as_deref().unwrap_or(text.as_str());
-        self.try_pin_language_at_admit(session.as_deref(), message_key.as_deref(), corpus);
         Ok(())
     }
 
-    /// Pin the turn's language from `corpus` when its normalized prose is long enough.
-    fn try_pin_language_at_admit(
-        &self,
-        session: Option<&str>,
-        message_key: Option<&str>,
-        corpus: &str,
-    ) {
-        let Some(message_key) = message_key else {
-            return;
-        };
-        let session_tag = session.unwrap_or("");
-        // Cheap map probe before normalizing up to 10 KiB: every later digest of an
-        // already-pinned turn re-enters here on the IPC thread and would redo that work.
-        {
-            let pins = self.language_pins.lock().unwrap();
-            if pins.get(session_tag, message_key).is_some() {
-                return;
-            }
-        }
-        let prose_len = ds_tts::normalize_spoken_text(corpus).chars().count();
-        if prose_len < SOLID_PIN_MIN_CHARS {
-            return;
-        }
-        // Config Copy, drop before detect (same pattern as play_speech).
+    /// Language for one chunk, decided at admit so the queued item carries it. `corpus` is
+    /// the turn text the producer sent, used only when the chunk cannot classify itself.
+    fn chunk_language(&self, text: &str, corpus: Option<&str>) -> String {
+        // Config Copy, so the lock drops before detection runs (same as play_speech).
         let model = self.config.lock().unwrap().tts_model;
-        let language = ds_tts::detect_language(corpus, model);
-        self.language_pins.lock().unwrap().try_insert(
-            session_tag.to_string(),
-            message_key.to_string(),
-            language,
-        );
+        ds_tts::chunk_language(text, corpus, model)
     }
 
     pub fn forget_narration_session(&self, session: &str) {
@@ -769,7 +677,6 @@ impl TtsQueue {
             .lock()
             .unwrap()
             .forget_session(session);
-        self.language_pins.lock().unwrap().forget_session(session);
     }
 
     /// Claim under `items` lock: gen snapshot + playing publish so clears can't race mid-claim.
@@ -1288,10 +1195,13 @@ impl TtsQueue {
 
             match &item.action {
                 QueueAction::Speech {
-                    text, voice, rate, ..
+                    text,
+                    language,
+                    voice,
+                    rate,
                 } => {
                     let (outcome, resume_skip) =
-                        self.play_speech(&item, gen0, text, voice.as_ref(), *rate);
+                        self.play_speech(&item, gen0, text, language, voice.as_ref(), *rate);
                     item.resume_skip = resume_skip;
                     if outcome == SpeechOutcome::Requeue {
                         self.requeue_if_resuming(item, gen0);
@@ -1316,46 +1226,22 @@ impl TtsQueue {
         }
     }
 
-    /// Language for one item: turn pin → else detect on its corpus (falling back to the
-    /// spoken text) → always clamp to `model`. The clamp is what covers a model switch
-    /// between admit and play: the pin was detected under the admit-time model's language
-    /// set, and a code the live model can't speak resolves to that model's default.
-    fn resolve_language(&self, item: &Item, text: &str, model: ds_config::TtsModel) -> String {
-        let session_tag = item.session.as_deref().unwrap_or("");
-        let (detection_text, message_key) = match &item.action {
-            QueueAction::Speech {
-                detection_text,
-                message_key,
-                ..
-            } => (detection_text.as_deref(), message_key.as_deref()),
-            QueueAction::Earcon(_) => (None, None),
-        };
-        let pinned = message_key.and_then(|key| {
-            self.language_pins
-                .lock()
-                .unwrap()
-                .get(session_tag, key)
-                .map(str::to_string)
-        });
-        let language = match pinned {
-            Some(code) => code,
-            None => ds_tts::detect_language(detection_text.unwrap_or(text), model),
-        };
-        ds_tts::supported_language(&language, model)
-    }
-
     /// Play speech; one retry on warm-child transport loss (reload mid-write).
     fn play_speech(
         &self,
         item: &Item,
         gen0: u64,
         text: &str,
+        language: &str,
         voice_override: Option<&String>,
         rate_override: Option<f32>,
     ) -> (SpeechOutcome, usize) {
-        // Read the model as a Copy local so the config lock drops before detection runs.
+        // Read the model as a Copy local so the config lock drops before the clamp.
         let model = self.config.lock().unwrap().tts_model;
-        let language = self.resolve_language(item, text, model);
+        // The item's language was detected under the admit-time model's language set; a
+        // model switch since then can leave a code the live model cannot speak, which the
+        // clamp resolves to that model's default.
+        let language = ds_tts::supported_language(language, model);
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
@@ -1876,8 +1762,7 @@ mod tests {
     fn should_requeue_only_when_paused_and_nonempty() {
         let speech = QueueAction::Speech {
             text: "the held narration".into(),
-            detection_text: None,
-            message_key: None,
+            language: "en".into(),
             voice: None,
             rate: None,
         };
@@ -1890,8 +1775,7 @@ mod tests {
             true,
             &QueueAction::Speech {
                 text: "   \n\t ".into(),
-                detection_text: None,
-                message_key: None,
+                language: "en".into(),
                 voice: None,
                 rate: None,
             }
@@ -2087,8 +1971,7 @@ mod tests {
         Item {
             action: QueueAction::Speech {
                 text: "x".into(),
-                detection_text: None,
-                message_key: None,
+                language: "en".into(),
                 voice: None,
                 rate: None,
             },
@@ -2284,8 +2167,7 @@ mod tests {
         Item {
             action: QueueAction::Speech {
                 text: text.to_string(),
-                detection_text: None,
-                message_key: None,
+                language: "en".into(),
                 voice: None,
                 rate: None,
             },
@@ -2941,7 +2823,6 @@ mod tests {
                 Some(session.into()),
                 Some(utt.id.clone()),
                 Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
-                Some(utt.message_key.clone()),
             )
         })
         .unwrap();
@@ -2961,7 +2842,6 @@ mod tests {
                     Some(session.into()),
                     Some(utt.id.clone()),
                     Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
-                    Some(utt.message_key.clone()),
                 )
             })
             .unwrap_err();
@@ -2977,7 +2857,6 @@ mod tests {
                 Some(session.into()),
                 Some(utt.id.clone()),
                 Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
-                Some(utt.message_key.clone()),
             )
         })
         .unwrap();
@@ -2998,7 +2877,6 @@ mod tests {
             ClientSource::Unknown,
             Some(session.into()),
             admitted_id,
-            None,
             None,
         )
         .unwrap();
@@ -3874,7 +3752,10 @@ mod tests {
         std::thread::spawn(move || {
             let spoken = item(text);
             let QueueAction::Speech {
-                text, voice, rate, ..
+                text,
+                language,
+                voice,
+                rate,
             } = &spoken.action
             else {
                 unreachable!()
@@ -3883,6 +3764,7 @@ mod tests {
                 &spoken,
                 worker.generation.load(Ordering::SeqCst),
                 text,
+                language,
                 voice.as_ref(),
                 *rate,
             )
@@ -4683,121 +4565,89 @@ mod tests {
         assert_eq!(later, claimed);
     }
 
-    /// English turn corpus ≥ 64 normalized chars; short digests pin English at admit.
+    /// Solid English turn corpus: what a short digest falls back to when it cannot
+    /// classify itself.
     const EN_DETECTION: &str = "This assistant reply is written entirely in clear English prose so language detection has a solid corpus for the whole turn. Short digests alone can false-positive as French or Portuguese.";
+    const IT_QUOTE: &str = "Oggi è una giornata tranquilla e luminosa, e mi fa davvero piacere poter scambiare due parole con te in italiano, una lingua che ha un ritmo caldo e musicale.";
+    const EN_QUOTE: &str = "Today has been a calm and bright sort of day, and it is genuinely a pleasure to trade a few words with you in English, a language with a rather different rhythm.";
+
+    /// Languages of the queued items, in order.
+    fn queued_languages(q: &TtsQueue) -> Vec<String> {
+        q.items
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|item| match &item.action {
+                QueueAction::Speech { language, .. } => Some(language.clone()),
+                QueueAction::Earcon(_) => None,
+            })
+            .collect()
+    }
 
     #[test]
-    fn narration_pins_language_from_detection_text_at_admit() {
+    fn each_narration_chunk_carries_its_own_language() {
+        // Both quotes of one reply arrive under the same turn corpus; the second must not
+        // inherit the first's language.
         let q = mk_queue();
         q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
-        let session = Some("sess-en".to_string());
-        let key = "msg-1";
-        // Short spoken digest that alone is a FR/PT false-friend risk.
+        let corpus = format!("> {IT_QUOTE}\n\n> {EN_QUOTE}");
+        for (i, quote) in [IT_QUOTE, EN_QUOTE].iter().enumerate() {
+            q.enqueue_narration(
+                (*quote).into(),
+                ClientSource::ClaudeCode,
+                Some("sess".into()),
+                Some(format!("n{i}")),
+                Some(corpus.clone()),
+            )
+            .unwrap();
+        }
+        assert_eq!(queued_languages(&q), vec!["it", "en"]);
+    }
+
+    #[test]
+    fn a_digest_that_cannot_classify_itself_takes_the_turn_corpus() {
+        let q = mk_queue();
+        q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
+        // Short FR/PT false-friend digest inside an English turn.
         q.enqueue_narration(
             "Bon courage.".into(),
             ClientSource::ClaudeCode,
-            session.clone(),
+            Some("sess".into()),
             Some("n1".into()),
             Some(EN_DETECTION.into()),
-            Some(key.into()),
         )
         .unwrap();
-        assert_eq!(
-            q.language_pins
-                .lock()
-                .unwrap()
-                .get("sess-en", key)
-                .map(str::to_string),
-            Some("en".into()),
-            "solid English corpus must pin en at admit"
-        );
-
-        // Second narration same key reuses pin (first solid wins).
+        // Same digest with no corpus behind it: English, never a coin flip.
         q.enqueue_narration(
-            "Oui.".into(),
+            "Bon courage.".into(),
             ClientSource::ClaudeCode,
-            session.clone(),
+            Some("sess".into()),
             Some("n2".into()),
-            Some("Different longer corpus that would detect differently if re-pinned — but first pin wins for this message key and session pair always.".into()),
-            Some(key.into()),
+            None,
         )
         .unwrap();
-        assert_eq!(
-            q.language_pins.lock().unwrap().get("sess-en", key),
-            Some("en"),
-            "first solid pin must not be overwritten"
-        );
-
-        // Independent message_key.
-        q.enqueue_narration(
-            "Hola.".into(),
-            ClientSource::ClaudeCode,
-            session,
-            Some("n3".into()),
-            Some(
-                "Esta respuesta del asistente está escrita completamente en español para que la detección fije el idioma del turno correctamente sin ambigüedad."
-                    .into(),
-            ),
-            Some("msg-2".into()),
-        )
-        .unwrap();
-        assert_eq!(
-            q.language_pins.lock().unwrap().get("sess-en", "msg-2"),
-            Some("es")
-        );
-        assert_eq!(
-            q.language_pins.lock().unwrap().get("sess-en", key),
-            Some("en"),
-            "other keys stay independent"
-        );
+        assert_eq!(queued_languages(&q), vec!["en", "en"]);
     }
 
     #[test]
-    fn short_detection_corpus_does_not_pin() {
+    fn mcp_enqueue_classifies_the_spoken_text() {
         let q = mk_queue();
-        q.enqueue_narration(
-            "Hi.".into(),
-            ClientSource::Unknown,
-            Some("s".into()),
-            Some("id".into()),
-            Some("Too short for a solid pin.".into()),
-            Some("k".into()),
-        )
-        .unwrap();
-        assert!(
-            q.language_pins.lock().unwrap().get("s", "k").is_none(),
-            "prose under {SOLID_PIN_MIN_CHARS} chars must not pin"
-        );
-    }
-
-    #[test]
-    fn mcp_enqueue_leaves_detection_fields_none() {
-        let q = mk_queue();
-        q.enqueue(
-            "hello from MCP".into(),
-            None,
-            None,
-            ClientSource::Unknown,
-            Some("s".into()),
-        )
-        .unwrap();
-        let items = q.items.lock().unwrap();
-        match &items[0].action {
-            QueueAction::Speech {
-                detection_text,
-                message_key,
-                ..
-            } => {
-                assert!(detection_text.is_none());
-                assert!(message_key.is_none());
-            }
-            other => panic!("expected speech, got {other:?}"),
+        q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
+        for text in ["hello from MCP", IT_QUOTE] {
+            q.enqueue(
+                text.into(),
+                None,
+                None,
+                ClientSource::Unknown,
+                Some("s".into()),
+            )
+            .unwrap();
         }
-        assert!(q.language_pins.lock().unwrap().map.is_empty());
+        assert_eq!(queued_languages(&q), vec!["en", "it"]);
     }
 
     #[test]
-    fn detection_text_over_limit_is_truncated_not_rejected() {
+    fn detection_corpus_over_limit_is_truncated_not_rejected() {
         let q = mk_queue();
         let huge = format!("{}{}", EN_DETECTION, "x".repeat(MAX_SPEAK_BYTES));
         assert!(huge.len() > MAX_SPEAK_BYTES);
@@ -4807,170 +4657,35 @@ mod tests {
             Some("s".into()),
             Some("id".into()),
             Some(huge),
-            Some("k".into()),
         )
         .unwrap();
-        let items = q.items.lock().unwrap();
-        match &items[0].action {
-            QueueAction::Speech {
-                detection_text: Some(det),
-                ..
-            } => {
-                assert!(det.len() <= MAX_SPEAK_BYTES);
-            }
-            other => panic!("expected capped detection_text, got {other:?}"),
-        }
+        assert_eq!(q.items.lock().unwrap().len(), 1);
     }
 
     #[test]
-    fn forget_narration_session_clears_real_and_sticky_pins() {
+    fn forget_narration_session_readmits_that_sessions_ids() {
         let q = mk_queue();
-        q.enqueue_narration(
-            "a".into(),
-            ClientSource::Grok,
-            Some("real".into()),
-            Some("id1".into()),
-            Some(EN_DETECTION.into()),
-            Some("m1".into()),
-        )
-        .unwrap();
-        q.enqueue_narration(
-            "b".into(),
-            ClientSource::Grok,
-            Some("grok-stop:real".into()),
-            Some("id2".into()),
-            Some(EN_DETECTION.into()),
-            Some("m2".into()),
-        )
-        .unwrap();
-        q.enqueue_narration(
-            "c".into(),
-            ClientSource::Grok,
-            Some("other".into()),
-            Some("id3".into()),
-            Some(EN_DETECTION.into()),
-            Some("m3".into()),
-        )
-        .unwrap();
-        assert!(q.language_pins.lock().unwrap().get("real", "m1").is_some());
-        assert!(
-            q.language_pins
-                .lock()
-                .unwrap()
-                .get("grok-stop:real", "m2")
-                .is_some()
-        );
+        let admit = |session: &str, id: &str| {
+            q.enqueue_narration(
+                "a".into(),
+                ClientSource::Grok,
+                Some(session.into()),
+                Some(id.into()),
+                None,
+            )
+            .unwrap();
+        };
+        admit("real", "id1");
+        admit("grok-stop:real", "id2");
+        admit("other", "id3");
+        q.edit_items_for_test(|q| q.clear());
+
         q.forget_narration_session("real");
-        assert!(q.language_pins.lock().unwrap().get("real", "m1").is_none());
-        assert!(
-            q.language_pins
-                .lock()
-                .unwrap()
-                .get("grok-stop:real", "m2")
-                .is_none()
-        );
-        assert!(
-            q.language_pins.lock().unwrap().get("other", "m3").is_some(),
-            "unrelated session pins must remain"
-        );
-    }
-
-    #[test]
-    fn stop_style_keys_do_not_cross_pin() {
-        let q = mk_queue();
-        let body_en = EN_DETECTION;
-        let body_es = "Esta respuesta del asistente está escrita completamente en español para que la detección fije el idioma del turno de forma estable y sin ambigüedad alguna.";
-        let key_en = "stop:aaaaaaaaaaaaaaaa";
-        let key_es = "stop:bbbbbbbbbbbbbbbb";
-        q.enqueue_narration(
-            "Short.".into(),
-            ClientSource::ClaudeCode,
-            Some("s".into()),
-            Some("s1".into()),
-            Some(body_en.into()),
-            Some(key_en.into()),
-        )
-        .unwrap();
-        q.enqueue_narration(
-            "Corto.".into(),
-            ClientSource::ClaudeCode,
-            Some("s".into()),
-            Some("s2".into()),
-            Some(body_es.into()),
-            Some(key_es.into()),
-        )
-        .unwrap();
-        assert_eq!(q.language_pins.lock().unwrap().get("s", key_en), Some("en"));
-        assert_eq!(q.language_pins.lock().unwrap().get("s", key_es), Some("es"));
-    }
-
-    #[test]
-    fn language_pins_fifo_evict_at_cap() {
-        let mut pins = LanguagePins::default();
-        for i in 0..(LANGUAGE_PINS_MAX + 2) {
-            pins.try_insert(format!("s{i}"), "k".into(), "en".into());
-        }
-        assert_eq!(pins.order.len(), LANGUAGE_PINS_MAX);
-        assert!(pins.get("s0", "k").is_none(), "oldest pin FIFO-evicted");
-        assert!(pins.get("s1", "k").is_none());
-        assert!(
-            pins.get(&format!("s{}", LANGUAGE_PINS_MAX + 1), "k")
-                .is_some()
-        );
-    }
-
-    fn spoken_item(text: &str, message_key: Option<&str>) -> Item {
-        Item {
-            action: QueueAction::Speech {
-                text: text.into(),
-                detection_text: None,
-                message_key: message_key.map(str::to_string),
-                voice: None,
-                rate: None,
-            },
-            source: ClientSource::Unknown,
-            session: Some("s".into()),
-            resume_skip: 0,
-        }
-    }
-
-    #[test]
-    fn resolve_language_prefers_the_turn_pin_over_the_digest() {
-        let q = mk_queue();
-        let model = ds_config::TtsModel::Kokoro;
-        q.config.lock().unwrap().tts_model = model;
-        q.language_pins
-            .lock()
-            .unwrap()
-            .try_insert("s".into(), "m".into(), "en".into());
-        // Short French-looking digest inside an English turn: the pin decides.
-        let pinned = spoken_item("Bon courage.", Some("m"));
-        assert_eq!(q.resolve_language(&pinned, "Bon courage.", model), "en");
-        // Same digest under an unpinned key falls back to per-item detection.
-        let unpinned = spoken_item("Bon courage.", Some("other"));
-        assert_eq!(
-            q.resolve_language(&unpinned, "Bon courage.", model),
-            ds_tts::detect_language("Bon courage.", model)
-        );
-    }
-
-    #[test]
-    fn resolve_language_clamps_a_pin_the_live_model_cannot_speak() {
-        let q = mk_queue();
-        // Pinned while Chatterbox was active: `ru` is in its set but not Kokoro's.
-        q.language_pins
-            .lock()
-            .unwrap()
-            .try_insert("s".into(), "m".into(), "ru".into());
-        let item = spoken_item("Короткая реплика.", Some("m"));
-        assert_eq!(
-            q.resolve_language(&item, "Короткая реплика.", ds_config::TtsModel::Chatterbox),
-            "ru"
-        );
-        assert_eq!(
-            q.resolve_language(&item, "Короткая реплика.", ds_config::TtsModel::Kokoro),
-            ds_config::TtsModel::Kokoro.descriptor().default_language,
-            "model switch between admit and play clamps to the live model's default"
-        );
+        // Only that session's ids are released; other sessions (including the Grok sticky
+        // sibling, which SessionEnd reclaims on its own) keep deduping.
+        admit("real", "id1");
+        admit("grok-stop:real", "id2");
+        admit("other", "id3");
+        assert_eq!(q.items.lock().unwrap().len(), 1);
     }
 }

@@ -27,7 +27,8 @@ pub fn cap_detection_text(s: String) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUtterance {
     pub text: String,
-    /// Turn text so far for language detection, capped at [`DETECTION_TEXT_MAX_BYTES`].
+    /// Turn text so far, capped at [`DETECTION_TEXT_MAX_BYTES`]. The engine classifies
+    /// `text` on its own and reaches for this only when that is too short to decide.
     pub detection_text: String,
 }
 

@@ -32,7 +32,7 @@ pub(crate) mod vocab;
 #[doc(hidden)]
 pub mod wav;
 
-pub use language::{DEFAULT_LANGUAGE, detect_language, supported_language};
+pub use language::{DEFAULT_LANGUAGE, chunk_language, detect_language, supported_language};
 pub use vocab::SAMPLE_RATE;
 
 /// Re-export from `ds-voices` (issue #5) — CLI lists voices without this heavy crate.

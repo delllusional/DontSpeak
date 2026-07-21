@@ -22,7 +22,7 @@ Canonical path from assistant text to built-in or system speech. Streaming mecha
 | Assistant text | Client hooks / Codex subscriber / MCP `speak` | Streamed batches or final utterance |
 | Narration select | `ds-narrate` | Emit completed top-level blockquotes once; optional short non-quote final; preserve selected text for the shared frontend |
 | Delivery | Hook/MCP IPC or in-process Codex | `SpeakNarration` / `Speak` / direct enqueue |
-| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect and pin one ISO language per **turn** (`message_key`), speak per utterance under that pin |
+| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect one ISO language per **utterance** at admit and carry it on the queued item |
 | Text frontend | `ds-tts` | One GFM → prose cleanup for every route; model-capability frontend → bounded typed chunks; System stops at prose |
 | Synthesis | `ds-helper` (built-in) / OS voice (System) | Selected built-in model → ORT CPU everywhere or a supported accelerator; System → `say` / SAPI / spd-say |
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
@@ -36,15 +36,18 @@ the English fallback for ambiguous or unspeakable input). No utterance is refuse
 language — the model is never changed to fit a detected language, but the **voice** is
 (see [Voice selection](#voice-selection)).
 
-**Turn-level language pin.** Streaming and Stop narration admit each spoken digest with
-optional `detection_text` (reconstructed message-so-far, capped at 10 KiB) and
-`message_key` (stream item id, or `stop:` + sha256 prefix of the full Stop body). At
-`enqueue_narration` the engine detects on that corpus and, when normalized prose is
-≥ 64 characters, pins the ISO code for `(session, message_key)` (first solid pin wins).
-`play_speech` uses the pin when present, otherwise detects on the item corpus / spoken
-text, then always clamps with `supported_language` for the live model. MCP `Speak` is
-unchanged (one-shot; no pin map). Short-only turns below the solid threshold stay
-best-effort and may still false-positive — that is accepted, not a regression.
+**Per-utterance language.** Every queued speech item carries the ISO code decided when it
+was admitted, so a reply that switches language is voiced per utterance instead of under
+one turn-wide verdict. `ds_tts::chunk_language` decides it: the utterance's own prose when
+whatlang calls that reliable or its confidence clears 0.3, else the turn corpus when that
+is reliable, else English. Streaming and Stop narration supply the corpus as
+`detection_text` (reconstructed message-so-far, capped at 10 KiB); MCP `Speak` has none
+and stands on its spoken text. The confidence floor is what keeps a one-line English
+digest out of a French voice — such misfires sit under 0.25, while short prose that really
+is Romance clears 0.3 (`digest_confidence_separates_english_from_the_rest`). A digest with
+neither its own evidence nor a corpus is spoken English rather than a coin flip.
+`play_speech` clamps the carried code with `supported_language`, which covers a model
+switch between admit and play.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
 Codex (in-process). Streaming routes retry rejected work; no route yet propagates
