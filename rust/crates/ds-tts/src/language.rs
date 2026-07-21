@@ -95,7 +95,7 @@ fn detector_for(model: ds_config::TtsModel) -> &'static Detector {
 
 /// Detect the language of `text` scoped to `model`'s supported set; ambiguous / unspeakable
 /// → `en`. Because the allowlist is derived from `descriptor().languages` and
-/// [`language_code`] is its exact inverse, every non-fallback result is a language the model
+/// `language_code` is its exact inverse, every non-fallback result is a language the model
 /// can speak. The `en` fallback is valid because every built-in model supports `en`.
 pub fn detect_language(text: &str, model: ds_config::TtsModel) -> String {
     let prose = crate::normalize_spoken_text(text);
