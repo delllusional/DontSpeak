@@ -30,6 +30,8 @@
         <NavigationView.Resources>
             <!-- Brand-purple selection underline under the top tabs (the DontSpeak seed color). -->
             <SolidColorBrush x:Key="NavigationViewSelectionIndicatorForeground" Color="#5B4397" />
+            <!-- No PaneCustomContent: release the template's otherwise-empty 48 px slot. -->
+            <x:Double x:Key="TopNavigationViewPaneCustomContentMinWidth">0</x:Double>
         </NavigationView.Resources>
         <NavigationView.MenuItems>
             <NavigationViewItem Content="{loc:Loc Key=common.nav_agents}" Tag="agents" IsSelected="True" />
