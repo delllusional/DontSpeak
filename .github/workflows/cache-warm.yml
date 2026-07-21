@@ -1,0 +1,127 @@
+name: Cache warm
+
+# NOT a gate. This workflow asserts nothing and blocks nothing — it only fills caches.
+# `.github/workflows/ci.yml` stays the source of truth for what must pass (AGENTS.md § Gates).
+#
+# Why it has to exist: GitHub scopes every cache entry to the ref that wrote it, with the
+# DEFAULT BRANCH as the only cross-ref fallback. Release builds run on tag refs and per-commit
+# CI is Linux-only, so nothing on main had ever written the macOS/Windows entries a release
+# wants — `Swatinem/rust-cache` logged "No cache found" in every release run, and every release
+# recompiled the whole dependency graph plus mlx-swift from source. Running the SAME builds
+# nightly on main gives the tag runs something to restore.
+#
+# The keys here must stay in lockstep with release.yml (rust-cache `shared-key`, and the MLX
+# dylib path/key below). A mismatch is silent: the release just goes cold again.
+
+on:
+  schedule:
+    - cron: '20 5 * * *'   # nightly, well clear of working hours in any timezone
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+# One warm run at a time; a queued nightly has nothing to add to the one already building.
+concurrency:
+  group: cache-warm
+  cancel-in-progress: true
+
+jobs:
+  # ── Cargo dependency graph, per release target ──────────────────────────────
+  # Same commands the release jobs run, so the same crates land in the cache. rust-cache
+  # keeps dependency artifacts and drops this workspace's own crates, so the payload is the
+  # expensive, rarely-changing half.
+  rust:
+    name: cargo deps (${{ matrix.shared-key }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            shared-key: macos-arm64
+            triple: aarch64-apple-darwin
+          - os: macos-26
+            shared-key: macos-x86_64
+            triple: x86_64-apple-darwin
+          - os: windows-2025
+            shared-key: windows-x64
+            arch: x64
+          - os: windows-2025
+            shared-key: windows-arm64
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/ring-asm-windows
+        if: runner.os == 'Windows'
+
+      # Same pin as the release jobs — a cache built by a different rustc is a cache miss.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust -> target
+          shared-key: ${{ matrix.shared-key }}
+
+      # Mirrors build_arch in apps/macos/dist-apps.sh.
+      - name: cargo build (macOS release binaries)
+        if: runner.os == 'macOS'
+        working-directory: rust
+        env:
+          # The floor dist-apps.sh exports. Cargo does NOT fingerprint it, so warming with a
+          # different value would poison the release build with wrong-deployment-target objects.
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          rustup target add ${{ matrix.triple }}
+          cargo build --profile release-ffi --locked --target ${{ matrix.triple }} -p ds-core
+          cargo build --release --locked --target ${{ matrix.triple }} -p ds-helper
+          cargo build --release --locked --target ${{ matrix.triple }} -p dontspeak --bin dontspeak
+
+      # Via build-common.ps1, i.e. the exact function build-portable.ps1 calls.
+      - name: cargo build (Windows release binaries)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          . ./apps/windows/installer/build-common.ps1
+          Initialize-BuildEnv
+          $repo = (Resolve-Path .).Path
+          $b = Resolve-BuildArch -Arch '${{ matrix.arch }}' -Repo $repo
+          Invoke-CargoRelease -Repo $repo -CargoTargetArg $b.CargoTargetArg -RustTarget $b.RustTarget
+
+  # ── The Apple silicon MLX shim ──────────────────────────────────────────────
+  # mlx-swift + mlx-audio-swift from source is the single longest step in the release (~12 min).
+  # Its inputs are the pins in Package.resolved, the shim sources, and the Xcode toolchain, so
+  # this rebuilds only when one of those moves — most nights are a cache hit and cost seconds.
+  # Path + key are duplicated from release.yml's restore step ON PURPOSE (a composite action
+  # would hide the key); change them together.
+  mlx-dylib:
+    name: MLX shim dylib (arm64)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Xcode build (MLX cache key input)
+        id: xcode
+        run: echo "id=$(xcodebuild -version | tr -d ' \n')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: |
+            apps/macos/DontSpeakMLX/.build/xcode-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/**', 'apps/macos/DontSpeakMLX/include/**') }}
+
+      # Through bundle-lib.sh, so the cached tree is byte-for-byte what a release build makes.
+      # DONTSPEAK_DIST=1 makes a broken MLX build fail this job instead of silently caching a
+      # degraded (ONNX-CPU-only) result.
+      - name: Build the MLX shim
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          DONTSPEAK_DIST: '1'
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          set -euo pipefail
+          source apps/macos/bundle-lib.sh
+          build_dontspeak_mlx_dylib arm64

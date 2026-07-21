@@ -68,4 +68,35 @@ mlx="$(DONTSPEAK_DIST=0 build_dontspeak_mlx_dylib arm64 2>"$stderr_file")" \
 grep -q "MLX backends unavailable" "$stderr_file" \
   || fail "arm64 development failure did not warn"
 
+# Cached-tree reuse (CI restores one instead of recompiling mlx-swift). Every rejection below
+# must fall through to a real xcodebuild — the stub fails, so "reused" and "rebuilt" are
+# distinguishable by exit status alone.
+derived="$test_dir/DontSpeakMLX/.build/xcode-arm64"
+products="$derived/Build/Products/Release"
+prebuilt="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+mkdir -p "${prebuilt%/*}" "$products/mlx-swift_Cmlx.bundle/Contents/Resources" \
+  "$derived/SourcePackages/checkouts"
+: >"$prebuilt"
+: >"$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+
+lipo() { echo "arm64"; }
+if DONTSPEAK_DIST=1 build_dontspeak_mlx_dylib arm64 >/dev/null 2>"$stderr_file"; then
+  fail "prebuilt tree was reused without DONTSPEAK_MLX_REUSE_PREBUILT"
+fi
+
+mlx="$(DONTSPEAK_DIST=1 DONTSPEAK_MLX_REUSE_PREBUILT=1 build_dontspeak_mlx_dylib arm64 2>"$stderr_file")" \
+  || fail "matching prebuilt arm64 tree was not reused"
+[ "$mlx" = "$prebuilt" ] || fail "reuse returned '$mlx', want '$prebuilt'"
+
+lipo() { echo "x86_64"; }
+if DONTSPEAK_DIST=1 DONTSPEAK_MLX_REUSE_PREBUILT=1 build_dontspeak_mlx_dylib arm64 >/dev/null 2>"$stderr_file"; then
+  fail "prebuilt tree of the wrong arch was reused"
+fi
+
+lipo() { echo "arm64"; }
+rm -rf "$derived/SourcePackages"
+if DONTSPEAK_DIST=1 DONTSPEAK_MLX_REUSE_PREBUILT=1 build_dontspeak_mlx_dylib arm64 >/dev/null 2>"$stderr_file"; then
+  fail "prebuilt tree without the dependency checkouts was reused"
+fi
+
 echo "bundle-lib tests passed"

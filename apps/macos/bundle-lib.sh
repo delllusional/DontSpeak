@@ -75,6 +75,23 @@ mlx_shim_missing() {
   echo "         (BuiltIn TTS/STT degrade to ONNX-CPU)" >&2
 }
 
+# mlx_prebuilt_usable DERIVED SWARCH — is a restored (CI-cached) Xcode product tree shippable?
+# Requires all three things assemble_app harvests: a dylib of the REQUESTED arch, MLX's Metal
+# library, and the dependency checkouts the license bundler reads — a partial cache must
+# rebuild rather than ship a wrong-arch or license-less app. Opt-in via
+# DONTSPEAK_MLX_REUSE_PREBUILT: staleness is the cache key's problem (CI keys on
+# Package.resolved + the shim sources + the Xcode build), so local builds keep rebuilding.
+mlx_prebuilt_usable() {
+  local derived="$1" swarch="$2"
+  [ "${DONTSPEAK_MLX_REUSE_PREBUILT:-0}" = "1" ] || return 1
+  local products="$derived/Build/Products/Release"
+  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+  [ -f "$bin" ] || return 1
+  [ -f "$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ] || return 1
+  [ -d "$derived/SourcePackages/checkouts" ] || return 1
+  lipo -archs "$bin" 2>/dev/null | tr ' ' '\n' | grep -qx "$swarch"
+}
+
 # build_dontspeak_mlx_dylib SWARCH — MLX on arm64; system-speech-only compatibility shim on Intel.
 # Built-in Intel models stay on ORT CPU. The small Intel dylib retains System STT without linking
 # MLX. MLX's Metal shaders are Xcode resources, so build the arm64 product through Xcode.
@@ -107,15 +124,22 @@ build_dontspeak_mlx_dylib() {
   esac
   local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
   local derived="$pkg/.build/xcode-$swarch"
+  local products="$derived/Build/Products/Release"
+  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+  local metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
+  # mlx-swift + mlx-audio-swift compile from source (~12 min) and change only when their
+  # exact pins do — reuse a verified prebuilt tree instead of rebuilding it every release.
+  if mlx_prebuilt_usable "$derived" "$swarch"; then
+    echo "   reusing prebuilt libdontspeak_mlx ($swarch) ← $products" >&2
+    echo "$bin"
+    return 0
+  fi
   if ! (cd "$pkg" && xcodebuild -scheme dontspeak_mlx -destination 'generic/platform=macOS' \
       -configuration Release -derivedDataPath "$derived" ARCHS="$swarch" ONLY_ACTIVE_ARCH=YES \
       build -quiet) >&2; then
     mlx_shim_missing "$swarch build failed" || return 1
     return 0
   fi
-  local products="$derived/Build/Products/Release"
-  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
-  local metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
   # if/else not bare && — missing file must not kill set -e with empty contract.
   if [ -f "$bin" ] && [ -f "$metallib" ]; then
     echo "$bin"

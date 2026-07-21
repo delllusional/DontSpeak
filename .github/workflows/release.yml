@@ -23,6 +23,13 @@ name: Release
 # same string in place, instead of erroring or accumulating duplicates. A real numbered
 # tag (no -dev) publishes as before. See .agents/skills/make-release/SKILL.md.
 #
+# Wall-clock shape: the three build jobs gate on `check` only, so they start immediately and
+# run alongside the full-matrix test gate; the `release` job requires BOTH, so nothing is ever
+# published without green tests. The two macOS slices are a job matrix (max, not sum), and
+# Intel — a compatibility slice with no MLX — is built only for a real version tag. Cargo and
+# mlx-swift compilation is restored from caches that cache-warm.yml writes on main; caches
+# written from a tag ref are invisible to the next tag, so this workflow never saves them.
+#
 # Release body comes from the git tag annotation (`gh release create --notes-from-tag`),
 # not --generate-notes (PR-only and empty for this repo's direct-to-main flow). Real
 # releases use annotated tags with the hand-written notes; lightweight tags fall back
@@ -56,8 +63,13 @@ jobs:
   check:
     name: tag = version guard
     runs-on: ubuntu-latest
+    outputs:
+      macos-arches: ${{ steps.plan.outputs.macos-arches }}
+      mlx-changed: ${{ steps.plan.outputs.mlx-changed }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0   # the MLX baseline below is `git describe` against earlier tags
       - name: Tag matches rust/Cargo.toml version
         if: startsWith(github.ref, 'refs/tags/')
         run: |
@@ -78,16 +90,45 @@ jobs:
           echo "rust/Cargo.toml version=$ver  apps/linux/gtk/Cargo.toml version=$gtk_ver"
           [ "$ver" = "$gtk_ver" ] || { echo "::error::apps/linux/gtk/Cargo.toml version ($gtk_ver) != rust/Cargo.toml version ($ver) — bump it to match"; exit 1; }
 
+      # Downstream selectors, decided once in the job every other job already waits on.
+      - name: Plan the macOS matrix + the MLX test gate
+        id: plan
+        run: |
+          set -euo pipefail
+          # Intel is a compatibility slice (ONNX-CPU, no MLX) that only real users of the
+          # published release need — -dev drafts and manual build-check runs stay Apple silicon.
+          case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
+            tag:*-dev*) arches='["arm64"]' ;;
+            tag:*)      arches='["arm64","x86_64"]' ;;
+            *)          arches='["arm64"]' ;;
+          esac
+          echo "macos-arches=$arches" >> "$GITHUB_OUTPUT"
+          # The DontSpeakMLX suite is ~7 min of Metal xcodebuild whose only inputs live in that
+          # one directory (sources, tests, and the mlx-swift/mlx-audio-swift pins in
+          # Package.resolved). Re-run it when the package moved since the last REAL release —
+          # -dev tags are excluded as baselines because their own runs use this same gate.
+          prev="$(git describe --tags --abbrev=0 --exclude='*-dev*' HEAD^ 2>/dev/null || true)"
+          if [ -z "$prev" ] || ! git diff --quiet "$prev" HEAD -- apps/macos/DontSpeakMLX; then
+            echo "mlx-changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mlx-changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "macos arches=$arches  MLX baseline=${prev:-<none>}"
+
   # ── Tests gate: run the SAME suite as CI, but across ALL THREE OSes, before
-  #    building/publishing (per-commit CI is Linux-only; the release is thorough). ──
+  #    PUBLISHING (per-commit CI is Linux-only; the release is thorough). The build jobs
+  #    deliberately do NOT wait on this — only `release` does, so a 17-minute test matrix
+  #    stops sitting in front of a 40-minute build. ──
   tests:
+    needs: [check]
     uses: ./.github/workflows/ci.yml
     with:
       full-matrix: true
+      mlx-tests: ${{ needs.check.outputs.mlx-changed == 'true' }}
 
   # ── Windows portable zips (self-contained — x64 + ARM64) ────────────────────
   windows:
-    needs: [check, tests]
+    needs: [check]
     runs-on: windows-2025
     strategy:
       fail-fast: false
@@ -115,13 +156,16 @@ jobs:
       # preinstalled rustup default.
       - uses: dtolnay/rust-toolchain@stable
 
-      # key includes matrix.arch: the x64 and arm64 legs cross-compile different Rust
-      # targets from the same job name, so the automatic per-job cache key alone would
-      # conflate them.
+      # shared-key, not the automatic per-job key: this run is on a tag ref, and only an
+      # entry written from the DEFAULT BRANCH is restorable here — cache-warm.yml's nightly
+      # job writes it under exactly this name. It also keeps the x64 and arm64 legs (which
+      # cross-compile different Rust targets from one job name) apart. Keep both sides in
+      # lockstep. save-if: writing from a tag ref is upload time no later tag can ever use.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
-          key: ${{ matrix.arch }}
+          shared-key: windows-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cache NuGet packages
         uses: actions/cache@v6
@@ -149,17 +193,24 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # ── macOS app DMGs (arm64 + x86_64) ─────────────────────────────────────────
+  # ── macOS app zips (arm64 + x86_64) ─────────────────────────────────────────
   # Both slices build on the arm64 macos-26 runner: arm64 native, x86_64 cross-compiled
   # (Rust via the added target, Swift via an x86_64 compiler target). The Intel slice builds
   # only the system-speech Swift shim; built-in TTS/STT retain their ONNX CPU path without MLX.
+  # One job PER SLICE (not dist-apps.sh's serial DONTSPEAK_ARCHES loop) so the two ~20-minute
+  # halves overlap; the asset names inside the zips are unchanged, only the artifact bucket is
+  # per-arch. `check` picks the arch list — Intel only for a real version tag.
   macos:
-    needs: [check, tests]
+    needs: [check]
     runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.check.outputs.macos-arches) }}
     env:
       MACOSX_DEPLOYMENT_TARGET: '14.0'
       OUTDIR: ${{ github.workspace }}/dist
-      DONTSPEAK_ARCHES: 'arm64 x86_64'   # dist-apps.sh builds one .app.zip per arch
+      DONTSPEAK_ARCHES: ${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v7
 
@@ -168,9 +219,14 @@ jobs:
       # preinstalled rustup default.
       - uses: dtolnay/rust-toolchain@stable
 
+      # shared-key + save-if: see the windows job's cache comment — same reasoning, and
+      # cache-warm.yml warms `macos-arm64` / `macos-x86_64` with the very same cargo builds
+      # (and the same MACOSX_DEPLOYMENT_TARGET, which cargo does not fingerprint).
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust -> target
+          shared-key: macos-${{ matrix.arch }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Add Rust apple targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -229,6 +285,29 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
           rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
 
+      # ── Prebuilt MLX shim (arm64 only; the Intel shim is a ~40 s swiftc call) ──
+      # build_dontspeak_mlx_dylib compiles mlx-swift + mlx-audio-swift from source (~12 min).
+      # That output changes only with the Package.resolved pins, the shim sources, or the Xcode
+      # toolchain, so key on exactly those and restore the Xcode product tree instead — a
+      # toolchain bump still recompiles rather than shipping a dylib built by another Xcode.
+      # Restore-only (a tag ref cannot read back what it saved; cache-warm.yml writes this on
+      # main) and NO restore-keys — a partial match would hand a stale dylib to a build that
+      # ships it. bundle-lib.sh re-verifies arch + metallib + license checkouts and rebuilds
+      # when they don't hold. Keep the path/key in lockstep with cache-warm.yml.
+      - name: Xcode build (MLX cache key input)
+        if: matrix.arch == 'arm64'
+        id: xcode
+        run: echo "id=$(xcodebuild -version | tr -d ' \n')" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the prebuilt MLX shim
+        if: matrix.arch == 'arm64'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            apps/macos/DontSpeakMLX/.build/xcode-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/**', 'apps/macos/DontSpeakMLX/include/**') }}
+
       # DONTSPEAK_DIST=1 → bundle libonnxruntime.dylib, hardened-runtime sign inside-out
       # with entitlements, then notarize+staple the .app (via the APPLE_ID trio) and zip it.
       # When unset/0 it ad-hoc-signs and skips notarization — both bundle the app, helper,
@@ -237,6 +316,9 @@ jobs:
       - name: Build app zips (signed + notarized when configured)
         env:
           DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
+          # Take the restored Xcode product tree above when it verifies; freshness is the
+          # cache key's job here, so this stays off for hand-run builds.
+          DONTSPEAK_MLX_REUSE_PREBUILT: '1'
           # Headless runner: never auto-mint a self-signed local-dev cert + codesign with it —
           # that blocks on a keychain-authorization GUI prompt forever. Ad-hoc sign instead when
           # not doing a real Developer-ID dist build. (No-op in dist mode, which skips autosign.)
@@ -249,7 +331,9 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: macos-apps
+          # Per-arch bucket (artifacts are immutable — two matrix legs cannot share a name).
+          # The zip INSIDE keeps its published name, dontspeak-<ver>-macos-<aarch64|x86_64>.app.zip.
+          name: macos-apps-${{ matrix.arch }}
           path: dist/*.app.zip
           if-no-files-found: error
           retention-days: 7
@@ -264,7 +348,7 @@ jobs:
   # genuine test regression in apps/linux/gtk must hard-fail this job and block the
   # `release` job's `needs:` gate, same as windows/macos.
   linux:
-    needs: [check, tests]
+    needs: [check]
     # The GTK host needs a RECENT GNOME stack — libadwaita >= 1.7 (v1_7) + GTK 4.12 +
     # gtk4-layer-shell — which ubuntu-latest (24.04) is too old for. Ubuntu 26.04 ships
     # libadwaita 1.9 / GTK 4.22 and the layer-shell -dev package (matches windows-2025 /
@@ -333,7 +417,9 @@ jobs:
   # ── Publish the GitHub Release with all artifacts ───────────────────────────
   release:
     name: publish release
-    needs: [windows, macos, linux]
+    # The ONE place both gates meet: the full-matrix test suite AND every platform build.
+    # Publishing is what must never happen on red tests; building in parallel with them is free.
+    needs: [tests, windows, macos, linux]
     runs-on: ubuntu-latest
     # Only publish a release for an actual tag push (workflow_dispatch just builds).
     if: startsWith(github.ref, 'refs/tags/')
@@ -385,9 +471,11 @@ jobs:
           esac
           # Windows + macOS are required; Linux packages are best-effort (the linux job
           # is continue-on-error) — nullglob drops them silently if the job produced none.
+          # macos-apps-* is one bucket per built slice: both arches on a real tag, arm64
+          # alone on a -dev draft.
           FILES=(
             artifacts/windows-portable-*/*.zip
-            artifacts/macos-apps/*.app.zip
+            artifacts/macos-apps-*/*.app.zip
             artifacts/linux-packages-*/*
           )
           INSTALLERS=(

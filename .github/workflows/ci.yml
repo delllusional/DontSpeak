@@ -12,7 +12,8 @@ name: CI
 #     (advisories/bans/licenses/sources), so the macOS MLX and Windows CUDA paths
 #     are compiled, linted, and tested on their own OS — and format/doc drift +
 #     dependency-graph issues are cleaned up — before anything is built or published.
-#     release.yml calls this with full-matrix: true.
+#     release.yml calls this with full-matrix: true, plus mlx-tests when the DontSpeakMLX
+#     package itself moved since the last release (see that step's comment).
 #     cargo-deny is release-only, same reasoning as hygiene: it's a considered gate
 #     (license/advisory exceptions need a deliberate deny.toml change, not a reflexive
 #     fix), so it's cheaper to clear once per release than to nag every commit. The
@@ -41,10 +42,18 @@ on:
         description: Run on all three OSes (Linux + Windows + macOS) instead of just Linux.
         type: boolean
         default: false
+      mlx-tests:
+        description: Also run the DontSpeakMLX shim suite (~7 min of Metal xcodebuild).
+        type: boolean
+        default: false
   workflow_call:
     inputs:
       full-matrix:
         description: Run on all three OSes (Linux + Windows + macOS) instead of just Linux.
+        type: boolean
+        default: false
+      mlx-tests:
+        description: Also run the DontSpeakMLX shim suite (~7 min of Metal xcodebuild).
         type: boolean
         default: false
 
@@ -278,8 +287,15 @@ jobs:
             echo "no Swift test targets in apps/macos/Package.swift — skipping"
           fi
 
+      # Gated on mlx-tests, which release.yml's `check` job sets when apps/macos/DontSpeakMLX
+      # differs from the last real release tag. The suite's inputs are that one directory
+      # (sources, tests, and the mlx-swift / mlx-audio-swift versions pinned in
+      # Package.resolved) plus Xcode, which the macos build job still recompiles the shim
+      # against on every image bump — so an unchanged package is already proven by the release
+      # that ran this. Corollary: a red run must be fixed inside the package, or the next tag
+      # skips it as "unchanged".
       - name: xcodebuild test (macOS DontSpeakMLX shim)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.mlx-tests
         env:
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         working-directory: apps/macos/DontSpeakMLX

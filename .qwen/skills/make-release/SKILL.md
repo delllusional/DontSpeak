@@ -128,10 +128,12 @@ done
 
 ## 3 — What runs (`release.yml`)
 
-1. **check** — tag == Cargo version
-2. **tests** — full OS matrix + hygiene (fmt both + rustdoc)
+1. **check** — tag == Cargo version; also picks the macOS slices and the MLX test gate
+2. **tests** — full OS matrix + hygiene (fmt both + rustdoc). Runs ALONGSIDE the builds,
+   which wait on `check` only; **publish** is what requires it
 3. **builds** (parallel): Windows portable zips (unsigned); macOS signed/notarized if
-   `APPLE_*` secrets else ad-hoc; Linux tarballs (upload best-effort)
+   `APPLE_*` secrets else ad-hoc, one job per slice (Intel only on a real tag); Linux
+   tarballs (upload best-effort)
 4. **publish** — assets + fixed-name installers + checksums + body from
    `--notes-from-tag` (the annotation written in step 2), then a soft-fail step
    patches the body's Binaries `…` cells with real published sizes
@@ -223,8 +225,8 @@ commit, annotated-tag, push. Missed sync fails only at **next** tag.
 
 ## 8 — On-demand `-dev` draft
 
-Same full matrix, `--draft` so `releases/latest` ignores it. Replace prior draft tag in
-place. **Same notes as a real release** — step 2's format, on an annotated tag: a draft
+Same full matrix, `--draft` so `releases/latest` ignores it — but Apple silicon only, so
+a draft has **8 assets** (no `macos-x86_64.app.zip`). Replace prior draft tag in place. **Same notes as a real release** — step 2's format, on an annotated tag: a draft
 is what testers install, so it has to say what changed. A lightweight tag makes the body
 the commit message, which reads as an accident.
 
