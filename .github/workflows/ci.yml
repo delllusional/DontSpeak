@@ -24,12 +24,15 @@ name: CI
 
 on:
   # Per-commit + PR test runs (Linux-only — the fast, platform-agnostic majority).
-  # tags-ignore: a tag push carries a commit that already ran this workflow on its branch,
-  # and release.yml re-runs it via workflow_call as the full-matrix gate. Without the
-  # filter both land on the SAME ref, so `concurrency` (cancel-in-progress: false)
+  # Branches only: a tag push carries a commit that already ran this workflow on its
+  # branch, and release.yml re-runs it via workflow_call as the full-matrix gate. Without
+  # the filter both land on the SAME ref, so `concurrency` (cancel-in-progress: false)
   # serializes them and the redundant run delays the release.
+  # Must be `branches: ['**']`, NOT `tags-ignore` — a push trigger carrying only tag
+  # filters stops firing on branch pushes altogether, and silently: a workflow that never
+  # triggers produces no run, no annotation, nothing to notice.
   push:
-    tags-ignore: ['**']
+    branches: ['**']
   pull_request:
   # Manual runs (workflow_dispatch) and the release gate (workflow_call from release.yml)
   # also run tests; the release passes full-matrix: true for all three OSes. Manual runs

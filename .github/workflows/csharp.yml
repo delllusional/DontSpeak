@@ -12,7 +12,9 @@ on:
   push:
     # A tag re-pushes a commit this workflow already checked on its branch, and release.yml
     # does not gate on it — so a tag run is pure duplicate Windows-runner time.
-    tags-ignore: ['**']
+    # Must be `branches: ['**']`, NOT `tags-ignore` — a push trigger carrying only tag
+    # filters stops firing on branch pushes altogether, and silently.
+    branches: ['**']
     paths:
       - 'apps/windows/**'
       - '.github/actions/dotnet-test-winui/**'
