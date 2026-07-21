@@ -160,8 +160,6 @@ public sealed record Activity
     public bool Muted;
     /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
     public string? Speaker;
-    /// Pending TTS queue depth (speech + earcons); excludes in-flight.
-    public ulong Queued;
     // Tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Host fallback only — engine is source of truth.
     public string[] TrayIndicator = { "stt", "tts_animated" };
@@ -203,6 +201,8 @@ public sealed record TtsStats
     public double TtfaMinMs, TtfaAvgMs, TtfaMaxMs;
     public double AudioSecs;
     public int Utterances, Failures;
+    /// Utterances left to say (waiting + in-flight); live, unlike its cumulative siblings.
+    public ulong Queued;
 }
 
 public sealed record SttStats
@@ -283,7 +283,6 @@ internal sealed class HealthSnapshot
                 s.Activity.Speaking = activity.Speaking;
                 s.Activity.Speaker = activity.Speaking ? activity.Speaker : null;
                 s.Activity.Muted = activity.Muted;
-                s.Activity.Queued = activity.Queued;
             }
             // Keep host default when key absent.
             if (dto.TrayIndicator is { } ti)
@@ -324,6 +323,7 @@ internal sealed class HealthSnapshot
                     s.Tts.RtfMin = tts.RtfMin; s.Tts.RtfAvg = tts.RtfAvg; s.Tts.RtfMax = tts.RtfMax;
                     s.Tts.TtfaMinMs = tts.TtfaMinMs; s.Tts.TtfaAvgMs = tts.TtfaAvgMs; s.Tts.TtfaMaxMs = tts.TtfaMaxMs;
                     s.Tts.Utterances = (int)tts.Utterances; s.Tts.AudioSecs = tts.AudioSecs; s.Tts.Failures = (int)tts.Failures;
+                    s.Tts.Queued = tts.Queued;
                 }
                 if (stats.Stt is { } stt)
                 {
@@ -395,7 +395,6 @@ internal sealed record ActivityDto
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
     [JsonPropertyName("speaker")] public string? Speaker { get; init; }
     [JsonPropertyName("muted")] public bool Muted { get; init; }
-    [JsonPropertyName("queued")] public ulong Queued { get; init; }
 }
 
 internal sealed record TtsStatusDto
@@ -440,6 +439,7 @@ internal sealed record TtsStatsDto
     [JsonPropertyName("utterances")] public long Utterances { get; init; }
     [JsonPropertyName("audio_secs")] public double AudioSecs { get; init; }
     [JsonPropertyName("failures")] public long Failures { get; init; }
+    [JsonPropertyName("queued")] public ulong Queued { get; init; }
 }
 
 internal sealed record SttStatsDto

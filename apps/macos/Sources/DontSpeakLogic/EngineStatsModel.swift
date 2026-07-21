@@ -11,6 +11,8 @@ public struct EngineStats: Sendable, Equatable {
         public var utterances: Int = 0
         public var audioSecs: Double = 0
         public var failures: Int = 0
+        /// Utterances left to say (waiting + in-flight); live, unlike its cumulative siblings.
+        public var queued: UInt64 = 0
         public init() {}
     }
 
@@ -47,6 +49,7 @@ public struct EngineStats: Sendable, Equatable {
         s.tts.utterances = dto.tts.utterances
         s.tts.audioSecs = dto.tts.audioSecs
         s.tts.failures = dto.tts.failures
+        s.tts.queued = dto.tts.queued
         s.stt.rtfMin = dto.stt.rtfMin
         s.stt.rtfAvg = dto.stt.rtfAvg
         s.stt.rtfMax = dto.stt.rtfMax
@@ -93,6 +96,7 @@ public struct TtsStatsDTO: Decodable {
     public var utterances: Int
     public var audioSecs: Double
     public var failures: Int
+    public var queued: UInt64
 
     enum CodingKeys: String, CodingKey {
         case rtfMin = "rtf_min"
@@ -104,6 +108,7 @@ public struct TtsStatsDTO: Decodable {
         case utterances
         case audioSecs = "audio_secs"
         case failures
+        case queued
     }
 }
 

@@ -23,10 +23,10 @@ pub struct Widgets {
     tts_row: adw::ExpanderRow,
     tts_dot: gtk::Image,
     tts_runtime: gtk::Label,
-    tts_queue: gtk::Label,
     tts_realtime: gtk::Label,
     tts_first: gtk::Label,
     tts_spoken: gtk::Label,
+    tts_queue: gtk::Label,
     tts_failures: gtk::Label,
     tts_failures_row: adw::ActionRow,
     stt_row: adw::ExpanderRow,
@@ -116,12 +116,12 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     tts_row.add_row(&action_row(&t("status.stats.first_audio"), &tts_first));
     let tts_spoken = value_label();
     tts_row.add_row(&action_row(&t("status.stats.spoken"), &tts_spoken));
+    let tts_queue = value_label();
+    tts_row.add_row(&action_row(&t("status.stats.queue"), &tts_queue));
     let tts_failures = value_label();
     tts_failures.add_css_class("error");
     let tts_failures_row = action_row(&t("status.stats.failures"), &tts_failures);
     tts_row.add_row(&tts_failures_row);
-    let tts_queue = value_label();
-    tts_row.add_row(&action_row(&t("status.stats.queue"), &tts_queue));
     voice_group.add(&tts_row);
 
     let stt_row = adw::ExpanderRow::builder()
@@ -289,10 +289,10 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         tts_row,
         tts_dot,
         tts_runtime,
-        tts_queue,
         tts_realtime,
         tts_first,
         tts_spoken,
+        tts_queue,
         tts_failures,
         tts_failures_row,
         stt_row,
@@ -320,10 +320,10 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         w.stt_row.set_subtitle("");
         for l in [
             &w.tts_runtime,
-            &w.tts_queue,
             &w.tts_realtime,
             &w.tts_first,
             &w.tts_spoken,
+            &w.tts_queue,
             &w.stt_runtime,
             &w.stt_realtime,
             &w.stt_transcribed,
@@ -357,7 +357,6 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     let tts = &s.stats.tts;
     w.tts_runtime
         .set_text(&runtime_text(s.tts.provider.as_deref()));
-    w.tts_queue.set_text(&s.activity.queued.to_string());
     w.tts_realtime.set_text(&crate::ffi::stats_range(
         tts.rtf_min,
         tts.rtf_avg,
@@ -374,6 +373,7 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
     ));
     w.tts_spoken
         .set_text(&crate::ffi::stats_count(tts.utterances, tts.audio_secs));
+    w.tts_queue.set_text(&tts.queued.to_string());
     set_failures(&w.tts_failures_row, &w.tts_failures, tts.failures);
 
     let (stt_name, stt_state, stt_o) = match stt_engine(s) {

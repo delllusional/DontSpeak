@@ -17,7 +17,8 @@ use crate::tts::TtsManager;
 use ds_model::DownloadTarget;
 use ds_status::{
     Activity, DiarizationStatus, Dictation, DictationState, EngineState, EngineStatus, ModelStatus,
-    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, StatusTtsModel, SttStatus, TtsStatus,
+    Stats, StatusSttEngine, StatusTrayKind, StatusTtsEngine, StatusTtsModel, SttStatus,
+    TtsSnapshot, TtsStatus,
 };
 
 /// Status seq + condvar for `WaitModelStatus`. Bump after every status flip.
@@ -340,7 +341,6 @@ pub(crate) fn model_status_json(
             speaking: tts_active,
             speaker: tts_source,
             muted: tts.is_muted(),
-            queued: tts_queued,
         },
         tts: TtsStatus {
             engine: status_tts_engine(resolved_tts),
@@ -371,7 +371,11 @@ pub(crate) fn model_status_json(
             can_paste: dict_has_target,
         },
         stats: Stats {
-            tts: tts_stats.snapshot(),
+            // Depth comes from the queue under `gate.snapshot`, not the stats accumulator.
+            tts: TtsSnapshot {
+                queued: tts_queued,
+                ..tts_stats.snapshot()
+            },
             stt: stt_stats.snapshot(),
             lifetime: lifetime.snapshot(),
         },
@@ -676,7 +680,7 @@ mod tests {
         let value = model_status_json(&shared, &paths, || (true, None, 3));
         // caps events are logged (see `Engine::record_caps`) but never serialized here.
         assert!(value.get("caps_events").is_none());
-        assert_eq!(value["activity"]["queued"], 3);
+        assert_eq!(value["stats"]["tts"]["queued"], 3);
         // SAFETY: restore the three values while ENV_LOCK is still held.
         unsafe {
             match previous_model_dir {
@@ -706,7 +710,7 @@ mod tests {
         assert!(!status.activity.caps);
         assert!(status.activity.recording);
         assert!(status.activity.speaking);
-        assert_eq!(status.activity.queued, 3);
+        assert_eq!(status.stats.tts.queued, 3);
         assert_eq!(status.dictation.text, "live words");
         assert!(!status.dictation.can_paste);
         assert_eq!(status.dictation.state, DictationState::Hidden);

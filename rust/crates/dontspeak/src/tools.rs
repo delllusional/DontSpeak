@@ -281,7 +281,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
             json!({
                 "running": true,
                 "tts_active": activity["speaking"].as_bool().unwrap_or(false),
-                "queued": activity["queued"].as_u64().unwrap_or(0),
+                "queued": status["stats"]["tts"]["queued"].as_u64().unwrap_or(0),
                 "muted": activity["muted"].as_bool().unwrap_or(false),
             })
         }

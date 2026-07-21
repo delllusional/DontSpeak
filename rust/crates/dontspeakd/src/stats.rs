@@ -121,6 +121,8 @@ impl TtsStats {
             utterances: s.utterances,
             audio_secs: s.total_audio_ms / 1000.0,
             failures: s.failures,
+            // Live depth; only `model_status_json` can read the queue, so it overwrites this.
+            queued: 0,
         }
     }
 

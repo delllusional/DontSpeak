@@ -32,7 +32,7 @@ public class HealthSnapshotTests
     {
         var s = Parse("""
             {"seq":42,"activity":{"caps":true,"caps_active":true,
-             "recording":true,"speaking":false,"speaker":null,"muted":true,"queued":4}}
+             "recording":true,"speaking":false,"speaker":null,"muted":true}}
             """);
         Assert.True(s.Activity.EngineRunning);
         Assert.Equal(42UL, s.StatusSeq);
@@ -42,7 +42,6 @@ public class HealthSnapshotTests
         Assert.False(s.Activity.Speaking);
         Assert.Null(s.Activity.Speaker);
         Assert.True(s.Activity.Muted);
-        Assert.Equal(4UL, s.Activity.Queued);
     }
 
     [Fact]
@@ -142,13 +141,14 @@ public class HealthSnapshotTests
     {
         var s = Parse("""
             {"stats":{
-              "tts":{"rtf_avg":1.2,"rtf_min":1.0,"rtf_max":1.5,"utterances":7,"audio_secs":33.5,"failures":2},
+              "tts":{"rtf_avg":1.2,"rtf_min":1.0,"rtf_max":1.5,"utterances":7,"audio_secs":33.5,"failures":2,"queued":4},
               "stt":{"rtf_avg":0.4,"transcriptions":3,"audio_secs":9.0,"failures":1},
               "lifetime":{"tts_secs":100,"stt_secs":50}}}
             """);
         Assert.Equal(1.2, s.Tts.RtfAvg);
         Assert.Equal(7, s.Tts.Utterances);
         Assert.Equal(2, s.Tts.Failures);
+        Assert.Equal(4UL, s.Tts.Queued);
         Assert.Equal(3, s.Stt.Transcriptions);
         Assert.Equal(9.0, s.Stt.AudioSecs);
         Assert.Equal(1, s.Stt.Failures);

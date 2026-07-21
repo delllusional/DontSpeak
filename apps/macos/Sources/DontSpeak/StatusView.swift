@@ -154,13 +154,13 @@ struct StatusView: View {
         case "system":
             EngineStatRow(
                 role: L.t("status.engine.role_tts"), detail: L.t("status.engine.system"),
-                status: core.tts.status, showsQueue: true
+                status: core.tts.status
             ) { TtsStatsContent() }
         case "built_in":
             if let model = core.tts.model {
                 EngineStatRow(
                     role: L.t("status.engine.role_tts"), detail: ttsModelName(model),
-                    status: core.tts.status, showsQueue: true
+                    status: core.tts.status
                 ) { TtsStatsContent() }
             } else {
                 OffEngineRow(role: L.t("status.engine.role_tts"))
@@ -211,10 +211,7 @@ private struct EngineStatRow<Stats: View>: View {
     let role: String
     let detail: String
     let status: EngineStatus
-    /// TTS only: queue depth renders last, below the stats or trouble note.
-    var showsQueue = false
     @ViewBuilder var stats: () -> Stats
-    @Environment(Core.self) private var core
     @State private var expanded = false
 
     var body: some View {
@@ -238,9 +235,6 @@ private struct EngineStatRow<Stats: View>: View {
                         Text(note).glassCaption()
                     } else {
                         stats()
-                    }
-                    if showsQueue {
-                        LabeledContent(L.t("status.stats.queue"), value: "\(core.activity.queued)")
                     }
                 }
             }
@@ -454,6 +448,7 @@ private struct TtsStatsContent: View {
                     s.firstMaxMs / 1000, 1,
                     "status.stats.unit.seconds")
                 statCountRow(L.t("status.stats.spoken"), s.utterances, s.audioSecs)
+                LabeledContent(L.t("status.stats.queue"), value: "\(s.queued)")
                 if s.failures > 0 {
                     LabeledContent(L.t("status.stats.failures"), value: "\(s.failures)").foregroundStyle(.red)
                 }

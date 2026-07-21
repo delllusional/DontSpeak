@@ -816,10 +816,6 @@ public sealed partial class MainWindow : Window
         TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.TtsEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
         if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.TtsEngine.Provider);
         TtsSystemSettingsRow.Visibility = Visibility.Collapsed;
-        // Queue sits outside TtsStatsGrid so depth survives every non-stats path — system
-        // voice, no_data, and trouble. A download is when utterances actually pile up.
-        TtsQueueRow.Visibility = Visibility.Visible;
-        TtsQueue.Text = s.Activity.Queued.ToString(System.Globalization.CultureInfo.InvariantCulture);
         if (ttsTrouble)
             ShowMsg(TtsStatsMsg, TtsStatsGrid, ttsInfo.Word);
         else if (ttsSystem)
@@ -832,6 +828,7 @@ public sealed partial class MainWindow : Window
             TtsSpeed.Text = Native.StatsRange(s.Tts.RtfMin, s.Tts.RtfAvg, s.Tts.RtfMax, 2, "status.stats.unit.times");
             TtsFirst.Text = Native.StatsRange(s.Tts.TtfaMinMs / 1000, s.Tts.TtfaAvgMs / 1000, s.Tts.TtfaMaxMs / 1000, 1, "status.stats.unit.seconds");
             TtsSpoken.Text = Native.StatsCount((ulong)s.Tts.Utterances, s.Tts.AudioSecs);
+            TtsQueue.Text = s.Tts.Queued.ToString(System.Globalization.CultureInfo.InvariantCulture);
             TtsFailuresRow.Visibility = s.Tts.Failures > 0 ? Visibility.Visible : Visibility.Collapsed;
             if (s.Tts.Failures > 0)
                 TtsFailures.Text = s.Tts.Failures.ToString(System.Globalization.CultureInfo.InvariantCulture);

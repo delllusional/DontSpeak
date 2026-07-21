@@ -83,9 +83,6 @@ pub struct Activity {
     /// is not a Usage agent (greet / unknown / DontSpeak).
     pub speaker: Option<ds_client::ClientSource>,
     pub muted: bool,
-    /// Utterances still outstanding: those waiting plus the one being spoken. Cues are not
-    /// counted, so this is "how much is left to say" — `0` exactly when speech has stopped.
-    pub queued: u64,
 }
 
 /// Dictation confirm-panel content and canonical [`DictationState`] mode.
@@ -116,6 +113,11 @@ pub struct TtsSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub audio_secs: f64,
     pub failures: u64,
+    /// Utterances still outstanding: those waiting plus the one being spoken. Cues are not
+    /// counted, so this is "how much is left to say" — `0` exactly when speech has stopped.
+    /// Instantaneous, unlike its cumulative siblings; the engine fills it from the TTS queue,
+    /// not from `TtsStats::snapshot`.
+    pub queued: u64,
 }
 
 /// Live STT RTF stats (`stats.stt`).
@@ -184,7 +186,6 @@ mod tests {
                 speaking: false,
                 speaker: None,
                 muted: false,
-                queued: 0,
             },
             tts: TtsStatus {
                 engine: StatusTtsEngine::System,
@@ -239,8 +240,9 @@ mod tests {
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert_eq!(v["activity"].as_object().unwrap().len(), 7);
-        assert_eq!(v["activity"]["queued"], 0);
+        assert_eq!(v["activity"].as_object().unwrap().len(), 6);
+        assert_eq!(v["stats"]["tts"].as_object().unwrap().len(), 10);
+        assert_eq!(v["stats"]["tts"]["queued"], 0);
         assert_eq!(v["tts"].as_object().unwrap().len(), 5);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
@@ -371,7 +373,6 @@ mod tests {
             speaking in any::<bool>(),
             speaker in prop::option::of(client_source_strategy()),
             muted in any::<bool>(),
-            queued in any::<u64>(),
         ) -> Activity {
             Activity {
                 caps,
@@ -380,7 +381,6 @@ mod tests {
                 speaking,
                 speaker,
                 muted,
-                queued,
             }
         }
     }
@@ -451,6 +451,7 @@ mod tests {
             utterances in any::<u64>(),
             audio_secs in finite_f64(),
             failures in any::<u64>(),
+            queued in any::<u64>(),
         ) -> TtsSnapshot {
             TtsSnapshot {
                 rtf_min,
@@ -462,6 +463,7 @@ mod tests {
                 utterances,
                 audio_secs,
                 failures,
+                queued,
             }
         }
     }
