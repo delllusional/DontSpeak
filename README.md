@@ -1,7 +1,7 @@
 # DontSpeak
 
-Local voice layer for Claude Code, Codex, Qwen Code, Grok, and Kimi Code: the agent speaks
-replies aloud; you dictate back with Caps Lock.
+Local voice layer for Claude Code, Codex, Qwen Code, Grok, Kimi Code, and Hermes
+Agent: the agent speaks replies aloud; you dictate back with Caps Lock.
 
 ## Install
 
@@ -29,11 +29,13 @@ dontspeak codex
 dontspeak qwen
 dontspeak grok
 dontspeak kimi
+dontspeak hermes
 ```
 
 Preserves client args and exit status. Codex interactive launches also prep app-server
 streaming (`codex --remote`). Grok stays a direct `grok` launch; mid-turn digests ride the
-host engine tail of session `updates.jsonl` (config `grok_stream`, default on). Details:
+host engine tail of session `updates.jsonl` (config `grok_stream`, default on). Kimi and
+Hermes are Stop-only (no mid-turn stream). Details:
 [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md) and
 [docs/STREAMING-NARRATION.md](docs/STREAMING-NARRATION.md).
 
@@ -53,7 +55,6 @@ but drop a client: `exclude_clients` in `config.toml`.
   replies can speak whole
 - Caps Lock talk — tap start/stop; double-tap skip/paste-without-Enter; long-press cancel
 - Optional always-listening: [docs/ALWAYS-LISTENING.md](docs/ALWAYS-LISTENING.md)
-- MCP tools for voice/engine/rate/toggles
 - Diarization implemented but hidden (issue #77)
 
 ## Caps Lock gestures

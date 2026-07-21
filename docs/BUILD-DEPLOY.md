@@ -1,7 +1,7 @@
 # Build & deploy
 
-Each OS host runs the engine in-process and spawns a warm synth child. Three runtime
-pieces, three deploy routes — wrong rebuild = stale code that *looks* installed.
+Three runtime pieces, three deploy routes — wrong rebuild = stale code that *looks*
+installed.
 
 ## Pieces per OS
 

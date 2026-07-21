@@ -1,9 +1,9 @@
 # Contributing to DontSpeak
 
-Rust engine/CLI in `rust/` (23 crates, one workspace); thin hosts: SwiftUI
-(`apps/macos/`), WinUI 3 (`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`). See
-[ARCHITECTURE.md](ARCHITECTURE.md) and [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md)
-before testing against a running app — wrong rebuild leaves stale code.
+Rust engine/CLI in `rust/` (25 crates); thin hosts: SwiftUI (`apps/macos/`), WinUI 3
+(`apps/windows/winui/`), GTK4 (`apps/linux/gtk/`). See [ARCHITECTURE.md](ARCHITECTURE.md)
+and [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md) before testing a running app — wrong
+rebuild leaves stale code.
 
 ## Build prerequisites
 

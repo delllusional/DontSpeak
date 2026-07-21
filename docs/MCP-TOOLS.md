@@ -1,8 +1,8 @@
 # MCP tools
 
 Eight tools by default: `speak`, `listen`, `stop`, `mute`, `status`,
-`usage`, `voices`, `set_config` — Tools window order. Source: `ds-tools`
-(`lib.rs` + `descriptions.rs`); parity test pins names/descriptions.
+`usage`, `voices`, `set_config` — Tools window order. Source: `ds-tools`;
+parity test pins names/descriptions.
 
 Client wiring is not an MCP tool — engine converges to `exclude_clients` at boot.
 Manual: `dontspeak wire <client>` / `wire --reconcile`.
@@ -12,9 +12,9 @@ but hidden (issue #77, `DIARIZATION_ENABLED`).
 
 Annotations: `usage` queries provider APIs (`openWorldHint=true`); the rest are local
 only. Read-only: `status`, `usage`, `voices`, `listen`, `diarize`. Idempotent:
-`stop`, `mute`, `set_config`. Destructive when discarding queue/state. `status`,
-`usage`, and `voices`: `structuredContent` + same JSON in text. Stdio: 1 JSON-RPC
-line ≤1 MiB; max 8 concurrent; cancel stops `listen`.
+`stop`, `mute`, `set_config`. `status`, `usage`, and `voices`: `structuredContent` +
+same JSON in text. Stdio: 1 JSON-RPC line ≤1 MiB; max 8 concurrent; cancel stops
+`listen`.
 
 ## speak
 

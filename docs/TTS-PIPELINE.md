@@ -28,13 +28,11 @@ Canonical path from assistant text to built-in or system speech. Streaming mecha
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
 
 Narration selection decides what to speak but does not rewrite it. Every delivery route
-converges on `ds_tts::normalize_spoken_text`, which owns markup, URL, hash, and whitespace
-cleanup once. Backend normalization starts from that prose; it does not duplicate cleanup.
-The `whatlang` detector sees that normalized prose, scoped to the selected model's
-supported languages, so detection only ever yields a language that model can speak (or
-the English fallback for ambiguous or unspeakable input). No utterance is refused for
-language — the model is never changed to fit a detected language, but the **voice** is
-(see [Voice selection](#voice-selection)).
+converges on `ds_tts::normalize_spoken_text` (markup, URL, hash, whitespace once).
+Backend normalization starts from that prose. The `whatlang` detector sees that prose,
+scoped to the selected model's languages, so detection only yields a speakable language
+(or English for ambiguous/unspeakable input). The model is never swapped for language;
+the **voice** is (see [Voice selection](#voice-selection)).
 
 **Per-utterance language.** Every queued speech item carries the ISO code decided when it
 was admitted, so a reply that switches language is voiced per utterance instead of under

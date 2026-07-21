@@ -141,5 +141,3 @@ No daemon-start or URL keys (Grok writes the session files itself).
 - `dontspeakd::codex_stream` / `dontspeakd::grok_stream` → engine/host rebuild
 - `ds-narrate` + hooks (Grok Stop finalize) → CLI; lockstep CLI+host for mid-turn
 - Hook-set change → `dontspeak wire codex` / `dontspeak wire grok` as needed
-
-See [BUILD-DEPLOY.md](BUILD-DEPLOY.md).

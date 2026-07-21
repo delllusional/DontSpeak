@@ -12,9 +12,10 @@ are thin clients over a Unix-domain socket.
 
 ## Workspace layout
 
-- `rust/crates/` — 23 crates (`rust-version = 1.97`). Key: `ds-core` (C ABI),
+- `rust/crates/` — 25 crates (`rust-version = 1.97`). Key: `ds-core` (C ABI),
   `dontspeakd` (engine lib), `dontspeak` (CLI: MCP + hooks + installers),
-  `ds-tools` (MCP catalog), `ds-config` (paths + `config.toml` + client wiring).
+  `ds-tools` (MCP catalog), `ds-config` (paths + `config.toml` + wire registry),
+  `ds-wire` (wire CLI + boot reconcile).
 - `apps/macos/` (SwiftUI), `apps/windows/winui/` (.NET 10), `apps/linux/gtk/`
   (GTK4 + libadwaita) — thin host UIs; engine control is via MCP.
 
@@ -29,8 +30,6 @@ publishes installer assets the site references.
 | Fresh `main`, worktrees, land + close | [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md) |
 | Reasoning effort | [docs/TASK-EFFORT.md](docs/TASK-EFFORT.md) |
 | `Agent:` commit trailer | [docs/COMMIT-ATTRIBUTION.md](docs/COMMIT-ATTRIBUTION.md) |
-
-Shared rules live here; vendor files import them rather than duplicating.
 
 **Always in force:** start every task from freshly pulled `main` unless the task
 names another target. Commit and push work on its feature branch. Land selected
@@ -82,7 +81,7 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 
 - **Config:** `config.toml` under the OS data dir. Never put DontSpeak settings in
   `~/.claude/settings.json` (Claude's hooks + `voice` block only).
-- **No FFI codegen.** uniffi rejected for the 32-fn `ds-core` surface — see
+- **No FFI codegen.** uniffi rejected for the 35-fn `ds-core` surface — see
   [ARCHITECTURE.md § FFI](ARCHITECTURE.md#ffi-boundary). For `model_status`: edit
   `ds-status`, hand-update both mirrors (`apps/windows/winui/Native.cs`,
   `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`), run the round-trip test.

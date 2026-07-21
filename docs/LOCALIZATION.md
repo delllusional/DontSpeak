@@ -1,7 +1,7 @@
 # Localization
 
 User-facing UI strings live in `ds-i18n` and render over the `ds-core` C ABI. English
-is source + fallback; macOS wording is canonical where hosts had drifted.
+is source + fallback.
 
 ## How it works
 

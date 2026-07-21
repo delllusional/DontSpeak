@@ -32,7 +32,7 @@ association until the engine finishes the action.
 ## Platform recovery
 
 - **Linux** — reconnect Pulse/PipeWire echo-cancelled source every 500 ms after read
-  failure; no UI terminal-failure state yet.
+  failure.
 - **Windows** — reconnect WASAPI; resample device rate changes to published rate;
   recoverable error while reconnecting.
 - **macOS System Speech** — phrase reset from shorter hypothesis or 0.65 s gap before
@@ -43,4 +43,3 @@ association until the engine finishes the action.
 
 Covered: resampling/gain, cancel-before-listen, exclusive listen, finalization recovery,
 provider change while always-listening, reconnect rate continuity, newest-only UI.
-Hardware latency percentiles are release-platform work, not unit tests.

@@ -1,9 +1,9 @@
 # dontspeak — Rust workspace
 
-In-process built-in TTS (`ort` + model pipelines + `rodio`); no Python runtime.
-`dontspeakd::engine_run` is a library each OS app hosts via `ds-core` C ABI — no
-standalone daemon. Hooks and MCP are the `dontspeak` binary over `dontspeak.sock`
-(NDJSON); they never load models. Design: [../ARCHITECTURE.md](../ARCHITECTURE.md).
+In-process built-in TTS (`ort` + model pipelines + `rodio`). `dontspeakd::engine_run`
+is a library each OS app hosts via `ds-core` C ABI. Hooks and MCP are the `dontspeak`
+binary over `dontspeak.sock` (NDJSON); they never load models. Design:
+[../ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## Status
 
@@ -17,7 +17,7 @@ standalone daemon. Hooks and MCP are the `dontspeak` binary over `dontspeak.sock
 
 ```
 rust/crates/
-  ds-config/       # paths, config.toml, client wiring, config enums
+  ds-config/       # paths, config.toml, wire registry/shapers, config enums
   ds-client/       # ClientSource enum (leaf: wiring, hooks, IPC, MCP, logs)
   ds-log/          # unified activity log
   ds-earcon/       # OS sound introspection + cue resolution
@@ -26,8 +26,8 @@ rust/crates/
   ds-platform/     # KeyInjector / FrontmostWindow / CapsKeyMonitor per OS
   ds-http/         # bounded blocking HTTP + native trust roots
   ds-agent-usage/  # read-only weekly/monthly coding-agent quotas
-  ds-model/        # download + checksum; ORT session; MLX Audio shim loader
-  ds-voices/       # voice/language enum (no full synth stack)
+  ds-model/        # parallel download + checksum; ORT session; MLX Audio shim loader
+  ds-voices/       # voice/language enum
   ds-tts/          # built-in TTS pipelines: Kokoro, Chatterbox, Qwen, OmniVoice
   ds-stt/          # Parakeet / ClaudeNative / SystemStt
   ds-aec/          # echo-cancelled duplex (VPIO / WASAPI / Pulse)
@@ -38,6 +38,7 @@ rust/crates/
   ds-i18n/         # UI strings (locales/en.yml)
   ds-status/       # model_status contract
   ds-narrate/      # streaming narration core
+  ds-wire/         # client wire CLI + boot reconcile (hooks/MCP)
   ds-core/         # cdylib/staticlib FFI
   dontspeakd/      # engine library (Caps, helper, IPC)
   dontspeak/       # multi-call CLI: MCP / notify / provide / wire / launch

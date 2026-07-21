@@ -39,7 +39,7 @@ terminal after first install for PATH.
 
 ### Claude Code
 
-Normal process; hooks for stream + lifecycle. `--bare` skips hooks/MCP — forwarded as-is.
+Hooks for stream + lifecycle. `--bare` skips hooks/MCP — forwarded as-is.
 
 ### OpenAI Codex
 
@@ -71,8 +71,7 @@ timeouts (registry emits Qwen shape). Cumulative `MessageDisplay`
 ### Grok
 
 Native hook file + Claude-compatible import; Grok dedupes matching bare commands.
-`LaunchMode::Direct`; `hook_streaming` stays false (mid-turn is engine file-tail, not
-`MessageDisplay`).
+`LaunchMode::Direct`; mid-turn is engine file-tail (`hook_streaming` false).
 
 **Mid-turn:** engine `dontspeakd::grok_stream` tails
 `~/.grok/sessions/<encoded-cwd>/<sessionId>/updates.jsonl` for ACP
@@ -99,8 +98,7 @@ plus `mcp_servers.DontSpeak` in the same file. First-use consent pairs are pre-a
 in `~/.hermes/shell-hooks-allowlist.json`. Event remap before TitleCase: `on_session_start`
 → SessionStart, `pre_llm_call` → UserPromptSubmit, `post_llm_call` → Stop,
 `on_session_finalize` → SessionEnd. Provide shape is flat `{"context":…}` (not Claude
-`hookSpecificOutput`). `HERMES_HOME` overrides the client dir. No Hermes STT/TTS
-providers — engine audio only.
+`hookSpecificOutput`). `HERMES_HOME` overrides the client dir.
 
 ## Wiring
 

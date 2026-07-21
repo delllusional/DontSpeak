@@ -27,10 +27,10 @@ Missing/unknown → `unknown`, never fails the hook. MCP identity comes from
 `notify` is async (except Codex: no `async` flag — Codex skips `async: true` hooks,
 so Codex runs sync with tight timeouts). `provide` is always sync.
 
-Claude final reply is not special-cased: streamed via `MessageDisplay`; `Stop`
-witness suppresses re-speech, still queues the earcon. Narration gated by `narrate`
-(`shorts`/`digests`) and `tts_engine != off`. Earcons independent of `narrate`
-(empty sound = off; honor mute). Reply ding defaults to OS chime; needs-input off.
+Claude final reply streams via `MessageDisplay`; `Stop` witness suppresses re-speech
+and still queues the earcon. Narration gated by `narrate` (`shorts`/`digests`) and
+`tts_engine != off`. Earcons independent of `narrate` (empty sound = off; honor mute).
+Reply ding defaults to OS chime; needs-input off.
 
 Other clients reuse this executor with different events/formats — see
 [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).

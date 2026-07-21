@@ -3,8 +3,7 @@
 Hands-free voice loop for Claude Code (and siblings): Caps Lock dictation, spoken
 replies. One native host per OS — macOS (SwiftUI), Windows (WinUI), Linux (GTK4) —
 links the same Rust engine **in-process** via `ds-core` C ABI. Hooks and MCP are
-thin clients over Unix-domain socket (`ds-ipc`, NDJSON). All three hosts ship in CI;
-macOS is the most polished.
+thin clients over Unix-domain socket (`ds-ipc`, NDJSON).
 
 ## In-process engine
 
@@ -30,7 +29,7 @@ Two fields each, resolved by `resolved_stt` / `resolved_tts`:
 - **User preference** (`stt_engine` / `tts_engine`, also MCP `set_config`): unset →
   ladder; `"off"` → off; named engine → that engine only, no auto-substitution.
   Unusable choice: `set_config` rejects. Runtime construct failure → inert off
-  placeholder (not a different engine).
+  placeholder.
 
 **STT ladder default:** `system` → `built_in` (Parakeet) → `claude_code`. `system` is
 macOS-only today, so Parakeet leads on Windows/Linux.
@@ -75,26 +74,24 @@ Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 ## Models & ONNX
 
-`ds-model`: URLs, paths, digests. On-demand download into app data dir, SHA-256 pinned.
+`ds-model`: URLs, paths, digests. On-demand parallel download into app data dir,
+SHA-256 pinned.
 `ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
 (Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
 built-in model. Intel macOS never builds or bundles MLX code; its built-in path remains ORT CPU
 when an Intel-compatible runtime is present. A dependency-free Swift shim retains Apple System
-STT on Intel. UI "Runtime" reflects the backend actually in use.
+STT on Intel. UI "Runtime" reflects the backend in use.
 
 Kokoro English frontend uses checksum-pinned BART G2P (ORT) before backend selection —
-MLX Kokoro still uses the shared Rust BART G2P frontend and therefore needs the ORT dylib. See
+MLX Kokoro still needs that ORT dylib. See
 [docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-and-backends).
 
 ## FFI boundary
 
-`ds-core`: handle-free C ABI (~32 fns) — lifecycle, status, app commands, i18n.
+`ds-core`: handle-free C ABI (35 fns) — lifecycle, status, app commands, i18n.
 `dontspeak.h` from cbindgen on `src/ffi.rs`.
 
 `model_status`: defined once in `ds-status`, shipped as JSON; each UI has hand-written
 DTOs locked by a round-trip contract test. No uniffi/codegen for this surface.
 
-## Workspace layout
-
-Engine: `rust/`. Hosts: `apps/macos/`, `apps/windows/winui/`, `apps/linux/gtk/`.
 Crate map: [rust/README.md](rust/README.md).

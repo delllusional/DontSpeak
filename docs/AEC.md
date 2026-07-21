@@ -41,7 +41,6 @@ echo-cancelled source via Pulse simple API (`pipewire-pulse` compatible).
 ## Rollout
 
 `full_duplex` default off. `DuplexAudio::open()` failure → cpal + rodio/afplay half-duplex.
-AEC is optional layer, never hard dependency.
 
 ## `capture_gain` (half-duplex)
 

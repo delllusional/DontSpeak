@@ -57,12 +57,8 @@ DontSpeak's MIT licensing.
 
 ### Other permissive licenses in the dependency graph
 
-Checked by the release-only `cargo deny` gate (`rust/deny.toml`); ordinary per-commit CI runs
-clippy and tests instead. These are common,
-OSI-approved permissive licenses carried by ordinary transitive dependencies across the
-Rust ecosystem — listed here for completeness, not because any of them require special
-handling beyond the standard permissive-license notice preservation already satisfied by
-each crate's own packaged `LICENSE` file:
+Checked by the release-only `cargo deny` gate (`rust/deny.toml`); per-commit CI is clippy +
+tests. Transitive permissive licenses (each crate ships its own `LICENSE`):
 
 - **BSD-2-Clause** — e.g. `mach2`, `zerocopy`.
 - **BSD-3-Clause** — e.g. `encoding_rs`, `subtle`, `num_enum`.

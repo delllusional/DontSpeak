@@ -11,7 +11,7 @@ closes during Kokoro speech and reopens when the queue is quiet. Uses Kokoro + P
 
 Design:
 
-1. **Half-duplex** — mic closed while TTS busy (AEC/full-duplex can replace later).
+1. **Half-duplex** — mic closed while TTS busy.
 2. **Stop word + trailing silence** — submit/cancel only when the word is the **final
    token** *and* followed by `submit_confirm_ms` silence. Fuzzy match (small Levenshtein)
    for live STT noise. Pause-bracketed = command; continuous speech keeps the word as
@@ -24,13 +24,9 @@ Design:
 
 ## Implementation
 
-- **Endpointer** — RMS VAD → `SpeechOnset` / `SegmentClosed` (`crate::listen`, unit-tested).
+- **Endpointer** — RMS VAD → `SpeechOnset` / `SegmentClosed` (`crate::listen`).
 - **`TurnLogic`** — idle until start word; segments append until submit/cancel arms
   confirm timer; fires paste-once or treats word as content if speech resumes first.
 - **Engine poll glue** (`crate::listener`) — gate mic on TTS; drain → endpointer →
   Parakeet helper → `TurnLogic` → same confirm pill / injector as Caps path. Armed
   submit always pastes into focused window (no silent refuse).
-
-## Later
-
-AEC barge-in; Silero VAD; pre-roll buffer; GUI mode toggle.
