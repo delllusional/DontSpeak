@@ -40,7 +40,7 @@ Stop this session's speech, or all speech if no session. Fades out. No parameter
 
 ## mute
 
-Global mute until changed or engine restart. Muted speech drains silently; earcons off.
+Global mute until changed or engine restart. Muted speech drains silently; earcons off. Built-in drains at zero volume; system TTS skips new speech and kills any in-flight OS synthesizer (no fade).
 
 | Param | Type | Required | Description |
 |---|---|---|---|

@@ -225,7 +225,8 @@ pub(crate) fn spawn_ipc_server(
                     }
                 }
                 ds_ipc::Request::SetMuted { on } => {
-                    // Global mute toggle (tray checkbox). Silences playback without stopping it.
+                    // Global mute: built-in drains silently; system TTS skips new speech
+                    // and kills any in-flight OS synthesizer (no fade).
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }

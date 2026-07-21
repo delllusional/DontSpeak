@@ -1444,7 +1444,8 @@ impl TtsQueue {
     /// residual voice/rate change between runs (shifting batch counts) degrades to an
     /// empty remainder — never a panic, at worst a dropped tail. Muted-but-draining
     /// batches count as played (mute consumes speech — today's semantics). System TTS
-    /// has no batch granularity; its `skip` is ignored by `speak_system`.
+    /// has no batch granularity (`skip` ignored); mute still consumes — no spawn when
+    /// already muted, kill of in-flight OS synth on live mute (`speak_system` / `set_muted`).
     fn speak_one(
         &self,
         engine: Option<ds_config::TtsEngine>,

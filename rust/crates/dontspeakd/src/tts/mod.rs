@@ -1158,6 +1158,11 @@ impl TtsManager {
     /// Speak through the OS System engine and block until completion or barge-in.
     /// [`ds_tts::system::speech_command`] owns prose cleanup, empty-input handling,
     /// voice selection, rate mapping, and platform command construction.
+    ///
+    /// Global mute is checked first: muted speech is consumed without spawning (and
+    /// without `stop()`, so built-in playback is not cancelled). Mid-utterance mute
+    /// kills the OS synthesizer via [`set_muted`](Self::set_muted) — system TTS cannot
+    /// volume-drain like the helper path.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn speak_system(
         &self,
@@ -1166,6 +1171,10 @@ impl TtsManager {
         _language: &str,
         rate: f32,
     ) -> std::io::Result<()> {
+        // Before speech_command / stop(): mute must not cancel built-in via HelperOp::Stop.
+        if self.is_muted() {
+            return Ok(());
+        }
         let Some(mut cmd) = ds_tts::system::speech_command(Some(voice), rate, text) else {
             return Ok(());
         };
@@ -1213,7 +1222,8 @@ impl TtsManager {
     }
 
     /// Linux has no warm System-TTS path yet (issue #74). Return `Unsupported` so callers
-    /// can fall back or record the error.
+    /// can fall back or record the error. When muted, consume without error so the queue
+    /// still mute-drains (same contract as the macOS/Windows arm).
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn speak_system(
         &self,
@@ -1222,6 +1232,9 @@ impl TtsManager {
         _language: &str,
         _rate: f32,
     ) -> std::io::Result<()> {
+        if self.is_muted() {
+            return Ok(());
+        }
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "dontspeakd System (say) TTS is not yet wired up on this platform",
@@ -1464,6 +1477,15 @@ impl TtsManager {
         }
     }
 
+    /// Kill + reap any in-flight System TTS child. Kill-only — does not send
+    /// `HelperOp::Stop` (built-in cancel is a separate path on `stop` / `stop_fade`).
+    fn kill_say_child(&self) {
+        if let Some(mut c) = self.say_child.lock().unwrap().take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
     /// Barge-in: cancel any in-flight playback. Fire-and-forget (no stdout read),
     /// so it can run while a `speak` is blocked awaiting its `DONE`. Stops BOTH the
     /// warm child's playback and any in-flight System `say`. Only the macOS/Windows
@@ -1474,10 +1496,7 @@ impl TtsManager {
         let _ = self.write_request(
             &serde_json::json!({ "op": ds_helper_proto::HelperOp::Stop }).to_string(),
         );
-        if let Some(mut c) = self.say_child.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        self.kill_say_child();
     }
 
     /// Whether global mute is on.
@@ -1485,13 +1504,16 @@ impl TtsManager {
         self.muted.load(Ordering::Relaxed)
     }
 
-    /// Set global mute. Records it and pushes the `mute` op to the warm child so speech is
-    /// silenced live and an active or later cue is stopped/suppressed.
+    /// Set global mute. Records it and pushes the `mute` op to the warm child so built-in
+    /// speech drains silently and an active or later cue is stopped/suppressed.
     /// Idempotent. macOS full-duplex mutes at RENDER time: the VPIO callback keeps
     /// consuming the ring at wall rate but zero-fills the output (the ring holds real
     /// audio), so mute lands within one audio quantum, unmute resumes at the playhead
     /// instantly, and audio elapsed while muted is still skipped — the same
     /// mute-consumes-speech semantics as the rodio volume path.
+    ///
+    /// System TTS is off the helper graph: mute skips new `speak_system` spawns and
+    /// kills any in-flight OS synthesizer (no fade/resume). Does not send `HelperOp::Stop`.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
         let _ = self.write_request(
@@ -1506,6 +1528,9 @@ impl TtsManager {
         if changed && let Some(gate) = self.gate.get() {
             gate.bump();
         }
+        if on {
+            self.kill_say_child();
+        }
     }
 
     /// Like [`stop`](Self::stop) but asks the warm helper to FADE the rodio player
@@ -1517,10 +1542,7 @@ impl TtsManager {
         let _ = self.write_request(
             &serde_json::json!({ "op": ds_helper_proto::HelperOp::Stopfade }).to_string(),
         );
-        if let Some(mut c) = self.say_child.lock().unwrap().take() {
-            let _ = c.kill();
-            let _ = c.wait();
-        }
+        self.kill_say_child();
     }
 
     /// Play one EARCON on the warm child and block until it finishes, is muted, or is
@@ -2666,5 +2688,116 @@ mod status_gate_tests {
         );
 
         restore_kokoro_env(prev_model_dir, prev_ort, previous_mlx);
+    }
+}
+
+#[cfg(test)]
+mod system_mute_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// Manager with no helper binary (never spawned). Safe for mute / say_child tests.
+    fn mk() -> TtsManager {
+        let dir = tempfile::tempdir().unwrap();
+        TtsManager::new(
+            dir.path().join("ds-test-nonexistent-helper"),
+            dir.path().join("engine.log"),
+            Arc::new(crate::stats::TtsStats::new()),
+            Arc::new(crate::stats::SttStats::new()),
+            Arc::new(crate::stats::LifetimeSeconds::load(
+                dir.path().join("ds-system-mute-test-lifetime.json"),
+            )),
+        )
+    }
+
+    /// Long-lived non-network process for inject-only say_child tests (not OS TTS).
+    fn spawn_long_lived_fake() -> std::process::Child {
+        #[cfg(unix)]
+        {
+            Command::new("sleep")
+                .arg("60")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("spawn sleep")
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            Command::new("powershell")
+                .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+                .spawn()
+                .expect("spawn Start-Sleep")
+        }
+    }
+
+    #[test]
+    fn speak_system_when_muted_returns_ok_without_stop_or_spawn() {
+        // Mute first, then inject a fake child: muted speak_system must not call stop()
+        // (would clear say_child) and must not spawn real OS TTS.
+        let tts = mk();
+        tts.set_muted(true);
+        assert!(tts.is_muted());
+
+        let child = spawn_long_lived_fake();
+        let pid = child.id();
+        *tts.say_child.lock().unwrap() = Some(child);
+
+        tts.speak_system("hello", "", "", 1.0)
+            .expect("muted system speak consumes without error");
+
+        let mut guard = tts.say_child.lock().unwrap();
+        let still = guard
+            .as_mut()
+            .expect("muted speak_system must not stop()/kill the pre-installed child");
+        assert_eq!(still.id(), pid, "same injected process");
+        assert!(
+            still.try_wait().expect("try_wait").is_none(),
+            "injected child must still be running (no stop/kill)"
+        );
+        let _ = still.kill();
+        let _ = still.wait();
+        *guard = None;
+    }
+
+    #[test]
+    fn set_muted_true_kills_in_flight_say_child() {
+        let tts = mk();
+        *tts.say_child.lock().unwrap() = Some(spawn_long_lived_fake());
+
+        tts.set_muted(true);
+
+        assert!(
+            tts.say_child.lock().unwrap().is_none(),
+            "mute must clear the system-speech slot"
+        );
+        // Second mute on empty is a no-op (idempotent kill).
+        tts.set_muted(true);
+        assert!(tts.say_child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn set_muted_false_does_not_clear_say_child() {
+        let tts = mk();
+        let child = spawn_long_lived_fake();
+        let pid = child.id();
+        *tts.say_child.lock().unwrap() = Some(child);
+
+        tts.set_muted(false);
+
+        let mut guard = tts.say_child.lock().unwrap();
+        let still = guard
+            .as_mut()
+            .expect("unmute must not kill in-flight system speech");
+        assert_eq!(still.id(), pid);
+        assert!(still.try_wait().expect("try_wait").is_none());
+        let _ = still.kill();
+        let _ = still.wait();
+        *guard = None;
     }
 }

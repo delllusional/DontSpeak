@@ -9,7 +9,8 @@ pub const SPEAK_RATE: &str = "Playback speed. Defaults to the configured rate.";
 pub const STOP: &str = "Stop this session's speech, or all speech if no session. Fades out.";
 
 pub const MUTE: &str = "Global mute until changed or engine restart. Muted speech drains \
-    silently; earcons off.";
+    silently; earcons off. Built-in drains at zero volume; system TTS skips new speech \
+    and kills any in-flight OS synthesizer (no fade).";
 pub const MUTE_ON: &str = "True to mute, false to unmute.";
 
 pub const VOICES: &str = "List selectable models, languages, and voices.";
