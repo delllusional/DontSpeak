@@ -1159,9 +1159,9 @@ impl TtsManager {
     /// [`ds_tts::system::speech_command`] owns prose cleanup, empty-input handling,
     /// voice selection, rate mapping, and platform command construction.
     ///
-    /// Global mute is checked first: muted speech is consumed without spawning (and
-    /// without `stop()`, so built-in playback is not cancelled). Mid-utterance mute
-    /// kills the OS synthesizer via [`set_muted`](Self::set_muted) — system TTS cannot
+    /// Global mute is checked before command construction and again while installing
+    /// the child: muted speech is consumed without spawning. Mid-utterance mute kills
+    /// the OS synthesizer via [`set_muted`](Self::set_muted) — system TTS cannot
     /// volume-drain like the helper path.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn speak_system(
@@ -1178,12 +1178,28 @@ impl TtsManager {
         let Some(mut cmd) = ds_tts::system::speech_command(Some(voice), rate, text) else {
             return Ok(());
         };
+        // Mute may have landed during command construction; do not cancel built-in speech.
+        if self.is_muted() {
+            return Ok(());
+        }
         self.stop();
-        let child = cmd.spawn()?;
-        // Hand the child to the shared slot so stop() can kill it, then poll for
-        // completion holding the lock only briefly (so a concurrent stop can win).
-        *self.say_child.lock().unwrap() = Some(child);
+        if !self.spawn_say_child_if_unmuted(&mut cmd)? {
+            return Ok(());
+        }
         self.wait_for_system_child()
+    }
+
+    /// Install a System TTS child only while holding the slot used by live mute. The
+    /// final mute check closes the check/spawn race: after `set_muted(true)` returns,
+    /// no concurrent `speak_system` can install a new synthesizer.
+    #[cfg(any(test, target_os = "macos", target_os = "windows"))]
+    fn spawn_say_child_if_unmuted(&self, cmd: &mut Command) -> std::io::Result<bool> {
+        let mut child = self.say_child.lock().unwrap();
+        if self.is_muted() {
+            return Ok(false);
+        }
+        *child = Some(cmd.spawn()?);
+        Ok(true)
     }
 
     /// Wait for an owned system-speech child without holding the slot across the poll sleep.
@@ -2710,30 +2726,34 @@ mod system_mute_tests {
         )
     }
 
-    /// Long-lived non-network process for inject-only say_child tests (not OS TTS).
-    fn spawn_long_lived_fake() -> std::process::Child {
+    /// Long-lived non-network command for inject-only say_child tests (not OS TTS).
+    fn long_lived_fake_command() -> Command {
         #[cfg(unix)]
         {
-            Command::new("sleep")
-                .arg("60")
+            let mut cmd = Command::new("sleep");
+            cmd.arg("60")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("spawn sleep")
+                .stderr(Stdio::null());
+            cmd
         }
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            Command::new("powershell")
-                .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+            let mut cmd = Command::new("powershell");
+            cmd.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-                .spawn()
-                .expect("spawn Start-Sleep")
+                .creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            cmd
         }
+    }
+
+    fn spawn_long_lived_fake() -> std::process::Child {
+        long_lived_fake_command()
+            .spawn()
+            .expect("spawn long-lived fake")
     }
 
     #[test]
@@ -2778,6 +2798,21 @@ mod system_mute_tests {
         );
         // Second mute on empty is a no-op (idempotent kill).
         tts.set_muted(true);
+        assert!(tts.say_child.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn system_child_install_rechecks_mute_before_spawn() {
+        // Simulate mute landing after speak_system's initial guard but before it
+        // acquires the child slot for the final check.
+        let tts = mk();
+        tts.set_muted(true);
+        let mut cmd = long_lived_fake_command();
+
+        assert!(
+            !tts.spawn_say_child_if_unmuted(&mut cmd)
+                .expect("muted install is consumed")
+        );
         assert!(tts.say_child.lock().unwrap().is_none());
     }
 
