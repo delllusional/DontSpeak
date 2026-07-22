@@ -43,11 +43,11 @@ final class TtsAbiTests: XCTestCase {
 
     func testStableOmniVoiceSeedMatchesOrtBackend() {
         XCTAssertEqual(
-            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi."),
-            0xaa49_2a17_b014_8759)
+            stableOmniVoiceSeed(language: "en", instruct: ""),
+            0xc2ef_df18_f053_12de)
         XCTAssertNotEqual(
-            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi."),
-            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi!"))
+            stableOmniVoiceSeed(language: "en", instruct: "female"),
+            stableOmniVoiceSeed(language: "en", instruct: "male"))
     }
 
     func testInitRejectsMissingAndUnknownModels() {

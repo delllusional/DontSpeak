@@ -141,9 +141,9 @@ func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
 }
 
 /// FNV-1a with NUL-separated fields, matching the ORT OmniVoice backend.
-func stableOmniVoiceSeed(language: String, instruct: String, text: String) -> UInt64 {
+func stableOmniVoiceSeed(language: String, instruct: String) -> UInt64 {
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
-    for bytes in [Array(language.utf8), [0], Array(instruct.utf8), [0], Array(text.utf8)] {
+    for bytes in [Array(language.utf8), [0], Array(instruct.utf8)] {
         for byte in bytes {
             hash ^= UInt64(byte)
             hash = hash &* 0x0000_0100_0000_01b3
@@ -290,8 +290,7 @@ public func ds_mlx_tts_synthesize2(
             if let configuredSeed = synthesisParams.omniVoiceSeed {
                 let seed = configuredSeed >= 0
                     ? UInt64(configuredSeed)
-                    : stableOmniVoiceSeed(
-                        language: language ?? "", instruct: selectedVoice ?? "", text: text)
+                    : stableOmniVoiceSeed(language: language ?? "", instruct: selectedVoice ?? "")
                 MLXRandom.seed(seed)
             }
             audio = try await omniVoice.generate(
