@@ -8,7 +8,7 @@
 
 use serde_json::{Map, Value, json};
 
-mod descriptions;
+pub mod descriptions;
 mod set_config;
 use descriptions::*;
 
@@ -17,13 +17,9 @@ pub use set_config::{SetConfigArgs, TtsParamUpdates, TtsVoiceUpdates};
 /// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
 pub const DIARIZATION_ENABLED: bool = false;
 
-const HIDDEN_TOOLS: &[&str] = &["diarize", "manage_speakers"];
-const HIDDEN_SET_CONFIG_PARAMS: &[&str] = &[
-    "diarizer",
-    "activity_threshold",
-    "match_threshold",
-    "speaker_lock",
-];
+const HIDDEN_TOOLS: &[&str] = &[DIARIZE_NAME, MANAGE_SPEAKERS_NAME];
+const HIDDEN_SET_CONFIG_PARAMS: &[&str] =
+    &[DIARIZER, ACTIVITY_THRESHOLD, MATCH_THRESHOLD, SPEAKER_LOCK];
 
 enum PType {
     Str,
@@ -94,26 +90,26 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
 /// Display order (Tools window): speak·listen, stop·mute, read-only, diarize, set_config last.
 static TOOLS: &[Tool] = &[
     Tool {
-        name: "speak",
+        name: SPEAK_NAME,
         description: SPEAK,
         params: &[
-            p("text", PType::Str, true, SPEAK_TEXT),
-            p("tts_args", PType::TtsArgs, false, SPEAK_TTS_ARGS),
+            p(TEXT, PType::Str, true, SPEAK_TEXT),
+            p(TTS_ARGS, PType::TtsArgs, false, SPEAK_TTS_ARGS),
         ],
         min_one: false,
         annotations: annotations(false, false, false),
         output: None,
     },
     Tool {
-        name: "listen",
+        name: LISTEN_NAME,
         description: LISTEN,
-        params: &[p("seconds", PType::Int(1, 60), false, LISTEN_SECONDS)],
+        params: &[p(SECONDS, PType::Int(1, 60), false, LISTEN_SECONDS)],
         min_one: false,
         annotations: annotations(false, false, false),
         output: None,
     },
     Tool {
-        name: "stop",
+        name: STOP_NAME,
         description: STOP,
         params: &[],
         min_one: false,
@@ -121,34 +117,29 @@ static TOOLS: &[Tool] = &[
         output: None,
     },
     Tool {
-        name: "mute",
+        name: MUTE_NAME,
         description: MUTE,
-        params: &[p("on", PType::Bool, true, MUTE_ON)],
+        params: &[p(ON, PType::Bool, true, MUTE_ON)],
         min_one: false,
         annotations: annotations(false, false, true),
         output: None,
     },
     Tool {
-        name: "status",
+        name: STATUS_NAME,
         description: STATUS,
         params: &[
-            p("detail", PType::Bool, false, STATUS_DETAIL),
-            p("since", PType::Int(0, i64::MAX), false, STATUS_SINCE),
-            p(
-                "timeout_ms",
-                PType::Int(1, 60_000),
-                false,
-                STATUS_TIMEOUT_MS,
-            ),
+            p(DETAIL, PType::Bool, false, STATUS_DETAIL),
+            p(SINCE, PType::Int(0, i64::MAX), false, STATUS_SINCE),
+            p(TIMEOUT_MS, PType::Int(1, 60_000), false, STATUS_TIMEOUT_MS),
         ],
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Status),
     },
     Tool {
-        name: "usage",
+        name: USAGE_NAME,
         description: USAGE,
-        params: &[p("refresh", PType::Bool, false, USAGE_REFRESH)],
+        params: &[p(REFRESH, PType::Bool, false, USAGE_REFRESH)],
         min_one: false,
         annotations: Annotations {
             read_only: true,
@@ -159,22 +150,22 @@ static TOOLS: &[Tool] = &[
         output: Some(Output::Usage),
     },
     Tool {
-        name: "voices",
+        name: VOICES_NAME,
         description: VOICES,
         params: &[
             p(
-                "tts_engine",
+                TTS_ENGINE,
                 PType::Enum(&["built_in", "system"]),
                 false,
                 VOICES_ENGINE,
             ),
             p(
-                "tts_model",
+                TTS_MODEL,
                 PType::Enum(ds_config::TtsModel::TOKENS),
                 false,
                 VOICES_MODEL,
             ),
-            p("language", PType::Str, false, VOICES_LANGUAGE),
+            p(LANGUAGE, PType::Str, false, VOICES_LANGUAGE),
         ],
         min_one: false,
         annotations: annotations(true, false, true),
@@ -182,129 +173,119 @@ static TOOLS: &[Tool] = &[
     },
     // Hidden when DIARIZATION_ENABLED is false (visibility only).
     Tool {
-        name: "diarize",
+        name: DIARIZE_NAME,
         description: DIARIZE,
-        params: &[p("seconds", PType::Int(1, 60), false, DIARIZE_SECONDS)],
+        params: &[p(SECONDS, PType::Int(1, 60), false, DIARIZE_SECONDS)],
         min_one: false,
         annotations: annotations(false, false, false),
         output: None,
     },
     Tool {
-        name: "manage_speakers",
+        name: MANAGE_SPEAKERS_NAME,
         description: MANAGE_SPEAKERS,
         params: &[
             p(
-                "action",
+                ACTION,
                 PType::Enum(&["list", "enroll", "forget"]),
                 true,
                 SPEAKERS_ACTION,
             ),
-            p("name", PType::Str, false, SPEAKERS_NAME),
-            p("seconds", PType::Int(1, 60), false, SPEAKERS_SECONDS),
+            p(NAME, PType::Str, false, SPEAKERS_NAME),
+            p(SECONDS, PType::Int(1, 60), false, SPEAKERS_SECONDS),
         ],
         min_one: false,
         annotations: annotations(false, true, false),
         output: None,
     },
     Tool {
-        name: "set_config",
+        name: SET_CONFIG_NAME,
         description: SET_CONFIG,
         // Grouped by concern — Tools window order.
         params: &[
             p(
-                "tts_engine",
+                TTS_ENGINE,
                 PType::Enum(&["built_in", "system", "off"]),
                 false,
                 SET_CONFIG_TTS_ENGINE,
             ),
             p(
-                "tts_model",
+                TTS_MODEL,
                 PType::Enum(ds_config::TtsModel::TOKENS),
                 false,
                 SET_CONFIG_TTS_MODEL,
             ),
+            p(TTS_VOICES, PType::VoicePools, false, SET_CONFIG_TTS_VOICES),
+            p(TTS_PARAMS, PType::ParamPools, false, SET_CONFIG_TTS_PARAMS),
             p(
-                "tts_voices",
-                PType::VoicePools,
-                false,
-                SET_CONFIG_TTS_VOICES,
-            ),
-            p(
-                "tts_params",
-                PType::ParamPools,
-                false,
-                SET_CONFIG_TTS_PARAMS,
-            ),
-            p(
-                "narrate",
+                NARRATE,
                 PType::EnumArray(&["shorts", "digests"]),
                 false,
                 SET_CONFIG_NARRATE,
             ),
-            p("greet", PType::Bool, false, SET_CONFIG_GREET),
+            p(GREET, PType::Bool, false, SET_CONFIG_GREET),
             p(
-                "clear_on_input",
+                CLEAR_ON_INPUT,
                 PType::EnumArray(&["current", "other"]),
                 false,
                 SET_CONFIG_INPUT_CLEARS,
             ),
-            p("pause_bg", PType::Bool, false, SET_CONFIG_PAUSE_BG),
-            p("earcon_reply", PType::Str, false, SET_CONFIG_EARCON_REPLY),
-            p("earcon_input", PType::Str, false, SET_CONFIG_EARCON_INPUT),
-            p("caps", PType::Bool, false, SET_CONFIG_CAPS),
+            p(PAUSE_BG, PType::Bool, false, SET_CONFIG_PAUSE_BG),
+            p(EARCON_REPLY, PType::Str, false, SET_CONFIG_EARCON_REPLY),
+            p(EARCON_INPUT, PType::Str, false, SET_CONFIG_EARCON_INPUT),
+            p(CAPS, PType::Bool, false, SET_CONFIG_CAPS),
             p(
-                "stt_engine",
+                STT_ENGINE,
                 PType::Enum(&["built_in", "system", "claude_code", "off"]),
                 false,
                 SET_CONFIG_STT_ENGINE,
             ),
-            p("capture_gain", PType::Gain, false, SET_CONFIG_CAPTURE_GAIN),
+            p(CAPTURE_GAIN, PType::Gain, false, SET_CONFIG_CAPTURE_GAIN),
             p(
-                "double_tap_submit",
+                DOUBLE_TAP_SUBMIT,
                 PType::Bool,
                 false,
                 SET_CONFIG_DOUBLE_TAP_SUBMITS,
             ),
             p(
-                "paste_delay_ms",
+                PASTE_DELAY_MS,
                 PType::Int(0, 5000),
                 false,
                 SET_CONFIG_PASTE_SUBMIT_DELAY_MS,
             ),
-            p("full_duplex", PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
+            p(FULL_DUPLEX, PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
             p(
-                "provider",
+                PROVIDER,
                 PType::EnumArray(&["mlx", "cuda", "coreml", "cpu"]),
                 false,
                 SET_CONFIG_PROVIDER,
             ),
             // Diarization (hidden when gate off).
             p(
-                "diarizer",
+                DIARIZER,
                 PType::EnumArray(&["mlx"]),
                 false,
                 SET_CONFIG_DIARIZER,
             ),
             p(
-                "activity_threshold",
+                ACTIVITY_THRESHOLD,
                 PType::Num(0.1, 0.9),
                 false,
                 SET_CONFIG_ACTIVITY_THRESHOLD,
             ),
             p(
-                "match_threshold",
+                MATCH_THRESHOLD,
                 PType::Num(0.0, 1.0),
                 false,
                 SET_CONFIG_SPEAKER_THRESH,
             ),
-            p("speaker_lock", PType::Bool, false, SET_CONFIG_SPEAKER_LOCK),
+            p(SPEAKER_LOCK, PType::Bool, false, SET_CONFIG_SPEAKER_LOCK),
             p(
-                "tray",
+                TRAY,
                 PType::EnumArray(&["stt", "tts", "stt_animated", "tts_animated"]),
                 false,
                 SET_CONFIG_TRAY,
             ),
-            p("agents", PType::Bool, false, SET_CONFIG_AGENTS),
+            p(AGENTS, PType::Bool, false, SET_CONFIG_AGENTS),
         ],
         min_one: true,
         annotations: annotations(false, true, true),
@@ -314,7 +295,7 @@ static TOOLS: &[Tool] = &[
 
 /// `agents` = config `agents` gate: hides `usage` when off (diarization gating unchanged).
 fn is_visible(t: &Tool, agents: bool) -> bool {
-    if t.name == "usage" {
+    if t.name == USAGE_NAME {
         return agents;
     }
     DIARIZATION_ENABLED || !HIDDEN_TOOLS.contains(&t.name)
@@ -1137,6 +1118,127 @@ mod tests {
                 t.name,
                 t.description
             );
+        }
+    }
+
+    /// DRIFT GUARD: every catalog name/description matches `descriptions` constants;
+    /// MCP `tools/list` and Tools-tab `catalog_ui` emit the same prose.
+    #[test]
+    fn catalog_and_ui_use_description_constants() {
+        type ToolExpect = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+        let expected: &[ToolExpect] = &[
+            (
+                SPEAK_NAME,
+                SPEAK,
+                &[(TEXT, SPEAK_TEXT), (TTS_ARGS, SPEAK_TTS_ARGS)],
+            ),
+            (LISTEN_NAME, LISTEN, &[(SECONDS, LISTEN_SECONDS)]),
+            (STOP_NAME, STOP, &[]),
+            (MUTE_NAME, MUTE, &[(ON, MUTE_ON)]),
+            (
+                STATUS_NAME,
+                STATUS,
+                &[
+                    (DETAIL, STATUS_DETAIL),
+                    (SINCE, STATUS_SINCE),
+                    (TIMEOUT_MS, STATUS_TIMEOUT_MS),
+                ],
+            ),
+            (USAGE_NAME, USAGE, &[(REFRESH, USAGE_REFRESH)]),
+            (
+                VOICES_NAME,
+                VOICES,
+                &[
+                    (TTS_ENGINE, VOICES_ENGINE),
+                    (TTS_MODEL, VOICES_MODEL),
+                    (LANGUAGE, VOICES_LANGUAGE),
+                ],
+            ),
+            (DIARIZE_NAME, DIARIZE, &[(SECONDS, DIARIZE_SECONDS)]),
+            (
+                MANAGE_SPEAKERS_NAME,
+                MANAGE_SPEAKERS,
+                &[
+                    (ACTION, SPEAKERS_ACTION),
+                    (NAME, SPEAKERS_NAME),
+                    (SECONDS, SPEAKERS_SECONDS),
+                ],
+            ),
+            (
+                SET_CONFIG_NAME,
+                SET_CONFIG,
+                &[
+                    (TTS_ENGINE, SET_CONFIG_TTS_ENGINE),
+                    (TTS_MODEL, SET_CONFIG_TTS_MODEL),
+                    (TTS_VOICES, SET_CONFIG_TTS_VOICES),
+                    (TTS_PARAMS, SET_CONFIG_TTS_PARAMS),
+                    (NARRATE, SET_CONFIG_NARRATE),
+                    (GREET, SET_CONFIG_GREET),
+                    (CLEAR_ON_INPUT, SET_CONFIG_INPUT_CLEARS),
+                    (PAUSE_BG, SET_CONFIG_PAUSE_BG),
+                    (EARCON_REPLY, SET_CONFIG_EARCON_REPLY),
+                    (EARCON_INPUT, SET_CONFIG_EARCON_INPUT),
+                    (CAPS, SET_CONFIG_CAPS),
+                    (STT_ENGINE, SET_CONFIG_STT_ENGINE),
+                    (CAPTURE_GAIN, SET_CONFIG_CAPTURE_GAIN),
+                    (DOUBLE_TAP_SUBMIT, SET_CONFIG_DOUBLE_TAP_SUBMITS),
+                    (PASTE_DELAY_MS, SET_CONFIG_PASTE_SUBMIT_DELAY_MS),
+                    (FULL_DUPLEX, SET_CONFIG_FULL_DUPLEX),
+                    (PROVIDER, SET_CONFIG_PROVIDER),
+                    (DIARIZER, SET_CONFIG_DIARIZER),
+                    (ACTIVITY_THRESHOLD, SET_CONFIG_ACTIVITY_THRESHOLD),
+                    (MATCH_THRESHOLD, SET_CONFIG_SPEAKER_THRESH),
+                    (SPEAKER_LOCK, SET_CONFIG_SPEAKER_LOCK),
+                    (TRAY, SET_CONFIG_TRAY),
+                    (AGENTS, SET_CONFIG_AGENTS),
+                ],
+            ),
+        ];
+        assert_eq!(TOOLS.len(), expected.len());
+        for (tool, &(name, desc, params)) in TOOLS.iter().zip(expected) {
+            assert_eq!(tool.name, name, "tool name must match name constant");
+            assert_eq!(
+                tool.description, desc,
+                "tool `{name}` description must match description constant"
+            );
+            assert_eq!(tool.params.len(), params.len(), "tool `{name}`");
+            for (param, &(pname, pdesc)) in tool.params.iter().zip(params) {
+                assert_eq!(
+                    param.name, pname,
+                    "param name on `{name}` must match name constant"
+                );
+                assert_eq!(
+                    param.description, pdesc,
+                    "param `{pname}` on `{name}` description must match constant"
+                );
+            }
+        }
+
+        // MCP + Tools-tab JSON surfaces emit the same names and descriptions.
+        for agents in [false, true] {
+            let mcp = catalog(agents);
+            let ui = catalog_ui(agents);
+            let mcp_tools = mcp.as_array().unwrap();
+            let ui_tools = ui.as_array().unwrap();
+            assert_eq!(mcp_tools.len(), ui_tools.len());
+            for (m, u) in mcp_tools.iter().zip(ui_tools) {
+                assert_eq!(m["name"], u["name"]);
+                assert_eq!(m["description"], u["description"]);
+                let u_params = u["params"].as_array().unwrap();
+                match m["inputSchema"]["properties"].as_object() {
+                    Some(props) => {
+                        assert_eq!(props.len(), u_params.len());
+                        for up in u_params {
+                            let pname = up["name"].as_str().unwrap();
+                            assert_eq!(
+                                props[pname]["description"], up["description"],
+                                "MCP vs Tools-tab param description for {pname}"
+                            );
+                        }
+                    }
+                    None => assert!(u_params.is_empty()),
+                }
+            }
         }
     }
 

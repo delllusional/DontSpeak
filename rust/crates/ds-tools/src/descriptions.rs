@@ -1,92 +1,116 @@
-//! Tool + parameter description strings (canonical MCP text from `TOOLS`).
-//! WHAT not HOW; no model/runtime names (engines can change).
+//! Canonical MCP / Tools-tab tokens: wire names + bare description prose.
+//! Single source for `tools/list`, `catalog_ui` (app Tools tab), and docs drift guards.
+//! WHAT not HOW; bare minimum for token cost.
+
+// ── tool wire names (Tools tab titles; MCP tool names) ──────────────────────
+
+pub const SPEAK_NAME: &str = "speak";
+pub const LISTEN_NAME: &str = "listen";
+pub const STOP_NAME: &str = "stop";
+pub const MUTE_NAME: &str = "mute";
+pub const STATUS_NAME: &str = "status";
+pub const USAGE_NAME: &str = "usage";
+pub const VOICES_NAME: &str = "voices";
+pub const DIARIZE_NAME: &str = "diarize";
+pub const MANAGE_SPEAKERS_NAME: &str = "manage_speakers";
+pub const SET_CONFIG_NAME: &str = "set_config";
+
+// ── param wire names ────────────────────────────────────────────────────────
+
+pub const TEXT: &str = "text";
+pub const TTS_ARGS: &str = "tts_args";
+pub const SECONDS: &str = "seconds";
+pub const ON: &str = "on";
+pub const DETAIL: &str = "detail";
+pub const SINCE: &str = "since";
+pub const TIMEOUT_MS: &str = "timeout_ms";
+pub const REFRESH: &str = "refresh";
+pub const TTS_ENGINE: &str = "tts_engine";
+pub const TTS_MODEL: &str = "tts_model";
+pub const LANGUAGE: &str = "language";
+pub const ACTION: &str = "action";
+pub const NAME: &str = "name";
+pub const TTS_VOICES: &str = "tts_voices";
+pub const TTS_PARAMS: &str = "tts_params";
+pub const NARRATE: &str = "narrate";
+pub const GREET: &str = "greet";
+pub const CLEAR_ON_INPUT: &str = "clear_on_input";
+pub const PAUSE_BG: &str = "pause_bg";
+pub const EARCON_REPLY: &str = "earcon_reply";
+pub const EARCON_INPUT: &str = "earcon_input";
+pub const CAPS: &str = "caps";
+pub const STT_ENGINE: &str = "stt_engine";
+pub const CAPTURE_GAIN: &str = "capture_gain";
+pub const DOUBLE_TAP_SUBMIT: &str = "double_tap_submit";
+pub const PASTE_DELAY_MS: &str = "paste_delay_ms";
+pub const FULL_DUPLEX: &str = "full_duplex";
+pub const PROVIDER: &str = "provider";
+pub const DIARIZER: &str = "diarizer";
+pub const ACTIVITY_THRESHOLD: &str = "activity_threshold";
+pub const MATCH_THRESHOLD: &str = "match_threshold";
+pub const SPEAKER_LOCK: &str = "speaker_lock";
+pub const TRAY: &str = "tray";
+pub const AGENTS: &str = "agents";
+
+// ── tool descriptions ───────────────────────────────────────────────────────
 
 pub const SPEAK: &str = "Queue text for spoken playback.";
+pub const LISTEN: &str = "Record mic to transcript.";
+pub const STOP: &str = "Stop this session's speech, or all if no session.";
+pub const MUTE: &str = "Global mute until changed or engine restart.";
+pub const STATUS: &str = "Speech config and runtime state.";
+pub const USAGE: &str = "Coding-agent subscription usage.";
+pub const VOICES: &str = "List models, languages, and voices.";
+pub const DIARIZE: &str = "Record and label speakers. macOS only.";
+pub const MANAGE_SPEAKERS: &str = "List, enroll, or forget diarize voiceprints. macOS only.";
+pub const SET_CONFIG: &str = "Update and reload settings.";
+
+// ── param descriptions ──────────────────────────────────────────────────────
+
 pub const SPEAK_TEXT: &str = "Text to speak.";
-pub const SPEAK_TTS_ARGS: &str = "Per-engine/model utterance arguments keyed by `system`, \
-`kokoro`, `chatterbox`, `qwen`, or `omnivoice`. Each target accepts `voice`, `language`, and \
-its configured parameter names (see voices). Omitted values use the assigned voice, detected \
-language, and configured parameters.";
+pub const SPEAK_TTS_ARGS: &str = "Per-target voice/language/params for this utterance. See voices.";
 
-pub const STOP: &str = "Stop this session's speech, or all speech if no session. Fades out.";
-
-pub const MUTE: &str = "Global mute until changed or engine restart. Muted speech drains \
-    silently; earcons off. Built-in drains at zero volume; system TTS skips new speech \
-    and kills any in-flight OS synthesizer (no fade).";
 pub const MUTE_ON: &str = "True to mute, false to unmute.";
 
-pub const VOICES: &str = "List selectable models, languages, and voices.";
-pub const VOICES_ENGINE: &str = "Engine to inspect. Defaults to configured speech engine, \
-    or built-in when speech is off.";
-pub const VOICES_MODEL: &str = "Built-in model to inspect. Defaults to the configured model.";
-pub const VOICES_LANGUAGE: &str = "Language to inspect. Defaults to the model's catalog default.";
+pub const VOICES_ENGINE: &str = "Engine to inspect.";
+pub const VOICES_MODEL: &str = "Built-in model to inspect.";
+pub const VOICES_LANGUAGE: &str = "Language to inspect.";
 
-pub const LISTEN: &str = "Record the mic → transcript. Stops on end-of-speech or time limit.";
 pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 
-pub const STATUS: &str = "Speech config and runtime state.";
-pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats. Default false.";
-pub const STATUS_SINCE: &str =
-    "Wait for the status sequence to change from this value, then return the new status.";
-pub const STATUS_TIMEOUT_MS: &str =
-    "Maximum wait in milliseconds when since is set. Default 30000; maximum 60000.";
+pub const STATUS_DETAIL: &str = "Include model, dictation, and runtime stats.";
+pub const STATUS_SINCE: &str = "Long-poll until status sequence changes from this value.";
+pub const STATUS_TIMEOUT_MS: &str = "Long-poll max wait ms when since is set. Default 30000.";
 
-pub const USAGE: &str = "Coding-agent subscription usage shown in the Agents tab.";
-pub const USAGE_REFRESH: &str = "Bypass the 60-second cache and query providers. Default false.";
+pub const USAGE_REFRESH: &str = "Bypass 60s cache. Default false.";
 
-pub const DIARIZE: &str = "Record mic and label who spoke when. Needs diarization; macOS only.";
 pub const DIARIZE_SECONDS: &str = "Recording seconds. Default 10.";
 
-pub const MANAGE_SPEAKERS: &str = "List, enroll, or remove diarize voiceprints. Re-enroll \
-    replaces. macOS only.";
 pub const SPEAKERS_ACTION: &str = "list | enroll | forget.";
-pub const SPEAKERS_NAME: &str = "Speaker name (required for enroll/forget).";
+pub const SPEAKERS_NAME: &str = "Speaker name for enroll/forget.";
 pub const SPEAKERS_SECONDS: &str = "Enrollment seconds. Default 15.";
 
-pub const SET_CONFIG: &str = "Atomically update and reload persistent settings.";
-pub const SET_CONFIG_TTS_ENGINE: &str = "Speech: \"built_in\", \"system\", or \
-    \"off\". Omit to keep the automatic preference. Unsupported engines are rejected.";
-pub const SET_CONFIG_TTS_MODEL: &str = "Built-in model: \"kokoro\", \"chatterbox\", \"qwen\", \
-    or \"omnivoice\".";
-pub const SET_CONFIG_TTS_VOICES: &str = "Voice arrays keyed by `system`, `kokoro`, `chatterbox`, \
-`qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. A pool \
-may mix languages: each utterance is spoken by a pooled voice for its detected language, or by \
-one of the model's own voices for that language when the pool has none.";
-pub const SET_CONFIG_TTS_PARAMS: &str = "Engine/model parameter objects keyed by `system`, \
-`kokoro`, `chatterbox`, `qwen`, or `omnivoice` (see voices for model parameters and ranges). \
-`rate` (0.5-2.0, default 1.0) belongs only under `system` and `kokoro`. A provided object replaces that target's \
-stored parameters; `{}` resets to defaults. Unset parameters use their defaults.";
-pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\" = long-reply \
-    summaries; \"shorts\" = short replies whole. [] off.";
-pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its agent's pool voice. Default on.";
-pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit: \"current\" this terminal, \
-    \"other\" the rest (incl. global). Default [\"current\"]; [] none.";
+pub const SET_CONFIG_TTS_ENGINE: &str = "Speech engine. Omit to keep the automatic preference.";
+pub const SET_CONFIG_TTS_MODEL: &str = "Built-in model.";
+pub const SET_CONFIG_TTS_VOICES: &str = "Voice pools by target. `system: []` uses the OS default.";
+pub const SET_CONFIG_TTS_PARAMS: &str =
+    "Param objects by target. rate default 1.0 (system/kokoro only). `{}` resets.";
+pub const SET_CONFIG_NARRATE: &str = "Narration modes. Default both.";
+pub const SET_CONFIG_GREET: &str = "Greet new terminals. Default on.";
+pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit. Default [\"current\"].";
 pub const SET_CONFIG_PAUSE_BG: &str = "Pause speech when no terminal is frontmost. Default false.";
-pub const SET_CONFIG_EARCON_REPLY: &str =
-    "Reply-done sound name/path. Default: OS chime; empty = off.";
-pub const SET_CONFIG_EARCON_INPUT: &str = "Needs-input sound name/path. Default off.";
-pub const SET_CONFIG_CAPS: &str = "Caps Lock PTT and speech cancel. Default on. Still silences \
-    speech when dictation is off.";
-pub const SET_CONFIG_STT_ENGINE: &str = "Dictation: \"built_in\", \"system\", \"claude_code\", \
-    or \"off\". Omit to keep the automatic preference. Unsupported/unauthorized rejected.";
-pub const SET_CONFIG_CAPTURE_GAIN: &str = "Mic gain: \"auto\" (default) or 0.5–20.0 fixed.";
-pub const SET_CONFIG_DOUBLE_TAP_SUBMITS: &str = "Double-tap submits; single-tap inserts only. \
-    Default false (swaps those).";
-pub const SET_CONFIG_PASTE_SUBMIT_DELAY_MS: &str = "Paste→submit delay (ms). Default 100; 0 = \
-    immediate.";
-pub const SET_CONFIG_PROVIDER: &str = "Compute provider preference order. Core ML is macOS \
-    TTS-only. Default [\"mlx\",\"cuda\",\"cpu\"].";
-pub const SET_CONFIG_DIARIZER: &str = "Diarization: [\"mlx\"] on, [] = off (default). \
-    macOS only.";
-pub const SET_CONFIG_ACTIVITY_THRESHOLD: &str =
-    "Sortformer speaker-activity cutoff; lower detects quieter speech. Default 0.5.";
-pub const SET_CONFIG_SPEAKER_THRESH: &str =
-    "Min voiceprint match; higher → stricter. Default 0.65.";
-pub const SET_CONFIG_SPEAKER_LOCK: &str = "Transcribe enrolled speakers only. Needs diarization \
-    + ≥1 voice. Built-in STT only. Default off.";
-pub const SET_CONFIG_FULL_DUPLEX: &str = "Mic open during replies (platform AEC). Default false; \
-    built-in STT+TTS only.";
-pub const SET_CONFIG_TRAY: &str = "Tray icon speech states. Default [\"stt\",\"tts_animated\"]; \
-    [] off.";
-pub const SET_CONFIG_AGENTS: &str = "Show the Agents tab and enable the usage tool. \
-    Off by default. Applies live.";
+pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done sound. Default: OS chime; empty = off.";
+pub const SET_CONFIG_EARCON_INPUT: &str = "Needs-input sound. Default off.";
+pub const SET_CONFIG_CAPS: &str = "Caps Lock PTT and speech cancel. Default on.";
+pub const SET_CONFIG_STT_ENGINE: &str = "Dictation engine. Omit to keep the automatic preference.";
+pub const SET_CONFIG_CAPTURE_GAIN: &str = "Mic gain: \"auto\" (default) or 0.5–20.0.";
+pub const SET_CONFIG_DOUBLE_TAP_SUBMITS: &str = "Double-tap submits. Default false.";
+pub const SET_CONFIG_PASTE_SUBMIT_DELAY_MS: &str = "Paste→submit delay ms. Default 100.";
+pub const SET_CONFIG_PROVIDER: &str = "Compute provider order. Default [\"mlx\",\"cuda\",\"cpu\"].";
+pub const SET_CONFIG_DIARIZER: &str = "Diarization providers. [] = off (default).";
+pub const SET_CONFIG_ACTIVITY_THRESHOLD: &str = "Speaker-activity cutoff. Default 0.5.";
+pub const SET_CONFIG_SPEAKER_THRESH: &str = "Voiceprint match threshold. Default 0.65.";
+pub const SET_CONFIG_SPEAKER_LOCK: &str = "Only enrolled speakers. Default off.";
+pub const SET_CONFIG_FULL_DUPLEX: &str = "Mic open during replies. Default false.";
+pub const SET_CONFIG_TRAY: &str = "Tray speech states. Default [\"stt\",\"tts_animated\"].";
+pub const SET_CONFIG_AGENTS: &str = "Agents tab and usage tool. Off by default.";

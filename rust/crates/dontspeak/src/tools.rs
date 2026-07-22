@@ -89,25 +89,35 @@ pub(crate) fn tools_call_cancellable(
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    use ds_tools::descriptions::{
+        DIARIZE_NAME, LISTEN_NAME, MANAGE_SPEAKERS_NAME, MUTE_NAME, SET_CONFIG_NAME, SPEAK_NAME,
+        STATUS_NAME, STOP_NAME, USAGE_NAME, VOICES_NAME,
+    };
     let result: Result<ToolSuccess, String> = match name {
         // Config-direct; no engine.
-        "voices" => match Paths::resolve() {
+        n if n == VOICES_NAME => match Paths::resolve() {
             Some(paths) => call_voices(&paths, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
         // config.toml write; mtime-watch or Reload nudge. Engine need not be up.
-        "set_config" => match Paths::resolve() {
+        n if n == SET_CONFIG_NAME => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args).map(ToolSuccess::Text),
             None => Err("Cannot resolve data paths.".into()),
         },
         // Read-only; must not spawn engine / start playback.
-        "status" => match Paths::resolve() {
+        n if n == STATUS_NAME => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
         // Prefer the app-hosted engine so macOS keychain ACL authorization applies.
-        "usage" => call_usage(sock, &args).map(ToolSuccess::Structured),
-        "speak" | "stop" | "mute" | "listen" | "diarize" | "manage_speakers" => {
+        n if n == USAGE_NAME => call_usage(sock, &args).map(ToolSuccess::Structured),
+        n if n == SPEAK_NAME
+            || n == STOP_NAME
+            || n == MUTE_NAME
+            || n == LISTEN_NAME
+            || n == DIARIZE_NAME
+            || n == MANAGE_SPEAKERS_NAME =>
+        {
             let Some(sock) = sock else {
                 return ok(
                     id,
@@ -116,11 +126,11 @@ pub(crate) fn tools_call_cancellable(
             };
             ensure_engine(sock);
             match name {
-                "speak" => call_speak(sock, &args, client).map(ToolSuccess::Text),
-                "stop" => call_stop(sock, client).map(ToolSuccess::Text),
-                "mute" => call_mute(sock, &args).map(ToolSuccess::Text),
-                "diarize" => call_diarize(sock, &args).map(ToolSuccess::Text),
-                "manage_speakers" => call_speakers(sock, &args).map(ToolSuccess::Text),
+                n if n == SPEAK_NAME => call_speak(sock, &args, client).map(ToolSuccess::Text),
+                n if n == STOP_NAME => call_stop(sock, client).map(ToolSuccess::Text),
+                n if n == MUTE_NAME => call_mute(sock, &args).map(ToolSuccess::Text),
+                n if n == DIARIZE_NAME => call_diarize(sock, &args).map(ToolSuccess::Text),
+                n if n == MANAGE_SPEAKERS_NAME => call_speakers(sock, &args).map(ToolSuccess::Text),
                 _ => call_listen(sock, &args, cancelled).map(ToolSuccess::Text),
             }
         }
