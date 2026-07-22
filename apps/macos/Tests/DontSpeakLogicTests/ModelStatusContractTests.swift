@@ -112,8 +112,9 @@ final class ModelStatusContractTests: XCTestCase {
     }
 
     func testSampleJSONObjectHasExactlyTenRootKeys() throws {
-        let root = try JSONSerialization.jsonObject(with: Data(Self.sampleJSON.utf8)) as? [String: Any]
-        let keys = Set(root?.keys ?? [])
+        let root = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(Self.sampleJSON.utf8)) as? [String: Any])
+        let keys = Set(root.keys)
         XCTAssertEqual(keys.count, 10, "no duplicated root-level engine fields")
         for key in [
             "seq", "activity", "tts", "stt", "diarization",
