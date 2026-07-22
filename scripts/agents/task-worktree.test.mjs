@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -104,7 +104,7 @@ test("refuses to update a main worktree with tracked changes", (t) => {
   writeFileSync(join(repo.main, "tracked.txt"), "dirty\n", "utf8");
 
   assert.throws(() => refreshMain(repo.feature, { log: () => {} }), /main worktree has tracked changes/);
-  assert.equal(mainWorktree(repo.feature), resolve(repo.main));
+  assert.equal(realpathSync(mainWorktree(repo.feature)), realpathSync(repo.main));
   assert.equal(readFileSync(join(repo.main, "tracked.txt"), "utf8"), "dirty\n");
 });
 
