@@ -582,7 +582,7 @@ fn output_schema_for(output: Output) -> Value {
                                     .collect::<Vec<_>>()
                             },
                             "account": { "type": "string" },
-                            // true only when Claude's macOS keychain access is guarded.
+                            // true only when a macOS keychain client's access is guarded (Claude Code today).
                             "needs_auth": { "type": "boolean" },
                             "rows": {
                                 "type": "array",

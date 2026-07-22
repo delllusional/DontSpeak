@@ -57,8 +57,8 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
-    /// Claude Code's macOS keychain item needs user-approved access;
-    /// [`authorize_card`] retries interactively.
+    /// A macOS keychain client's item needs user-approved access
+    /// (`requires_macos_keychain`); [`authorize_card`] retries interactively.
     /// Skip-when-false on wire; never cached (`UsageCache::store`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub needs_auth: bool,
@@ -66,6 +66,13 @@ pub struct UsageCard {
 
 fn is_false(flag: &bool) -> bool {
     !*flag
+}
+
+/// Clients that keep credentials in the macOS keychain — the only cards whose
+/// guarded reads set `needs_auth` / offer authorize. Claude Code is the sole
+/// member so far.
+fn requires_macos_keychain(agent: ClientSource) -> bool {
+    agent == ClientSource::ClaudeCode
 }
 
 impl UsageCard {
@@ -84,7 +91,7 @@ impl UsageCard {
         result: Result<Vec<UsageRow>, FetchError>,
     ) -> Self {
         let needs_auth =
-            agent == ClientSource::ClaudeCode && matches!(result, Err(FetchError::Guarded));
+            requires_macos_keychain(agent) && matches!(result, Err(FetchError::Guarded));
         let mut card = Self {
             agent,
             account,
@@ -294,7 +301,7 @@ fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
         .collect()
 }
 
-/// Claude only honors `interactive`; other providers ignore it.
+/// Only `requires_macos_keychain` clients honor `interactive`; other providers ignore it.
 fn fetch_rows(
     paths: &ds_config::Paths,
     agent: ClientSource,
@@ -810,25 +817,37 @@ mod tests {
     }
 
     #[test]
-    fn only_guarded_claude_credentials_offer_authorize() {
+    fn only_guarded_keychain_client_credentials_offer_authorize() {
+        // Pins membership: Claude Code is the only macOS keychain client so far.
+        let keychain_clients: Vec<_> = ClientSource::CLIENTS
+            .iter()
+            .copied()
+            .filter(|&agent| requires_macos_keychain(agent))
+            .collect();
+        assert_eq!(keychain_clients, [ClientSource::ClaudeCode]);
+
         for agent in ClientSource::CLIENTS {
             let guarded = UsageCard::from_result(*agent, None, Err(FetchError::Guarded));
-            assert_eq!(guarded.needs_auth, *agent == ClientSource::ClaudeCode);
+            assert_eq!(
+                guarded.needs_auth,
+                requires_macos_keychain(*agent),
+                "{agent:?}"
+            );
 
             let unauthorized = UsageCard::from_result(*agent, None, Err(FetchError::Unauthorized));
-            assert!(!unauthorized.needs_auth);
+            assert!(!unauthorized.needs_auth, "{agent:?}");
         }
     }
 
     #[test]
-    fn unauthorized_non_claude_refreshes_keep_cached_rows_without_authorize() {
+    fn unauthorized_non_keychain_refreshes_keep_cached_rows_without_authorize() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
 
         for agent in ClientSource::CLIENTS
             .iter()
             .copied()
-            .filter(|agent| *agent != ClientSource::ClaudeCode)
+            .filter(|&agent| !requires_macos_keychain(agent))
         {
             let good = UsageCard {
                 agent,

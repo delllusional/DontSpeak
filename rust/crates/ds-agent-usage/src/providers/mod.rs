@@ -15,12 +15,14 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
-/// Internal; only Guarded Claude credentials surface as `UsageCard.needs_auth`.
+/// Internal; only a macOS keychain client's Guarded read surfaces as
+/// `UsageCard.needs_auth` (`requires_macos_keychain`).
 #[derive(Debug)]
 pub(crate) enum FetchError {
-    /// Silent keychain read blocked (macOS Claude only).
+    /// Silent macOS keychain read blocked.
     Guarded,
-    /// Provider rejected a stale or revoked token; Claude may retry its keychain copy.
+    /// Provider rejected a stale or revoked token; a keychain client may retry
+    /// its keychain copy.
     Unauthorized,
     // Tests assert kinds; production branches on the credential variants only.
     Io(#[allow(dead_code)] std::io::Error),
@@ -28,8 +30,8 @@ pub(crate) enum FetchError {
 
 impl From<std::io::Error> for FetchError {
     fn from(error: std::io::Error) -> Self {
-        // Preserve refused-credential semantics for Claude's file-to-keychain retry.
-        // Other providers fall back to their last-good card without an auth action.
+        // Preserve refused-credential semantics for keychain clients' file-to-keychain
+        // retry. Other providers fall back to their last-good card without an auth action.
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             return Self::Unauthorized;
         }
