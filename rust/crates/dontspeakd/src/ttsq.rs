@@ -318,6 +318,14 @@ fn select_pos(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
     }
 }
 
+/// Worker claim gate: a paused queue claims nothing, however selectable the head is.
+fn claimable_pos(paused: bool, q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
+    if paused {
+        return None;
+    }
+    select_pos(q, active)
+}
+
 /// Asymmetric: Dictation wins; barge auto-resume is no-op under Dictation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PauseCause {
@@ -728,9 +736,13 @@ impl TtsQueue {
             .forget_session(session);
     }
 
-    /// Claim under `items` lock: gen snapshot + playing publish so clears can't race mid-claim.
-    fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> (Item, u64) {
-        let gen0 = self.generation.load(Ordering::SeqCst);
+    /// Claim under `items`: publish `playing` so clears can't race mid-claim.
+    /// The caller snapshots the cancel generation under this same guard BEFORE its pause
+    /// check — any bump between that snapshot and the claim invalidates the claim, which is
+    /// intended: only `pause_with_cause` bumps without holding `items` (clear /
+    /// clear_session / cancel_for_submit / hard_cancel_in_flight_locked all hold it).
+    /// Do not load the generation here — that is what absorbed the pause's bump.
+    fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> Item {
         let before = speech_depth(q);
         let item = q.remove(pos).expect("select_pos returns a valid index");
         self.publish_queue_depth(before, speech_depth(q));
@@ -741,7 +753,7 @@ impl TtsQueue {
             speech: item.action.speech_text().is_some(),
             utterance: None,
         });
-        (item, gen0)
+        item
     }
 
     /// Update recency fallback. Caller holds `items` (lock order: items → active).
@@ -1254,15 +1266,18 @@ impl TtsQueue {
 
     fn run(self: Arc<Self>) {
         'outer: loop {
-            // Wait for playable item ([`select_pos`]); lock order items → active.
+            // Wait for playable item ([`claimable_pos`]); lock order items → active.
             let (mut item, gen0) = {
                 let mut q = self.items.lock().unwrap();
                 loop {
-                    if !self.is_paused() {
-                        let active = self.active.lock().unwrap().effective();
-                        if let Some(pos) = select_pos(&q, &active) {
-                            break self.claim_item(&mut q, pos);
-                        }
+                    // Snapshot the cancel generation BEFORE reading `paused`:
+                    // `pause_with_cause` sets `paused` then bumps, so a snapshot taken
+                    // after the pause check could absorb that bump and play the item
+                    // while paused.
+                    let gen0 = self.generation.load(Ordering::SeqCst);
+                    let active = self.active.lock().unwrap().effective();
+                    if let Some(pos) = claimable_pos(self.is_paused(), &q, &active) {
+                        break (self.claim_item(&mut q, pos), gen0);
                     }
                     q = self.cv.wait(q).unwrap();
                 }
@@ -3635,6 +3650,49 @@ mod tests {
         assert!(q.items.lock().unwrap().is_empty());
     }
 
+    /// Lock-in for the worker's claim ordering: `run` snapshots the generation BEFORE its
+    /// pause check, so a pause landing in that window still invalidates the claim and its
+    /// requeue intent (keyed to the pre-bump generation) still resolves.
+    #[test]
+    fn a_pause_after_the_claim_snapshot_abandons_and_requeues_the_item() {
+        let q = mk_queue();
+        let mut items = q.items.lock().unwrap();
+        q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(Some("a"))));
+        let gen0 = q.generation.load(Ordering::SeqCst); // the worker's snapshot point
+        // Holding `items` across the pause is safe only because `pause_with_cause` →
+        // `set_tts_active` must not take `items` (see its doc) and `record_cancel_kind`
+        // takes only `cancel_kind` — otherwise a change there hangs CI instead of failing it.
+        q.pause_for_record(); // pause lands inside the window
+        let item = q.claim_item(&mut items, 0);
+        drop(items);
+
+        assert_ne!(
+            q.generation.load(Ordering::SeqCst),
+            gen0,
+            "the pause's bump must invalidate a claim taken under the pre-pause snapshot"
+        );
+        q.requeue_if_resuming(item, gen0);
+        assert_eq!(
+            q.items.lock().unwrap().len(),
+            1,
+            "the abandoned item is held for resume, not dropped"
+        );
+    }
+
+    #[test]
+    fn a_paused_queue_claims_nothing() {
+        let mut q: VecDeque<Item> = VecDeque::new();
+        q.push_back(narr(Some("a")));
+        let active = Some("a".to_string());
+        assert_eq!(claimable_pos(false, &q, &active), Some(0));
+        assert_eq!(
+            claimable_pos(true, &q, &active),
+            None,
+            "a paused queue claims nothing, however selectable the head is"
+        );
+        assert_eq!(claimable_pos(true, &VecDeque::new(), &None), None);
+    }
+
     #[test]
     fn pause_for_record_pauses_bumps_generation_and_marks_resume_intent() {
         let q = mk_queue();
@@ -3820,7 +3878,8 @@ mod tests {
         });
         started_rx.recv().unwrap();
 
-        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        let selected_generation = q.generation.load(Ordering::SeqCst);
+        let _item = q.claim_item(&mut items, 0);
         drop(items);
         handle.join().unwrap();
 
@@ -3845,7 +3904,8 @@ mod tests {
         });
         started_rx.recv().unwrap();
 
-        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        let selected_generation = q.generation.load(Ordering::SeqCst);
+        let _item = q.claim_item(&mut items, 0);
         drop(items);
         handle.join().unwrap();
 
@@ -3870,7 +3930,8 @@ mod tests {
         });
         started_rx.recv().unwrap();
 
-        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        let selected_generation = q.generation.load(Ordering::SeqCst);
+        let _item = q.claim_item(&mut items, 0);
         drop(items);
         handle.join().unwrap();
 
@@ -3911,17 +3972,22 @@ mod tests {
         let selected_generation = match q.items.try_lock() {
             // This is the buggy ordering: the queue lock escaped before the generation bump.
             Ok(mut items) => {
+                // Snapshot under the escaped guard, still ahead of the bump `transition` is
+                // holding back — that pre-bump value is what records the regression.
+                let generation = q.generation.load(Ordering::SeqCst);
                 // try_lock already recorded the regression; release `seq` before claiming,
                 // because `claim_item`'s depth bump re-locks it (std mutexes aren't reentrant).
                 drop(transition);
-                let (_, generation) = q.claim_item(&mut items, 0);
+                let _ = q.claim_item(&mut items, 0);
                 generation
             }
             // The fixed ordering: let the cancellation finish, then claim its survivor.
             Err(std::sync::TryLockError::WouldBlock) => {
                 drop(transition);
                 let mut items = q.items.lock().unwrap();
-                let (_, generation) = q.claim_item(&mut items, 0);
+                // Post-bump: the cancellation released `items` only after finishing.
+                let generation = q.generation.load(Ordering::SeqCst);
+                let _ = q.claim_item(&mut items, 0);
                 generation
             }
             Err(std::sync::TryLockError::Poisoned(e)) => panic!("items lock poisoned: {e}"),
@@ -4012,7 +4078,8 @@ mod tests {
         // The playing half: an untagged claimed item IS the global session — it must cancel.
         let mut items = q.items.lock().unwrap();
         q.edit_items_locked_for_test(&mut items, |q| q.push_back(narr(None)));
-        let (_item, selected_generation) = q.claim_item(&mut items, 0);
+        let selected_generation = q.generation.load(Ordering::SeqCst);
+        let _item = q.claim_item(&mut items, 0);
         drop(items);
 
         q.clear_session(None);
