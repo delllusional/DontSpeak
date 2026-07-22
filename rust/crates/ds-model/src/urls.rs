@@ -613,6 +613,19 @@ pub const OMNIVOICE_HIGGS_TOKENIZER: Project = Project {
     files: &[],
 };
 
+/// The OmniVoice LLM backbone re-export THIS PROJECT publishes (the one derived work
+/// DontSpeak redistributes — see NOTICE.md). Same CC-BY-NC terms as the upstream
+/// weights it derives from; files come from the OmniVoice set's attribution partition.
+pub const OMNIVOICE_BIDI_EXPORT: Project = Project {
+    name: "OmniVoice bidirectional ONNX export",
+    usage: "Bidirectional ONNX re-export of the OmniVoice diffusion backbone (plain SDPA forward, 4-D bool mask, no KV cache, embed_tokens dropped)",
+    homepage: "https://huggingface.co/dellusional/OmniVoice-ONNX-bidirectional",
+    license: "CC-BY-NC-4.0",
+    license_url: "https://creativecommons.org/licenses/by-nc/4.0/",
+    platforms: Platform::ALL,
+    files: &[],
+};
+
 /// ONNX Runtime inference library (MIT). Files are platform-selected (the load-dynamic
 /// dist archive, plus the GPU build wheel on Windows x64), assembled in the collector.
 pub const ONNX_RUNTIME: Project = Project {

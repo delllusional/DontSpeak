@@ -127,6 +127,12 @@ upstream license:
   Apache-2.0 license covers the OmniVoice source code only, not the published weights.
   The `higgs_decoder.onnx` waveform decoder derives from upstream's `audio_tokenizer/`
   (Boson Higgs Audio 2) and carries the **Boson Higgs Audio 2 Community License**.
+  The disclosed redistribution exception: the LLM backbone
+  (`llm_backbone_fp32.onnx` + `.data`) is a bidirectional ONNX re-export of the
+  OmniVoice diffusion backbone that this project itself publishes at
+  https://huggingface.co/dellusional/OmniVoice-ONNX-bidirectional under the same
+  **CC-BY-NC 4.0** terms, crediting k2-fsa/OmniVoice and stating the changes (plain
+  SDPA forward, 4-D bool mask, no KV cache, embed_tokens dropped).
   https://huggingface.co/k2-fsa/OmniVoice
 - **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
   words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license

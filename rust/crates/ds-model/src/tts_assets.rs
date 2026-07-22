@@ -43,6 +43,14 @@ macro_rules! hf_url {
             $path
         )
     };
+    ($repo:literal, OMNIVOICE_BIDI_REV, $path:literal) => {
+        concat!(
+            "https://huggingface.co/",
+            $repo,
+            "/resolve/a0109dfbd1ec0ec5874d15a1b32353886a5f17dc/",
+            $path
+        )
+    };
 }
 
 macro_rules! hf_asset {
@@ -283,43 +291,27 @@ hf_asset!(
     "38e69afe9c9aa531fa59f23337d7fecbe84b7b04dc9c3ce0b871249a1c659ad4",
     16_795_584
 );
+// The single fp32 LLM profile for every provider (verified on the CPU and CUDA EPs;
+// fp16 does not exist and int8 was rejected for 11% relative hidden-state error). The
+// on-disk name MUST stay the basename the graph's external-data references embed
+// (`llm_backbone_fp32.onnx.data`), or the weights fail to resolve at load.
 hf_asset!(
     OMNI_LLM,
-    "llm_decoder.onnx",
-    "onnx-community/OmniVoice-Onnx",
-    OMNIVOICE_REV,
-    "llm_decoder.onnx",
-    "dba2abc6753795f47e9c2f79e274ba1149de8a056f4cda35c7fb30fa0e50fedc",
-    298_798
+    "llm_backbone_fp32.onnx",
+    "dellusional/OmniVoice-ONNX-bidirectional",
+    OMNIVOICE_BIDI_REV,
+    "llm_backbone_fp32.onnx",
+    "5643dbbf00e50b1f500123d1669e7966f7888a7770b10acb4cf69c5a5f6b6d09",
+    9_111_300
 );
 hf_asset!(
     OMNI_LLM_DATA,
-    "llm_decoder.onnx.data",
-    "onnx-community/OmniVoice-Onnx",
-    OMNIVOICE_REV,
-    "llm_decoder.onnx.data",
-    "59aa22f43d7b501d9ce64183106e60b65f97fb67e92f5d9e088d07504cf63383",
-    296_484_864
-);
-// The CUDA LLM decoder keeps its own subdirectory: both variants reference their external
-// weights by the literal name `llm_decoder.onnx.data`, so they cannot share one dir.
-hf_asset!(
-    OMNI_LLM_CUDA,
-    "cuda/llm_decoder.onnx",
-    "onnx-community/OmniVoice-Onnx",
-    OMNIVOICE_REV,
-    "cuda/llm_decoder.onnx",
-    "edc74683639fce5a3082327a096d49d505750d362ccd3f828a02711a0b258aa8",
-    247_030
-);
-hf_asset!(
-    OMNI_LLM_CUDA_DATA,
-    "cuda/llm_decoder.onnx.data",
-    "onnx-community/OmniVoice-Onnx",
-    OMNIVOICE_REV,
-    "cuda/llm_decoder.onnx.data",
-    "b4f1f7444adbb68bd781c3c8e7f0f75fda6f2023aa5e6e5420e61c7b7fc2170c",
-    891_420_672
+    "llm_backbone_fp32.onnx.data",
+    "dellusional/OmniVoice-ONNX-bidirectional",
+    OMNIVOICE_BIDI_REV,
+    "llm_backbone_fp32.onnx.data",
+    "7ba81a2fdcfb63f9cc7c1d0186414a8edc437cb913c92ca6b2a7778c87baca17",
+    1_761_869_824
 );
 hf_asset!(
     OMNI_TOKENIZER,
@@ -421,8 +413,6 @@ static OMNIVOICE_FILES: [Download; 11] = [
     OMNI_WAVE_DECODER,
     OMNI_WAVE_DECODER_DATA,
 ];
-static OMNIVOICE_CUDA_FILES: [Download; 2] = [OMNI_LLM_CUDA, OMNI_LLM_CUDA_DATA];
-
 /// Files inside one pinned set whose upstream license differs from the set's own.
 /// Consumed ONLY by the Libraries attribution (`crate::libraries`): presence and
 /// download paths keep reading `files`/`files_for`, so a partitioned file still
@@ -434,10 +424,17 @@ pub struct DerivedAttribution {
 }
 
 static OMNIVOICE_HIGGS_FILES: [Download; 2] = [OMNI_WAVE_DECODER, OMNI_WAVE_DECODER_DATA];
-static OMNIVOICE_ATTRIBUTION_PARTITIONS: [DerivedAttribution; 1] = [DerivedAttribution {
-    project: &urls::OMNIVOICE_HIGGS_TOKENIZER,
-    files: &OMNIVOICE_HIGGS_FILES,
-}];
+static OMNIVOICE_BIDI_FILES: [Download; 2] = [OMNI_LLM, OMNI_LLM_DATA];
+static OMNIVOICE_ATTRIBUTION_PARTITIONS: [DerivedAttribution; 2] = [
+    DerivedAttribution {
+        project: &urls::OMNIVOICE_HIGGS_TOKENIZER,
+        files: &OMNIVOICE_HIGGS_FILES,
+    },
+    DerivedAttribution {
+        project: &urls::OMNIVOICE_BIDI_EXPORT,
+        files: &OMNIVOICE_BIDI_FILES,
+    },
+];
 
 #[derive(Debug)]
 pub struct TtsOrtAssetSet {
@@ -495,7 +492,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         model: TtsModel::OmniVoice,
         dir_name: Some("omnivoice"),
         files: &OMNIVOICE_FILES,
-        cuda_files: &OMNIVOICE_CUDA_FILES,
+        cuda_files: &[],
         display_name: "OmniVoice",
         homepage: "https://huggingface.co/onnx-community/OmniVoice-Onnx",
         // Upstream's Apache-2.0 covers the OmniVoice CODE only; the published weights are
@@ -672,42 +669,30 @@ mod tests {
         );
 
         let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
+        // The LLM is the single fp32 bidirectional export — never an int4/CUDA variant.
         assert!(
-            !omnivoice
+            omnivoice
                 .files
                 .iter()
-                .any(|file| file.url.contains("/int4/"))
+                .any(|file| file.url.contains("fp32") && file.file_name.starts_with("llm_"))
         );
+        for file in omnivoice.files_for(true) {
+            assert!(!file.url.contains("int4"), "{}", file.url);
+            assert!(!file.url.contains("/cuda/"), "{}", file.url);
+        }
         assert!(omnivoice.files.iter().any(|file| {
             file.url
                 .contains("/audio_tokenizer/fp16/higgs_decoder.onnx")
         }));
     }
 
-    /// The two OmniVoice LLM exports name their external weights identically
-    /// (`llm_decoder.onnx.data`), so flattening the CUDA pair into the shared directory would
-    /// collide them and silently load the wrong precision.
+    /// One fp32 LLM profile serves every provider, so no model pins CUDA-only bytes and
+    /// the shared set never smuggles a `cuda/` asset in.
     #[test]
-    fn the_cuda_llm_variant_keeps_its_own_subdirectory() {
-        let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
-        for file in omnivoice.cuda_files {
-            assert!(
-                file.file_name.starts_with("cuda/"),
-                "CUDA asset `{}` must land under cuda/",
-                file.file_name
-            );
-            assert!(file.url.contains("/cuda/"), "{}", file.url);
-        }
-        assert_eq!(
-            omnivoice
-                .cuda_files
-                .iter()
-                .map(|file| file.file_name)
-                .collect::<Vec<_>>(),
-            ["cuda/llm_decoder.onnx", "cuda/llm_decoder.onnx.data"]
-        );
-        // The shared set stays the portable profile: no CUDA-only bytes for a CPU host.
+    fn no_model_pins_cuda_only_assets() {
+        assert!(tts_ort_asset_set(TtsModel::OmniVoice).cuda_files.is_empty());
         for set in &TTS_ORT_ASSETS {
+            assert!(set.cuda_files.is_empty(), "{}", set.display_name);
             for file in set.files {
                 assert!(!file.file_name.starts_with("cuda/"), "{}", file.file_name);
                 assert!(!file.url.contains("/cuda/"), "{}", file.url);

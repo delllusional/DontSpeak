@@ -504,9 +504,9 @@ mod tests {
         }
     }
 
-    /// The installer stages the shared profile only: it runs before any CUDA probe, so a
-    /// staged `cuda/` asset would be dead weight, and `--install-prefetched` asking for one
-    /// would fall through to the network mid-install.
+    /// The installer stages the shared profile only — which is now the WHOLE profile:
+    /// the single fp32 LLM serves every provider, so nothing CUDA-only may sneak into
+    /// the staged manifest.
     #[test]
     fn omnivoice_prefetch_manifest_stages_no_cuda_asset() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -527,10 +527,7 @@ mod tests {
 
         let set = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::OmniVoice);
         assert_eq!(items.len(), set.files.len());
-        assert!(
-            !set.cuda_files.is_empty(),
-            "the CUDA profile must be pinned"
-        );
+        assert!(set.cuda_files.is_empty(), "one profile serves every provider");
         for item in &items {
             assert!(
                 !item.url.contains("/cuda/"),

@@ -177,9 +177,8 @@ const DEFAULT_VOICE: &[&str] = &["default"];
 const QWEN_DEFAULT_VOICE: &[&str] = &["sohee"];
 const OMNIVOICE_VOICES: &[&str] = &["warm, clear female voice"];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
-// Two pinned OmniVoice ONNX profiles differing only in the LLM decoder: the portable one
-// pairs FP16 audio sub-models with an INT4 LLM (ONNX Runtime GenAI has no FP16 CPU LLM
-// profile), and the CUDA one is the all-FP16 export published under `cuda/`.
+// One pinned OmniVoice ONNX profile for every ORT provider: FP16 audio sub-models plus
+// the single fp32 bidirectional LLM backbone (no per-provider variants).
 const OMNIVOICE_PROVIDERS: &[Provider] = MLX_CUDA_CPU_PROVIDERS;
 
 pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
