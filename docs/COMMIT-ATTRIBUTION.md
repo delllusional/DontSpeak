@@ -23,23 +23,21 @@ shape later but can't recover which runtime produced it).
 
 Capture sources:
 
-- **Codex** — hook model slug; turn context for effort. When a tool surface skips
-  `PreToolUse`, **`commit-msg` live-resolves** both values from the active transcript
-  under `~/.codex/sessions` using `CODEX_THREAD_ID`.
+- **Codex** — hook model slug; turn context for effort.
 - **Claude** — transcript for model; tool hooks for applied effort.
 - **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
 - **Grok** — session model + effort (`summary.reasoning_effort` / chat turns /
   `~/.grok/active_sessions.json`). `none` only when the catalog says effort is
-  unsupported. Tool shells often set only `GROK_AGENT` (no `GROK_SESSION_ID`).
-  PreToolUse capture is best-effort; **`commit-msg` also live-resolves** from the
-  Grok session store when the cache is missing so trailers stay correct without
-  a prior capture. Prefer parent sessions over plan/implement subagents.
+  unsupported. Prefer parent sessions over plan/implement subagents.
 
 Claude auto-`Co-Authored-By` is disabled via `.claude/settings.json` `attribution`.
 If Codex/Qwen still emit auto-attribution, the commit hook strips it.
 
 Hook mechanics:
 
+- PreToolUse capture is best-effort. When it is absent, `commit-msg` asks the active
+  client's resolver to prove the same model and effort from its session store. The
+  commit remains blocked when either value is unavailable.
 - Merge commits (`git merge`) are captured and stamped like regular commits.
 - `--amend` preserves the existing pair (appending the amending pair if it
   differs) only when the amended message is identical to `HEAD`'s (`--no-edit`,

@@ -186,11 +186,20 @@ function findFileByName(directory, predicate) {
   return undefined;
 }
 
-function findCodexTranscript(home, sessionId) {
+function findSessionTranscript(home, client, sessionId) {
   if (!sessionId) return undefined;
-  const matches = (name) => name.endsWith(".jsonl") && name.includes(sessionId);
-  return findFileByName(join(home, ".codex", "sessions"), matches)
-    ?? findFileByName(join(home, ".codex", "archived_sessions"), matches);
+  const directories = {
+    codex: [join(home, ".codex", "sessions"), join(home, ".codex", "archived_sessions")],
+    claude: [join(home, ".claude", "projects")],
+    qwen: [join(home, ".qwen", "projects")],
+  }[client] ?? [];
+  const matches = (name) => name === `${sessionId}.jsonl`
+    || name.endsWith(`-${sessionId}.jsonl`);
+  for (const directory of directories) {
+    const transcript = findFileByName(directory, matches);
+    if (transcript) return transcript;
+  }
+  return undefined;
 }
 
 function loadJson(file) {
@@ -350,7 +359,7 @@ function resolveCodex(input, env, home) {
   // Transcript only when hook input is incomplete.
   if (hookModel && hookEffort) return { model: hookModel, effort: hookEffort };
   const sessionId = firstString(input?.sessionId, input?.session_id, env.CODEX_THREAD_ID);
-  const transcript = transcriptPath(input) ?? findCodexTranscript(home, sessionId);
+  const transcript = transcriptPath(input) ?? findSessionTranscript(home, "codex", sessionId);
   const context = codexContextFromTranscript(transcript, hookModel);
   return {
     model: firstString(hookModel, context?.model),
@@ -358,24 +367,28 @@ function resolveCodex(input, env, home) {
   };
 }
 
-function resolveClaude(input, env) {
+function resolveClaude(input, env, home) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
+  const sessionId = firstString(input?.sessionId, input?.session_id, env.CLAUDE_CODE_SESSION_ID);
+  const transcript = transcriptPath(input) ?? findSessionTranscript(home, "claude", sessionId);
   return {
-    model: firstString(hookModel, assistantModelFromTranscript(transcriptPath(input))),
+    model: firstString(hookModel, assistantModelFromTranscript(transcript)),
     effort: firstString(hookEffort, normalizedEffort(env.CLAUDE_EFFORT)),
   };
 }
 
-function resolveQwen(input, root, home) {
+function resolveQwen(input, root, home, env) {
   const settings = qwenSettings(root, home);
   const direct = directEffort(input);
+  const sessionId = firstString(input?.sessionId, input?.session_id, env.QWEN_SESSION_ID);
+  const transcript = transcriptPath(input) ?? findSessionTranscript(home, "qwen", sessionId);
   return {
     model: firstString(
       input?.model,
       input?.model_id,
       input?.modelId,
-      assistantModelFromTranscript(transcriptPath(input)),
+      assistantModelFromTranscript(transcript),
     ),
     effort: normalizedEffort(firstString(direct, settings.reasoningEffort)),
   };
@@ -418,10 +431,10 @@ export function resolveAttribution(client, input, options = {}) {
       resolved = resolveCodex(input, env, home);
       break;
     case "claude":
-      resolved = resolveClaude(input, env);
+      resolved = resolveClaude(input, env, home);
       break;
     case "qwen":
-      resolved = resolveQwen(input, root, home);
+      resolved = resolveQwen(input, root, home, env);
       break;
     case "grok":
       resolved = resolveGrok(input, env, home, root);

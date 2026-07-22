@@ -355,6 +355,26 @@ test("Claude combines its transcript model with applied hook effort", (t) => {
   assert.deepEqual(result.errors, []);
 });
 
+test("Claude resolves its active session transcript without hook input", (t) => {
+  const home = temporaryDirectory(t);
+  const sessionId = "1c82a9c5-15e6-4727-b979-59092f641c1d";
+  const transcript = join(home, ".claude", "projects", "project", `${sessionId}.jsonl`);
+  jsonLines(transcript, [
+    { type: "assistant", message: { role: "assistant", model: "claude-opus-4-8" } },
+  ]);
+  const result = resolveAttribution(
+    "claude",
+    {},
+    {
+      home,
+      env: { CLAUDE_CODE_SESSION_ID: sessionId, CLAUDE_EFFORT: "max" },
+    },
+  );
+  assert.equal(result.model, "claude-opus-4-8");
+  assert.equal(result.effort, "max");
+  assert.deepEqual(result.errors, []);
+});
+
 test("Qwen combines its transcript model with its persisted effort selection", (t) => {
   const base = temporaryDirectory(t);
   const root = join(base, "repo");
@@ -366,6 +386,29 @@ test("Qwen combines its transcript model with its persisted effort selection", (
   writeFileSync(join(root, ".qwen", "settings.json"), JSON.stringify({ model: { reasoningEffort: "xhigh" } }));
   jsonLines(transcript, [{ type: "assistant", model: "qwen3-coder-plus" }]);
   const result = resolveAttribution("qwen", { transcript_path: transcript }, { root, home });
+  assert.equal(result.model, "qwen3-coder-plus");
+  assert.equal(result.effort, "xhigh");
+  assert.deepEqual(result.errors, []);
+});
+
+test("Qwen resolves its active session transcript without hook input", (t) => {
+  const base = temporaryDirectory(t);
+  const root = join(base, "repo");
+  const home = join(base, "home");
+  const sessionId = "10ff200c-319f-47c3-9eb8-2f3e9be0c466";
+  const transcript = join(home, ".qwen", "projects", "project", "chats", `${sessionId}.jsonl`);
+  mkdirSync(join(root, ".qwen"), { recursive: true });
+  writeFileSync(join(root, ".qwen", "settings.json"), JSON.stringify({
+    model: { reasoningEffort: "xhigh" },
+  }));
+  jsonLines(transcript, [
+    { type: "assistant", model: "qwen3-coder-plus" },
+  ]);
+  const result = resolveAttribution(
+    "qwen",
+    {},
+    { root, home, env: { QWEN_CODE: "1", QWEN_SESSION_ID: sessionId } },
+  );
   assert.equal(result.model, "qwen3-coder-plus");
   assert.equal(result.effort, "xhigh");
   assert.deepEqual(result.errors, []);

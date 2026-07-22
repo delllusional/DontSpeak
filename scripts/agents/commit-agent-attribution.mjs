@@ -45,9 +45,9 @@ if (active?.conflict) {
 }
 
 if (!record) {
-  // Some tool surfaces skip PreToolUse capture. Resolve from the active client's
-  // session store so the trailer still stamps from exact runtime metadata.
-  if (active?.client === "codex" || active?.client === "grok") {
+  // Some tool surfaces skip PreToolUse capture. Every client resolver gets one
+  // chance to prove exact attribution from its active session store.
+  if (active?.client) {
     const resolved = resolveAttribution(
       active.client,
       { cwd: root, sessionId: active.sessionId },
