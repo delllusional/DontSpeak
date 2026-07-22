@@ -754,10 +754,9 @@ fn try_streaming(
 }
 
 /// Resolve the SepFormer separator model, most-specific first: an explicit
-/// `DONTSPEAK_SEPARATOR_PATH` (older app bundles shipped the model inside Resources and
-/// point this at it), a dev copy in the config dir (so the lock can be exercised without
-/// a full `.app` build), then the DOWNLOADED copy in the flat `model_dir()` — the normal
-/// path since the model moved out of the repo/bundle and into the standard download
+/// `DONTSPEAK_SEPARATOR_PATH`, a dev copy in the config dir (so the lock can be exercised
+/// without a full `.app` build), then the DOWNLOADED copy in the flat `model_dir()` — the
+/// normal path since the model moved out of the repo/bundle and into the standard download
 /// registry (`ds_model::urls::SEPFORMER`, auto-fetched by the engine when the speaker-lock
 /// is on). `None` ⇒ no model present (lock fails open).
 #[cfg(target_os = "macos")]

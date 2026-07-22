@@ -39,6 +39,19 @@ $archive = if ($env:DONTSPEAK_ARCHIVE) {
 
 function Say  ($m) { Write-Host "==> $m" }
 function Warn ($m) { Write-Warning $m }
+function Publish-EnvironmentChange {
+  if (-not ('DontSpeak.EnvironmentChangeNativeMethods' -as [type])) {
+    Add-Type -Namespace DontSpeak -Name EnvironmentChangeNativeMethods -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto, SetLastError = true)]
+public static extern System.IntPtr SendMessageTimeout(
+    System.IntPtr hWnd, uint message, System.UIntPtr wParam, string lParam,
+    uint flags, uint timeout, out System.UIntPtr result);
+'@
+  }
+  $result = [UIntPtr]::Zero
+  [void][DontSpeak.EnvironmentChangeNativeMethods]::SendMessageTimeout(
+    [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result)
+}
 
 # Release-asset arch token is uname-style everywhere: ARM64 → aarch64, AMD64 → x86_64.
 # Detect the MACHINE, not this process: an x64-emulated shell on Windows-on-ARM reports
@@ -140,13 +153,35 @@ try {
 
   # Publish the CLI for `dontspeak <client>` in NEW terminals. Keep the user PATH
   # additive/idempotent and never rewrite the machine PATH or require elevation.
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $pathEntries = @($userPath -split ';' | Where-Object { $_ })
-  $destKey = $dest.TrimEnd('\')
-  if (-not ($pathEntries | Where-Object { $_.TrimEnd('\') -ieq $destKey })) {
-    $userPath = (@($pathEntries) + $dest) -join ';'
-    [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
-    Say 'added DontSpeak to your user PATH (available in new terminals)'
+  # Read the registry value without expanding entries such as %USERPROFILE%, then retain
+  # its REG_SZ/REG_EXPAND_SZ kind when writing it back.
+  $userEnvKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+  if (-not $userEnvKey) { throw 'cannot open the current-user environment registry key' }
+  try {
+    $hasUserPath = @($userEnvKey.GetValueNames()) -icontains 'Path'
+    $userPath = [string]$userEnvKey.GetValue(
+      'Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $pathEntries = @($userPath -split ';' | Where-Object { $_ })
+    $destKey = $dest.TrimEnd('\')
+    if (-not ($pathEntries | Where-Object {
+      $_.TrimEnd('\') -ieq $destKey -or
+        [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $destKey
+    })) {
+      $userPath = if (-not $userPath) { $dest } elseif ($userPath.EndsWith(';')) { "$userPath$dest" } else { "$userPath;$dest" }
+      $pathKind = if ($hasUserPath) {
+        $userEnvKey.GetValueKind('Path')
+      } else {
+        [Microsoft.Win32.RegistryValueKind]::ExpandString
+      }
+      if ($pathKind -notin @([Microsoft.Win32.RegistryValueKind]::String, [Microsoft.Win32.RegistryValueKind]::ExpandString)) {
+        throw "current-user PATH has unsupported registry type $pathKind"
+      }
+      $userEnvKey.SetValue('Path', $userPath, $pathKind)
+      Publish-EnvironmentChange
+      Say 'added DontSpeak to your user PATH (available in new terminals)'
+    }
+  } finally {
+    $userEnvKey.Dispose()
   }
   if (-not (($env:Path -split ';') | Where-Object { $_.TrimEnd('\') -ieq $destKey })) {
     $env:Path = "$dest;$env:Path"

@@ -70,13 +70,16 @@ fn launch_host() -> bool {
     cmd.spawn().is_ok()
 }
 
-/// Locate the host binary. Windows: `ds-winui.exe` (ds_core.dll beside it). Linux: `ds-gtk`.
-/// Order: next to this binary (packaged single-dir), then `~/.local/bin` install layout.
+/// Locate the host binary. Windows checks packaged locations beside the CLI; Linux also
+/// checks the `~/.local/bin` install layout.
 #[cfg(not(target_os = "macos"))]
 fn host_app_bin() -> Option<PathBuf> {
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|cur| cur.parent().map(Path::to_path_buf));
+    #[cfg(target_os = "windows")]
+    let home: Option<PathBuf> = None;
+    #[cfg(not(target_os = "windows"))]
     let home = ds_config::Paths::resolve().map(|paths| paths.home);
     host_app_candidates(exe_dir.as_deref(), home.as_deref())
         .into_iter()
@@ -86,7 +89,7 @@ fn host_app_bin() -> Option<PathBuf> {
 /// Ordered candidate paths from already-resolved `exe_dir` / `home` — pure composition,
 /// no filesystem checks. See [`host_app_bin`] for what each candidate is.
 #[cfg(not(target_os = "macos"))]
-fn host_app_candidates(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathBuf> {
+fn host_app_candidates(exe_dir: Option<&Path>, _home: Option<&Path>) -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     const APP: &str = "ds-winui.exe";
     #[cfg(not(target_os = "windows"))]
@@ -98,12 +101,8 @@ fn host_app_candidates(exe_dir: Option<&Path>, home: Option<&Path>) -> Vec<PathB
         #[cfg(target_os = "windows")]
         candidates.push(dir.join("winui").join(APP)); // winui\ subdir beside us
     }
-    if let Some(home) = home {
-        // Linux install-gui.sh: `ds-gtk` in ~/.local/bin. Windows portable zip is single-dir
-        // (above); winui/ under home is a legacy dev-deploy fallback.
-        #[cfg(target_os = "windows")]
-        candidates.push(home.join(".local/bin/winui").join(APP));
-        #[cfg(not(target_os = "windows"))]
+    #[cfg(not(target_os = "windows"))]
+    if let Some(home) = _home {
         candidates.push(home.join(".local/bin").join(APP));
     }
     candidates
@@ -122,7 +121,7 @@ mod tests {
     const APP: &str = "ds-gtk";
 
     #[test]
-    fn both_present_orders_exe_dir_before_home() {
+    fn candidates_match_supported_platform_layouts() {
         let exe_dir = Path::new("/tmp/exe-dir");
         let home = Path::new("/tmp/home");
         let candidates = host_app_candidates(Some(exe_dir), Some(home));
@@ -131,8 +130,7 @@ mod tests {
         #[cfg(target_os = "windows")]
         {
             assert_eq!(candidates[1], exe_dir.join("winui").join(APP));
-            assert_eq!(candidates[2], home.join(".local/bin/winui").join(APP));
-            assert_eq!(candidates.len(), 3);
+            assert_eq!(candidates.len(), 2);
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -142,13 +140,13 @@ mod tests {
     }
 
     #[test]
-    fn no_exe_dir_still_yields_home_candidates() {
+    fn home_candidate_is_linux_only() {
         let home = Path::new("/tmp/home");
         let candidates = host_app_candidates(None, Some(home));
 
         #[cfg(target_os = "windows")]
         {
-            assert_eq!(candidates, vec![home.join(".local/bin/winui").join(APP)]);
+            assert!(candidates.is_empty());
         }
         #[cfg(not(target_os = "windows"))]
         {

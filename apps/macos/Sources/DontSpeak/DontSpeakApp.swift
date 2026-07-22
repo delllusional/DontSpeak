@@ -235,7 +235,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerLoginItem()
         useBundledOnnxRuntimeIfPresent()
         useBundledMLXIfPresent()
-        useBundledSeparatorIfPresent()
         // In-process: caps loop + RPC + TTS on a bg thread. Accessibility / Input-Monitoring /
         // Mic all grant to this one signed bundle. MCP/hooks hit the socket we serve.
         _ = ds_engine_start()
@@ -266,14 +265,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             FileManager.default.fileExists(atPath: dylib.path)
         else { return }
         setenv("DONTSPEAK_MLX_DYLIB_PATH", dylib.path, 1)
-    }
-
-    /// Speaker-lock sepformer model. Absent → fail open (unfiltered STT).
-    private func useBundledSeparatorIfPresent() {
-        guard let model = Bundle.main.resourceURL?.appendingPathComponent("sepformer_int8.onnx"),
-            FileManager.default.fileExists(atPath: model.path)
-        else { return }
-        setenv("DONTSPEAK_SEPARATOR_PATH", model.path, 1)
     }
 
     /// Login item via SMAppService. Fail-quiet if denied / standalone.

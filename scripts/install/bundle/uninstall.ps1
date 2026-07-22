@@ -9,6 +9,19 @@ function Invoke-CleanupStep ($name, [scriptblock]$action) {
   try { & $action }
   catch { $failures.Add("${name}: $($_.Exception.Message)") }
 }
+function Publish-EnvironmentChange {
+  if (-not ('DontSpeak.EnvironmentChangeNativeMethods' -as [type])) {
+    Add-Type -Namespace DontSpeak -Name EnvironmentChangeNativeMethods -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto, SetLastError = true)]
+public static extern System.IntPtr SendMessageTimeout(
+    System.IntPtr hWnd, uint message, System.UIntPtr wParam, string lParam,
+    uint flags, uint timeout, out System.UIntPtr result);
+'@
+  }
+  $result = [UIntPtr]::Zero
+  [void][DontSpeak.EnvironmentChangeNativeMethods]::SendMessageTimeout(
+    [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result)
+}
 # Only the PLACED copy sits next to dontspeak.exe — any other copy (repo checkout,
 # standalone download) must target the standard install dir, NOT its own folder:
 # $PSScriptRoot alone once resolved to a repo's scripts/ dir and step 7 deleted it.
@@ -40,10 +53,28 @@ Invoke-CleanupStep 'remove start-at-login entry' {
 }
 # 4. Remove only our exact install directory from the user PATH.
 Invoke-CleanupStep 'remove install directory from user PATH' {
-  $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-  $destKey = $dest.TrimEnd('\')
-  $keptPath = @($userPath -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ine $destKey }) -join ';'
-  [Environment]::SetEnvironmentVariable('Path', $keptPath, 'User')
+  $userEnvKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
+  if (-not $userEnvKey) { return }
+  try {
+    $hasUserPath = @($userEnvKey.GetValueNames()) -icontains 'Path'
+    $userPath = [string]$userEnvKey.GetValue(
+      'Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $destKey = $dest.TrimEnd('\')
+    $keptPath = @($userPath -split ';' | Where-Object {
+      -not ($_ -and ($_.TrimEnd('\') -ieq $destKey -or
+        [Environment]::ExpandEnvironmentVariables($_).TrimEnd('\') -ieq $destKey))
+    }) -join ';'
+    if ($hasUserPath -and $keptPath -cne $userPath) {
+      $pathKind = $userEnvKey.GetValueKind('Path')
+      if ($pathKind -notin @([Microsoft.Win32.RegistryValueKind]::String, [Microsoft.Win32.RegistryValueKind]::ExpandString)) {
+        throw "current-user PATH has unsupported registry type $pathKind"
+      }
+      $userEnvKey.SetValue('Path', $keptPath, $pathKind)
+      Publish-EnvironmentChange
+    }
+  } finally {
+    $userEnvKey.Dispose()
+  }
 }
 # 5. Downloaded models + logs + config (everything DontSpeak wrote outside the install dir).
 Invoke-CleanupStep 'remove application data' {

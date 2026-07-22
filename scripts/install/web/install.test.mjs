@@ -10,6 +10,23 @@ import test from "node:test";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const installer = join(repoRoot, "scripts/install/web/install.sh");
 
+test("Windows PATH edits preserve unexpanded registry values and their type", async () => {
+  const scripts = [
+    "scripts/install/web/install.ps1",
+    "scripts/install/bundle/uninstall.ps1",
+  ];
+  for (const relative of scripts) {
+    const source = await readFile(join(repoRoot, relative), "utf8");
+    assert.match(source, /RegistryValueOptions\]::DoNotExpandEnvironmentNames/);
+    assert.match(source, /GetValueKind\('Path'\)/);
+    assert.match(source, /SetValue\('Path', \$(?:userPath|keptPath), \$pathKind\)/);
+    assert.match(source, /ExpandEnvironmentVariables\(\$_\)/);
+    assert.match(source, /Publish-EnvironmentChange/);
+    assert.match(source, /SendMessageTimeout/);
+    assert.doesNotMatch(source, /\[Environment\]::(?:Get|Set)EnvironmentVariable\('Path'/);
+  }
+});
+
 async function executable(path, contents) {
   await writeFile(path, contents);
   await chmod(path, 0o755);

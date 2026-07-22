@@ -14,6 +14,11 @@ stderr_file="$test_dir/stderr"
 trap 'rm -rf "$test_dir"' EXIT
 BUNDLE_LIB_DIR="$test_dir"
 
+if grep -Eq 'DONTSPEAK_SEPARATOR_PATH|sepformer_int8\.onnx' \
+    "$HERE/Sources/DontSpeak/DontSpeakApp.swift"; then
+  fail "macOS host still probes for the retired bundled separator"
+fi
+
 xcodebuild() { return 99; }
 xcrun() {
   [ "${1:-}" = "swiftc" ] || return 98
