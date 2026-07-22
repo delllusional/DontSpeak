@@ -368,7 +368,7 @@ enum EngineProbe {
     Unreachable,
     /// Engine answered, but not with a `model_status` object.
     Invalid,
-    Live(ds_status::ModelStatus),
+    Live(Box<ds_status::ModelStatus>),
 }
 
 fn probe_engine(sock: Option<&PathBuf>, since: Option<u64>, timeout_ms: u64) -> EngineProbe {
@@ -381,6 +381,7 @@ fn probe_engine(sock: Option<&PathBuf>, since: Option<u64>, timeout_ms: u64) -> 
     });
     match ds_ipc::request(sock, &request) {
         Ok(Response::ModelStatus { status }) => serde_json::from_value(status)
+            .map(Box::new)
             .map(EngineProbe::Live)
             .unwrap_or(EngineProbe::Invalid),
         Ok(_) => EngineProbe::Invalid,
