@@ -588,9 +588,7 @@ mod tests {
     #[test]
     fn a_pure_tone_fails_the_ratio_gate_even_at_speech_loudness() {
         // sin has rms/peak = 0.707 regardless of amplitude; a quiet tone must still fail.
-        let tone: Vec<f32> = (0..24_000)
-            .map(|i| 0.2 * (i as f32 * 0.05).sin())
-            .collect();
+        let tone: Vec<f32> = (0..24_000).map(|i| 0.2 * (i as f32 * 0.05).sin()).collect();
         let health = audio_health(&tone);
         assert!(health.rms < RMS_CEILING, "quiet tone passes the rms gate");
         let error = health_verdict(&health).unwrap_err();

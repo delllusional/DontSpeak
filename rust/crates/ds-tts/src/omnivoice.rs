@@ -89,8 +89,14 @@ pub const OMNIVOICE_PRESETS: &[(&str, &str)] = &[
     ("young_man", "male, young adult, moderate pitch"),
     ("mature_woman", "female, middle-aged, moderate pitch"),
     ("mature_man", "male, middle-aged, low pitch"),
-    ("british_woman", "female, middle-aged, moderate pitch, british accent"),
-    ("british_man", "male, middle-aged, moderate pitch, british accent"),
+    (
+        "british_woman",
+        "female, middle-aged, moderate pitch, british accent",
+    ),
+    (
+        "british_man",
+        "male, middle-aged, moderate pitch, british accent",
+    ),
     ("bright_woman", "female, young adult, high pitch"),
     ("deep_man", "male, middle-aged, very low pitch"),
     ("whisper", "female, young adult, whisper"),
@@ -467,7 +473,9 @@ fn check_llm_contract(inputs: &[(&str, ValueType)], outputs: &[&str]) -> Result<
         }
     }
     if !saw_embeds || !saw_mask {
-        return Err(format!("omnivoice LLM is missing a required input; {expected}"));
+        return Err(format!(
+            "omnivoice LLM is missing a required input; {expected}"
+        ));
     }
     if !outputs.contains(&"hidden_states") {
         return Err(format!(
@@ -816,7 +824,10 @@ mod tests {
 
     #[test]
     fn voice_resolution_maps_presets_and_passes_raw_instructs() {
-        assert_eq!(preset_instruct("young_woman"), Some("female, young adult, moderate pitch"));
+        assert_eq!(
+            preset_instruct("young_woman"),
+            Some("female, young adult, moderate pitch")
+        );
         assert_eq!(preset_instruct("default"), Some(""));
         assert_eq!(preset_instruct("no_such_voice"), None);
         // MLX arg: instruct-less resolutions become the literal "default" the shim

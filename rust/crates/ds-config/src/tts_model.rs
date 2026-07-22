@@ -149,7 +149,11 @@ impl ResolvedTtsParams {
                 Some(TtsParamDefault::Float(value)) => value,
                 Some(TtsParamDefault::Int(value)) => value as f32,
                 _ => {
-                    debug_assert!(false, "{key} is not a declared {} float param", model.as_str());
+                    debug_assert!(
+                        false,
+                        "{key} is not a declared {} float param",
+                        model.as_str()
+                    );
                     0.0
                 }
             },
@@ -163,7 +167,11 @@ impl ResolvedTtsParams {
             _ => match model.descriptor().param(key).map(|p| p.default) {
                 Some(TtsParamDefault::Int(value)) => value,
                 _ => {
-                    debug_assert!(false, "{key} is not a declared {} int param", model.as_str());
+                    debug_assert!(
+                        false,
+                        "{key} is not a declared {} int param",
+                        model.as_str()
+                    );
                     0
                 }
             },
@@ -376,7 +384,10 @@ const NO_PARAMS: &[TtsParamDescriptor] = &[];
 // (model card range; 0.5 = neutral — the value the ORT port hardcoded before params).
 const CHATTERBOX_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
     key: "exaggeration",
-    kind: TtsParamKind::Float { min: 0.25, max: 2.0 },
+    kind: TtsParamKind::Float {
+        min: 0.25,
+        max: 2.0,
+    },
     default: TtsParamDefault::Float(0.5),
     user_visible: true,
     honored_ort: true,
@@ -741,10 +752,7 @@ mod tests {
         let chatterbox = TtsModel::Chatterbox.descriptor();
         // Absent config ⇒ all defaults (byte-identical pre-parameter behavior).
         let resolved = chatterbox.resolve_params(&TtsParamMap::new());
-        assert_eq!(
-            resolved.float(TtsModel::Chatterbox, "exaggeration"),
-            0.5
-        );
+        assert_eq!(resolved.float(TtsModel::Chatterbox, "exaggeration"), 0.5);
         assert_eq!(resolved.iter().count(), chatterbox.params.len());
         // A valid override is kept.
         let mut stored = TtsParamMap::new();

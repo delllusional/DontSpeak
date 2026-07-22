@@ -1959,7 +1959,9 @@ pub(crate) mod wedge_recovery_tests {
         let mgr = mk_mgr(&dir);
         mgr.speak_slot.0.lock().unwrap().progress = 9;
 
-        let error = mgr.speak("hello", "af_sarah", "en", 1.0, &Default::default(), 0).unwrap_err();
+        let error = mgr
+            .speak("hello", "af_sarah", "en", 1.0, &Default::default(), 0)
+            .unwrap_err();
 
         assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
         assert_eq!(mgr.last_speak_progress(), 0);
@@ -2027,8 +2029,9 @@ pub(crate) mod wedge_recovery_tests {
 
         // A speak queued RIGHT BEHIND the wedge, on the same (about-to-be-reaped) child.
         let speak_mgr = mgr.clone();
-        let speak_attempt_1 =
-            std::thread::spawn(move || speak_mgr.speak("hello", "af_sarah", "en", 1.0, &Default::default(), 0));
+        let speak_attempt_1 = std::thread::spawn(move || {
+            speak_mgr.speak("hello", "af_sarah", "en", 1.0, &Default::default(), 0)
+        });
 
         let t0 = std::time::Instant::now();
         let listen_result = listen.join().expect("listen thread panicked");
@@ -2051,7 +2054,8 @@ pub(crate) mod wedge_recovery_tests {
         );
 
         mgr.ensure_started();
-        let speak_2_result = mgr.speak("hello again", "af_sarah", "en", 1.0, &Default::default(), 0);
+        let speak_2_result =
+            mgr.speak("hello again", "af_sarah", "en", 1.0, &Default::default(), 0);
         assert!(
             speak_2_result.is_ok(),
             "speak after the wedge is killed must succeed: {speak_2_result:?}"

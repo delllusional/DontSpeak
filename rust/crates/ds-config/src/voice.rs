@@ -537,7 +537,9 @@ fn warn_dropped_tts_params(table: &toml::Table, paths: &Paths) {
     };
     for (token, entries) in models {
         let Some(model) = TtsModel::parse(token) else {
-            warn(&format!("unknown model in [tts_params]: {token:?} (ignored)"));
+            warn(&format!(
+                "unknown model in [tts_params]: {token:?} (ignored)"
+            ));
             continue;
         };
         let Some(entries) = entries.as_table() else {

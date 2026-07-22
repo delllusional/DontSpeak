@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use ds_config::{
     CancelSpeechScope, CaptureGain, DiarizerProvider, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine, TtsModel, TtsParamMap, VoiceConfig, de_opt_pref_stt_engine,
-    de_opt_pref_tts_engine, default_provider, normalize_tray,
+    TtsEngine, TtsModel, TtsParamMap, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
+    default_provider, normalize_tray,
 };
 
 fn de_opt_tts_model<'de, D>(deserializer: D) -> Result<Option<TtsModel>, D::Error>
@@ -878,9 +878,8 @@ mod tests {
         };
         let err = reject(serde_json::json!({ "tts_params": { "kokoro": { "steps": 8 } } }));
         assert!(err.contains("not a kokoro parameter"), "{err}");
-        let err = reject(
-            serde_json::json!({ "tts_params": { "chatterbox": { "exaggeration": 2.5 } } }),
-        );
+        let err =
+            reject(serde_json::json!({ "tts_params": { "chatterbox": { "exaggeration": 2.5 } } }));
         assert!(err.contains("0.25 to 2"), "{err}");
         let err = reject(serde_json::json!({ "tts_params": {} }));
         assert!(err.contains("at least one model"), "{err}");

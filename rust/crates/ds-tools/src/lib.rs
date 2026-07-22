@@ -1314,12 +1314,8 @@ mod tests {
             }),
             tts_params: Some(TtsParamUpdates {
                 kokoro: None,
-                chatterbox: Some(
-                    [("exaggeration".to_string(), TtsParamValue::Float(1.5))].into(),
-                ),
-                qwen: Some(
-                    [("repetition_penalty".to_string(), TtsParamValue::Float(1.2))].into(),
-                ),
+                chatterbox: Some([("exaggeration".to_string(), TtsParamValue::Float(1.5))].into()),
+                qwen: Some([("repetition_penalty".to_string(), TtsParamValue::Float(1.2))].into()),
                 omnivoice: Some([("steps".to_string(), TtsParamValue::Int(32))].into()),
             }),
             tts_model: Some(TtsModel::Kokoro),
