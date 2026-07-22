@@ -1,32 +1,35 @@
 //! Self-managed MLX model downloads.
 //!
 //! We fetch every MLX asset with the same HTTP/retry/SHA/atomic-rename/progress path as ONNX.
-//! The native shim loads only these local directories. Each set is pinned to an immutable
-//! HF commit; tree API + LFS `oid` (content sha256) or
-//! plain-blob `oid` (`git hash-object`) + size verify bytes. `.ds-ready` holds the revision
-//! and downloaded path manifest (status poll is network-free; partials never look ready).
+//! The native shim loads only these local directories. Each set pins an immutable HF commit
+//! and every selected file's path, size, and SHA-256 in this repository. `.ds-ready` records
+//! the revision after all pinned bytes verify (status polling stays network-free).
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::download::{DEFAULT_RETRIES, DownloadState, download_to_with_state, is_permanent_error};
-use crate::hash::verify_sha256;
+use crate::download::{DEFAULT_RETRIES, ensure_at};
+use crate::hash::verify_sha256_cached;
+use crate::spec::ModelSpec;
 
 const HF_HOST: &str = "https://huggingface.co";
 /// Written into a model dir once every file is present + verified; holds the pinned revision
 /// so bumping the pin invalidates a stale tree and forces a re-fetch.
 const READY_MARKER: &str = ".ds-ready";
 
-/// One MLX model set, pinned to an immutable HF revision. `include_prefixes`
-/// keeps only tree paths beginning with one of them (empty = whole repo); `exclude_substrings`
-/// drops junk/duplicate formats. Each kept tree path is written under `target()` preserving
-/// its sub-path.
+/// One source-pinned file in an MLX repository.
+#[derive(Debug, Clone, Copy)]
+pub struct MlxFile {
+    pub path: &'static str,
+    pub size: u64,
+    pub sha256: &'static str,
+}
+
+/// One MLX model set, pinned to an immutable HF revision and static file manifest.
 pub struct MlxRepo {
     pub name: &'static str,
     pub repo: &'static str,
     pub revision: &'static str,
-    pub include_prefixes: &'static [&'static str],
-    pub exclude_substrings: &'static [&'static str],
+    pub files: &'static [MlxFile],
     pub target: fn() -> Option<PathBuf>,
     /// Library-catalog metadata (the macOS-only Apple-Silicon model sets shown in the
     /// Libraries tab). The license lives WITH the files here — same can't-drift principle
@@ -84,34 +87,8 @@ fn parakeet_target() -> Option<PathBuf> {
     Some(ds_config::mlx_dir()?.join("parakeet"))
 }
 
-/// The versioned directory this model used before [`parakeet_target`] became version-less.
-/// 2.3 GB that nothing else would ever claim: the status/removal UI only knows the current
-/// target, so an upgrade would otherwise leak it silently.
-const LEGACY_PARAKEET_DIR_NAME: &str = "parakeet-tdt-0.6b-v2";
-
 pub fn parakeet_mlx_dir() -> Option<PathBuf> {
     parakeet_target()
-}
-
-/// Best-effort removal of the pre-rename tree. Called on the download path, where a failure
-/// is only wasted disk — never a reason to fail the fetch.
-pub fn remove_legacy_parakeet_dir() {
-    if let Some(mlx) = ds_config::mlx_dir() {
-        remove_legacy_parakeet_dir_in(&mlx);
-    }
-}
-
-fn remove_legacy_parakeet_dir_in(mlx_dir: &Path) {
-    let legacy = mlx_dir.join(LEGACY_PARAKEET_DIR_NAME);
-    if !legacy.is_dir() {
-        return;
-    }
-    match std::fs::remove_dir_all(&legacy) {
-        Ok(()) => log::info!(target: "model", "removed the superseded Parakeet v2 model directory"),
-        Err(e) => {
-            log::warn!(target: "model", "could not remove the superseded Parakeet v2 directory: {e}")
-        }
-    }
 }
 
 pub const DIARIZATION_MLX_DIR_NAME: &str = "sortformer";
@@ -125,13 +102,496 @@ fn speaker_embedding_target() -> Option<PathBuf> {
     Some(ds_config::mlx_dir()?.join(SPEAKER_EMBEDDING_DIR_NAME))
 }
 
+static KOKORO_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 2_351,
+        sha256: "5abb01e2403b072bf03d04fde160443e209d7a0dad49a423be15196b9b43c17f",
+    },
+    MlxFile {
+        path: "kokoro-v1_0.safetensors",
+        size: 327_115_152,
+        sha256: "4e9ecdf03b8b6cf906070390237feda473dc13327cb8d56a43deaa374c02acd8",
+    },
+    MlxFile {
+        path: "voices/af_alloy.safetensors",
+        size: 522_320,
+        sha256: "5bb848d02ade7e37981809acad52a1761ef7a586ff9f30d02d65fd71c4af95f9",
+    },
+    MlxFile {
+        path: "voices/af_aoede.safetensors",
+        size: 522_320,
+        sha256: "23809148777f2a2378983dd856bc14b9c261018279f916f98c23d86e844409a5",
+    },
+    MlxFile {
+        path: "voices/af_bella.safetensors",
+        size: 522_320,
+        sha256: "112d310468cbb3cf23404d3d0b50ad3adf017b87bf38bf9edd15f4ad572df6a3",
+    },
+    MlxFile {
+        path: "voices/af_heart.safetensors",
+        size: 522_320,
+        sha256: "2c1c733b0e6576c810e268d3e440c21dea4e0f0131a3ba4cfc98d7fe6136d094",
+    },
+    MlxFile {
+        path: "voices/af_jessica.safetensors",
+        size: 522_320,
+        sha256: "c358448e4277b79e8b13b92033711660a1a2205c3940c2dfb16698b99fed58a8",
+    },
+    MlxFile {
+        path: "voices/af_kore.safetensors",
+        size: 522_320,
+        sha256: "c491174280cb1ad25210a842f2f34b46a9ef904ec6f6a8e784839531795fa278",
+    },
+    MlxFile {
+        path: "voices/af_nicole.safetensors",
+        size: 522_320,
+        sha256: "574656386022c81a029e9a72558191925f44c3de2dad2fa2e45751938557d062",
+    },
+    MlxFile {
+        path: "voices/af_nova.safetensors",
+        size: 522_320,
+        sha256: "242b9a0a01eac1ac2865c69fc617a756b20d86df82d5fae3970533e2312ca50e",
+    },
+    MlxFile {
+        path: "voices/af_river.safetensors",
+        size: 522_320,
+        sha256: "82c866b0b976d50e82cbd781ac7bc771471ce5bd21decf05ab92812a08fb1c04",
+    },
+    MlxFile {
+        path: "voices/af_sarah.safetensors",
+        size: 522_320,
+        sha256: "4940072182542f54c1035d1daf4c1cf3136ca9baa9ac57c8e006b4befcc50be6",
+    },
+    MlxFile {
+        path: "voices/af_sky.safetensors",
+        size: 522_320,
+        sha256: "957af332330db8e9bd7f9dc449475a946cb0d7d689afef64b91007bbbf20eaa0",
+    },
+    MlxFile {
+        path: "voices/am_adam.safetensors",
+        size: 522_320,
+        sha256: "a4f60a3b9c20353c2604a17485ba53260502a758681a84d41e8af53cc559d929",
+    },
+    MlxFile {
+        path: "voices/am_echo.safetensors",
+        size: 522_320,
+        sha256: "031fc608a900332c4e1a29bd0884f5d0e84bd0348261fa79981e5cbd138c950d",
+    },
+    MlxFile {
+        path: "voices/am_eric.safetensors",
+        size: 522_320,
+        sha256: "1fb4a61dcee1f114f90886ecf29bc2feed05e29eed9caa6ddb109f1934d73274",
+    },
+    MlxFile {
+        path: "voices/am_fenrir.safetensors",
+        size: 522_320,
+        sha256: "9abed964b906c4cae6f404d9849e76260689aea862bc6ca85fc3f5207ba96538",
+    },
+    MlxFile {
+        path: "voices/am_liam.safetensors",
+        size: 522_320,
+        sha256: "66b65a96e16c3d91035a6e9019d9986ed524d27ce35b487270cdf61c99e3ebad",
+    },
+    MlxFile {
+        path: "voices/am_michael.safetensors",
+        size: 522_320,
+        sha256: "3940147ded35deba0bb52e8132f89b719298e0520258c34584358aa5a24da2ea",
+    },
+    MlxFile {
+        path: "voices/am_onyx.safetensors",
+        size: 522_320,
+        sha256: "b5d6132a5747648d98c82c9c4aaa9cf52d7230e63e403c1cb9c12858446ca5f5",
+    },
+    MlxFile {
+        path: "voices/am_puck.safetensors",
+        size: 522_320,
+        sha256: "9a8c2e56413bd2063f814cb4c3885fc425876157369117c3f8258d03c8a9ad89",
+    },
+    MlxFile {
+        path: "voices/am_santa.safetensors",
+        size: 522_320,
+        sha256: "d1f433b57ffccf105ea9e434ea19af6c2a8a7916ba6d1a73c34f0046bd226084",
+    },
+    MlxFile {
+        path: "voices/bf_alice.safetensors",
+        size: 522_320,
+        sha256: "9c77e390d93d9db7c4a7526c3b1f393290a2be46f233b89a00b8188e850c20a8",
+    },
+    MlxFile {
+        path: "voices/bf_emma.safetensors",
+        size: 522_320,
+        sha256: "8878a75a6661305849eeb1d6293a7177250193616e161b4c3100636434dfe69f",
+    },
+    MlxFile {
+        path: "voices/bf_isabella.safetensors",
+        size: 522_320,
+        sha256: "f7b6076f025649699fcfed1a6debf13049a87afdc7aafc8c72b7d81246db6ead",
+    },
+    MlxFile {
+        path: "voices/bf_lily.safetensors",
+        size: 522_320,
+        sha256: "ee77a419046a765420ac82cb46e8b8cf5754a0b9d20c340fece1d4b18be7ecdb",
+    },
+    MlxFile {
+        path: "voices/bm_daniel.safetensors",
+        size: 522_320,
+        sha256: "b195dec592ee024f57ddc5bf481464596082ba60998a2a295eba90bfc1064f4b",
+    },
+    MlxFile {
+        path: "voices/bm_fable.safetensors",
+        size: 522_320,
+        sha256: "9fa80184e96d016a744bc13b0b2e7695e55d6b855556fa003325cb1e5ebf2c2b",
+    },
+    MlxFile {
+        path: "voices/bm_george.safetensors",
+        size: 522_320,
+        sha256: "a3d9b8995cbbe5536f954b6be2a0f1f312f077118ba0d4d2178fc41dc8306672",
+    },
+    MlxFile {
+        path: "voices/bm_lewis.safetensors",
+        size: 522_320,
+        sha256: "e1e68013c21a141efe527aaec561e1174c2f5a6951b3bcecc8396adab315b247",
+    },
+    MlxFile {
+        path: "voices/ef_dora.safetensors",
+        size: 522_320,
+        sha256: "13f6dfe8a498ce97a384186af045b586db6292869acbfde123a0fa2798229351",
+    },
+    MlxFile {
+        path: "voices/em_alex.safetensors",
+        size: 522_320,
+        sha256: "e3bc4bf56ab47f0d52074cd3f84cd4f1713187285fdd85a545c6e167dfa3ab77",
+    },
+    MlxFile {
+        path: "voices/em_santa.safetensors",
+        size: 522_320,
+        sha256: "37c44211b77b3f29512f420bd5a2e146c7769a5ad3d904b3455cccd55055db62",
+    },
+    MlxFile {
+        path: "voices/ff_siwis.safetensors",
+        size: 522_320,
+        sha256: "5c659c9b9e12be28b98a4aa0cd6b1e66f359b6381ba5680264e9072945ac32b8",
+    },
+    MlxFile {
+        path: "voices/hf_alpha.safetensors",
+        size: 522_320,
+        sha256: "e93355a43e6f57e8cfde96874008c858f1fb7fd8b65dd043114d451882cad3f6",
+    },
+    MlxFile {
+        path: "voices/hf_beta.safetensors",
+        size: 522_320,
+        sha256: "976ea52ba7edce5da049c41ef06a663f3807fd470d2ea5c359245dfc2fb00d66",
+    },
+    MlxFile {
+        path: "voices/hm_omega.safetensors",
+        size: 522_320,
+        sha256: "227f0c710d1169686bf617fac486e8496982e96cc01617a3acd3579db75dd126",
+    },
+    MlxFile {
+        path: "voices/hm_psi.safetensors",
+        size: 522_320,
+        sha256: "03efb26b99e78c8d40ade3217f9c9905f8f84bbad7f21f921e270c036b01144e",
+    },
+    MlxFile {
+        path: "voices/if_sara.safetensors",
+        size: 522_320,
+        sha256: "2f3d092c8ba16f2007e8b234c9a55bdebec614a1e50143e41b39dd7f89fdb45b",
+    },
+    MlxFile {
+        path: "voices/im_nicola.safetensors",
+        size: 522_320,
+        sha256: "96b62f7d25c3e7efce4f2506beeaa9f63bcc73524c7b2862738c65433fe9ba16",
+    },
+    MlxFile {
+        path: "voices/jf_alpha.safetensors",
+        size: 522_320,
+        sha256: "455f78a6ebe633929cf314ce7c4a6b595ad1fb0ec7de6de7bc1d62d37e5264d2",
+    },
+    MlxFile {
+        path: "voices/jf_gongitsune.safetensors",
+        size: 522_320,
+        sha256: "30d744337db7a7a91185b129dfd24ca86c19f7d46acadf2daf077ba78edaba81",
+    },
+    MlxFile {
+        path: "voices/jf_nezumi.safetensors",
+        size: 522_320,
+        sha256: "65743c88fa1c8d30d7f41e402ce30a6ce461e2b0f8095c252e51905eb0c0754a",
+    },
+    MlxFile {
+        path: "voices/jf_tebukuro.safetensors",
+        size: 522_320,
+        sha256: "0cc28d928ce14b2ba4586b4c552edba36828a0961a37649530f80b3ad809bdec",
+    },
+    MlxFile {
+        path: "voices/jm_kumo.safetensors",
+        size: 522_320,
+        sha256: "9f6b9d85ae099c409193924add0f1c478d7c9b6904ef181f2297154bfe05cc2c",
+    },
+    MlxFile {
+        path: "voices/pf_dora.safetensors",
+        size: 522_320,
+        sha256: "9a8d587d60d0e041f593f7e7488943e7a6821f0136961bf0e554572e12c91c77",
+    },
+    MlxFile {
+        path: "voices/pm_alex.safetensors",
+        size: 522_320,
+        sha256: "bec864eaeb05cc1a6fa12777ad31faaae1b2ed6d5eb2a6f7370fb9cdc48e3e2f",
+    },
+    MlxFile {
+        path: "voices/pm_santa.safetensors",
+        size: 522_320,
+        sha256: "5009747fd93841c0865830be0f577ed50800b41b2122c469dedf51bb8311f78d",
+    },
+    MlxFile {
+        path: "voices/zf_xiaobei.safetensors",
+        size: 522_320,
+        sha256: "cbda378bbe266c735aa13c94c20b6224f2f8d0e16cf3abe612a4e6d93ebeab51",
+    },
+    MlxFile {
+        path: "voices/zf_xiaoni.safetensors",
+        size: 522_320,
+        sha256: "ef37a82850e10eb15f18a4549c76707a8eebd682e61facdda6ee4a4dc4eb0bf0",
+    },
+    MlxFile {
+        path: "voices/zf_xiaoxiao.safetensors",
+        size: 522_320,
+        sha256: "cf507ad2319c50121aca4755cd3b9793bde10eea9aa9caca6cb3b5914d5f258f",
+    },
+    MlxFile {
+        path: "voices/zf_xiaoyi.safetensors",
+        size: 522_320,
+        sha256: "1f2b7ce315a84870170ca83b2e4c0a072242bacbbd869f8a3b22377cc7d59e0b",
+    },
+    MlxFile {
+        path: "voices/zm_yunjian.safetensors",
+        size: 522_320,
+        sha256: "a08940c5dd3d8aadfda8a5576aa0f688a184ccbd5e4408d7a2a8144ab1fb3040",
+    },
+    MlxFile {
+        path: "voices/zm_yunxi.safetensors",
+        size: 522_320,
+        sha256: "78d8bb5ba4a2ea75a7f22c6148214a7434b436db85dc791a2ddf2aa7f6cc6fab",
+    },
+    MlxFile {
+        path: "voices/zm_yunxia.safetensors",
+        size: 522_320,
+        sha256: "59a4ba431ffa7165b95d5b953097affb71110b3039f81c4439cf0f7464bcb2ee",
+    },
+    MlxFile {
+        path: "voices/zm_yunyang.safetensors",
+        size: 522_320,
+        sha256: "8ad45c1077ab0d973ebb85ebb84f797caf6c6b188255c1178511a6feba3a0611",
+    },
+];
+
+static CHATTERBOX_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "Cangjie5_TC.json",
+        size: 1_920_163,
+        sha256: "7073fd9de919443ae88e0bd2449917a65fe54898a4413ed1edcc4b67f28bce8c",
+    },
+    MlxFile {
+        path: "conds.safetensors",
+        size: 105_316,
+        sha256: "709e5a7fa80e010a011c8244f553853aed7a49c106fff54008fbd89a0f5a6148",
+    },
+    MlxFile {
+        path: "config.json",
+        size: 336,
+        sha256: "b52886e6c0d2c9f32bda2507c5154742c359eed20b7cacffac1c57aa45328251",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 928_163_417,
+        sha256: "ca3de1b7592d6c00850e9b81a93b5a130135fa52250c5649671dd1df30a0aab2",
+    },
+    MlxFile {
+        path: "model.safetensors.index.json",
+        size: 355_942,
+        sha256: "bc865294257de937442a2634b263fc5d0ac8fcd0ca100e25d82c83ae60ed1aea",
+    },
+    MlxFile {
+        path: "tokenizer.json",
+        size: 70_011,
+        sha256: "df81a7ca7c31796cbe97f7a7142d5a53b12e88e12417ebe98f66602cafaf0461",
+    },
+];
+
+static CHATTERBOX_S3_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 126,
+        sha256: "8591fcc0eaae8c2bbfc69cf9d439933ecdf2d58cb9be63d00ce88736c4f2aa9d",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 494_868_984,
+        sha256: "928726bc1f206a613d36b8f49e297eae9c5593a21bf9b92ddfe2c23f85eb92cc",
+    },
+];
+
+static QWEN_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 6_058,
+        sha256: "2eea3665564268139c3beb8d497fd3c2e4524e9eed5452836cdf1de96ed3cdbd",
+    },
+    MlxFile {
+        path: "generation_config.json",
+        size: 245,
+        sha256: "f1b90b4513f3b34c62851049e2492d7b4c5940daf1276f89c82b8ef04127f3aa",
+    },
+    MlxFile {
+        path: "merges.txt",
+        size: 1_671_839,
+        sha256: "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 1_286_743_170,
+        sha256: "3bcb2c4a127e6243e81a30b7126c7865f686d3559de4f938e5d3b150c6a9560d",
+    },
+    MlxFile {
+        path: "model.safetensors.index.json",
+        size: 71_447,
+        sha256: "0c92041960fa189cf35ae538c8d9ca07c468edddd0c9bb52274c5d4d287a860b",
+    },
+    MlxFile {
+        path: "speech_tokenizer/config.json",
+        size: 2_336,
+        sha256: "ee65bb901c876664ab8707c487157aa1a6ee57c65969b28fb5ec9dc211e68167",
+    },
+    MlxFile {
+        path: "speech_tokenizer/configuration.json",
+        size: 76,
+        sha256: "6bc26d64eb5024b4d1dab5a52371958b429256d6c9d59787f1f5294a54e0cebd",
+    },
+    MlxFile {
+        path: "speech_tokenizer/model.safetensors",
+        size: 682_293_092,
+        sha256: "836b7b357f5ea43e889936a3709af68dfe3751881acefe4ecf0dbd30ba571258",
+    },
+    MlxFile {
+        path: "speech_tokenizer/preprocessor_config.json",
+        size: 234,
+        sha256: "fcb3805e597e786d4067706e602f6688524640f8d3396790e2e09b5942fcbdfb",
+    },
+    MlxFile {
+        path: "tokenizer_config.json",
+        size: 7_344,
+        sha256: "dc3c31c3bdaedd5016382bb3cbe07323026775ad51f5a4fb564505992ae4a670",
+    },
+    MlxFile {
+        path: "vocab.json",
+        size: 2_776_833,
+        sha256: "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+    },
+];
+
+static OMNIVOICE_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "audio_tokenizer/config.json",
+        size: 2_531,
+        sha256: "eefb20806f7104e77c9a5277c9df0f9bb8826b08eb1d4e8ab2b9829b6ef9fac1",
+    },
+    MlxFile {
+        path: "audio_tokenizer/model.safetensors",
+        size: 402_864_930,
+        sha256: "8ef745bfbabeb3bd9ebbdc69e7b6a05e43e191d0208dabfcf7adc42ca89c6580",
+    },
+    MlxFile {
+        path: "audio_tokenizer/preprocessor_config.json",
+        size: 206,
+        sha256: "ae61eea88558608ee2fa86d2aec9fce8d99a5ff75d09cb7651ccce21ae1d9084",
+    },
+    MlxFile {
+        path: "chat_template.jinja",
+        size: 4_168,
+        sha256: "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8",
+    },
+    MlxFile {
+        path: "config.json",
+        size: 2_238,
+        sha256: "e2e13755cca29061b09d0c0c4b945e1a65179de8ec522de18e86794425f86c9f",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 1_225_192_351,
+        sha256: "5768f3f1d11ee8b3ec31fe906e5d6f5934fdc397e3e5b818de85b70b0e1a2e7e",
+    },
+    MlxFile {
+        path: "tokenizer.json",
+        size: 11_423_986,
+        sha256: "408f669b7e2b045fdf54201d815bd364e6667dbd845115da81239c40bc6dcfd1",
+    },
+    MlxFile {
+        path: "tokenizer_config.json",
+        size: 533,
+        sha256: "49f78845596a82bf15c83673794bdf9f76f812b11f60ab6a2239d9be65b00676",
+    },
+];
+
+static PARAKEET_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 244_093,
+        sha256: "f320f1292511f34ec47f513755fe20fd01dbfc09a925d42730e66059a6e1ef4c",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 2_508_288_736,
+        sha256: "05e01c7f396c298cf7d23f61da7b504adeab698f0aaeafd9c82d198625464592",
+    },
+    MlxFile {
+        path: "tokenizer.model",
+        size: 360_916,
+        sha256: "eacec2b0a77f336d4a2ca4a25a7047575d3c2b74de47e997f4c205126ed3135e",
+    },
+    MlxFile {
+        path: "tokenizer.vocab",
+        size: 101_024,
+        sha256: "41130ff456706304a1adec782ccc9e003c4d417e8e324353d281be958cac4e17",
+    },
+    MlxFile {
+        path: "vocab.txt",
+        size: 46_772,
+        sha256: "3cde1409fd78783a79b29ed4d32da57c746993856f7c8263bcb905d2e5839db7",
+    },
+];
+
+static DIARIZATION_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 1_702,
+        sha256: "17c9f943bed07b0593f2b8dca01e0be6a418053becc6148b01ecabdff9cbd84d",
+    },
+    MlxFile {
+        path: "model.safetensors",
+        size: 236_108_132,
+        sha256: "3b60b8df29e59a8abaf8061ceeeae6e9284a68fbcd2e762c68f5e058bfceebfa",
+    },
+];
+
+static SPEAKER_EMBEDDING_MLX_FILES: &[MlxFile] = &[
+    MlxFile {
+        path: "config.json",
+        size: 590,
+        sha256: "5e598e1ef04d0c014a59f47d6a7884f26b9203bdefe08d2a5876c7b86cb40b75",
+    },
+    MlxFile {
+        path: "weights.npz",
+        size: 26_614_262,
+        sha256: "802706880b81ece11a9acefb2cf523ae91473e3b7615858390a1eded4efcdedf",
+    },
+];
+
 /// MLX Kokoro TTS weights and voice embeddings. Apache-2.0.
 pub static KOKORO_MLX: MlxRepo = MlxRepo {
     name: "kokoro_mlx",
     repo: "mlx-community/Kokoro-82M-bf16",
     revision: "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
-    include_prefixes: &["config.json", "kokoro-v1_0.safetensors", "voices/"],
-    exclude_substrings: &[".pt", ".DS_Store"],
+    files: KOKORO_MLX_FILES,
     target: kokoro_main_target,
     display_name: "Kokoro (MLX)",
     usage: "Apple-Silicon text-to-speech model and voice embeddings for MLX Audio",
@@ -144,15 +604,7 @@ pub static CHATTERBOX_MLX: MlxRepo = MlxRepo {
     name: "chatterbox_mlx",
     repo: "mlx-community/chatterbox-8bit",
     revision: "9617d61b596a03d1bed766a28c341680e993a1b9",
-    include_prefixes: &[
-        "Cangjie5_TC.json",
-        "conds.safetensors",
-        "config.json",
-        "model.safetensors",
-        "model.safetensors.index.json",
-        "tokenizer.json",
-    ],
-    exclude_substrings: &[".DS_Store"],
+    files: CHATTERBOX_MLX_FILES,
     target: chatterbox_tts_target,
     display_name: "Chatterbox Multilingual (MLX)",
     usage: "Apple-Silicon multilingual text-to-speech model and default voice conditioning",
@@ -165,8 +617,7 @@ pub static CHATTERBOX_S3_MLX: MlxRepo = MlxRepo {
     name: "chatterbox_s3_mlx",
     repo: "mlx-community/S3TokenizerV2",
     revision: "e0c9886f0e1c35ae85b1f27277416fb19fc72bec",
-    include_prefixes: &["config.json", "model.safetensors"],
-    exclude_substrings: &[".DS_Store"],
+    files: CHATTERBOX_S3_MLX_FILES,
     target: chatterbox_s3_target,
     display_name: "S3TokenizerV2 (MLX)",
     usage: "Apple-Silicon speech tokenizer required by Chatterbox MLX",
@@ -179,16 +630,7 @@ pub static QWEN_MLX: MlxRepo = MlxRepo {
     name: "qwen_mlx",
     repo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
     revision: "049ef77fe8816b536193c0c25f9a214d17921282",
-    include_prefixes: &[
-        "config.json",
-        "generation_config.json",
-        "merges.txt",
-        "model.safetensors",
-        "speech_tokenizer/",
-        "tokenizer_config.json",
-        "vocab.json",
-    ],
-    exclude_substrings: &[".DS_Store", "README"],
+    files: QWEN_MLX_FILES,
     target: qwen_tts_target,
     display_name: "Qwen3-TTS (MLX)",
     usage: "Apple-Silicon multilingual text-to-speech model for MLX Audio",
@@ -201,17 +643,7 @@ pub static OMNIVOICE_MLX: MlxRepo = MlxRepo {
     name: "omnivoice_mlx",
     repo: "mlx-community/OmniVoice-bf16",
     revision: "8fb0b754cad788aaefec690cd55c207e8a628f85",
-    include_prefixes: &[
-        "audio_tokenizer/config.json",
-        "audio_tokenizer/model.safetensors",
-        "audio_tokenizer/preprocessor_config.json",
-        "chat_template.jinja",
-        "config.json",
-        "model.safetensors",
-        "tokenizer.json",
-        "tokenizer_config.json",
-    ],
-    exclude_substrings: &[".DS_Store"],
+    files: OMNIVOICE_MLX_FILES,
     target: omnivoice_tts_target,
     display_name: "OmniVoice (MLX)",
     usage: "Apple-Silicon omnilingual text-to-speech model and Higgs Audio 2 tokenizer",
@@ -225,14 +657,7 @@ pub static PARAKEET_MLX: MlxRepo = MlxRepo {
     name: "parakeet_mlx",
     repo: "mlx-community/parakeet-tdt-0.6b-v3",
     revision: "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
-    include_prefixes: &[
-        "config.json",
-        "model.safetensors",
-        "tokenizer.model",
-        "tokenizer.vocab",
-        "vocab.txt",
-    ],
-    exclude_substrings: &[".DS_Store"],
+    files: PARAKEET_MLX_FILES,
     target: parakeet_target,
     display_name: "Parakeet (MLX)",
     usage: "Apple-Silicon multilingual speech-to-text model (NVIDIA NeMo; MLX conversion)",
@@ -246,8 +671,7 @@ pub static DIARIZATION_MLX: MlxRepo = MlxRepo {
     name: "diarization_mlx",
     repo: "mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16",
     revision: "e23e6404bd9859e93edbf94a740eb1c7fc58f12e",
-    include_prefixes: &["config.json", "model.safetensors"],
-    exclude_substrings: &[".DS_Store"],
+    files: DIARIZATION_MLX_FILES,
     target: diarization_target,
     display_name: "Sortformer diarization (MLX)",
     usage: "Apple-Silicon speaker diarization (NVIDIA Sortformer; MLX conversion)",
@@ -260,8 +684,7 @@ pub static SPEAKER_EMBEDDING_MLX: MlxRepo = MlxRepo {
     name: "speaker_embedding_mlx",
     repo: "mlx-community/wespeaker-voxceleb-resnet34-LM",
     revision: "038a61d379b8729c72d64d7c209e0cee80b11d0f",
-    include_prefixes: &["config.json", "weights.npz"],
-    exclude_substrings: &[],
+    files: SPEAKER_EMBEDDING_MLX_FILES,
     target: speaker_embedding_target,
     display_name: "WeSpeaker embedding (MLX)",
     usage: "Apple-Silicon speaker enrollment and identity matching",
@@ -319,226 +742,22 @@ pub fn all_mlx_repos() -> [&'static MlxRepo; 8] {
     ]
 }
 
-/// One tree entry at the pinned revision. Content verify: LFS → `sha256`; else `git_blob_sha1` + size.
-#[derive(Debug)]
-struct TreeFile {
-    path: String,
-    size: u64,
-    sha256: Option<String>,
-    /// Non-LFS tree `oid` only — LFS top-level oid is the pointer file, not resolved content.
-    git_blob_sha1: Option<String>,
+fn already_have(dest: &Path, file: &MlxFile) -> bool {
+    verify_sha256_cached(dest, file.sha256)
 }
 
-/// Lowercase hex SHA-1 (git blob hash; no `sha1` crate — distinct from [`crate::hash`]).
-fn sha1_hex(message: &[u8]) -> String {
-    let (mut h0, mut h1, mut h2, mut h3, mut h4): (u32, u32, u32, u32, u32) =
-        (0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0);
-
-    let bit_len: u64 = (message.len() as u64) * 8;
-    let mut msg = message.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for (i, word) in w.iter_mut().enumerate().take(16) {
-            *word = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                _ => (b ^ c ^ d, 0xCA62C1D6u32),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
-    }
-    let mut out = String::with_capacity(40);
-    for word in [h0, h1, h2, h3, h4] {
-        out.push_str(&format!("{word:08x}"));
-    }
-    out
-}
-
-/// `git hash-object` oid: `sha1("blob {len}\0" + content)`. Same-size MITM fails oid check.
-fn git_blob_sha1_hex(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let mut data = format!("blob {}\0", bytes.len()).into_bytes();
-    data.extend_from_slice(&bytes);
-    Some(sha1_hex(&data))
-}
-
-/// Whether a kept tree path passes a repo's include/exclude filters.
-fn keep(repo: &MlxRepo, path: &str) -> bool {
-    let included = repo.include_prefixes.is_empty()
-        || repo.include_prefixes.iter().any(|p| path.starts_with(p));
-    let excluded = repo.exclude_substrings.iter().any(|s| path.contains(s));
-    included && !excluded
-}
-
-/// GET + parse the HF tree API. `url` is full tree URL so tests can point at httpmock
-/// instead of `huggingface.co` — same `http_get_builder`, JSON shape, and filters.
-fn fetch_tree_at(url: &str, repo: &MlxRepo) -> std::io::Result<Vec<TreeFile>> {
-    let body = crate::download::http_get_builder(url)
-        .send()
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.text())
-        .map_err(|e| std::io::Error::other(format!("HF tree fetch failed: {e}")))?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let arr = json
-        .as_array()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "tree not an array"))?;
-    let mut out = Vec::new();
-    for e in arr {
-        if e.get("type").and_then(|t| t.as_str()) != Some("file") {
-            continue;
-        }
-        let Some(path) = e.get("path").and_then(|p| p.as_str()) else {
-            continue;
-        };
-        if !keep(repo, path) {
-            continue;
-        }
-        // LFS: content sha under `lfs`. Plain blob: top-level oid = git hash-object (not LFS pointer).
-        let lfs = e.get("lfs");
-        let size = lfs
-            .and_then(|l| l.get("size"))
-            .or_else(|| e.get("size"))
-            .and_then(|s| s.as_u64())
-            .unwrap_or(0);
-        let sha256 = lfs
-            .and_then(|l| l.get("oid"))
-            .and_then(|o| o.as_str())
-            .map(|s| s.trim_start_matches("sha256:").to_string());
-        let git_blob_sha1 = if lfs.is_none() {
-            e.get("oid").and_then(|o| o.as_str()).map(|s| s.to_string())
-        } else {
-            None
-        };
-        // Every kept file needs SOME verifier (see `verify_downloaded`); an entry with
-        // none would download unverifiable bytes. Permanent per the crate's retry policy.
-        if sha256.is_none() && git_blob_sha1.is_none() && size == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("tree entry {path} has no verifier (no LFS sha256, git oid, or size)"),
-            ));
-        }
-        out.push(TreeFile {
-            path: path.to_string(),
-            size,
-            sha256,
-            git_blob_sha1,
-        });
-    }
-    if out.is_empty() {
-        return Err(std::io::Error::other(format!(
-            "HF tree for {} matched no files (filters too strict or revision moved)",
-            repo.repo
-        )));
-    }
-    Ok(out)
-}
-
-/// Skip re-fetch when [`verify_downloaded`] passes (stale same-size plain blobs fail).
-fn already_have(dest: &Path, f: &TreeFile) -> bool {
-    verify_downloaded(dest, f).is_ok()
-}
-
-/// Single integrity check for download + presence: LFS sha256, else size + optional git blob oid.
-fn verify_downloaded(path: &Path, f: &TreeFile) -> std::io::Result<()> {
-    if let Some(sha) = &f.sha256 {
-        return if verify_sha256(path, sha) {
-            Ok(())
-        } else {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("sha256 mismatch for {}", f.path),
-            ))
-        };
-    }
-    let len = std::fs::metadata(path)?.len();
-    if f.size > 0 && len != f.size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!(
-                "size mismatch for {}: got {len} bytes, expected {}",
-                f.path, f.size
-            ),
-        ));
-    }
-    if let Some(oid) = &f.git_blob_sha1 {
-        let matches = git_blob_sha1_hex(path).is_some_and(|got| got.eq_ignore_ascii_case(oid));
-        if !matches {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("git blob oid mismatch for {}", f.path),
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// GET-and-verify one tree file (temp→rename, retry, [`verify_downloaded`]). Resolve URL is a
-/// parameter so tests can point at httpmock instead of `huggingface.co`.
 fn download_one_at(
     url: &str,
-    f: &TreeFile,
+    file: &MlxFile,
     dest: &Path,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let dir = dest.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = tempfile::Builder::new().tempfile_in(dir)?;
-    let mut state = DownloadState::default();
-    let mut attempt = 0;
-    loop {
-        let res = download_to_with_state(url, tmp.path(), progress, &mut state)
-            .and_then(|()| verify_downloaded(tmp.path(), f));
-        match res {
-            Ok(()) => {
-                tmp.persist(dest).map_err(|e| e.error)?;
-                return Ok(());
-            }
-            Err(e) if is_permanent_error(&e) || attempt + 1 >= DEFAULT_RETRIES.max(1) => {
-                return Err(e);
-            }
-            Err(_) => {
-                attempt += 1;
-                std::thread::sleep(std::time::Duration::from_millis(500 * attempt as u64));
-            }
-        }
-    }
+    let spec = ModelSpec {
+        file_name: file.path.to_string(),
+        url: url.to_string(),
+        sha256: file.sha256.to_string(),
+    };
+    ensure_at(dest, &spec, DEFAULT_RETRIES, progress)
 }
 
 /// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:
@@ -551,35 +770,33 @@ pub fn ensure_mlx_repos(repos: &[&MlxRepo], progress: &dyn Fn(u64, u64)) -> std:
     ensure_mlx_repos_at(HF_HOST, repos, progress)
 }
 
-/// Same as [`ensure_mlx_repos`] but tree + resolve URLs are rooted at `host` (production:
+/// Same as [`ensure_mlx_repos`] but resolve URLs are rooted at `host` (production:
 /// [`HF_HOST`]; tests: httpmock base URL).
 pub(crate) fn ensure_mlx_repos_at(
     host: &str,
     repos: &[&MlxRepo],
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    // Resolve every not-yet-present repo's tree first so the total byte count is exact up front.
-    let mut plan: Vec<(&MlxRepo, PathBuf, Vec<TreeFile>)> = Vec::new();
+    let mut plan: Vec<(&MlxRepo, PathBuf)> = Vec::new();
     for r in repos {
         if is_mlx_repo_present(r) {
             continue;
         }
+        if r.files.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("MLX manifest for {} is empty", r.name),
+            ));
+        }
         let target = (r.target)().ok_or_else(|| {
             std::io::Error::other(format!("cannot resolve target dir for {}", r.name))
         })?;
-        let tree_url = format!(
-            "{host}/api/models/{}/tree/{}?recursive=true",
-            r.repo, r.revision
-        );
-        let files = fetch_tree_at(&tree_url, r)?;
-        plan.push((r, target, files));
+        plan.push((r, target));
     }
-    // Denominator = sum of every file's size across the whole set (each floored at 1 so a
-    // zero-length/unknown entry still advances the bar as it completes).
     let total_bytes: u64 = plan
         .iter()
-        .flat_map(|(_, _, f)| f.iter())
-        .map(|f| f.size.max(1))
+        .flat_map(|(repo, _)| repo.files)
+        .map(|file| file.size)
         .sum();
     if total_bytes == 0 {
         progress(1, 1);
@@ -588,42 +805,33 @@ pub(crate) fn ensure_mlx_repos_at(
 
     let mut pre_credit: u64 = 0;
     let mut jobs: Vec<crate::parallel::DownloadJob> = Vec::new();
-    for (r, target, files) in &plan {
-        for f in files {
-            let relative = Path::new(&f.path);
+    for (repo, target) in &plan {
+        for file in repo.files {
+            let relative = Path::new(file.path);
             if relative
                 .components()
                 .any(|c| !matches!(c, std::path::Component::Normal(_)))
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("unsafe path in Apple model tree response: {}", f.path),
+                    format!("unsafe path in MLX manifest: {}", file.path),
                 ));
             }
             let dest = target.join(relative);
-            let size = f.size.max(1);
-            if already_have(&dest, f) {
+            let size = file.size;
+            if already_have(&dest, file) {
                 pre_credit = pre_credit.saturating_add(size);
                 continue;
             }
             let host = host.to_string();
-            let repo_id = r.repo;
-            let revision = r.revision;
-            let path = f.path.clone();
-            let sha256 = f.sha256.clone();
-            let git_blob_sha1 = f.git_blob_sha1.clone();
-            let file_size = f.size;
+            let repo_id = repo.repo;
+            let revision = repo.revision;
+            let file = *file;
             jobs.push(Box::new(move |p| {
-                let tree = TreeFile {
-                    path: path.clone(),
-                    size: file_size,
-                    sha256,
-                    git_blob_sha1,
-                };
                 // Local progress is file bytes; pool sums high-waters + pre_credit.
                 let emit = |done: u64, _t: u64| p(done.min(size), size);
-                let url = format!("{host}/{repo_id}/resolve/{revision}/{path}");
-                download_one_at(&url, &tree, &dest, &emit)
+                let url = format!("{host}/{repo_id}/resolve/{revision}/{}", file.path);
+                download_one_at(&url, &file, &dest, &emit)
             }));
         }
     }
@@ -637,13 +845,13 @@ pub(crate) fn ensure_mlx_repos_at(
 
     // Per-repo marker atomicity: write each repo's marker as soon as ALL of its own files verify,
     // independent of sibling repos in the same set. A failed sibling no longer discards a completed
-    // repo's marker, so the next retry skips the finished repo instead of re-fetching its tree and
-    // re-hashing every already-good file. A repo with any missing file gets no marker and
-    // self-repairs on the next run.
-    for (r, target, files) in &plan {
-        if let Some(missing) = files
+    // repo's marker, so the next retry skips the finished repo. A repo with any invalid file gets
+    // no marker and self-repairs on the next run.
+    for (repo, target) in &plan {
+        if let Some(missing) = repo
+            .files
             .iter()
-            .find(|f| !already_have(&target.join(Path::new(&f.path)), f))
+            .find(|file| !already_have(&target.join(Path::new(file.path)), file))
         {
             // After a *successful* pool run every file must be present; a gap is a real bug, not
             // the partial-failure case (which already carries the pool's own error).
@@ -655,52 +863,27 @@ pub(crate) fn ensure_mlx_repos_at(
             }
             continue;
         }
-        let mut marker = String::with_capacity(
-            r.revision.len() + files.iter().map(|f| f.path.len() + 1).sum::<usize>() + 1,
-        );
-        marker.push_str(r.revision);
-        marker.push('\n');
-        for file in files {
-            marker.push_str(&file.path);
-            marker.push('\n');
-        }
-        std::fs::write(target.join(READY_MARKER), marker)?;
-    }
-
-    // Only once the new tree verifies: a failed fetch leaves the old one on disk rather than
-    // freeing space the user would have to re-download to get back.
-    if repos.iter().any(|r| std::ptr::eq(*r, &PARAKEET_MLX)) && is_mlx_repo_present(&PARAKEET_MLX) {
-        remove_legacy_parakeet_dir();
+        std::fs::write(target.join(READY_MARKER), repo.revision)?;
     }
 
     pool_result
 }
 
-/// LOCAL presence (no network): marker revision matches and every manifested file still exists.
+/// LOCAL presence (no network): marker revision matches and every source-pinned file verifies.
 pub fn is_mlx_repo_present(repo: &MlxRepo) -> bool {
     let Some(target) = (repo.target)() else {
         return false;
     };
-    let marker = target.join(READY_MARKER);
-    let mut s = String::new();
-    if std::fs::File::open(&marker)
-        .and_then(|mut f| f.read_to_string(&mut s))
-        .is_err()
-    {
-        return false;
-    }
-    let mut lines = s.lines();
-    lines.next() == Some(repo.revision)
-        && lines
-            .try_fold(false, |_, path| {
-                let relative = Path::new(path);
-                let safe = relative
-                    .components()
-                    .all(|part| matches!(part, std::path::Component::Normal(_)));
-                safe.then(|| target.join(relative).is_file())
-                    .filter(|present| *present)
-            })
-            .unwrap_or(false)
+    std::fs::read_to_string(target.join(READY_MARKER))
+        .is_ok_and(|marker| marker.trim() == repo.revision)
+        && !repo.files.is_empty()
+        && repo.files.iter().all(|file| {
+            let relative = Path::new(file.path);
+            relative
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)))
+                && verify_sha256_cached(&target.join(relative), file.sha256)
+        })
 }
 
 // `target` is `fn() -> Option<PathBuf>` (no captures). Thread-local seam for presence tests.
@@ -724,6 +907,39 @@ fn test_target_2() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn fixture_file(path: &'static str, content: &'static [u8]) -> MlxFile {
+        MlxFile {
+            path,
+            size: content.len() as u64,
+            sha256: Box::leak(crate::hash::sha256_hex(content).into_boxed_str()),
+        }
+    }
+
+    fn fixture_files(files: Vec<MlxFile>) -> &'static [MlxFile] {
+        Box::leak(files.into_boxed_slice())
+    }
+
+    fn fixture_repo(
+        name: &'static str,
+        repo: &'static str,
+        revision: &'static str,
+        files: &'static [MlxFile],
+        target: fn() -> Option<PathBuf>,
+    ) -> MlxRepo {
+        MlxRepo {
+            name,
+            repo,
+            revision,
+            files,
+            target,
+            display_name: "",
+            usage: "",
+            license: "",
+            license_url: "",
+        }
+    }
 
     #[test]
     fn model_sets_have_the_expected_components() {
@@ -734,23 +950,6 @@ mod tests {
         assert_eq!(DIARIZATION_MLX_SET.len(), 2);
         assert!(DIARIZATION_MLX.repo.contains("sortformer"));
         assert!(SPEAKER_EMBEDDING_MLX.repo.contains("wespeaker"));
-    }
-
-    #[test]
-    fn legacy_parakeet_tree_is_removed_and_the_current_one_left_alone() {
-        let mlx = tempfile::tempdir().unwrap();
-        let legacy = mlx.path().join(LEGACY_PARAKEET_DIR_NAME);
-        std::fs::create_dir_all(&legacy).unwrap();
-        std::fs::write(legacy.join("model.safetensors"), b"old weights").unwrap();
-        let current = mlx.path().join("parakeet");
-        std::fs::create_dir_all(&current).unwrap();
-
-        remove_legacy_parakeet_dir_in(mlx.path());
-        assert!(!legacy.exists(), "superseded tree must be reclaimed");
-        assert!(current.is_dir(), "current tree must survive");
-
-        // Idempotent: nothing to remove is not an error.
-        remove_legacy_parakeet_dir_in(mlx.path());
     }
 
     #[test]
@@ -778,711 +977,239 @@ mod tests {
     }
 
     #[test]
-    fn filters_keep_only_the_runtime_set() {
-        assert!(keep(&KOKORO_MLX, "config.json"));
-        assert!(keep(&KOKORO_MLX, "kokoro-v1_0.safetensors"));
-        assert!(keep(&KOKORO_MLX, "voices/af_heart.safetensors"));
-        assert!(!keep(&KOKORO_MLX, "voices/af_heart.pt"));
-        assert!(!keep(&KOKORO_MLX, "README.md"));
-        assert!(keep(&CHATTERBOX_MLX, "conds.safetensors"));
-        assert!(keep(&CHATTERBOX_S3_MLX, "model.safetensors"));
-        assert!(!keep(
-            &CHATTERBOX_MLX,
-            "models--ResembleAI--chatterbox/model.safetensors"
-        ));
-        assert!(keep(&OMNIVOICE_MLX, "audio_tokenizer/model.safetensors"));
-        assert!(keep(&PARAKEET_MLX, "model.safetensors"));
-        assert!(keep(&PARAKEET_MLX, "tokenizer.model"));
-        assert!(!keep(&PARAKEET_MLX, "README.md"));
-        assert!(keep(&DIARIZATION_MLX, "model.safetensors"));
-        assert!(keep(&SPEAKER_EMBEDDING_MLX, "weights.npz"));
-    }
-
-    #[test]
-    fn sha1_hex_matches_known_vectors() {
-        // Standard NIST SHA-1 test vectors, plus a 56-byte input (crosses the single-block
-        // padding boundary, exercising the multi-block chunking path).
-        assert_eq!(sha1_hex(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(sha1_hex(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    fn manifests_are_complete_unique_and_sha256_pinned() {
+        let repos = all_mlx_repos();
+        let counts: Vec<usize> = repos.iter().map(|repo| repo.files.len()).collect();
+        assert_eq!(counts, vec![56, 6, 2, 11, 8, 5, 2, 2]);
+        assert_eq!(counts.iter().sum::<usize>(), 92);
         assert_eq!(
-            sha1_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
-    }
-
-    #[test]
-    fn git_blob_sha1_hex_matches_real_git_hash_object() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Empty file: `git hash-object` of an empty file is this exact, famous id — every git
-        // repo has an object with it.
-        let empty = tmp.path().join("empty");
-        std::fs::write(&empty, b"").unwrap();
-        assert_eq!(
-            git_blob_sha1_hex(&empty).unwrap(),
-            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391"
-        );
-        // A short file — cross-checked against real `git hash-object`'s output for the literal
-        // bytes "abc\n".
-        let short = tmp.path().join("short");
-        std::fs::write(&short, b"abc\n").unwrap();
-        assert_eq!(
-            git_blob_sha1_hex(&short).unwrap(),
-            "8baef1b4abc478178b004d62031cf7fe6db6f903"
-        );
-    }
-
-    #[test]
-    fn verify_downloaded_checks_lfs_sha256() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("weights.bin");
-        std::fs::write(&p, b"weights").unwrap();
-        let f = TreeFile {
-            path: "weights.bin".to_string(),
-            size: 7,
-            sha256: Some(crate::hash::sha256_hex(b"weights")),
-            git_blob_sha1: None,
-        };
-        assert!(verify_downloaded(&p, &f).is_ok());
-
-        let f_bad = TreeFile {
-            path: "weights.bin".to_string(),
-            size: 7,
-            sha256: Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into()),
-            git_blob_sha1: None,
-        };
-        let err = verify_downloaded(&p, &f_bad).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    /// A plain (non-LFS) blob with NO metadata beyond size used to get ZERO verification after
-    /// download — this pins the fix: a size mismatch is now caught.
-    #[test]
-    fn verify_downloaded_rejects_size_mismatch_for_plain_blobs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("config.json");
-        std::fs::write(&p, b"{}").unwrap();
-        let f = TreeFile {
-            path: "config.json".to_string(),
-            size: 999,
-            sha256: None,
-            git_blob_sha1: None,
-        };
-        let err = verify_downloaded(&p, &f).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    /// Same-size wrong content must fail when a git blob oid is pinned.
-    #[test]
-    fn verify_downloaded_rejects_git_blob_oid_mismatch_even_at_the_right_size() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("parakeet_vocab.json");
-        std::fs::write(&p, b"AAAAAAAAAA").unwrap(); // 10 tampered bytes, right length
-        let f = TreeFile {
-            path: "parakeet_vocab.json".to_string(),
-            size: 10,
-            sha256: None,
-            git_blob_sha1: Some("f".repeat(40)), // not this content's real oid
-        };
-        let err = verify_downloaded(&p, &f).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-    }
-
-    #[test]
-    fn verify_downloaded_accepts_the_real_git_blob_oid() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("parakeet_vocab.json");
-        let content: &[u8] = b"real, untampered bytes";
-        std::fs::write(&p, content).unwrap();
-        let oid = git_blob_sha1_hex(&p).unwrap();
-        let f = TreeFile {
-            path: "parakeet_vocab.json".to_string(),
-            size: content.len() as u64,
-            sha256: None,
-            git_blob_sha1: Some(oid),
-        };
-        assert!(verify_downloaded(&p, &f).is_ok());
-    }
-
-    /// `already_have` (the re-run skip-check) must apply the SAME content verification as a
-    /// fresh download, not just a size check — a same-size-but-different-content leftover from
-    /// an older pinned revision must read as ABSENT (so it gets re-fetched and the completion
-    /// marker doesn't get written over a stale file), matching `verify_downloaded` exactly
-    /// since `already_have` now delegates to it.
-    #[test]
-    fn already_have_checks_content_not_just_size_for_plain_blobs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dest = tmp.path().join("g2p_vocab.json");
-        let content: &[u8] = b"{\"hello\":\"world\"}";
-        std::fs::write(&dest, content).unwrap();
-        let real_oid = git_blob_sha1_hex(&dest).unwrap();
-
-        let matching = TreeFile {
-            path: "g2p_vocab.json".to_string(),
-            size: content.len() as u64,
-            sha256: None,
-            git_blob_sha1: Some(real_oid),
-        };
-        assert!(already_have(&dest, &matching));
-
-        let tampered = TreeFile {
-            path: "g2p_vocab.json".to_string(),
-            size: content.len() as u64,
-            sha256: None,
-            git_blob_sha1: Some("0".repeat(40)),
-        };
-        assert!(!already_have(&dest, &tampered));
-
-        let wrong_size = TreeFile {
-            path: "g2p_vocab.json".to_string(),
-            size: content.len() as u64 + 1,
-            sha256: None,
-            git_blob_sha1: None,
-        };
-        assert!(!already_have(&dest, &wrong_size));
-    }
-
-    #[test]
-    fn presence_is_false_without_a_matching_marker() {
-        let tmp = tempfile::tempdir().unwrap();
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
-        let repo = MlxRepo {
-            name: "test_repo",
-            repo: "Test/test-repo",
-            revision: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-            include_prefixes: &[],
-            exclude_substrings: &[],
-            target: test_target,
-            display_name: "",
-            usage: "",
-            license: "",
-            license_url: "",
-        };
-
-        // No marker at all → absent.
-        assert!(!is_mlx_repo_present(&repo), "no marker yet");
-
-        // Marker present but revision mismatches → still absent.
-        std::fs::write(tmp.path().join(READY_MARKER), "some-other-revision").unwrap();
-        assert!(
-            !is_mlx_repo_present(&repo),
-            "mismatched revision reads as absent"
+            repos
+                .iter()
+                .flat_map(|repo| repo.files)
+                .map(|file| file.size)
+                .sum::<u64>(),
+            8_165_636_922
         );
 
-        // Revision alone is a pre-manifest marker and therefore absent.
+        for repo in repos {
+            assert_eq!(repo.revision.len(), 40, "{} revision", repo.name);
+            assert!(
+                repo.revision
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            );
+            assert!(repo.repo.starts_with("mlx-community/"));
+            assert!(!repo.files.is_empty());
+
+            let mut paths = HashSet::new();
+            for file in repo.files {
+                let relative = Path::new(file.path);
+                assert!(
+                    relative
+                        .components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_))),
+                    "{} has unsafe path {}",
+                    repo.name,
+                    file.path
+                );
+                assert!(paths.insert(file.path), "duplicate path {}", file.path);
+                assert!(file.size > 0, "{} has zero size", file.path);
+                assert_eq!(file.sha256.len(), 64, "{} digest", file.path);
+                assert!(
+                    file.sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
+                    "{} digest is not lowercase hex",
+                    file.path
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn presence_requires_matching_marker_and_every_pinned_digest() {
+        const CONTENT: &[u8] = b"verified weights";
+        let tmp = tempfile::tempdir().unwrap();
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let files = fixture_files(vec![fixture_file("model.safetensors", CONTENT)]);
+        let repo = fixture_repo(
+            "presence",
+            "test-org/presence",
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            files,
+            test_target,
+        );
+
+        assert!(!is_mlx_repo_present(&repo));
+        std::fs::write(tmp.path().join(READY_MARKER), "different-revision").unwrap();
+        assert!(!is_mlx_repo_present(&repo));
+
         std::fs::write(tmp.path().join(READY_MARKER), repo.revision).unwrap();
-        assert!(
-            !is_mlx_repo_present(&repo),
-            "old marker has no file manifest"
-        );
+        assert!(!is_mlx_repo_present(&repo), "pinned file is still missing");
 
         let model = tmp.path().join("model.safetensors");
-        std::fs::write(&model, b"weights").unwrap();
-        std::fs::write(
-            tmp.path().join(READY_MARKER),
-            format!("{}\nmodel.safetensors\n", repo.revision),
-        )
-        .unwrap();
+        std::fs::write(&model, CONTENT).unwrap();
+        assert!(is_mlx_repo_present(&repo));
+
+        std::fs::write(&model, b"tampered weights").unwrap();
         assert!(
-            is_mlx_repo_present(&repo),
-            "matching marker reads as present"
+            !is_mlx_repo_present(&repo),
+            "matching marker cannot bless changed bytes"
         );
-        std::fs::remove_file(model).unwrap();
-        assert!(!is_mlx_repo_present(&repo), "missing manifested file");
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = None);
     }
 
-    /// A local `httpmock` server stands in for `huggingface.co`, so the JSON-shape handling —
-    /// LFS `oid` extraction, plain git-blob `oid` extraction, `directory`-type skipping, and
-    /// the include/exclude filters — gets deterministic coverage on every `cargo test`.
     #[test]
-    fn fetch_tree_at_parses_lfs_and_plain_blobs_and_applies_filters() {
+    fn download_one_at_persists_only_bytes_matching_the_static_pin() {
+        const CONTENT: &[u8] = b"fake model weights";
         let server = httpmock::MockServer::start();
-        let lfs_sha = "a".repeat(64);
-        let body = serde_json::json!([
-            // LFS-tracked runtime weight: kept; the
-            // real content sha256 comes from `lfs.oid`, NOT the top-level (pointer-file) oid.
-            {
-                "type": "file",
-                "path": "kokoro-v1_0.safetensors",
-                "size": 12345,
-                "oid": "pointerfileblobsha1notusedforlfs01",
-                "lfs": { "oid": format!("sha256:{lfs_sha}"), "size": 12345 }
-            },
-            // Plain (non-LFS) blob: kept, verified via the top-level git-blob `oid` instead.
-            {
-                "type": "file",
-                "path": "config.json",
-                "size": 20,
-                "oid": "deadbeefcafef00d"
-            },
-            // Excluded duplicate voice format — must be dropped.
-            {
-                "type": "file",
-                "path": "voices/af_heart.pt",
-                "size": 5,
-                "oid": "ignored"
-            },
-            // Not included by prefix — dropped.
-            {
-                "type": "file",
-                "path": "README.md",
-                "size": 5,
-                "oid": "ignored"
-            },
-            // A `directory` entry — never a file, must be skipped regardless of path/filters.
-            {
-                "type": "directory",
-                "path": "voices",
-                "size": 0,
-                "oid": "ignored"
-            }
-        ]);
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path("/api/models/mlx-community/Kokoro-82M-bf16/tree/a71e4d38b236d968966a2002c4c895dbd12b1c3c")
-                .query_param("recursive", "true");
-            then.status(200).json_body(body);
+        let good = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/good.bin");
+            then.status(200).body(CONTENT);
         });
-
-        let url = server.url(
-            "/api/models/mlx-community/Kokoro-82M-bf16/tree/a71e4d38b236d968966a2002c4c895dbd12b1c3c?recursive=true",
-        );
-        let files = fetch_tree_at(&url, &KOKORO_MLX).expect("tree fetch parses");
-        mock.assert();
-
-        assert_eq!(
-            files.len(),
-            2,
-            "only the selected non-excluded files survive: {files:?}",
-        );
-        let weights = files
-            .iter()
-            .find(|f| f.path == "kokoro-v1_0.safetensors")
-            .expect("LFS weights file kept");
-        assert_eq!(weights.size, 12345);
-        assert_eq!(weights.sha256.as_deref(), Some(lfs_sha.as_str()));
-        assert!(
-            weights.git_blob_sha1.is_none(),
-            "LFS entries must not capture the pointer-file's top-level oid"
-        );
-        let heart = files
-            .iter()
-            .find(|f| f.path == "config.json")
-            .expect("plain blob kept");
-        assert_eq!(heart.size, 20);
-        assert!(heart.sha256.is_none(), "plain blobs have no lfs.oid");
-        assert_eq!(heart.git_blob_sha1.as_deref(), Some("deadbeefcafef00d"));
-    }
-
-    /// A tree response where every entry is filtered out (or the repo/revision moved) must
-    /// error rather than silently report zero files to download.
-    #[test]
-    fn fetch_tree_at_errors_when_no_files_match() {
-        let server = httpmock::MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/empty-tree");
-            then.status(200).json_body(serde_json::json!([
-                { "type": "file", "path": "README.md", "size": 5, "oid": "x" }
-            ]));
-        });
-        let err = fetch_tree_at(&server.url("/empty-tree"), &KOKORO_MLX).unwrap_err();
-        mock.assert();
-        assert!(err.to_string().contains("matched no files"));
-    }
-
-    /// A kept tree entry that carries NO verifier at all (no `lfs.oid`, no top-level `oid`,
-    /// no size) must reject the whole tree as permanent `InvalidData` — otherwise its bytes
-    /// would land with zero content verification.
-    #[test]
-    fn fetch_tree_at_rejects_an_entry_with_no_verifier() {
-        let server = httpmock::MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/no-verifier");
-            then.status(200).json_body(serde_json::json!([
-                { "type": "file", "path": "config.json" }
-            ]));
-        });
-        let err = fetch_tree_at(&server.url("/no-verifier"), &KOKORO_MLX).unwrap_err();
-        mock.assert();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(is_permanent_error(&err), "no-verifier entries fail fast");
-        assert!(err.to_string().contains("no verifier"), "got: {err}");
-    }
-
-    /// A non-2xx tree-API response (moved/deleted repo, bad revision) must surface as an
-    /// error, not a panic or a silently-empty file list.
-    #[test]
-    fn fetch_tree_at_errors_on_http_error_status() {
-        let server = httpmock::MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/missing-repo");
-            then.status(404).body("Not Found");
-        });
-        let err = fetch_tree_at(&server.url("/missing-repo"), &KOKORO_MLX).unwrap_err();
-        mock.assert();
-        assert!(err.to_string().contains("HF tree fetch failed"));
-    }
-
-    /// A local `httpmock` server stands in for the real `resolve/.../<path>` blob GET,
-    /// exercising the same temp→rename→[`verify_downloaded`] path `download_one` uses in
-    /// production.
-    #[test]
-    fn download_one_at_persists_and_verifies_a_mocked_blob() {
-        let server = httpmock::MockServer::start();
-        let content = b"fake sepformer weights";
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET).path("/blob/weights.bin");
-            then.status(200).body(content);
-        });
-
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("nested").join("weights.bin");
-        let f = TreeFile {
-            path: "weights.bin".to_string(),
-            size: content.len() as u64,
-            sha256: Some(crate::hash::sha256_hex(content)),
-            git_blob_sha1: None,
-        };
-        download_one_at(&server.url("/blob/weights.bin"), &f, &dest, &|_, _| {})
-            .expect("download + verify succeeds");
-        mock.assert();
-        assert_eq!(std::fs::read(&dest).unwrap(), content);
-    }
-
-    /// A sha256 mismatch (corrupted/MITM'd blob) must fail rather than persist bad bytes —
-    /// `download_one_at` retries transient errors but a verify failure isn't one, so this
-    /// exercises the fast-fail path with no retry delay.
-    #[test]
-    fn download_one_at_rejects_a_sha256_mismatch() {
-        let server = httpmock::MockServer::start();
-        let mock = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path("/blob/tampered.bin");
+        let bad = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/bad.bin");
             then.status(200).body(b"tampered bytes");
         });
 
         let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("tampered.bin");
-        let f = TreeFile {
-            path: "tampered.bin".to_string(),
-            size: 14,
-            sha256: Some("0".repeat(64)),
-            git_blob_sha1: None,
-        };
-        let err =
-            download_one_at(&server.url("/blob/tampered.bin"), &f, &dest, &|_, _| {}).unwrap_err();
-        mock.assert();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(!dest.exists(), "a failed verify must not persist the file");
+        let file = fixture_file("model.bin", CONTENT);
+        let good_dest = dir.path().join("good.bin");
+        download_one_at(&server.url("/good.bin"), &file, &good_dest, &|_, _| {})
+            .expect("matching bytes land");
+        good.assert();
+        assert_eq!(std::fs::read(&good_dest).unwrap(), CONTENT);
+
+        let bad_dest = dir.path().join("bad.bin");
+        let error =
+            download_one_at(&server.url("/bad.bin"), &file, &bad_dest, &|_, _| {}).unwrap_err();
+        bad.assert();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!bad_dest.exists());
     }
 
-    /// Parallel multi-file orchestrator: tree + blobs via httpmock; marker only after all files.
     #[test]
-    fn ensure_mlx_repos_at_downloads_files_and_writes_marker() {
+    fn orchestrator_uses_static_paths_precredits_and_writes_marker() {
+        const A: &[u8] = b"already present";
+        const B: &[u8] = b"download me";
+        const REV: &str = "abc1230000000000000000000000000000000000";
+        const REPO_ID: &str = "test-org/static-model";
         let server = httpmock::MockServer::start();
-        let a = b"alpha-bytes";
-        let b = b"beta-bytes!!";
-        let a_sha = crate::hash::sha256_hex(a);
-        let b_sha = crate::hash::sha256_hex(b);
-        let rev = "abc123rev00000000000000000000000000001";
-        let repo_id = "test-org/test-model";
-
-        let tree = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/api/models/{repo_id}/tree/{rev}"))
-                .query_param("recursive", "true");
-            then.status(200).json_body(serde_json::json!([
-                {
-                    "type": "file",
-                    "path": "a.bin",
-                    "size": a.len(),
-                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
-                },
-                {
-                    "type": "file",
-                    "path": "b.bin",
-                    "size": b.len(),
-                    "lfs": { "oid": format!("sha256:{b_sha}"), "size": b.len() }
-                }
-            ]));
-        });
         let blob_a = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
-            then.status(200).body(a);
+                .path(format!("/{REPO_ID}/resolve/{REV}/a.bin"));
+            then.status(200).body(A);
         });
         let blob_b = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/b.bin"));
-            then.status(200).body(b);
+                .path(format!("/{REPO_ID}/resolve/{REV}/nested/b.bin"));
+            then.status(200).body(B);
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
-        let repo = MlxRepo {
-            name: "orch_ok",
-            repo: repo_id,
-            revision: rev,
-            include_prefixes: &[],
-            exclude_substrings: &[],
-            target: test_target,
-            display_name: "",
-            usage: "",
-            license: "",
-            license_url: "",
-        };
+        std::fs::write(tmp.path().join("a.bin"), A).unwrap();
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let files = fixture_files(vec![
+            fixture_file("a.bin", A),
+            fixture_file("nested/b.bin", B),
+        ]);
+        let repo = fixture_repo("static", REPO_ID, REV, files, test_target);
+        let progress = std::sync::Mutex::new(Vec::new());
 
-        let seen = std::sync::Mutex::new(Vec::<u64>::new());
-        ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|d, t| {
-            seen.lock().unwrap().push(d);
-            assert_eq!(t, (a.len() + b.len()) as u64);
+        ensure_mlx_repos_at(&server.base_url(), &[&repo], &|done, total| {
+            assert_eq!(total, (A.len() + B.len()) as u64);
+            progress.lock().unwrap().push(done);
         })
-        .expect("orchestrator succeeds");
-        tree.assert();
-        blob_a.assert();
+        .expect("static manifest downloads");
+
+        assert_eq!(blob_a.calls(), 0, "verified file is precredited");
         blob_b.assert();
-        assert_eq!(std::fs::read(tmp.path().join("a.bin")).unwrap(), a);
-        assert_eq!(std::fs::read(tmp.path().join("b.bin")).unwrap(), b);
-        let marker = std::fs::read_to_string(tmp.path().join(READY_MARKER)).unwrap();
-        assert!(marker.starts_with(rev));
-        assert!(marker.contains("a.bin"));
-        assert!(marker.contains("b.bin"));
-        let seen = seen.lock().unwrap();
-        assert!(seen.windows(2).all(|w| w[1] >= w[0]), "monotonic: {seen:?}");
-        assert_eq!(*seen.last().unwrap(), (a.len() + b.len()) as u64);
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
-    }
-
-    /// Already-present files pre-credit the bar; only missing blobs are fetched.
-    #[test]
-    fn ensure_mlx_repos_at_precredits_present_files() {
-        let server = httpmock::MockServer::start();
-        let a = b"present-aaa";
-        let b = b"missing-bbb";
-        let a_sha = crate::hash::sha256_hex(a);
-        let b_sha = crate::hash::sha256_hex(b);
-        let rev = "abc123rev00000000000000000000000000002";
-        let repo_id = "test-org/precredit";
-
-        let tree = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/api/models/{repo_id}/tree/{rev}"))
-                .query_param("recursive", "true");
-            then.status(200).json_body(serde_json::json!([
-                {
-                    "type": "file",
-                    "path": "a.bin",
-                    "size": a.len(),
-                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
-                },
-                {
-                    "type": "file",
-                    "path": "b.bin",
-                    "size": b.len(),
-                    "lfs": { "oid": format!("sha256:{b_sha}"), "size": b.len() }
-                }
-            ]));
-        });
-        let blob_a = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
-            then.status(200).body(a);
-        });
-        let blob_b = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/b.bin"));
-            then.status(200).body(b);
-        });
-
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("a.bin"), a).unwrap();
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
-        let repo = MlxRepo {
-            name: "orch_pre",
-            repo: repo_id,
-            revision: rev,
-            include_prefixes: &[],
-            exclude_substrings: &[],
-            target: test_target,
-            display_name: "",
-            usage: "",
-            license: "",
-            license_url: "",
-        };
-
-        ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {})
-            .expect("precredit path succeeds");
-        tree.assert();
-        assert_eq!(blob_a.calls(), 0, "present file must not re-fetch");
-        blob_b.assert();
-        assert!(tmp.path().join(READY_MARKER).is_file());
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
-    }
-
-    /// Permanent blob failure must not write `.ds-ready`.
-    #[test]
-    fn ensure_mlx_repos_at_fails_without_marker() {
-        let server = httpmock::MockServer::start();
-        let a = b"ok-file";
-        let a_sha = crate::hash::sha256_hex(a);
-        let rev = "abc123rev00000000000000000000000000003";
-        let repo_id = "test-org/fail-set";
-
-        let tree = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/api/models/{repo_id}/tree/{rev}"))
-                .query_param("recursive", "true");
-            then.status(200).json_body(serde_json::json!([
-                {
-                    "type": "file",
-                    "path": "a.bin",
-                    "size": a.len(),
-                    "lfs": { "oid": format!("sha256:{a_sha}"), "size": a.len() }
-                },
-                {
-                    "type": "file",
-                    "path": "bad.bin",
-                    "size": 10,
-                    "lfs": {
-                        "oid": format!("sha256:{}", "0".repeat(64)),
-                        "size": 10
-                    }
-                }
-            ]));
-        });
-        let _blob_a = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/a.bin"));
-            then.status(200).body(a);
-        });
-        let _blob_bad = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/{repo_id}/resolve/{rev}/bad.bin"));
-            then.status(200).body(b"wrong-size");
-        });
-
-        let tmp = tempfile::tempdir().unwrap();
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(tmp.path().to_path_buf()));
-        let repo = MlxRepo {
-            name: "orch_fail",
-            repo: repo_id,
-            revision: rev,
-            include_prefixes: &[],
-            exclude_substrings: &[],
-            target: test_target,
-            display_name: "",
-            usage: "",
-            license: "",
-            license_url: "",
-        };
-
-        let err =
-            ensure_mlx_repos_at(server.base_url().as_str(), &[&repo], &|_, _| {}).unwrap_err();
-        tree.assert();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(
-            !tmp.path().join(READY_MARKER).exists(),
-            "partial fail must not write .ds-ready"
+        assert_eq!(std::fs::read(tmp.path().join("nested/b.bin")).unwrap(), B);
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join(READY_MARKER)).unwrap(),
+            REV
         );
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
+        assert!(is_mlx_repo_present(&repo));
+        let progress = progress.lock().unwrap();
+        assert!(progress.windows(2).all(|values| values[1] >= values[0]));
+        assert_eq!(*progress.last().unwrap(), (A.len() + B.len()) as u64);
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = None);
     }
 
-    /// A completed repo in a multi-repo set keeps its marker even when a sibling repo fails, so the
-    /// finished repo is not re-fetched/re-hashed on the next retry.
     #[test]
-    fn ensure_mlx_repos_at_marks_completed_repo_when_sibling_fails() {
+    fn failed_file_does_not_write_a_ready_marker() {
+        const GOOD: &[u8] = b"good bytes";
+        const BAD_EXPECTED: &[u8] = b"expected bytes";
+        const REV: &str = "abc1240000000000000000000000000000000000";
+        const REPO_ID: &str = "test-org/failing-model";
         let server = httpmock::MockServer::start();
-        let good = b"good-repo-bytes";
-        let good_sha = crate::hash::sha256_hex(good);
-        let good_rev = "abc123rev00000000000000000000000000004";
-        let good_id = "test-org/good-repo";
-        let bad_rev = "abc123rev00000000000000000000000000005";
-        let bad_id = "test-org/bad-repo";
-
-        let good_tree = server.mock(|when, then| {
+        let _good = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path(format!("/api/models/{good_id}/tree/{good_rev}"))
-                .query_param("recursive", "true");
-            then.status(200).json_body(serde_json::json!([{
-                "type": "file",
-                "path": "g.bin",
-                "size": good.len(),
-                "lfs": { "oid": format!("sha256:{good_sha}"), "size": good.len() }
-            }]));
+                .path(format!("/{REPO_ID}/resolve/{REV}/good.bin"));
+            then.status(200).body(GOOD);
         });
+        let bad = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{REPO_ID}/resolve/{REV}/bad.bin"));
+            then.status(200).body(b"wrong bytes");
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = Some(tmp.path().to_path_buf()));
+        let files = fixture_files(vec![
+            fixture_file("good.bin", GOOD),
+            fixture_file("bad.bin", BAD_EXPECTED),
+        ]);
+        let repo = fixture_repo("failure", REPO_ID, REV, files, test_target);
+
+        let error = ensure_mlx_repos_at(&server.base_url(), &[&repo], &|_, _| {}).unwrap_err();
+        bad.assert();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(!tmp.path().join(READY_MARKER).exists());
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = None);
+    }
+
+    #[test]
+    fn completed_repo_keeps_its_marker_when_a_sibling_fails() {
+        const GOOD: &[u8] = b"good repository";
+        const BAD_EXPECTED: &[u8] = b"expected sibling";
+        const GOOD_REV: &str = "abc1250000000000000000000000000000000000";
+        const BAD_REV: &str = "abc1260000000000000000000000000000000000";
+        const GOOD_ID: &str = "test-org/good";
+        const BAD_ID: &str = "test-org/bad";
+        let server = httpmock::MockServer::start();
         let good_blob = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path(format!("/{good_id}/resolve/{good_rev}/g.bin"));
-            then.status(200).body(good);
+                .path(format!("/{GOOD_ID}/resolve/{GOOD_REV}/good.bin"));
+            then.status(200).body(GOOD);
         });
-        let bad_tree = server.mock(|when, then| {
+        let bad_blob = server.mock(|when, then| {
             when.method(httpmock::Method::GET)
-                .path(format!("/api/models/{bad_id}/tree/{bad_rev}"))
-                .query_param("recursive", "true");
-            then.status(200).json_body(serde_json::json!([{
-                "type": "file",
-                "path": "bad.bin",
-                "size": 10,
-                "lfs": { "oid": format!("sha256:{}", "0".repeat(64)), "size": 10 }
-            }]));
-        });
-        let _bad_blob = server.mock(|when, then| {
-            when.method(httpmock::Method::GET)
-                .path(format!("/{bad_id}/resolve/{bad_rev}/bad.bin"));
-            then.status(200).body(b"wrong-size");
+                .path(format!("/{BAD_ID}/resolve/{BAD_REV}/bad.bin"));
+            then.status(200).body(b"wrong sibling");
         });
 
         let good_dir = tempfile::tempdir().unwrap();
         let bad_dir = tempfile::tempdir().unwrap();
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = Some(good_dir.path().to_path_buf()));
-        TEST_TARGET_DIR_2.with(|t| *t.borrow_mut() = Some(bad_dir.path().to_path_buf()));
-        let mk = |name, repo, revision, target| MlxRepo {
-            name,
-            repo,
-            revision,
-            include_prefixes: &[],
-            exclude_substrings: &[],
-            target,
-            display_name: "",
-            usage: "",
-            license: "",
-            license_url: "",
-        };
-        let good_repo = mk("good", good_id, good_rev, test_target);
-        let bad_repo = mk("bad", bad_id, bad_rev, test_target_2);
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = Some(good_dir.path().to_path_buf()));
+        TEST_TARGET_DIR_2.with(|target| *target.borrow_mut() = Some(bad_dir.path().to_path_buf()));
+        let good_files = fixture_files(vec![fixture_file("good.bin", GOOD)]);
+        let bad_files = fixture_files(vec![fixture_file("bad.bin", BAD_EXPECTED)]);
+        let good_repo = fixture_repo("good", GOOD_ID, GOOD_REV, good_files, test_target);
+        let bad_repo = fixture_repo("bad", BAD_ID, BAD_REV, bad_files, test_target_2);
 
-        let err = ensure_mlx_repos_at(
-            server.base_url().as_str(),
-            &[&good_repo, &bad_repo],
-            &|_, _| {},
-        )
-        .unwrap_err();
-        good_tree.assert();
+        let error = ensure_mlx_repos_at(&server.base_url(), &[&good_repo, &bad_repo], &|_, _| {})
+            .unwrap_err();
+
         good_blob.assert();
-        bad_tree.assert();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert!(
-            good_dir.path().join(READY_MARKER).is_file(),
-            "completed sibling must keep its marker"
+        bad_blob.assert();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            std::fs::read_to_string(good_dir.path().join(READY_MARKER)).unwrap(),
+            GOOD_REV
         );
-        assert!(
-            !bad_dir.path().join(READY_MARKER).exists(),
-            "failed sibling must not write a marker"
-        );
-        TEST_TARGET_DIR.with(|t| *t.borrow_mut() = None);
-        TEST_TARGET_DIR_2.with(|t| *t.borrow_mut() = None);
-    }
-
-    #[test]
-    fn revisions_are_full_40_char_commit_shas() {
-        for r in all_mlx_repos() {
-            assert_eq!(
-                r.revision.len(),
-                40,
-                "{} revision must be a full SHA",
-                r.name
-            );
-            assert!(r.revision.chars().all(|c| c.is_ascii_hexdigit()));
-            assert!(r.repo.starts_with("mlx-community/"));
-        }
+        assert!(!bad_dir.path().join(READY_MARKER).exists());
+        TEST_TARGET_DIR.with(|target| *target.borrow_mut() = None);
+        TEST_TARGET_DIR_2.with(|target| *target.borrow_mut() = None);
     }
 }

@@ -6,6 +6,7 @@
 use serde_json::Value;
 
 const REPO_SLUG: &str = "delllusional/DontSpeak";
+const MAX_UPDATE_JSON_BYTES: usize = 1024 * 1024;
 
 /// Shape for `ds_update_check_json` / host "update available" UI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,14 +35,14 @@ impl UpdateInfo {
 /// GET + parse + compare; `api_base` is mockable. Same path as production.
 pub fn check_for_update_at(api_base: &str, current_version: &str) -> std::io::Result<UpdateInfo> {
     let url = format!("{api_base}/repos/{REPO_SLUG}/releases/latest");
-    let body = crate::download::http_get_builder(&url)
+    let response = crate::download::http_get_builder(&url)
         // GitHub rejects empty User-Agent.
         .header("User-Agent", "DontSpeak-update-check")
         .header("Accept", "application/vnd.github+json")
         .send()
-        .and_then(|r| r.error_for_status())
-        .and_then(|r| r.text())
         .map_err(|e| std::io::Error::other(format!("update check request failed: {e}")))?;
+    let body = ds_http::read_utf8_limited(response, MAX_UPDATE_JSON_BYTES)
+        .map_err(|e| std::io::Error::new(e.kind(), format!("update check request failed: {e}")))?;
 
     let json: Value = serde_json::from_str(&body)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -187,6 +188,21 @@ mod tests {
             err.to_string().contains("update check request failed"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn rejects_an_oversized_response_body() {
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path("/repos/delllusional/DontSpeak/releases/latest");
+            then.status(200).body("x".repeat(MAX_UPDATE_JSON_BYTES + 1));
+        });
+
+        let err = check_for_update_at(&server.base_url(), "0.1.0").unwrap_err();
+        mock.assert();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceeds size limit"), "{err}");
     }
 
     #[test]

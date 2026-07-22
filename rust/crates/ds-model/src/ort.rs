@@ -149,23 +149,28 @@ fn bundled_onnxruntime_dylib() -> Option<PathBuf> {
 pub use crate::urls::ONNXRUNTIME_VERSION;
 
 #[cfg(any(target_os = "macos", test))]
-fn has_supported_macos_dylib_id(mut reader: impl std::io::Read) -> bool {
+fn has_supported_macos_dylib_id(mut reader: impl std::io::Read, expected_version: &str) -> bool {
     const MAX_MACHO_HEADER_BYTES: usize = 256 * 1024;
-    const NEEDLE: &[u8] = b"libonnxruntime.1.dylib";
+    const MAJOR_ID: &[u8] = b"libonnxruntime.1.dylib";
+    let exact_id = format!("libonnxruntime.{expected_version}.dylib");
 
     let mut buf = vec![0u8; MAX_MACHO_HEADER_BYTES];
     let n = reader.read(&mut buf).unwrap_or(0);
-    buf[..n]
-        .windows(NEEDLE.len())
-        .any(|window| window == NEEDLE)
+    let header = &buf[..n];
+    header
+        .windows(MAJOR_ID.len())
+        .any(|window| window == MAJOR_ID)
+        || header
+            .windows(exact_id.len())
+            .any(|window| window == exact_id.as_bytes())
 }
 
 /// Cheap gate that the on-disk dylib matches what `ort` needs (status-poll safe).
 ///
 /// Wrong-version dylib dlopens fine, but `GetApi(24)` NULL + ort rc.12 re-enters
 /// `api()` OnceLock → self-deadlock (warm child hangs before READY). Reject before
-/// `ort` loads. macOS: scan Mach-O for major-only `LC_ID_DYLIB` (`libonnxruntime.1.dylib`
-/// since ≥1.25; full `1.24.x` id rejected → re-download). Exact pin is archive SHA-256.
+/// `ort` loads. macOS accepts the major-only `LC_ID_DYLIB` used since 1.25 or the exact
+/// target pin (Intel's last build is full-versioned 1.23.2). Exact bytes are archive-pinned.
 pub fn is_onnxruntime_dylib_version_ok() -> bool {
     let Some(path) = onnxruntime_dylib_path() else {
         return false;
@@ -175,7 +180,7 @@ pub fn is_onnxruntime_dylib_version_ok() -> bool {
         let Ok(f) = std::fs::File::open(&path) else {
             return false;
         };
-        has_supported_macos_dylib_id(f)
+        has_supported_macos_dylib_id(f, ONNXRUNTIME_VERSION)
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -733,10 +738,29 @@ mod tests {
     }
 
     #[test]
+    fn macos_dylib_id_accepts_major_or_exact_pin_only() {
+        assert!(has_supported_macos_dylib_id(
+            &b"header libonnxruntime.1.dylib trailer"[..],
+            "1.27.1",
+        ));
+        assert!(has_supported_macos_dylib_id(
+            &b"header libonnxruntime.1.23.2.dylib trailer"[..],
+            "1.23.2",
+        ));
+        assert!(!has_supported_macos_dylib_id(
+            &b"header libonnxruntime.1.24.2.dylib trailer"[..],
+            "1.23.2",
+        ));
+    }
+
+    #[test]
     fn macos_dylib_id_scan_reaches_beyond_the_old_64k_limit() {
         let mut header = vec![0u8; 96 * 1024];
         header.extend_from_slice(b"libonnxruntime.1.dylib");
-        assert!(has_supported_macos_dylib_id(std::io::Cursor::new(header)));
+        assert!(has_supported_macos_dylib_id(
+            std::io::Cursor::new(header),
+            "1.27.1",
+        ));
     }
 
     /// A minimal valid runtime archive holding one dylib member, in THIS platform's real

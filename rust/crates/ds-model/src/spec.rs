@@ -369,8 +369,7 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
                 .map(|(u, s)| item(u, s))
                 .collect()
         }
-        // MLX sets and off-x86_64 CUDA have no static manifest: MLX downloads a pinned
-        // repository tree rather than named files.
+        // MLX sets are engine-managed; installer prefetch covers the portable asset routes.
         _ => vec![],
     }
 }

@@ -30,7 +30,7 @@ pub(crate) const POLL_MS: u64 = 30; // caps-state poll
 const RELOAD_QUIET_WINDOW: Duration = Duration::from_millis(750);
 /// Re-probe AX so live grant/revoke flips caps without reload.
 const AX_PROBE_INTERVAL: Duration = Duration::from_secs(2);
-/// Slow auto-download retry (launch fetch fail / no network).
+/// Auto-download poll cadence; per-target failure policy applies backoff and permanent latches.
 const AUTO_DL_RETRY_INTERVAL: Duration = Duration::from_secs(20);
 /// Status-gate nudge while downloading (~2.5 Hz; progress alone doesn't bump seq).
 const DL_PROGRESS_BUMP_INTERVAL: Duration = Duration::from_millis(400);

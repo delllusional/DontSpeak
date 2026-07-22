@@ -125,7 +125,7 @@ pub fn ensure_in_dir(
 }
 
 /// Explicit dest; serialized by [`file_flight`].
-fn ensure_at(
+pub(crate) fn ensure_at(
     final_path: &Path,
     spec: &ModelSpec,
     retries: u32,
@@ -139,6 +139,9 @@ fn ensure_at(
     let _in_flight = flight.lock().unwrap();
 
     if verify_sha256(final_path, &spec.sha256) {
+        if let Ok(partial) = resumable_partial_path(final_path) {
+            remove_resume_files(&partial, &resumable_metadata_path(&partial));
+        }
         return Ok(());
     }
 
@@ -146,40 +149,59 @@ fn ensure_at(
         .parent()
         .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
     std::fs::create_dir_all(dir)?;
+    let partial = resumable_partial_path(final_path)?;
+    let metadata = resumable_metadata_path(&partial);
+    let mut state = load_resume_state(&partial, &metadata, spec);
 
-    let tmp = tempfile::NamedTempFile::new_in(dir)?;
+    if verify_sha256(&partial, &spec.sha256) {
+        persist_partial(&partial, final_path)?;
+        let _ = std::fs::remove_file(&metadata);
+        return Ok(());
+    }
 
     // Bad prefetch: zero temp and fall through to network (once).
     if let Some(local) = prefetch_local(&spec.url) {
-        copy_prefetched(&local, tmp.path(), progress)?;
-        if verify_sha256(tmp.path(), &spec.sha256) {
-            tmp.persist(final_path).map_err(|e| e.error)?;
+        copy_prefetched(&local, &partial, progress)?;
+        if verify_sha256(&partial, &spec.sha256) {
+            persist_partial(&partial, final_path)?;
+            let _ = std::fs::remove_file(&metadata);
             return Ok(());
         }
-        tmp.as_file().set_len(0)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&partial)?
+            .set_len(0)?;
+        state = DownloadState::default();
+        let _ = std::fs::remove_file(&metadata);
     }
 
-    let mut state = DownloadState::default();
     let mut last_err: Option<std::io::Error> = None;
     for attempt in 0..retries.max(1) {
-        let result =
-            download_to_network(&spec.url, tmp.path(), progress, &mut state).and_then(|()| {
-                if verify_sha256(tmp.path(), &spec.sha256) {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "sha256 mismatch on downloaded file",
-                    ))
-                }
-            });
+        let transfer = download_to_network(&spec.url, &partial, progress, &mut state);
+        if state.validator.is_some() {
+            persist_resume_state(&metadata, spec, &state)?;
+        } else {
+            let _ = std::fs::remove_file(&metadata);
+        }
+        let result = transfer.and_then(|()| {
+            if verify_sha256(&partial, &spec.sha256) {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "sha256 mismatch on downloaded file",
+                ))
+            }
+        });
         match result {
             Ok(()) => {
-                tmp.persist(final_path).map_err(|e| e.error)?;
+                persist_partial(&partial, final_path)?;
+                let _ = std::fs::remove_file(&metadata);
                 return Ok(());
             }
             Err(e) => {
                 if is_permanent_error(&e) {
+                    remove_resume_files(&partial, &metadata);
                     return Err(std::io::Error::new(
                         e.kind(),
                         format!("permanent download failure (not retried): {e}"),
@@ -198,6 +220,79 @@ fn ensure_at(
         }
     }
     Err(last_err.unwrap_or_else(|| std::io::Error::other("download failed")))
+}
+
+fn resumable_partial_path(final_path: &Path) -> std::io::Result<PathBuf> {
+    let dir = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
+    let name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("model path has no UTF-8 file name"))?;
+    Ok(dir.join(format!(".{name}.part")))
+}
+
+fn resumable_metadata_path(partial: &Path) -> PathBuf {
+    let mut name = partial.as_os_str().to_os_string();
+    name.push(".meta");
+    PathBuf::from(name)
+}
+
+fn load_resume_state(partial: &Path, metadata: &Path, spec: &ModelSpec) -> DownloadState {
+    if !partial.is_file() {
+        let _ = std::fs::remove_file(metadata);
+        return DownloadState::default();
+    }
+    let expected_identity = resume_identity(spec);
+    let state = std::fs::read_to_string(metadata).ok().and_then(|contents| {
+        let mut lines = contents.lines();
+        (lines.next() == Some("v1") && lines.next() == Some(expected_identity.as_str()))
+            .then(|| lines.next())
+            .flatten()
+            .filter(|validator| !validator.is_empty())
+            .map(|validator| DownloadState {
+                validator: Some(validator.to_string()),
+            })
+    });
+    if state.is_none() {
+        remove_resume_files(partial, metadata);
+    }
+    state.unwrap_or_default()
+}
+
+fn resume_identity(spec: &ModelSpec) -> String {
+    sha256_hex(format!("{}\n{}", spec.url, spec.sha256).as_bytes())
+}
+
+fn persist_resume_state(
+    metadata: &Path,
+    spec: &ModelSpec,
+    state: &DownloadState,
+) -> std::io::Result<()> {
+    let Some(validator) = &state.validator else {
+        return Ok(());
+    };
+    let dir = metadata
+        .parent()
+        .ok_or_else(|| std::io::Error::other("resume metadata path has no parent"))?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    writeln!(tmp, "v1")?;
+    writeln!(tmp, "{}", resume_identity(spec))?;
+    writeln!(tmp, "{validator}")?;
+    tmp.persist(metadata).map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn persist_partial(partial: &Path, final_path: &Path) -> std::io::Result<()> {
+    tempfile::TempPath::try_from_path(partial.to_path_buf())?
+        .persist(final_path)
+        .map_err(|e| e.error)
+}
+
+fn remove_resume_files(partial: &Path, metadata: &Path) {
+    let _ = std::fs::remove_file(partial);
+    let _ = std::fs::remove_file(metadata);
 }
 
 fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<PathBuf> {
@@ -379,7 +474,7 @@ fn http_get_stream(
 }
 
 /// `InvalidData` / `NotFound` fail fast; else retry.
-pub(crate) fn is_permanent_error(e: &std::io::Error) -> bool {
+pub fn is_permanent_error(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::InvalidData | std::io::ErrorKind::NotFound
@@ -585,34 +680,40 @@ fn sweep_orphans_once(dir: &Path) {
 
 /// Recursive best-effort remove of `.tmp*` older than [`MIN_ORPHAN_AGE`].
 pub(crate) fn sweep_orphaned_temp_files(dir: &Path) {
+    sweep_orphaned_temp_entries(dir, MIN_ORPHAN_AGE);
+}
+
+fn sweep_orphaned_temp_entries(dir: &Path, min_age: std::time::Duration) {
     let now = std::time::SystemTime::now();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        match entry.file_type() {
-            Ok(ft) if ft.is_dir() => sweep_orphaned_temp_files(&path),
-            Ok(ft) if ft.is_file() => {
-                let is_tmp = entry
-                    .file_name()
-                    .to_str()
-                    .map(|n| n.starts_with(".tmp"))
-                    .unwrap_or(false);
-                if !is_tmp {
-                    continue;
-                }
-                let old_enough = std::fs::metadata(&path)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|m| now.duration_since(m).ok())
-                    .map(|age| age >= MIN_ORPHAN_AGE)
-                    .unwrap_or(false);
-                if old_enough {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_tmp = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(".tmp"));
+        if is_tmp {
+            let old_enough = std::fs::metadata(&path)
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| now.duration_since(modified).ok())
+                .is_some_and(|age| age >= min_age);
+            if old_enough {
+                if file_type.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else if file_type.is_file() {
                     let _ = std::fs::remove_file(&path);
                 }
             }
-            _ => {}
+            continue;
+        }
+        if file_type.is_dir() {
+            sweep_orphaned_temp_entries(&path, min_age);
         }
     }
 }
@@ -888,6 +989,108 @@ mod tests {
         let err = ensure_at(&final_path, &spec, 3, &|_, _| {}).expect_err("checksum must reject");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         mock.assert_calls(1);
+        let partial = resumable_partial_path(&final_path).unwrap();
+        assert!(
+            !partial.exists(),
+            "permanent failures discard partial bytes"
+        );
+        assert!(!resumable_metadata_path(&partial).exists());
+    }
+
+    #[test]
+    fn ensure_resumes_across_separate_calls_with_persisted_validator() {
+        let body = b"a model body resumed by the daemon's next scheduled attempt".to_vec();
+        let split = body.len() / 2;
+        let sha = crate::hash::sha256_hex(&body);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+
+        let served = body.clone();
+        let server = std::thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let request = read_request(&mut first);
+            assert!(!request.to_ascii_lowercase().contains("\r\nrange:"));
+            write!(
+                first,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"fixture-v1\"\r\n\
+                 Connection: close\r\n\r\n",
+                served.len()
+            )
+            .unwrap();
+            first.write_all(&served[..split]).unwrap();
+            first.flush().unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let request = read_request(&mut second);
+            assert!(has_header(&request, &format!("Range: bytes={split}-")));
+            assert!(has_header(&request, "If-Range: \"fixture-v1\""));
+            let remaining = served.len() - split;
+            write!(
+                second,
+                "HTTP/1.1 206 Partial Content\r\nContent-Length: {remaining}\r\n\
+                 Content-Range: bytes {split}-{}/{}\r\nETag: \"fixture-v1\"\r\n\
+                 Connection: close\r\n\r\n",
+                served.len() - 1,
+                served.len()
+            )
+            .unwrap();
+            second.write_all(&served[split..]).unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("model.bin");
+        let spec = ModelSpec {
+            file_name: "model.bin".into(),
+            url,
+            sha256: sha,
+        };
+        let first = ensure_at(&final_path, &spec, 1, &|_, _| {})
+            .expect_err("the interrupted first call remains transient");
+        assert!(!is_permanent_error(&first));
+        let partial = resumable_partial_path(&final_path).unwrap();
+        assert_eq!(std::fs::metadata(&partial).unwrap().len(), split as u64);
+        assert!(resumable_metadata_path(&partial).is_file());
+
+        ensure_at(&final_path, &spec, 1, &|_, _| {})
+            .expect("the next call resumes, verifies, and lands the file");
+        server.join().unwrap();
+
+        assert_eq!(std::fs::read(&final_path).unwrap(), body);
+        assert!(!partial.exists());
+        assert!(!resumable_metadata_path(&partial).exists());
+    }
+
+    #[test]
+    fn changed_pin_discards_incompatible_resume_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let final_path = dir.path().join("model.bin");
+        let partial = resumable_partial_path(&final_path).unwrap();
+        let metadata = resumable_metadata_path(&partial);
+        std::fs::write(&partial, b"old pinned bytes").unwrap();
+        let old = ModelSpec {
+            file_name: "model.bin".into(),
+            url: "https://example.invalid/model.bin".into(),
+            sha256: crate::hash::sha256_hex(b"old pinned bytes"),
+        };
+        persist_resume_state(
+            &metadata,
+            &old,
+            &DownloadState {
+                validator: Some("\"old-version\"".into()),
+            },
+        )
+        .unwrap();
+        let new = ModelSpec {
+            sha256: crate::hash::sha256_hex(b"new pinned bytes"),
+            ..old
+        };
+
+        let state = load_resume_state(&partial, &metadata, &new);
+
+        assert!(state.validator.is_none());
+        assert!(!partial.exists());
+        assert!(!metadata.exists());
     }
 
     /// A server may return less than the requested suffix. Keep advancing the range with the
@@ -1246,9 +1449,8 @@ mod tests {
         );
     }
 
-    /// Same truncation-guard coverage for `download_to` — used by the onnxruntime archive
-    /// fetch and, after the plain-blob integrity fix, effectively every MLX
-    /// download too. A regression here would silently reintroduce the same bug on that path.
+    /// Same truncation-guard coverage for `download_to`, used by the ONNX Runtime archive
+    /// fetch. A regression here would silently reintroduce the same bug on that path.
     #[test]
     fn download_to_classifies_truncated_body_as_transient_not_permanent() {
         let full_body = b"onnxruntime archive bytes that will be cut off early".to_vec();
@@ -1348,6 +1550,26 @@ mod tests {
         assert!(
             !nested_tmp.exists(),
             "the sweep must recurse into subdirectories"
+        );
+    }
+
+    #[test]
+    fn sweep_removes_orphaned_temp_directories_as_units() {
+        let root = tempfile::tempdir().unwrap();
+        let staging = tempfile::Builder::new().tempdir_in(root.path()).unwrap();
+        let staging_path = staging.keep();
+        std::fs::create_dir_all(staging_path.join("payload/espeak-ng-data")).unwrap();
+        std::fs::write(
+            staging_path.join("payload/espeak-ng-data/phondata"),
+            b"staged frontend data",
+        )
+        .unwrap();
+
+        sweep_orphaned_temp_entries(root.path(), std::time::Duration::ZERO);
+
+        assert!(
+            !staging_path.exists(),
+            "an abandoned tempfile staging tree must be reclaimed in full"
         );
     }
 

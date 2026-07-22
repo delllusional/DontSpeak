@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ds_config::{Paths, Provider, VoiceConfig};
 use ds_model::DownloadTarget;
@@ -48,11 +48,21 @@ pub(crate) enum TargetState {
     Done(DownloadProgress),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryGate {
+    Permanent,
+    Transient { failures: u32, not_before: Instant },
+}
+
+const AUTO_RETRY_BASE: Duration = Duration::from_secs(20);
+const AUTO_RETRY_CAP: Duration = Duration::from_secs(15 * 60);
+
 /// Background download progress for `model_status` (orange ring / red failed dot).
 #[derive(Default)]
 pub(crate) struct DownloadState {
     /// Per-target lifecycle (Active XOR Failed XOR Done). See [`TargetState`].
     pub targets: HashMap<DownloadTarget, TargetState>,
+    retry_gates: HashMap<DownloadTarget, RetryGate>,
     /// First timed sample, excluding already-present bytes from rate estimates.
     pub transfer_start: HashMap<DownloadTarget, (Instant, u64)>,
     /// Warm-child self-heal hook (wired once at boot via [`wire`]). On success,
@@ -124,11 +134,15 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
                     && cfg.resolved_stt_provider() == Provider::OrtCuda)))
 }
 
-/// Mark `which` Active (clears prior Failed/Done). `false` if already Active — attach.
-/// Pure; split out of [`start_download`] for unit tests.
-fn begin_download(s: &mut DownloadState, which: DownloadTarget) -> bool {
+/// Mark a due target Active. Active/permanent/backoff-gated targets attach or stay idle.
+fn begin_download_at(s: &mut DownloadState, which: DownloadTarget, now: Instant) -> bool {
     if matches!(s.targets.get(&which), Some(TargetState::Active(_))) {
         return false; // already downloading — attach, don't retrigger
+    }
+    match s.retry_gates.get(&which) {
+        Some(RetryGate::Permanent) => return false,
+        Some(RetryGate::Transient { not_before, .. }) if now < *not_before => return false,
+        _ => {}
     }
     // Active overwrites prior Done/Failed (no stale ring / error).
     s.targets
@@ -137,22 +151,58 @@ fn begin_download(s: &mut DownloadState, which: DownloadTarget) -> bool {
     true
 }
 
+fn begin_download(s: &mut DownloadState, which: DownloadTarget) -> bool {
+    begin_download_at(s, which, Instant::now())
+}
+
+fn retry_delay(failures: u32) -> Duration {
+    let multiplier = 1u32
+        .checked_shl(failures.saturating_sub(1).min(31))
+        .unwrap_or(u32::MAX);
+    AUTO_RETRY_BASE
+        .saturating_mul(multiplier)
+        .min(AUTO_RETRY_CAP)
+}
+
 /// Retire `which`: Err → Failed always; Ok only Active → Done (keeps final %).
-fn finish_download(s: &mut DownloadState, which: DownloadTarget, result: &std::io::Result<()>) {
+fn finish_download_at(
+    s: &mut DownloadState,
+    which: DownloadTarget,
+    result: &std::io::Result<()>,
+    now: Instant,
+) {
     s.transfer_start.remove(&which);
     match result {
         // Always record Err (active or not) so a red-dot path stays visible.
         Err(e) => {
             s.targets.insert(which, TargetState::Failed(e.to_string()));
+            let gate = if ds_model::is_permanent_error(e) {
+                RetryGate::Permanent
+            } else {
+                let failures = match s.retry_gates.get(&which) {
+                    Some(RetryGate::Transient { failures, .. }) => failures.saturating_add(1),
+                    _ => 1,
+                };
+                RetryGate::Transient {
+                    failures,
+                    not_before: now.checked_add(retry_delay(failures)).unwrap_or(now),
+                }
+            };
+            s.retry_gates.insert(which, gate);
         }
         // Ok on non-Active leaves state untouched.
         Ok(()) => {
+            s.retry_gates.remove(&which);
             if let Some(TargetState::Active(p)) = s.targets.get(&which) {
                 let p = *p;
                 s.targets.insert(which, TargetState::Done(p));
             }
         }
     }
+}
+
+fn finish_download(s: &mut DownloadState, which: DownloadTarget, result: &std::io::Result<()>) {
+    finish_download_at(s, which, result, Instant::now());
 }
 
 /// Lifecycle log line (`started`/`finished`/`failed` [+ detail]). Pure for unit tests.
@@ -403,7 +453,7 @@ fn fetch_plan(prefetch_cuda: bool, need: &DownloadNeeds) -> Vec<DownloadTarget> 
 }
 
 /// Auto-fetch missing models for enabled engines (no manual Download button).
-/// Idempotent; retries on boot, reload, and a slow poll-loop tick.
+/// Idempotent; the per-target gate latches permanent errors and backs off transient ones.
 pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig) {
     for which in fetch_plan(false, &compute_needs(cfg)) {
         start_download(downloads, which);
@@ -453,13 +503,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
-    let parakeet_model = stt_is_builtin
-        && stt_onnx_runtime
-        && !(exists(ds_model::model_path(ds_model::PARAKEET_ENCODER_FILE))
-            && exists(ds_model::model_path(ds_model::PARAKEET_DECODER_FILE))
-            && exists(ds_model::model_path(ds_model::PARAKEET_JOINER_FILE))
-            && exists(ds_model::model_path(ds_model::PARAKEET_TOKENS_FILE))
-            && exists(ds_model::onnxruntime_dylib_path()));
+    let parakeet_model = stt_is_builtin && stt_onnx_runtime && !ds_model::is_parakeet_present();
     let parakeet_mlx = stt_is_builtin
         && !stt_onnx_runtime
         && !ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
@@ -472,7 +516,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let sepformer_model = cfg!(target_os = "macos")
         && cfg.speaker_lock
         && cfg.is_diarization_on()
-        && !exists(ds_model::model_path(ds_model::SEPFORMER_FILE));
+        && !ds_model::is_sepformer_present();
     DownloadNeeds {
         tts_model,
         kokoro_frontend,
@@ -553,11 +597,13 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, cfg: &VoiceConfig, which: Provider)
 #[cfg(test)]
 mod tests {
     use super::{
-        DownloadNeeds, DownloadProgress, DownloadState, TargetState, begin_download,
-        diarization_mlx_needed, download_event_msg, download_needs_child_reload, fetch_plan,
-        finish_download, needed_downloads, needs_kokoro_frontend,
+        AUTO_RETRY_BASE, AUTO_RETRY_CAP, DownloadNeeds, DownloadProgress, DownloadState, RetryGate,
+        TargetState, begin_download, begin_download_at, compute_needs, diarization_mlx_needed,
+        download_event_msg, download_needs_child_reload, fetch_plan, finish_download,
+        finish_download_at, needed_downloads, needs_kokoro_frontend,
     };
     use ds_model::DownloadTarget;
+    use std::time::{Duration, Instant};
 
     /// Pins CUDA-first boot order (old single-flight could drop Cuda when a model raced).
     #[test]
@@ -585,6 +631,56 @@ mod tests {
         assert_eq!(
             fetch_plan(true, &DownloadNeeds::default()),
             vec![DownloadTarget::Cuda]
+        );
+    }
+
+    #[test]
+    fn corrupt_parakeet_files_remain_in_the_download_plan() {
+        let _guard = crate::config_gate::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
+        let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
+        let model_dir = tempfile::tempdir().unwrap();
+        for file in [
+            ds_model::PARAKEET_ENCODER_FILE,
+            ds_model::PARAKEET_DECODER_FILE,
+            ds_model::PARAKEET_JOINER_FILE,
+            ds_model::PARAKEET_TOKENS_FILE,
+        ] {
+            std::fs::write(model_dir.path().join(file), b"corrupt but present").unwrap();
+        }
+        let runtime = model_dir.path().join("onnxruntime.dll");
+        std::fs::write(&runtime, b"present runtime").unwrap();
+        // SAFETY: this process-wide mutation is serialized by ENV_LOCK and restored below.
+        unsafe {
+            std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
+            std::env::set_var("ORT_DYLIB_PATH", &runtime);
+        }
+        let config = ds_config::VoiceConfig {
+            tts_engine: Some(Vec::new()),
+            stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
+            provider: vec![ds_config::Provider::OrtCpu],
+            ..ds_config::VoiceConfig::default()
+        };
+
+        let need = compute_needs(&config);
+
+        // SAFETY: restore the serialized process environment before releasing ENV_LOCK.
+        unsafe {
+            match previous_model_dir {
+                Some(value) => std::env::set_var("DONTSPEAK_MODEL_DIR", value),
+                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            }
+            match previous_ort {
+                Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
+                None => std::env::remove_var("ORT_DYLIB_PATH"),
+            }
+        }
+
+        assert!(
+            need.parakeet_model,
+            "checksum-invalid files must be replaced even when every path exists"
         );
     }
 
@@ -766,7 +862,13 @@ mod tests {
             "parakeet tracks its own fraction"
         );
 
-        finish_download(&mut s, par, &Err(std::io::Error::other("boom")));
+        let failure_time = Instant::now();
+        finish_download_at(
+            &mut s,
+            par,
+            &Err(std::io::Error::other("boom")),
+            failure_time,
+        );
         assert_eq!(s.targets[&par], TargetState::Failed("boom".into()));
         assert_eq!(
             s.targets[&kok],
@@ -777,7 +879,16 @@ mod tests {
             "other target unaffected"
         );
 
-        assert!(begin_download(&mut s, par));
+        assert!(!begin_download_at(
+            &mut s,
+            par,
+            failure_time + AUTO_RETRY_BASE - Duration::from_millis(1),
+        ));
+        assert!(begin_download_at(
+            &mut s,
+            par,
+            failure_time + AUTO_RETRY_BASE,
+        ));
         assert_eq!(
             s.targets[&par],
             TargetState::Active(DownloadProgress::default()),
@@ -793,6 +904,76 @@ mod tests {
             }),
             "a successful finish must retire the Active progress into Done"
         );
+    }
+
+    #[test]
+    fn permanent_failures_latch_without_blocking_other_targets() {
+        let now = Instant::now();
+        let mut state = DownloadState::default();
+        let kokoro = DownloadTarget::KokoroModel;
+        let parakeet = DownloadTarget::ParakeetModel;
+        assert!(begin_download_at(&mut state, kokoro, now));
+        let failure = Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "checksum mismatch",
+        ));
+        finish_download_at(&mut state, kokoro, &failure, now);
+
+        assert_eq!(state.retry_gates[&kokoro], RetryGate::Permanent);
+        assert!(!begin_download_at(
+            &mut state,
+            kokoro,
+            now + Duration::from_secs(24 * 60 * 60),
+        ));
+        assert!(begin_download_at(&mut state, parakeet, now));
+
+        let missing = Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "repository missing",
+        ));
+        finish_download_at(&mut state, parakeet, &missing, now);
+        assert_eq!(state.retry_gates[&parakeet], RetryGate::Permanent);
+    }
+
+    #[test]
+    fn transient_failures_back_off_exponentially_and_success_clears_the_gate() {
+        let now = Instant::now();
+        let mut state = DownloadState::default();
+        let target = DownloadTarget::ParakeetModel;
+        let timeout = Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "offline"));
+
+        assert!(begin_download_at(&mut state, target, now));
+        finish_download_at(&mut state, target, &timeout, now);
+        assert_eq!(
+            state.retry_gates[&target],
+            RetryGate::Transient {
+                failures: 1,
+                not_before: now + AUTO_RETRY_BASE,
+            }
+        );
+        assert!(!begin_download_at(
+            &mut state,
+            target,
+            now + AUTO_RETRY_BASE - Duration::from_millis(1),
+        ));
+
+        let second = now + AUTO_RETRY_BASE;
+        assert!(begin_download_at(&mut state, target, second));
+        finish_download_at(&mut state, target, &timeout, second);
+        assert_eq!(
+            state.retry_gates[&target],
+            RetryGate::Transient {
+                failures: 2,
+                not_before: second + AUTO_RETRY_BASE * 2,
+            }
+        );
+        assert_eq!(super::retry_delay(100), AUTO_RETRY_CAP);
+
+        let due = second + AUTO_RETRY_BASE * 2;
+        assert!(begin_download_at(&mut state, target, due));
+        finish_download_at(&mut state, target, &Ok(()), due);
+        assert!(!state.retry_gates.contains_key(&target));
+        assert!(matches!(state.targets[&target], TargetState::Done(_)));
     }
 
     /// Stale Done must not linger as the ring % for a re-download.

@@ -59,20 +59,24 @@ fn with_tts_languages(mut project: Value, model: ds_config::TtsModel) -> Value {
 
 /// One JSON entry for an MLX model set. The license lives with the files on
 /// [`MlxRepo`](crate::mlx_repo::MlxRepo), so this can't drift
-/// from what's downloaded. The set's files are a whole pinned HuggingFace revision (fetched
-/// via the tree API), so the single "file" we list is that pinned revision — `name` is the
-/// repo, `url` links the exact tree the download reads.
+/// from what's downloaded. Each source-pinned file links to its immutable revision URL.
 fn mlx_project_obj(r: &crate::mlx_repo::MlxRepo) -> Value {
     let homepage = format!("https://huggingface.co/{}", r.repo);
-    let tree_url = format!("{homepage}/tree/{}", r.revision);
+    let files: Vec<Value> = r
+        .files
+        .iter()
+        .map(|file| {
+            let url = format!("{homepage}/resolve/{}/{}", r.revision, file.path);
+            file_obj(file.path, &url, file.size)
+        })
+        .collect();
     json!({
         "name": r.display_name,
         "usage": r.usage,
         "homepage": homepage,
         "license": r.license,
         "license_url": r.license_url,
-        // The pinned revision IS the unit we fetch; show it as the single source "file".
-        "files": [{ "name": r.repo, "url": tree_url }],
+        "files": files,
     })
 }
 

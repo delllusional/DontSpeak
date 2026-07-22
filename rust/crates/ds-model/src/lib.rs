@@ -54,7 +54,8 @@ pub mod urls;
 
 // Flat facade — stable `ds_model::<item>` paths.
 pub use download::{
-    ensure_in_dir, ensure_with_progress, prefetch_key, set_prefetch_source, url_basename,
+    ensure_in_dir, ensure_with_progress, is_permanent_error, prefetch_key, set_prefetch_source,
+    url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use kokoro_frontend::{
