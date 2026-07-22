@@ -1095,12 +1095,15 @@ mod tests {
         );
     }
 
-    /// DRIFT GUARD: hand-written `docs/MCP-TOOLS.md` must track catalog names + descriptions.
+    /// DRIFT GUARD: hand-written `docs/MCP-TOOLS.md` must track catalog names +
+    /// tool/param descriptions (`descriptions.rs` is the single source).
     #[test]
     fn mcp_tools_doc_matches_catalog_descriptions() {
-        // Normalize whitespace (doc wraps) and strip backticks before comparing.
+        // Normalize whitespace (doc wraps), strip backticks, and unescape
+        // markdown table pipes (`\|` → `|`) before comparing.
         fn normalize(s: &str) -> String {
             s.replace('`', "")
+                .replace("\\|", "|")
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ")
@@ -1118,6 +1121,15 @@ mod tests {
                 t.name,
                 t.description
             );
+            for param in visible_params(t) {
+                assert!(
+                    doc.contains(&normalize(param.description)),
+                    "docs/MCP-TOOLS.md's `{}.{}` param description doesn't match the catalog's:\n{}",
+                    t.name,
+                    param.name,
+                    param.description
+                );
+            }
         }
     }
 
