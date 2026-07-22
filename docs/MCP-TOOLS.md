@@ -134,7 +134,7 @@ Update and reload settings.
 |---|---|---|
 | `narrate` | array of `shorts`, `digests` | Narration modes. Default both. |
 | `greet` | boolean | Greet new terminals. Default on. |
-| `clear_on_input` | array of `current`, `other` | Queues to clear on submit. Default ["current"]. |
+| `clear_on_input` | array of `current`, `other` | Queues to clear on submit. `current` = the submitting terminal, `other` = everything else (incl. untagged). Default ["current"]. |
 | `pause_bg` | boolean | Pause speech when no terminal is frontmost. Default false. |
 
 **Earcons**

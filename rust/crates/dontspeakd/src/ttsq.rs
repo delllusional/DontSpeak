@@ -818,8 +818,10 @@ impl TtsQueue {
     /// Apply `clear_on_input` against one resolved `target`. No-op if `target` is None
     /// or neither scope requested.
     ///
-    /// `current`: prune target (+ sticky) and hard-cancel in-flight unconditionally
-    /// (don't gate on stale tts_active/playing during record-barge).
+    /// `current`: prune target (+ sticky) and hard-cancel in-flight iff it is the target's
+    /// ([`session_belongs_to_real`] — the same set the prune removes).
+    /// Gate on `playing`, never `tts_active`: a record-barge pause clears `tts_active` while
+    /// the item is still claimed, so a `tts_active` gate would leak.
     /// `other`: retain only target (+ sticky); cancel in-flight iff not target's.
     /// Both scopes together empty the queue.
     pub fn cancel_for_submit(
@@ -837,13 +839,23 @@ impl TtsQueue {
         if cancel_current {
             let mut items = self.items.lock().unwrap();
             let before = speech_depth(&items);
+            // Snapshot `playing` under `items` (the worker's claim order, like the `other`
+            // branch) so a claim can't slip in between the prune and the decision.
+            let playing_is_target = self
+                .playing
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|p| session_belongs_to_real(&p.session, target.as_str()));
             prune_session(&mut items, &Some(target.clone()));
             // Voice submit path (not MarkActive): also drop sticky of same terminal.
             if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                 prune_session(&mut items, &Some(sticky));
             }
             self.publish_queue_depth(before, speech_depth(&items));
-            self.hard_cancel_in_flight_locked(&items);
+            if playing_is_target {
+                self.hard_cancel_in_flight_locked(&items);
+            }
         }
         if cancel_other {
             // Prune + playing snapshot under items (avoid claim race after return).
@@ -3386,39 +3398,132 @@ mod tests {
         assert_eq!(q.generation.load(Ordering::SeqCst), gen_before);
     }
 
-    #[test]
-    fn cancel_for_submit_current_prunes_target_and_cancels_unconditionally() {
+    /// Seed a queue whose worker is claiming `playing` and speaking.
+    fn queue_playing(sessions: &[Option<&str>], playing: Option<&str>) -> Arc<TtsQueue> {
         let q = mk_queue();
-        q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
-        // Someone ELSE is playing ("b") — `current` must still cancel unconditionally.
+        q.edit_items_for_test(|q| q.extend(sessions.iter().map(|s| narr(*s))));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: ClientSource::Unknown,
-            session: Some("b".into()),
+            session: playing.map(str::to_string),
             speech: true,
             utterance: None,
         });
-        let gen_before = q.generation.load(Ordering::SeqCst);
+        q
+    }
 
-        q.cancel_for_submit(Some("a".into()), true, false);
-
-        let kept: Vec<_> = q
-            .items
+    fn queued_sessions(q: &TtsQueue) -> Vec<Option<String>> {
+        q.items
             .lock()
             .unwrap()
             .iter()
             .map(|it| it.session.clone())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn cancel_for_submit_current_cancels_only_the_submitting_terminals_playback() {
+        // A voice / hands-free submit in terminal "a" must not barge terminal "b": the
+        // prune and the in-flight cancel cover the same set (`session_belongs_to_real`).
+        let q = queue_playing(&[Some("a"), Some("b")], Some("b"));
+        let gen_before = q.generation.load(Ordering::SeqCst);
+
+        q.cancel_for_submit(Some("a".into()), true, false);
+
         assert_eq!(
-            kept,
+            queued_sessions(&q),
             vec![Some("b".into())],
             "current prunes only target's own queued items"
         );
+        assert_eq!(
+            q.generation.load(Ordering::SeqCst),
+            gen_before,
+            "another terminal's speech must survive a `current` clear"
+        );
+        assert!(q.tts_active.load(Ordering::SeqCst));
+
+        // Playing the target itself → cancelled.
+        let q2 = queue_playing(&[Some("a"), Some("b")], Some("a"));
+        let gen_before2 = q2.generation.load(Ordering::SeqCst);
+        q2.cancel_for_submit(Some("a".into()), true, false);
+        assert!(
+            q2.generation.load(Ordering::SeqCst) > gen_before2,
+            "the submitting terminal's own playback is cancelled"
+        );
+        assert!(!q2.tts_active.load(Ordering::SeqCst));
+
+        // Playing the target's Grok sticky digest → also the submitting terminal's, and
+        // this branch prunes that sibling too (unlike `clear_session`, which keeps it).
+        let q3 = queue_playing(&[Some("a"), Some("grok-stop:a")], Some("grok-stop:a"));
+        let gen_before3 = q3.generation.load(Ordering::SeqCst);
+        q3.cancel_for_submit(Some("a".into()), true, false);
+        assert!(
+            queued_sessions(&q3).is_empty(),
+            "voice submit drops the target's sticky sibling as well"
+        );
+        assert!(
+            q3.generation.load(Ordering::SeqCst) > gen_before3,
+            "sticky playback of the submitting terminal is cancelled"
+        );
+    }
+
+    #[test]
+    fn current_scope_leaves_untagged_global_playback_alone() {
+        // Prune and cancel cover the identical set: untagged MCP speech is `other`'s
+        // scope per `CancelSpeechScope`, and the typing route (`clear_session`) already
+        // leaves it alone.
+        let q = queue_playing(&[None, Some("a")], None);
+        let gen_before = q.generation.load(Ordering::SeqCst);
+
+        q.cancel_for_submit(Some("a".into()), true, false);
+
+        assert_eq!(queued_sessions(&q), vec![None]);
+        assert_eq!(
+            q.generation.load(Ordering::SeqCst),
+            gen_before,
+            "untagged global speech is not the submitting terminal's"
+        );
+        assert!(q.tts_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn current_scope_is_idle_safe() {
+        // `playing = None` is an IDLE worker, not "playing the untagged global session".
+        let q = mk_queue();
+        q.edit_items_for_test(|q| q.extend([narr(Some("a"))]));
+        let gen_before = q.generation.load(Ordering::SeqCst);
+
+        q.cancel_for_submit(Some("a".into()), true, false);
+
+        assert!(queued_sessions(&q).is_empty());
+        assert_eq!(
+            q.generation.load(Ordering::SeqCst),
+            gen_before,
+            "an idle worker must not be hard-cancelled"
+        );
+    }
+
+    #[test]
+    fn both_scopes_still_cancel_a_foreign_in_flight_item() {
+        // The `clear_on_input = ["current", "other"]` escape hatch for users who want
+        // every terminal barged still works — via the `other` branch.
+        let q = queue_playing(&[Some("a"), Some("b")], Some("b"));
+        let gen_before = q.generation.load(Ordering::SeqCst);
+        q.cancel_for_submit(Some("a".into()), true, true);
+        assert!(q.items.lock().unwrap().is_empty());
         assert!(
             q.generation.load(Ordering::SeqCst) > gen_before,
-            "current cancels the in-flight item unconditionally"
+            "a foreign in-flight item is cancelled once `other` is requested"
         );
-        assert!(!q.tts_active.load(Ordering::SeqCst));
+
+        // …including untagged MCP speech ("other" = everything else, per CancelSpeechScope).
+        let q2 = queue_playing(&[Some("a"), None], None);
+        let gen_before2 = q2.generation.load(Ordering::SeqCst);
+        q2.cancel_for_submit(Some("a".into()), true, true);
+        assert!(
+            q2.generation.load(Ordering::SeqCst) > gen_before2,
+            "untagged in-flight speech is cancelled once `other` is requested"
+        );
     }
 
     #[test]

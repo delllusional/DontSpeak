@@ -1137,7 +1137,11 @@ mod tests {
     /// MCP `tools/list` and Tools-tab `catalog_ui` emit the same prose.
     #[test]
     fn catalog_and_ui_use_description_constants() {
-        type ToolExpect = (&'static str, &'static str, &'static [(&'static str, &'static str)]);
+        type ToolExpect = (
+            &'static str,
+            &'static str,
+            &'static [(&'static str, &'static str)],
+        );
         let expected: &[ToolExpect] = &[
             (
                 SPEAK_NAME,

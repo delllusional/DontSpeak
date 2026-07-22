@@ -97,7 +97,7 @@ pub const SET_CONFIG_TTS_PARAMS: &str =
     "Param objects by target. rate default 1.0 (system/kokoro only). `{}` resets.";
 pub const SET_CONFIG_NARRATE: &str = "Narration modes. Default both.";
 pub const SET_CONFIG_GREET: &str = "Greet new terminals. Default on.";
-pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit. Default [\"current\"].";
+pub const SET_CONFIG_INPUT_CLEARS: &str = "Queues to clear on submit. `current` = the submitting terminal, `other` = everything else (incl. untagged). Default [\"current\"].";
 pub const SET_CONFIG_PAUSE_BG: &str = "Pause speech when no terminal is frontmost. Default false.";
 pub const SET_CONFIG_EARCON_REPLY: &str = "Reply-done sound. Default: OS chime; empty = off.";
 pub const SET_CONFIG_EARCON_INPUT: &str = "Needs-input sound. Default off.";
