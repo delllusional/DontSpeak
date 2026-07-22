@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeak"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-agent-usage",
  "ds-config",
@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "dontspeakd"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-agent-usage",
  "ds-config",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "ds-aec"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "coreaudio-rs",
  "libpulse-binding",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "ds-agent-usage"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "base64 0.22.1",
  "ds-client",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "ds-client"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "ds-config"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "directories",
  "ds-client",
@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "ds-core"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "cbindgen",
  "dontspeakd",
@@ -1024,7 +1024,7 @@ dependencies = [
 
 [[package]]
 name = "ds-earcon"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "directories",
  "ds-config",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "ds-engines"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "ds-platform",
@@ -1045,7 +1045,7 @@ dependencies = [
 
 [[package]]
 name = "ds-helper"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-aec",
  "ds-config",
@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "ds-helper-proto"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "serde",
  "serde_json",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "ds-http"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "attohttpc",
  "httpmock",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "ds-i18n"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-client",
  "ds-config",
@@ -1095,7 +1095,7 @@ dependencies = [
 
 [[package]]
 name = "ds-ipc"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-client",
  "ds-earcon",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "ds-log"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "directories",
  "ds-client",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "ds-model"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "attohttpc",
  "ds-config",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "ds-narrate"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "log",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "ds-platform"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "arboard",
  "core-graphics",
@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "ds-proc"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "nix 0.31.3",
  "tempfile",
@@ -1177,7 +1177,7 @@ dependencies = [
 
 [[package]]
 name = "ds-status"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-client",
  "proptest",
@@ -1187,7 +1187,7 @@ dependencies = [
 
 [[package]]
 name = "ds-stt"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "cpal 0.18.1",
  "ds-config",
@@ -1207,7 +1207,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tools"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "ds-voices",
@@ -1217,7 +1217,7 @@ dependencies = [
 
 [[package]]
 name = "ds-tts"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "ds-voices"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "ds-model",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "ds-wire"
-version = "0.3.7"
+version = "0.3.8-dev"
 dependencies = [
  "ds-config",
  "ds-log",
