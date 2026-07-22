@@ -76,20 +76,40 @@ fn mlx_project_obj(r: &crate::mlx_repo::MlxRepo) -> Value {
     })
 }
 
-fn tts_project_obj(set: &crate::tts_assets::TtsOrtAssetSet) -> Value {
-    with_tts_languages(
+/// A TTS set's catalog entries: the model project plus one entry per attribution
+/// partition ([`crate::tts_assets::DerivedAttribution`]). Every pinned file (CUDA-only
+/// assets included) appears exactly once — in its partition's entry when partitioned,
+/// else in the model entry — so no downloaded asset shows up licence-less or
+/// double-attributed. Partitions affect THIS shaping only; download/presence paths keep
+/// reading `files`/`files_for`.
+fn tts_project_objs(set: &crate::tts_assets::TtsOrtAssetSet) -> Vec<Value> {
+    let partitioned: Vec<&str> = set
+        .attribution_partitions
+        .iter()
+        .flat_map(|partition| partition.files.iter().map(|file| file.url))
+        .collect();
+    let mut entries = vec![with_tts_languages(
         json!({
             "name": set.display_name,
             "usage": "Built-in text-to-speech model",
             "homepage": set.homepage,
             "license": set.license,
             "license_url": set.license_url,
-            // Attribution covers every pinned file of the project, CUDA-only assets included:
-            // a downloaded asset missing from this list would show up licence-less.
-            "files": set.files_for(true).map(download_file).collect::<Vec<_>>(),
+            "files": set
+                .files_for(true)
+                .filter(|file| !partitioned.contains(&file.url))
+                .map(download_file)
+                .collect::<Vec<_>>(),
         }),
         set.model,
-    )
+    )];
+    for partition in set.attribution_partitions {
+        entries.push(project_obj(
+            partition.project,
+            partition.files.iter().map(download_file).collect(),
+        ));
+    }
+    entries
 }
 
 /// The libraries catalog for the UI's Libraries tab, FILTERED to the platform this build runs
@@ -199,7 +219,7 @@ pub fn catalog() -> Value {
         crate::tts_assets::TTS_ORT_ASSETS
             .iter()
             .filter(|set| set.model != ds_config::TtsModel::Kokoro)
-            .map(tts_project_obj),
+            .flat_map(tts_project_objs),
     );
     push_portable(&mut projects, &urls::PARAKEET);
     for repo in crate::mlx_repo::all_mlx_repos() {
@@ -241,6 +261,57 @@ mod tests {
                 "project `{}` has no files",
                 p["name"]
             );
+            // Everything under upstream `audio_tokenizer/` derives from Boson's Higgs
+            // Audio 2 — an Apache-2.0 claim over such a file is the misattribution the
+            // OmniVoice partition exists to prevent.
+            if p["license"].as_str() == Some("Apache-2.0") {
+                for f in p["files"].as_array().unwrap() {
+                    assert!(
+                        !f["url"].as_str().unwrap_or("").contains("audio_tokenizer"),
+                        "Apache-2.0 project `{}` claims Boson-derived file {}",
+                        p["name"],
+                        f["url"]
+                    );
+                }
+            }
+        }
+    }
+
+    /// Every pinned TTS file appears in the catalog exactly once: partitioned files under
+    /// their derived project, the rest under the model entry — the exactly-once guarantee
+    /// `tts_project_objs` provides.
+    #[test]
+    fn tts_attribution_partitions_cover_every_file_exactly_once() {
+        let cat = catalog();
+        let projects = cat.as_array().unwrap();
+        let files_of = |name: &str| -> Vec<String> {
+            projects
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("missing catalog entry {name}"))["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| f["url"].as_str().unwrap().to_string())
+                .collect()
+        };
+        // Kokoro is cataloged from `urls::KOKORO` + `urls::KOKORO_G2P` (see the collector),
+        // so the shaping under test only covers the non-Kokoro sets.
+        for set in crate::tts_assets::TTS_ORT_ASSETS
+            .iter()
+            .filter(|set| set.model != ds_config::TtsModel::Kokoro)
+        {
+            let mut cataloged = files_of(set.display_name);
+            for partition in set.attribution_partitions {
+                cataloged.extend(files_of(partition.project.name));
+            }
+            let mut pinned: Vec<String> = set
+                .files_for(true)
+                .map(|file| file.url.to_string())
+                .collect();
+            cataloged.sort();
+            pinned.sort();
+            assert_eq!(cataloged, pinned, "{}", set.display_name);
         }
     }
 

@@ -106,8 +106,9 @@ WASAPI, both OS-provided APIs with no LGPL involvement.
 
 ## Native libraries and models downloaded at runtime
 
-These are fetched to the user's machine on first use; DontSpeak does not redistribute them.
-Each carries its upstream license:
+These are fetched to the user's machine on first use; DontSpeak does not redistribute
+them, with one disclosed exception noted in the OmniVoice entry below. Each carries its
+upstream license:
 
 - **ONNX Runtime** (Microsoft) — **MIT**.
 - **eSpeak NG**, fetched in the platform wheel published by `espeakng-loader` and loaded
@@ -121,10 +122,12 @@ Each carries its upstream license:
 - **Qwen3-TTS 12 Hz 0.6B CustomVoice** (Qwen), downloaded as either the onnx-community
   FP16 profile or the mlx-community 8-bit conversion — **Apache-2.0**.
   https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
-- **OmniVoice / Prince-1** TTS model (onnx-community FP16 audio sub-models and Higgs decoder
-  with either the INT4 CPU LLM decoder or, on an NVIDIA GPU, the FP16 one published under
-  `cuda/`; mlx-community BF16 conversion) — **Apache-2.0**.
-  https://huggingface.co/onnx-community/OmniVoice-Onnx
+- **OmniVoice** TTS model (k2-fsa; onnx-community ONNX export, mlx-community BF16
+  conversion). The model **weights** are **CC-BY-NC 4.0** (non-commercial); upstream's
+  Apache-2.0 license covers the OmniVoice source code only, not the published weights.
+  The `higgs_decoder.onnx` waveform decoder derives from upstream's `audio_tokenizer/`
+  (Boson Higgs Audio 2) and carries the **Boson Higgs Audio 2 Community License**.
+  https://huggingface.co/k2-fsa/OmniVoice
 - **graphemes_to_phonemes_en_us** tiny BART model (Peter Reid), used for unknown English
   words in the Kokoro frontend — **Apache-2.0**. The upstream model card declares the license
   but documents no training record. The pinned repository's script suggests training from local

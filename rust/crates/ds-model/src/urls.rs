@@ -598,6 +598,21 @@ pub const SEPFORMER_PROJECT: Project = Project {
     files: &[SEPFORMER],
 };
 
+/// Higgs Audio 2 tokenizer decoder redistributed inside the OmniVoice ONNX export
+/// (upstream `audio_tokenizer/` tree). Boson's community license, not the CC-BY-NC
+/// weights license and not upstream's Apache-2.0 (which covers code only). Files come
+/// from the OmniVoice set's attribution partition
+/// (`crate::tts_assets::TtsOrtAssetSet::attribution_partitions`), not from here.
+pub const OMNIVOICE_HIGGS_TOKENIZER: Project = Project {
+    name: "Higgs Audio 2 tokenizer",
+    usage: "Audio-token waveform decoder for OmniVoice",
+    homepage: "https://huggingface.co/bosonai/higgs-audio-v2-tokenizer",
+    license: "Boson Higgs Audio 2 Community License",
+    license_url: "https://github.com/boson-ai/higgs-audio/blob/main/LICENSE",
+    platforms: Platform::ALL,
+    files: &[],
+};
+
 /// ONNX Runtime inference library (MIT). Files are platform-selected (the load-dynamic
 /// dist archive, plus the GPU build wheel on Windows x64), assembled in the collector.
 pub const ONNX_RUNTIME: Project = Project {

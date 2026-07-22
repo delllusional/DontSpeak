@@ -423,6 +423,22 @@ static OMNIVOICE_FILES: [Download; 11] = [
 ];
 static OMNIVOICE_CUDA_FILES: [Download; 2] = [OMNI_LLM_CUDA, OMNI_LLM_CUDA_DATA];
 
+/// Files inside one pinned set whose upstream license differs from the set's own.
+/// Consumed ONLY by the Libraries attribution (`crate::libraries`): presence and
+/// download paths keep reading `files`/`files_for`, so a partitioned file still
+/// downloads with its set — moving it into the [`urls::Project`] would stop that.
+#[derive(Debug)]
+pub struct DerivedAttribution {
+    pub project: &'static urls::Project,
+    pub files: &'static [Download],
+}
+
+static OMNIVOICE_HIGGS_FILES: [Download; 2] = [OMNI_WAVE_DECODER, OMNI_WAVE_DECODER_DATA];
+static OMNIVOICE_ATTRIBUTION_PARTITIONS: [DerivedAttribution; 1] = [DerivedAttribution {
+    project: &urls::OMNIVOICE_HIGGS_TOKENIZER,
+    files: &OMNIVOICE_HIGGS_FILES,
+}];
+
 #[derive(Debug)]
 pub struct TtsOrtAssetSet {
     pub model: TtsModel,
@@ -437,6 +453,8 @@ pub struct TtsOrtAssetSet {
     pub homepage: &'static str,
     pub license: &'static str,
     pub license_url: &'static str,
+    /// Attribution-only license partitions ([`DerivedAttribution`]).
+    pub attribution_partitions: &'static [DerivedAttribution],
 }
 
 pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
@@ -449,6 +467,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         homepage: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX",
         license: "Apache-2.0",
         license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+        attribution_partitions: &[],
     },
     TtsOrtAssetSet {
         model: TtsModel::Chatterbox,
@@ -459,6 +478,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         homepage: "https://huggingface.co/onnx-community/chatterbox-multilingual-ONNX",
         license: "MIT",
         license_url: "https://opensource.org/license/mit",
+        attribution_partitions: &[],
     },
     TtsOrtAssetSet {
         model: TtsModel::Qwen,
@@ -469,6 +489,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         homepage: "https://huggingface.co/onnx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice",
         license: "Apache-2.0",
         license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+        attribution_partitions: &[],
     },
     TtsOrtAssetSet {
         model: TtsModel::OmniVoice,
@@ -477,8 +498,11 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         cuda_files: &OMNIVOICE_CUDA_FILES,
         display_name: "OmniVoice",
         homepage: "https://huggingface.co/onnx-community/OmniVoice-Onnx",
-        license: "Apache-2.0",
-        license_url: "https://www.apache.org/licenses/LICENSE-2.0",
+        // Upstream's Apache-2.0 covers the OmniVoice CODE only; the published weights are
+        // CC-BY-NC 4.0, and the Higgs decoder pair carries Boson's license (partition).
+        license: "CC-BY-NC-4.0",
+        license_url: "https://creativecommons.org/licenses/by-nc/4.0/",
+        attribution_partitions: &OMNIVOICE_ATTRIBUTION_PARTITIONS,
     },
 ];
 
@@ -734,6 +758,59 @@ mod tests {
             "mlx",
             true
         ));
+    }
+
+    /// Attribution partitions cover only files the set actually pins, exactly once. The
+    /// Libraries catalog moves these files into their derived project entry; a stray or
+    /// duplicated URL there would double- or mis-attribute a download.
+    #[test]
+    fn attribution_partitions_reference_set_files_exactly_once() {
+        for model in TtsModel::ALL.iter().copied() {
+            let set = tts_ort_asset_set(model);
+            let all: Vec<&str> = set.files_for(true).map(|file| file.url).collect();
+            let mut seen: Vec<&str> = Vec::new();
+            for partition in set.attribution_partitions {
+                assert!(!partition.files.is_empty(), "{model:?} empty partition");
+                assert!(!partition.project.license.is_empty());
+                for file in partition.files {
+                    assert!(
+                        all.contains(&file.url),
+                        "{model:?} partitions a file its set does not pin: {}",
+                        file.url
+                    );
+                    assert!(
+                        !seen.contains(&file.url),
+                        "{model:?} partitions {} twice",
+                        file.url
+                    );
+                    seen.push(file.url);
+                }
+            }
+        }
+    }
+
+    /// Licensing regression: the OmniVoice WEIGHTS are CC-BY-NC 4.0 (upstream's
+    /// Apache-2.0 covers code only), and everything under upstream `audio_tokenizer/`
+    /// derives from Boson's Higgs Audio 2 — the exact misattributions that shipped once.
+    #[test]
+    fn omnivoice_licensing_is_never_apache() {
+        let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
+        assert_ne!(omnivoice.license, "Apache-2.0");
+        assert_eq!(omnivoice.license, "CC-BY-NC-4.0");
+        let partitioned: Vec<&str> = omnivoice
+            .attribution_partitions
+            .iter()
+            .flat_map(|partition| partition.files.iter().map(|file| file.url))
+            .collect();
+        for file in omnivoice.files_for(true) {
+            if file.url.contains("audio_tokenizer") {
+                assert!(
+                    partitioned.contains(&file.url),
+                    "audio_tokenizer file {} must carry the Boson partition",
+                    file.url
+                );
+            }
+        }
     }
 
     #[test]
