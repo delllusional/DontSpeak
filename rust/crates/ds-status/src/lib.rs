@@ -35,15 +35,17 @@ pub struct EngineStatus {
     pub error: Option<String>,
 }
 
-/// One active model download. Byte totals come from the live transfer; rate is the
-/// whole-target average and ETA is absent until enough progress has been observed.
+/// One active model download. Clients derive average rate and ETA from the raw transfer
+/// counters, avoiding duplicated values on the wire.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DownloadStatus {
     pub target: String,
     pub done_bytes: u64,
     pub total_bytes: u64,
-    pub bytes_per_second: Option<u64>,
-    pub eta_seconds: Option<u64>,
+    /// Byte count at the first timed progress sample.
+    pub start_bytes: u64,
+    /// Whole seconds since that sample; zero until one second has elapsed.
+    pub elapsed_seconds: u64,
 }
 
 /// Diagnostic attached when a language-specific voice does not own the detected language.
@@ -380,15 +382,15 @@ mod tests {
             target in short_string(),
             done_bytes in any::<u64>(),
             total_bytes in any::<u64>(),
-            bytes_per_second in prop::option::of(any::<u64>()),
-            eta_seconds in prop::option::of(any::<u64>()),
+            start_bytes in any::<u64>(),
+            elapsed_seconds in any::<u64>(),
         ) -> DownloadStatus {
             DownloadStatus {
                 target,
                 done_bytes,
                 total_bytes,
-                bytes_per_second,
-                eta_seconds,
+                start_bytes,
+                elapsed_seconds,
             }
         }
     }

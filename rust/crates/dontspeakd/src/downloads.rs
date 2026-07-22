@@ -55,7 +55,7 @@ pub(crate) struct DownloadState {
     pub targets: HashMap<DownloadTarget, TargetState>,
     /// First live progress sample `(time, done)`, excluding already-present bytes from the
     /// transfer-rate estimate. Kept separate so byte progress stays a plain value.
-    pub rate_start: HashMap<DownloadTarget, (Instant, u64)>,
+    pub transfer_start: HashMap<DownloadTarget, (Instant, u64)>,
     /// Warm-child self-heal hook (wired once at boot via [`wire`]). On success,
     /// [`start_download`] restarts the child iff it hosts the new model
     /// ([`download_needs_child_reload`]). `None` until boot / in tests.
@@ -133,13 +133,13 @@ fn begin_download(s: &mut DownloadState, which: DownloadTarget) -> bool {
     // Active overwrites prior Done/Failed (no stale ring / error).
     s.targets
         .insert(which, TargetState::Active(DownloadProgress::default()));
-    s.rate_start.remove(&which);
+    s.transfer_start.remove(&which);
     true
 }
 
 /// Retire `which`: Err → Failed always; Ok only Active → Done (keeps final %).
 fn finish_download(s: &mut DownloadState, which: DownloadTarget, result: &std::io::Result<()>) {
-    s.rate_start.remove(&which);
+    s.transfer_start.remove(&which);
     match result {
         // Always record Err (active or not) so a red-dot path stays visible.
         Err(e) => {
@@ -186,7 +186,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             let mut state = dl.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(state.targets.get(&which), Some(TargetState::Active(_))) {
                 state
-                    .rate_start
+                    .transfer_start
                     .entry(which)
                     .or_insert_with(|| (Instant::now(), done));
                 if let Some(TargetState::Active(progress)) = state.targets.get_mut(&which) {

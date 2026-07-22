@@ -184,11 +184,11 @@ pub(crate) fn model_status_json(
         .unwrap_or((String::new(), false, true, false));
 
     // Per-target download snapshot (parallel; each row owns its fraction).
-    let (dl, download_rate_start) = {
+    let (dl, download_transfer_start) = {
         let downloads = downloads.lock().unwrap_or_else(|e| e.into_inner());
-        (downloads.targets.clone(), downloads.rate_start.clone())
+        (downloads.targets.clone(), downloads.transfer_start.clone())
     };
-    let download_statuses = active_download_statuses(&dl, &download_rate_start, Instant::now());
+    let download_statuses = active_download_statuses(&dl, &download_transfer_start, Instant::now());
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
     // Active-only (Done % is row_download_frac).
     let frac_for = |eng: DownloadTarget| match dl.get(&eng) {
@@ -400,7 +400,7 @@ pub(crate) fn model_status_json(
 
 fn active_download_statuses(
     targets: &std::collections::HashMap<DownloadTarget, TargetState>,
-    rate_start: &std::collections::HashMap<DownloadTarget, (Instant, u64)>,
+    transfer_start: &std::collections::HashMap<DownloadTarget, (Instant, u64)>,
     now: Instant,
 ) -> Vec<DownloadStatus> {
     let mut statuses: Vec<_> = targets
@@ -409,22 +409,21 @@ fn active_download_statuses(
             let TargetState::Active(progress) = state else {
                 return None;
             };
-            let bytes_per_second = rate_start.get(target).and_then(|(started, start_done)| {
-                let elapsed = now.saturating_duration_since(*started);
-                let transferred = progress.done.saturating_sub(*start_done);
-                (transferred > 0 && elapsed >= Duration::from_millis(250))
-                    .then(|| ((transferred as f64 / elapsed.as_secs_f64()).round() as u64).max(1))
-            });
-            let eta_seconds = bytes_per_second.and_then(|rate| {
-                (progress.total > 0)
-                    .then(|| progress.total.saturating_sub(progress.done).div_ceil(rate))
-            });
+            let (start_bytes, elapsed_seconds) = transfer_start
+                .get(target)
+                .map(|(started, start_done)| {
+                    (
+                        *start_done,
+                        now.saturating_duration_since(*started).as_secs(),
+                    )
+                })
+                .unwrap_or_default();
             Some(DownloadStatus {
                 target: target.as_str().to_string(),
                 done_bytes: progress.done,
                 total_bytes: progress.total,
-                bytes_per_second,
-                eta_seconds,
+                start_bytes,
+                elapsed_seconds,
             })
         })
         .collect();
@@ -863,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn active_downloads_report_sorted_bytes_rate_and_eta() {
+    fn active_downloads_report_sorted_raw_transfer_counters() {
         use std::collections::HashMap;
 
         let now = Instant::now();
@@ -886,22 +885,25 @@ mod tests {
             DownloadTarget::ParakeetModel,
             TargetState::Failed("offline".to_string()),
         );
-        let rate_start = HashMap::from([
-            (DownloadTarget::QwenModel, (now - Duration::from_secs(2), 0)),
+        let transfer_start = HashMap::from([
+            (
+                DownloadTarget::QwenModel,
+                (now - Duration::from_secs(2), 10),
+            ),
             (
                 DownloadTarget::KokoroModel,
                 (now - Duration::from_secs(1), 0),
             ),
         ]);
 
-        let statuses = active_download_statuses(&targets, &rate_start, now);
+        let statuses = active_download_statuses(&targets, &transfer_start, now);
         assert_eq!(statuses.len(), 2, "terminal targets are omitted");
         assert_eq!(statuses[0].target, "kokoro_model");
-        assert_eq!(statuses[0].bytes_per_second, Some(100));
-        assert_eq!(statuses[0].eta_seconds, Some(0));
+        assert_eq!(statuses[0].start_bytes, 0);
+        assert_eq!(statuses[0].elapsed_seconds, 1);
         assert_eq!(statuses[1].target, "qwen_model");
-        assert_eq!(statuses[1].bytes_per_second, Some(25));
-        assert_eq!(statuses[1].eta_seconds, Some(6));
+        assert_eq!(statuses[1].start_bytes, 10);
+        assert_eq!(statuses[1].elapsed_seconds, 2);
     }
 
     /// Each model row picks ITS OWN target's fraction from the parallel-download map:

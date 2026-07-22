@@ -465,15 +465,15 @@ struct DownloadStatusDTO: Decodable {
     var target: String
     var doneBytes: UInt64
     var totalBytes: UInt64
-    var bytesPerSecond: UInt64?
-    var etaSeconds: UInt64?
+    var startBytes: UInt64
+    var elapsedSeconds: UInt64
 
     enum CodingKeys: String, CodingKey {
         case target
         case doneBytes = "done_bytes"
         case totalBytes = "total_bytes"
-        case bytesPerSecond = "bytes_per_second"
-        case etaSeconds = "eta_seconds"
+        case startBytes = "start_bytes"
+        case elapsedSeconds = "elapsed_seconds"
     }
 }
 

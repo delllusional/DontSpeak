@@ -594,12 +594,12 @@ fn output_schema_for(output: Output) -> Value {
                                     "target": { "type": "string" },
                                     "done_bytes": { "type": "integer", "minimum": 0 },
                                     "total_bytes": { "type": "integer", "minimum": 0 },
-                                    "bytes_per_second": { "type": ["integer", "null"], "minimum": 0 },
-                                    "eta_seconds": { "type": ["integer", "null"], "minimum": 0 }
+                                    "start_bytes": { "type": "integer", "minimum": 0 },
+                                    "elapsed_seconds": { "type": "integer", "minimum": 0 }
                                 },
                                 "required": [
                                     "target", "done_bytes", "total_bytes",
-                                    "bytes_per_second", "eta_seconds"
+                                    "start_bytes", "elapsed_seconds"
                                 ],
                                 "additionalProperties": false
                             }

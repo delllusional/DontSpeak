@@ -63,9 +63,11 @@ schema even when the engine resolves to `system`/`off`); the `detail` `status` s
 `ModelStatus` semantics and nulls them when no built-in model is active.
 
 The concise `state` includes the status sequence, TTS/STT lifecycle rows, active download
-targets with byte totals/rate/ETA, the current resolved voice and detected language, and the
-last utterance that reached playback. Pass its `seq` back as `since` to long-poll without a
-client-side polling loop. `timeout_ms` is only valid with `since`.
+targets with byte totals plus starting bytes and elapsed seconds, the current resolved voice
+and detected language, and the last utterance that reached playback. Clients derive average
+rate as `(done_bytes - start_bytes) / elapsed_seconds` once `elapsed_seconds` is nonzero,
+then derive ETA from the remaining bytes and that rate. Pass `seq` back as `since` to
+long-poll without a client-side polling loop. `timeout_ms` is only valid with `since`.
 
 ## usage
 

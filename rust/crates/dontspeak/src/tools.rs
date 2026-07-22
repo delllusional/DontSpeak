@@ -955,7 +955,7 @@ mod status_output {
             "tray": ["tts"],
             "downloads": [{
                 "target": "kokoro_model", "done_bytes": 25, "total_bytes": 100,
-                "bytes_per_second": 10, "eta_seconds": 8
+                "start_bytes": 5, "elapsed_seconds": 2
             }]
         })
     }
@@ -1063,7 +1063,8 @@ mod status_output {
         assert_eq!(value["state"]["detected_language"], "it");
         assert_eq!(value["state"]["tts"]["progress"], 0.25);
         assert_eq!(value["state"]["downloads"][0]["done_bytes"], 25);
-        assert_eq!(value["state"]["downloads"][0]["bytes_per_second"], 10);
+        assert_eq!(value["state"]["downloads"][0]["start_bytes"], 5);
+        assert_eq!(value["state"]["downloads"][0]["elapsed_seconds"], 2);
         assert!(value.get("status").is_none(), "detail remains opt-in");
     }
 

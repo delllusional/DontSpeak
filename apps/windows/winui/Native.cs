@@ -413,8 +413,8 @@ internal sealed record DownloadStatusDto
     [JsonPropertyName("target")] public string? Target { get; init; }
     [JsonPropertyName("done_bytes")] public ulong DoneBytes { get; init; }
     [JsonPropertyName("total_bytes")] public ulong TotalBytes { get; init; }
-    [JsonPropertyName("bytes_per_second")] public ulong? BytesPerSecond { get; init; }
-    [JsonPropertyName("eta_seconds")] public ulong? EtaSeconds { get; init; }
+    [JsonPropertyName("start_bytes")] public ulong StartBytes { get; init; }
+    [JsonPropertyName("elapsed_seconds")] public ulong ElapsedSeconds { get; init; }
 }
 
 internal sealed record TtsStatusDto
