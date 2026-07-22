@@ -95,7 +95,9 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 - **No FFI codegen.** uniffi rejected for the 35-fn `ds-core` surface — see
   [ARCHITECTURE.md § FFI](ARCHITECTURE.md#ffi-boundary). For `model_status`: edit
   `ds-status`, hand-update both mirrors (`apps/windows/winui/Native.cs`,
-  `apps/macos/Sources/DontSpeak/DontSpeakCore.swift`), run the round-trip test.
+  `apps/macos/Sources/DontSpeakLogic/ModelStatusDTO.swift`), run the round-trip
+  tests (Rust `ds-status`, Windows `HealthSnapshotTests`, macOS
+  `ModelStatusContractTests`).
 - **Three deploy routes.** CLI, engine, and host app update separately — wrong
   rebuild = stale running code. See [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 - **Speech frontend runtimes.** English dictionary misses use a checksum-pinned ONNX

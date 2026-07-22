@@ -479,27 +479,6 @@ pub extern "C" fn ds_agents_ui_enabled() -> u8 {
     guard_val(0, || agents_enabled() as u8)
 }
 
-/// Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
-/// Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if
-/// delivered; new provider/stats via `ds_model_status_json`.
-#[unsafe(no_mangle)]
-pub extern "C" fn ds_set_provider(provider: *const c_char) -> u8 {
-    guard_val(0, || {
-        // NULL/invalid UTF-8 → "auto".
-        let provider = cstr_or(provider, "auto");
-        let Some(paths) = ds_config::Paths::resolve() else {
-            return 0;
-        };
-        match ds_ipc::request(
-            &paths.engine_sock,
-            &ds_ipc::Request::SetProvider { provider },
-        ) {
-            Ok(ds_ipc::Response::Done) => 1,
-            _ => 0,
-        }
-    })
-}
-
 /// Free a `char*` from any ds_* function. NULL no-op.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_string_free(s: *mut c_char) {

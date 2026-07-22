@@ -41,7 +41,7 @@ ds-i18n = { workspace = true }
 # `detail` qualifier so every host renders it identically.
 serde_json = { workspace = true }
 # The full engine, hosted in-process by a native app via the C ABI
-# (ds_engine_start/stop/reload). Pulls the TTS/STT/platform stack.
+# (ds_engine_start/stop). Pulls the TTS/STT/platform stack.
 dontspeakd = { workspace = true }
 # Engine host diagnostics via the log facade (ds_log sink).
 log = { workspace = true }

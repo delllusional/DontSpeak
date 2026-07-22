@@ -64,14 +64,14 @@ public struct EngineStats: Sendable, Equatable {
 
 // MARK: - Wire DTOs
 
-public struct EngineStatusDTO: Decodable {
+public struct EngineStatusDTO: Decodable, Sendable, Equatable {
     public var state: String
     public var progress: Double
     public var error: String?
 }
 
 /// `model_status.diarization`: lifecycle and configuration kept together on the wire.
-public struct DiarizationStatusDTO: Decodable {
+public struct DiarizationStatusDTO: Decodable, Sendable, Equatable {
     public var status: EngineStatusDTO
     public var enabled: Bool
     public var provider: String
@@ -86,7 +86,7 @@ public struct DiarizationStatusDTO: Decodable {
 
 // `model_status.stats`
 
-public struct TtsStatsDTO: Decodable {
+public struct TtsStatsDTO: Decodable, Sendable, Equatable {
     public var rtfMin: Double
     public var rtfAvg: Double
     public var rtfMax: Double
@@ -112,7 +112,7 @@ public struct TtsStatsDTO: Decodable {
     }
 }
 
-public struct SttStatsDTO: Decodable {
+public struct SttStatsDTO: Decodable, Sendable, Equatable {
     public var rtfMin: Double
     public var rtfAvg: Double
     public var rtfMax: Double
@@ -131,7 +131,7 @@ public struct SttStatsDTO: Decodable {
 }
 
 /// Lifetime totals (engine u64; Double decodes JSON integers).
-public struct LifetimeStatsDTO: Decodable {
+public struct LifetimeStatsDTO: Decodable, Sendable, Equatable {
     public var ttsSecs: Double
     public var sttSecs: Double
 
@@ -141,7 +141,7 @@ public struct LifetimeStatsDTO: Decodable {
     }
 }
 
-public struct StatsDTO: Decodable {
+public struct StatsDTO: Decodable, Sendable, Equatable {
     public var tts: TtsStatsDTO
     public var stt: SttStatsDTO
     public var lifetime: LifetimeStatsDTO

@@ -179,7 +179,6 @@ persisted).
 | `ds_agent_usage_skeleton_json()` | Installed agents + last-good cache; **no network** |
 | `ds_agent_usage_card_json(agent, force)` | Blocking single-card load; never prompts |
 | `ds_agent_usage_card_authorize_json(agent)` | User-click authorize + force load; may ACL-prompt on macOS |
-| `ds_agent_usage_json(refresh)` | Aggregate all cards (tests/tooling) |
 | `ds_usage_resets_in(unix)` | Remaining duration (`2d 05h`, no seconds, no “Resets in” prefix) |
 | `ds_random_pastel_wash_json()` | One pastel wash `{"r","g","b","a"}` (HSV: random H, S=0.42, V=0.92, α=0.30) |
 

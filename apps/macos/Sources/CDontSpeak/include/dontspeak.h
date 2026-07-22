@@ -5,9 +5,10 @@
  *
  * The app is an informational menu-bar + health panel, so this surface is
  * intentionally TINY and HANDLE-FREE: a few read-only probes, the in-process
- * engine lifecycle (start/stop/reload), localization, two engine actions
- * (model download, TTS provider), and the string free. ALL config (voice /
- * engine / language / rate / toggles) lives in DontSpeak, NOT here.
+ * engine lifecycle (start/stop), mute + open voice settings, localization
+ * formatters, agent-usage/tools/logs probes, and the string free. ALL config
+ * (voice / engine / language / rate / provider / toggles) lives in DontSpeak
+ * config / MCP, NOT here.
  *
  * MEMORY / OWNERSHIP / CONTRACT (read before binding):
  *  - HANDLE-FREE: there is no opaque handle and no create/destroy pair — every
@@ -191,11 +192,6 @@ uint8_t ds_diarization_ui_enabled(void);
 // live updates arrive via the model_status push (`agents` root field). Paths
 // unresolvable → 0 (fail closed). HANDLE-FREE.
 uint8_t ds_agents_ui_enabled(void);
-
-// Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
-// Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if
-// delivered; new provider/stats via `ds_model_status_json`.
-uint8_t ds_set_provider(const char *provider);
 
 // Free a `char*` from any ds_* function. NULL no-op.
 void ds_string_free(char *s);

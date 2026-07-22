@@ -27,9 +27,10 @@ header = """
  *
  * The app is an informational menu-bar + health panel, so this surface is
  * intentionally TINY and HANDLE-FREE: a few read-only probes, the in-process
- * engine lifecycle (start/stop/reload), localization, two engine actions
- * (model download, TTS provider), and the string free. ALL config (voice /
- * engine / language / rate / toggles) lives in DontSpeak, NOT here.
+ * engine lifecycle (start/stop), mute + open voice settings, localization
+ * formatters, agent-usage/tools/logs probes, and the string free. ALL config
+ * (voice / engine / language / rate / provider / toggles) lives in DontSpeak
+ * config / MCP, NOT here.
  *
  * MEMORY / OWNERSHIP / CONTRACT (read before binding):
  *  - HANDLE-FREE: there is no opaque handle and no create/destroy pair — every

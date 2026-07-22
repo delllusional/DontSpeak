@@ -8,9 +8,9 @@ thin clients over Unix-domain socket (`ds-ipc`, NDJSON).
 ## In-process engine
 
 The engine (Caps dictation, TTS queue, local STT, models, RPC) is Rust over a small
-C ABI (`ds_engine_start/stop/reload`). Each app links it on a background thread so
-OS permissions (Accessibility, Microphone) and the login item live in one signed
-bundle.
+C ABI (`ds_engine_start` / `ds_engine_stop`). Each app links it on a background
+thread so OS permissions (Accessibility, Microphone) and the login item live in
+one signed bundle.
 
 ## Configuration
 
@@ -89,9 +89,12 @@ MLX Kokoro still needs that ORT dylib. See
 ## FFI boundary
 
 `ds-core`: handle-free C ABI (35 fns) — lifecycle, status, app commands, i18n.
-`dontspeak.h` from cbindgen on `src/ffi.rs`.
+`dontspeak.h` from cbindgen on `src/ffi.rs` (count the `pub extern "C" fn` items
+there; the preamble in `cbindgen.toml` is narrative only).
 
 `model_status`: defined once in `ds-status`, shipped as JSON; each UI has hand-written
-DTOs locked by a round-trip contract test. No uniffi/codegen for this surface.
+DTOs locked by a round-trip contract test (`ds-status` Rust fixture, Windows
+`HealthSnapshotTests`, macOS `ModelStatusContractTests`). No uniffi/codegen for
+this surface.
 
 Crate map: [rust/README.md](rust/README.md).

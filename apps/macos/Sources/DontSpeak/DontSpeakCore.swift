@@ -40,10 +40,6 @@ struct Activity: Sendable, Equatable {
     var trayIndicator = ["stt", "tts_animated"]
 }
 
-enum TtsModel: String, Decodable, Sendable, Equatable {
-    case kokoro, chatterbox, qwen, omnivoice
-}
-
 struct TtsEngine: Sendable, Equatable {
     var engine = "off"
     var model: TtsModel? = nil
@@ -295,13 +291,6 @@ final class Core {
         }
     }
 
-    func setProvider(_ which: String) {
-        Task { [weak self] in
-            await Task.detached { which.withCString { _ = ds_set_provider($0) } }.value
-            self?.refresh()
-        }
-    }
-
     func setMuted(_ on: Bool) {
         Task { [weak self] in
             await Task.detached { _ = ds_set_muted(on ? 1 : 0) }.value
@@ -399,8 +388,7 @@ final class Core {
     }
 }
 
-// MARK: - model_status DTO
-// Consumer projection of the canonical `ds-status` contract.
+// MARK: - model_status DTO → EngineStatus
 
 extension EngineStatusDTO {
     var engineStatus: EngineStatus {
@@ -419,112 +407,4 @@ extension EngineStatusDTO {
 extension Optional where Wrapped == EngineStatusDTO {
     /// Missing block means the selected engine is off.
     var engineStatus: EngineStatus { self?.engineStatus ?? .missing }
-}
-
-struct ActivityDTO: Decodable {
-    var caps: Bool
-    var capsActive: Bool
-    var recording: Bool
-    var speaking: Bool
-    var speaker: String?
-    var voice: String?
-    var language: String?
-    var warning: String?
-    var muted: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case caps
-        case capsActive = "caps_active"
-        case recording
-        case speaking
-        case speaker
-        case voice
-        case language
-        case warning
-        case muted
-    }
-}
-
-struct DictationDTO: Decodable {
-    var state: String
-    var text: String
-    var canPaste: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case state
-        case text
-        case canPaste = "can_paste"
-    }
-}
-
-struct TtsStatusDTO: Decodable {
-    var engine: String
-    var model: TtsModel?
-    var language: String?
-    var provider: String?
-    var status: EngineStatusDTO?
-    var lastUtterance: UtteranceStatusDTO?
-
-    enum CodingKeys: String, CodingKey {
-        case engine, model, language, provider, status
-        case lastUtterance = "last_utterance"
-    }
-}
-
-struct UtteranceStatusDTO: Decodable {
-    var voice: String
-    var language: String
-    var warning: String?
-}
-
-struct DownloadStatusDTO: Decodable {
-    var target: String
-    var doneBytes: UInt64
-    var totalBytes: UInt64
-    var startBytes: UInt64
-    var elapsedSeconds: UInt64
-
-    enum CodingKeys: String, CodingKey {
-        case target
-        case doneBytes = "done_bytes"
-        case totalBytes = "total_bytes"
-        case startBytes = "start_bytes"
-        case elapsedSeconds = "elapsed_seconds"
-    }
-}
-
-struct SttStatusDTO: Decodable {
-    var engine: String
-    var provider: String?
-    var status: EngineStatusDTO?
-    var voiceKey: String?
-
-    enum CodingKeys: String, CodingKey {
-        case engine, provider, status
-        case voiceKey = "voice_key"
-    }
-}
-
-struct ModelStatusDTO: Decodable {
-    var seq: UInt64
-    var activity: ActivityDTO
-    var tts: TtsStatusDTO
-    var stt: SttStatusDTO
-    var diarization: DiarizationStatusDTO
-    var dictation: DictationDTO
-    var stats: StatsDTO
-    var tray: [String]
-    var downloads: [DownloadStatusDTO]
-    var agents: Bool
-
-    enum CodingKeys: String, CodingKey {
-        case seq
-        case activity, tts, stt
-        case diarization
-        case dictation
-        case stats
-        case tray
-        case downloads
-        case agents
-    }
 }
