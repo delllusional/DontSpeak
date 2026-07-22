@@ -230,7 +230,7 @@ pub(crate) fn spawn_ipc_server(
                     // Mid-turn narration → enqueue onto the same bounded FIFO as everything
                     // else (no kind). Warm path: no per-block model reload.
                     //
-                    // Success is deliberately NOT logged: it fires once per blockquote and
+                    // Success is deliberately NOT logged: it fires once per blockquote line and
                     // would spam the activity log. Identified retries return the same success
                     // without adding a second queue item.
                     match ttsq.enqueue_narration(

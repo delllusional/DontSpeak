@@ -339,7 +339,7 @@ mod tests {
     }
 
     /// Reply that opens in Italian and closes in English, as narration delivers it: one
-    /// utterance per blockquote, each with the message-so-far as its corpus.
+    /// utterance per blockquote line, each with the message-so-far as its corpus.
     const ITALIAN_QUOTE: &str = concat!(
         "Oggi è una giornata tranquilla e luminosa, e mi fa davvero piacere poter ",
         "scambiare due parole con te in italiano, una lingua che ha un ritmo caldo e ",

@@ -1,53 +1,39 @@
 //! Spoken-summary extraction and the prompt that requests those summaries.
 
-/// Join one blockquote run into a spoken line; drop empties. `complete` = run is finished.
-fn push_blockquote_run(cur: &mut Vec<String>, out: &mut Vec<(String, bool)>, complete: bool) {
-    if cur.is_empty() {
-        return;
-    }
-    let text = cur
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    cur.clear();
-    if !text.is_empty() {
-        out.push((text, complete));
-    }
-}
-
-/// Top-level blockquotes of `msg` in document order as `(text, complete)`.
-/// Body prose between runs is skipped — narration speaks these VERBATIM, one utterance per run.
+/// Top-level blockquote lines of `msg` in document order as `(text, complete)`.
+/// Body prose between them is skipped — narration speaks these VERBATIM, one utterance
+/// per `>` line. The spec asks for one point per line and language is classified per
+/// utterance, so joining adjacent lines would put a single language verdict on a digest
+/// that switches language between points (garbling the minority-language line).
 ///
-/// A run is contiguous top-level `>` lines; ends at non-quote, nested `>>`, or EOF.
-/// Every run except possibly the last is `complete`. Last is complete only after a terminator
-/// or `is_final` — so streaming never voices a half line. No `>` ⇒ empty (silent).
+/// Nested `>>` lines are never spoken. The last line is `complete` once its newline
+/// arrives or on `is_final` — so streaming never voices a half line. No `>` ⇒ empty
+/// (silent).
 pub fn all_blockquotes_state(msg: &str, is_final: bool) -> Vec<(String, bool)> {
-    let is_quote = |l: &str| l.trim_start().starts_with('>');
     let mut out: Vec<(String, bool)> = Vec::new();
-    let mut cur: Vec<String> = Vec::new();
-    let mut in_run = false;
+    let mut last_line_spoken = false;
     for l in msg.lines() {
-        if is_quote(l) {
-            let t = l.trim_start();
-            let inner = t.strip_prefix('>').unwrap_or(t);
-            let inner = inner.strip_prefix(' ').unwrap_or(inner);
-            // Nested `>>` ends the top-level run and is skipped.
-            if inner.trim_start().starts_with('>') {
-                push_blockquote_run(&mut cur, &mut out, true);
-                in_run = false;
-                continue;
-            }
-            cur.push(inner.to_string());
-            in_run = true;
-        } else if in_run {
-            push_blockquote_run(&mut cur, &mut out, true);
-            in_run = false;
+        last_line_spoken = false;
+        let Some(inner) = l.trim_start().strip_prefix('>') else {
+            continue;
+        };
+        let inner = inner.strip_prefix(' ').unwrap_or(inner);
+        if inner.trim_start().starts_with('>') {
+            continue;
         }
+        let text = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        out.push((text, true));
+        last_line_spoken = true;
     }
-    if in_run {
-        // Trailing run: complete only on final batch.
-        push_blockquote_run(&mut cur, &mut out, is_final);
+    if last_line_spoken
+        && !is_final
+        && !msg.ends_with('\n')
+        && let Some(last) = out.last_mut()
+    {
+        last.1 = false;
     }
     out
 }
@@ -87,14 +73,28 @@ mod tests {
         );
         assert_eq!(
             all_blockquotes("> First part\n> second part\n\nbody"),
-            vec!["First part second part"]
+            vec!["First part", "second part"]
         );
         assert_eq!(all_blockquotes("\n> hello\nbody"), vec!["hello"]);
     }
 
     #[test]
+    fn adjacent_lines_stay_separate_utterances() {
+        // Language is classified per utterance: a digest that switches language
+        // between points must not merge into one verdict (ru line spoken under `en`
+        // comes out garbled).
+        assert_eq!(
+            all_blockquotes("> Русская строка о результате.\n> English line about the fix."),
+            vec![
+                "Русская строка о результате.",
+                "English line about the fix."
+            ]
+        );
+    }
+
+    #[test]
     fn nested_quotes_are_skipped_only_top_level_spoken() {
-        // Nested ends current run; following top-level starts a new voiced run.
+        // Nested lines are skipped; surrounding top-level lines still speak.
         assert_eq!(
             all_blockquotes("> the spoken line\n> > a nested quote\n> a new top-level run"),
             vec!["the spoken line", "a new top-level run"]
@@ -111,19 +111,49 @@ mod tests {
     }
 
     #[test]
-    fn streaming_run_incomplete_until_body_or_final() {
-        let runs = all_blockquotes_state("> partial spoken line", false);
-        assert_eq!(runs, vec![("partial spoken line".to_string(), false)]);
-        let runs = all_blockquotes_state("> partial spoken line", true);
-        assert_eq!(runs, vec![("partial spoken line".to_string(), true)]);
+    fn streaming_line_incomplete_until_newline_or_final() {
+        let lines = all_blockquotes_state("> partial spoken line", false);
+        assert_eq!(lines, vec![("partial spoken line".to_string(), false)]);
+        let lines = all_blockquotes_state("> partial spoken line", true);
+        assert_eq!(lines, vec![("partial spoken line".to_string(), true)]);
+        // A newline terminates the line — speakable before the final batch.
+        let lines = all_blockquotes_state("> done line\n", false);
+        assert_eq!(lines, vec![("done line".to_string(), true)]);
+        let lines = all_blockquotes_state("> done line\n> next partial", false);
+        assert_eq!(
+            lines,
+            vec![
+                ("done line".to_string(), true),
+                ("next partial".to_string(), false)
+            ]
+        );
         assert!(texts("just prose, no spoken line", true).is_empty());
     }
 
     #[test]
-    fn earlier_runs_complete_once_a_later_line_terminates_them() {
-        let runs = all_blockquotes_state("> One.\n\nbody.\n\n> Two still open", false);
+    fn a_bare_marker_tail_never_retracts_or_speaks() {
+        // A trailing `> ` (marker typed, text not yet streamed) adds no entry and
+        // must not reopen the previous line's completeness.
         assert_eq!(
-            runs,
+            all_blockquotes_state("> a\n> ", false),
+            vec![("a".to_string(), true)]
+        );
+        assert!(all_blockquotes_state(">", false).is_empty());
+    }
+
+    #[test]
+    fn crlf_lines_split_and_complete_like_lf() {
+        assert_eq!(
+            all_blockquotes_state("> one\r\n> two\r\n", false),
+            vec![("one".to_string(), true), ("two".to_string(), true)]
+        );
+    }
+
+    #[test]
+    fn earlier_lines_complete_once_a_later_line_terminates_them() {
+        let lines = all_blockquotes_state("> One.\n\nbody.\n\n> Two still open", false);
+        assert_eq!(
+            lines,
             vec![
                 ("One.".to_string(), true),
                 ("Two still open".to_string(), false)

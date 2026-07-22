@@ -1425,12 +1425,12 @@ mod tests {
         let spoken = stop_utterances(Some(&text), true, true, false, false);
         assert_eq!(
             spoken.len(),
-            1,
-            "adjacent > lines form one digest run: {spoken:?}"
+            2,
+            "each adjacent > line is its own utterance: {spoken:?}"
         );
         assert!(
             spoken[0].contains("This is a DontSpeak digest check.")
-                && spoken[0].contains("If Stop narration works"),
+                && spoken[1].contains("If Stop narration works"),
             "spoken={spoken:?}"
         );
     }

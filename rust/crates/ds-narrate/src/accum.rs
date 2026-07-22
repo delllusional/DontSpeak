@@ -1,8 +1,8 @@
-//! Per-message accumulation: which top-level blockquote runs become speakable now.
+//! Per-message accumulation: which top-level blockquote lines become speakable now.
 //! Pure of IO; [`crate::deliver_batch`] owns state file + lock.
 //!
 //! Out-of-order batches (parallel hooks): reconstruct by content-block `index`, emit
-//! each completed run once in document order (high-water mark). Cumulative
+//! each completed line once in document order (high-water mark). Cumulative
 //! `displayed_text` covers Qwen / Codex final snapshots.
 
 use std::collections::BTreeMap;
@@ -23,7 +23,7 @@ pub fn cap_detection_text(s: String) -> String {
     s[..end].to_string()
 }
 
-/// One newly speakable run plus the reconstructed message-so-far for language detection.
+/// One newly speakable line plus the reconstructed message-so-far for language detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUtterance {
     pub text: String,
@@ -32,21 +32,21 @@ pub struct SelectedUtterance {
     pub detection_text: String,
 }
 
-/// Feed batches → newly speakable blockquote runs. One per session under a lock.
+/// Feed batches → newly speakable blockquote lines. One per session under a lock.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Accum {
     /// Chunks by content-block `index` — reconstructs regardless of arrival order.
     pub parts: BTreeMap<u64, String>,
     /// Sticky: any `final=true` makes the message final (even if that batch arrived early).
     pub seen_final: bool,
-    /// High-water mark of runs already forwarded; re-fed batches advance nothing.
+    /// High-water mark of lines already forwarded; re-fed batches advance nothing.
     pub emitted: usize,
     /// "Shorts" latch: blockquote-less final reply voiced whole, once.
     pub short_done: bool,
 }
 
 impl Accum {
-    /// Newly speakable runs this batch (usually empty mid-run). Cumulative
+    /// Newly speakable lines this batch (usually empty mid-line). Cumulative
     /// `displayed_text` wins over delta reconstruction when present.
     pub fn feed(
         &mut self,
@@ -75,17 +75,37 @@ impl Accum {
             }
         };
 
-        // Speakable prefix = leading complete runs (only the last can still be open).
+        // Speakable prefix = leading complete lines (only the last can still be open).
         // Advance the high-water mark even when `messages_on` is false so shorts can
         // tell "no blockquote" from "blockquotes, but muted".
-        let runs = ds_config::all_blockquotes_state(&cumulative, self.seen_final);
-        let total = runs.len();
-        let speakable = runs.iter().take_while(|(_, complete)| *complete).count();
+        let lines = ds_config::all_blockquotes_state(&cumulative, self.seen_final);
+        let total = lines.len();
+        let mut speakable = lines.iter().take_while(|(_, complete)| *complete).count();
+        // Racing hook processes serialize on the lock but not in order, so a
+        // later-indexed delta can land first. Entries past a gap in `parts` are
+        // position-unstable — the gap filling in shifts them under the index
+        // high-water mark (double-speak + skip) — so before the final batch only
+        // the gap-free prefix may speak. On final the full list stays trusted: a
+        // permanent hole (non-text block) must not silence lines forever.
+        if !self.seen_final && !self.parts.keys().copied().eq(0..self.parts.len() as u64) {
+            let dense: String = self
+                .parts
+                .iter()
+                .enumerate()
+                .take_while(|(expect, (idx, _))| **idx == *expect as u64)
+                .map(|(_, (_, part))| part.as_str())
+                .collect();
+            let stable = ds_config::all_blockquotes_state(&dense, false)
+                .iter()
+                .take_while(|(_, complete)| *complete)
+                .count();
+            speakable = speakable.min(stable);
+        }
         let mut spoken = Vec::new();
         // Cap once per feed so pending state and IPC never carry multi-MB corpora.
         let detection_corpus = cap_detection_text(cumulative.clone());
         if messages_on {
-            for (text, _) in runs.into_iter().take(speakable).skip(self.emitted) {
+            for (text, _) in lines.into_iter().take(speakable).skip(self.emitted) {
                 spoken.push(SelectedUtterance {
                     text,
                     detection_text: detection_corpus.clone(),
@@ -285,6 +305,33 @@ mod tests {
         // has chunks that arrived after that free — detection still tracks so-far.
         assert!(out[0].detection_text.contains("Spoken even out of order."));
         assert!(!out[0].detection_text.is_empty());
+    }
+
+    #[test]
+    fn out_of_order_multiline_batch_waits_for_the_gap() {
+        // Racing hook processes: the index-1 batch lands first with newline-complete
+        // lines. Speaking them early would double-speak "C." and never speak "A."
+        // once index 0 fills in — the gap-free prefix rule holds them until order
+        // settles.
+        let mut a = Accum::default();
+        assert!(
+            a.feed(1, "> B.\n> C.\n", None, false, true, false)
+                .is_empty()
+        );
+        let out = a.feed(0, "> A.\n", None, false, true, false);
+        assert_eq!(texts(&out), ["A.", "B.", "C."]);
+        assert!(a.feed(2, "Body.", None, true, true, false).is_empty());
+    }
+
+    #[test]
+    fn a_permanent_index_hole_still_speaks_on_final() {
+        // Non-text content blocks leave holes that never fill; final must not hold
+        // their lines hostage to the gap rule.
+        let mut a = Accum::default();
+        let first = a.feed(0, "> Before tool.\n", None, false, true, false);
+        assert_eq!(texts(&first), ["Before tool."]);
+        let out = a.feed(2, "> After tool.\n", None, true, true, false);
+        assert_eq!(texts(&out), ["After tool."]);
     }
 
     #[test]

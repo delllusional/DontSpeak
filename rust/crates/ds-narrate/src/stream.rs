@@ -20,7 +20,7 @@ pub struct StreamBatch {
     /// Per-message key (client message/item id, or fingerprint fallback). New key resets.
     pub key: String,
     pub payload: BatchPayload,
-    /// Last batch: final run counts complete without a trailing blank line; shorts may fire.
+    /// Last batch: the final line counts complete without its trailing newline; shorts may fire.
     pub is_final: bool,
 }
 

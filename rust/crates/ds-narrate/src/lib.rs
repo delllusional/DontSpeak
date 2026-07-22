@@ -1,6 +1,6 @@
 //! Shared streaming-narration core — one pipeline for every client adapter.
 //!
-//! From [`StreamBatch`]s: emit each top-level blockquote run verbatim, exactly once,
+//! From [`StreamBatch`]s: emit each top-level blockquote line verbatim, exactly once,
 //! in document order (plus "shorts" for a blockquote-less final reply). Progress lives
 //! in `narrate-display-<session>.json`, which is also the cross-process **streaming
 //! witness** that keeps `Stop` silent after mid-turn narration.
