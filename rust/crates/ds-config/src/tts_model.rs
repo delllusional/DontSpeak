@@ -414,7 +414,7 @@ const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[
         honored_ort: true,
         honored_mlx: false,
     },
-    // -1 derives a reproducible per-piece seed; non-negative values override it.
+    // -1 derives a stable seed from language + voice; non-negative values override it.
     TtsParamDescriptor {
         key: "seed",
         kind: TtsParamKind::Int {

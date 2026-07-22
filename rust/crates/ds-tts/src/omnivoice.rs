@@ -182,23 +182,22 @@ impl OmniVoiceSynth {
         let model = ds_config::TtsModel::OmniVoice;
         let language = model.descriptor().runtime_language(language).to_string();
         let steps = params.int(model, "steps") as usize;
-        // Non-negative values override each piece's derived seed.
-        let seed_override = u64::try_from(params.int(model, "seed")).ok();
         // Unknown non-empty values remain raw instructs; empty omits the block.
         let instruct = preset_instruct(voice).unwrap_or(voice);
+        // Text stays out of the derived seed: with the noise stream fixed per
+        // language + voice, the sampled speaker holds across sentences and split
+        // pieces instead of drifting per utterance. Non-negative config values
+        // override the derivation.
+        let seed = u64::try_from(params.int(model, "seed"))
+            .unwrap_or_else(|_| stable_seed(&language, instruct));
         let mut waveform = Vec::new();
         for piece in split_for_frame_budget(text, MAX_FRAMES) {
             if cancelled() {
                 return Ok(Vec::new());
             }
-            waveform.extend(self.synthesize_piece(
-                &piece,
-                &language,
-                instruct,
-                steps,
-                seed_override,
-                cancelled,
-            )?);
+            waveform.extend(
+                self.synthesize_piece(&piece, &language, instruct, steps, seed, cancelled)?,
+            );
         }
         Ok(waveform)
     }
@@ -209,7 +208,7 @@ impl OmniVoiceSynth {
         language: &str,
         instruct: &str,
         steps: usize,
-        seed_override: Option<u64>,
+        seed: u64,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
         let estimate = estimate_audio_frames(text);
@@ -236,9 +235,6 @@ impl OmniVoiceSynth {
         let seq = prompt.seq();
         let cond_len = prompt.cond_len;
         let total = CODEBOOKS * frames;
-
-        // Deterministic Gumbel noise makes identical requests reproducible.
-        let seed = seed_override.unwrap_or_else(|| stable_seed(language, instruct, text));
 
         let mut cond_ids = prompt.ids.clone();
         // Upstream unconditional pass: target region only, with audio_mask true
@@ -608,15 +604,9 @@ fn is_total_collapse(diversity: &[usize]) -> bool {
 }
 
 /// FNV-1a with NUL-separated fields.
-fn stable_seed(language: &str, instruct: &str, text: &str) -> u64 {
+fn stable_seed(language: &str, instruct: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for chunk in [
-        language.as_bytes(),
-        &[0][..],
-        instruct.as_bytes(),
-        &[0][..],
-        text.as_bytes(),
-    ] {
+    for chunk in [language.as_bytes(), &[0][..], instruct.as_bytes()] {
         for &byte in chunk {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
@@ -1056,9 +1046,9 @@ mod tests {
 
     #[test]
     fn stable_seed_separates_fields_and_is_deterministic() {
-        assert_eq!(stable_seed("en", "", "Hi."), stable_seed("en", "", "Hi."));
-        assert_ne!(stable_seed("en", "", "Hi."), stable_seed("en", "", "Hi!"));
-        assert_ne!(stable_seed("ab", "c", "x"), stable_seed("a", "bc", "x"));
+        assert_eq!(stable_seed("en", "female"), stable_seed("en", "female"));
+        assert_ne!(stable_seed("en", "female"), stable_seed("en", "male"));
+        assert_ne!(stable_seed("ab", "c"), stable_seed("a", "bc"));
     }
 
     #[test]
