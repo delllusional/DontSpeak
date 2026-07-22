@@ -1051,7 +1051,9 @@ mod tests {
         std::fs::write(&model, CONTENT).unwrap();
         assert!(is_mlx_repo_present(&repo));
 
-        std::fs::write(&model, b"tampered weights").unwrap();
+        // Different length so file identity (size + mtime) invalidates the SHA
+        // cache even on filesystems with coarse mtime resolution.
+        std::fs::write(&model, b"tampered").unwrap();
         assert!(
             !is_mlx_repo_present(&repo),
             "matching marker cannot bless changed bytes"
