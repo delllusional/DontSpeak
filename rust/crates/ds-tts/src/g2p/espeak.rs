@@ -238,6 +238,9 @@ fn phonemize_preserving_punctuation(
     Ok(output.trim().to_string())
 }
 
+/// Map eSpeak IPA ties to Kokoro symbols the same way Misaki's `EspeakG2P` does
+/// (`misaki/espeak.py` `e2m` for non-English languages). Keep this table in lockstep
+/// with Misaki — Kokoro was trained on that frontend, not raw eSpeak IPA.
 fn normalize_for_kokoro(phonemes: &str) -> String {
     let mut phonemes = remove_language_switch_flags(phonemes)
         .replace("a^ɪ", "I")
@@ -253,6 +256,7 @@ fn normalize_for_kokoro(phonemes: &str) -> String {
         .replace("ɔ^ɪ", "Y")
         .replace(['\u{0361}', '\u{035c}', '^'], "")
         .replace('-', "")
+        // Kokoro vocab has U+0261 script g only (ASCII `g` would be dropped).
         .replace('g', "ɡ")
         .replace('«', "(")
         .replace('»', ")");

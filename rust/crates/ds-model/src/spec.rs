@@ -301,9 +301,29 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         // never the whole multi-GB set. The ORT dylib is `DownloadTarget::Onnxruntime`'s
         // concern, not a condition here. (`spec_item` can't be reused: it resolves through
         // the flat `model_path`, wrong for the per-model subdirectory sets.)
+        // KokoroModel also lists the eSpeak NG loader that
+        // `run_setup_kokoro_with_progress` installs — same espeakng-loader wheel
+        // Misaki/MLX Audio uses for es/fr/hi/it/pt.
+        DownloadTarget::KokoroModel => {
+            let model = ds_config::TtsModel::Kokoro;
+            let dir = crate::tts_assets::tts_model_dir(model);
+            let mut items = tts_prefetch_items(
+                crate::tts_assets::tts_ort_asset_set(model).files,
+                |file| {
+                    dir.as_deref()
+                        .map(|d| verify_sha256_cached(&d.join(file.file_name), file.sha256))
+                        .unwrap_or(false)
+                },
+            );
+            if let Some(dist) = espeak_dist()
+                && !is_espeak_loader_present()
+            {
+                items.push(item(dist.url, dist.archive_sha256));
+            }
+            items
+        }
         // Installers stage the shared set before host CUDA probing.
-        DownloadTarget::KokoroModel
-        | DownloadTarget::ChatterboxModel
+        DownloadTarget::ChatterboxModel
         | DownloadTarget::QwenModel
         | DownloadTarget::OmniVoiceModel => {
             let model = target.tts_model().expect("matched TTS target");

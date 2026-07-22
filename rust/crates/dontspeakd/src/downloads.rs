@@ -109,7 +109,8 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
     let tts_target_matches =
         target.tts_model() == Some(cfg.tts_model) && target.is_mlx_tts() == mlx_tts;
     (builtin_tts && tts_target_matches)
-        || (mlx_tts
+        // eSpeak/G2P/JA assets are loaded by the warm helper — both ONNX and MLX Kokoro.
+        || (builtin_tts
             && cfg.tts_model == ds_config::TtsModel::Kokoro
             && target == DownloadTarget::KokoroFrontend)
         || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
@@ -210,13 +211,13 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             )))
         } else {
             match which {
-                DownloadTarget::KokoroModel => ds_model::run_setup_tts_model_with_progress(
-                    ds_config::TtsModel::Kokoro,
-                    cuda_assets(ds_config::TtsModel::Kokoro),
-                    &prog,
-                )
-                .map(|_| ()),
-                // MLX frontend: vocabulary + OOV G2P + ORT (not the synth graph).
+                // Full portable Kokoro: synth weights + voices + English G2P + eSpeak NG
+                // loader (es/fr/hi/it/pt) + ORT. Matches Misaki/MLX Audio multilingual
+                // frontend assets (Kokoro has no cuda_files extras).
+                DownloadTarget::KokoroModel => {
+                    ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
+                }
+                // Shared frontend only (MLX Kokoro, or ONNX when weights already present).
                 DownloadTarget::KokoroFrontend => {
                     ds_model::run_setup_kokoro_frontend_with_progress(&prog).map(|_| ())
                 }
@@ -338,13 +339,20 @@ fn diarization_mlx_needed(host_supported: bool, diarization_on: bool, set_presen
     host_supported && diarization_on && !set_present
 }
 
-/// MLX Kokoro still needs shared Rust frontend assets (`KokoroFrontend`). Pure for tests.
-fn mlx_needs_frontend_assets(
+/// Kokoro multilingual text frontend (English G2P + eSpeak NG loader + JA dict + ORT).
+///
+/// Needed whenever Kokoro is selected and those assets are missing. Pure for tests.
+///
+/// - **MLX**: synth weights are a separate download; always request `KokoroFrontend` here.
+/// - **ONNX**: `KokoroModel` already installs the full frontend — skip a second fetch when
+///   that target is already queued. If weights are present but eSpeak/JA/G2P are not,
+///   request `KokoroFrontend` alone (the bug that left Italian/Spanish silent).
+fn needs_kokoro_frontend(
     tts_is_kokoro: bool,
-    mlx_active: bool,
     frontend_assets_present: bool,
+    downloading_full_kokoro_onnx: bool,
 ) -> bool {
-    tts_is_kokoro && mlx_active && !frontend_assets_present
+    tts_is_kokoro && !frontend_assets_present && !downloading_full_kokoro_onnx
 }
 
 /// "Enabled but files missing" flags → download targets. Named (not positional) so needs
@@ -419,6 +427,10 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
     let mlx_active = builtin_tts && mlx_tts_active(cfg);
+    let kokoro_selected = builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro;
+    // Full Misaki-compatible stack (G2P graphs + espeakng-loader + ORT), not merely
+    // "encoder.onnx exists" — that left eSpeak uninstalled on the ONNX path.
+    let frontend_present = ds_model::is_kokoro_frontend_present();
     let tts_model = if !builtin_tts {
         None
     } else if mlx_active {
@@ -432,14 +444,9 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             && exists(ds_model::onnxruntime_dylib_path())))
         .then_some(target)
     };
-    // Shared Rust frontend assets provide the vocabulary and phonemizer.
-    let kokoro_frontend = mlx_needs_frontend_assets(
-        builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro,
-        mlx_active,
-        exists(ds_model::model_path(ds_model::KOKORO_G2P_ENCODER_FILE))
-            && exists(ds_model::model_path(ds_model::KOKORO_G2P_DECODER_FILE))
-            && exists(ds_model::onnxruntime_dylib_path()),
-    );
+    let downloading_full_kokoro_onnx = tts_model == Some(DownloadTarget::KokoroModel);
+    let kokoro_frontend =
+        needs_kokoro_frontend(kokoro_selected, frontend_present, downloading_full_kokoro_onnx);
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
@@ -545,7 +552,7 @@ mod tests {
     use super::{
         DownloadNeeds, DownloadProgress, DownloadState, TargetState, begin_download,
         diarization_mlx_needed, download_event_msg, download_needs_child_reload, fetch_plan,
-        finish_download, mlx_needs_frontend_assets, needed_downloads,
+        finish_download, needed_downloads, needs_kokoro_frontend,
     };
     use ds_model::DownloadTarget;
 
@@ -630,23 +637,29 @@ mod tests {
     }
 
     #[test]
-    fn mlx_path_still_needs_the_shared_frontend_assets() {
-        // MLX uses the shared Rust frontend assets.
+    fn kokoro_frontend_fetch_covers_mlx_and_onnx_gaps() {
+        // Missing frontend, not already installing full ONNX Kokoro ⇒ fetch.
         assert!(
-            mlx_needs_frontend_assets(true, true, false),
-            "MLX active + frontend assets missing ⇒ must fetch them"
+            needs_kokoro_frontend(true, false, false),
+            "Kokoro selected + frontend missing ⇒ must fetch espeak/G2P/JA"
         );
+        // Already present ⇒ idle.
         assert!(
-            !mlx_needs_frontend_assets(true, true, true),
+            !needs_kokoro_frontend(true, true, false),
             "frontend assets already present ⇒ nothing to fetch"
         );
-        // ONNX pulls frontend via kokoro_model — don't double-fetch.
+        // Full ONNX KokoroModel install includes the frontend — avoid double-fetch.
         assert!(
-            !mlx_needs_frontend_assets(true, false, false),
-            "ONNX path fetches the frontend via kokoro_model, not this trigger"
+            !needs_kokoro_frontend(true, false, true),
+            "KokoroModel download already installs the frontend"
+        );
+        // Weights present but eSpeak missing (ONNX gap we hit in production): still fetch.
+        assert!(
+            needs_kokoro_frontend(true, false, false),
+            "ONNX weights without eSpeak still need KokoroFrontend"
         );
         assert!(
-            !mlx_needs_frontend_assets(false, true, false),
+            !needs_kokoro_frontend(false, false, false),
             "non-Kokoro TTS needs no Kokoro frontend assets"
         );
     }

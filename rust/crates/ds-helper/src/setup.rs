@@ -30,10 +30,10 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Some(DownloadTarget::Onnxruntime) => {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
-        // Match the staged shared set; installers have no host CUDA probe.
+        // Full portable Kokoro set (ONNX + voices + G2P + eSpeak loader + ORT).
+        // Installers have no host CUDA probe; Kokoro has no cuda_files extras.
         Some(DownloadTarget::KokoroModel) => {
-            ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, false, &p)
-                .map(|_| ())
+            ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())
         }
         Some(DownloadTarget::KokoroFrontend) => {
             ds_model::run_setup_kokoro_frontend_with_progress(&p).map(|_| ())
