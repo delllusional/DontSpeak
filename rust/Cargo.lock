@@ -921,6 +921,7 @@ dependencies = [
 name = "dontspeakd"
 version = "0.3.7-dev"
 dependencies = [
+ "ds-agent-usage",
  "ds-config",
  "ds-earcon",
  "ds-engines",

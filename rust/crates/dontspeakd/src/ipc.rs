@@ -39,6 +39,20 @@ fn speak_tts_args(value: Option<serde_json::Value>) -> Result<Option<TtsArgPools
         .map_err(|error| format!("invalid tts_args: {error}"))
 }
 
+fn agent_usage_response(refresh: bool) -> ds_ipc::Response {
+    agent_usage_response_with(refresh, ds_agent_usage::snapshot)
+}
+
+fn agent_usage_response_with(
+    refresh: bool,
+    snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
+) -> ds_ipc::Response {
+    match serde_json::to_value(snapshot(refresh)) {
+        Ok(deck) => ds_ipc::Response::AgentUsage { deck },
+        Err(error) => ds_ipc::Response::error(format!("agent usage: {error}")),
+    }
+}
+
 /// UserPromptSubmit MarkActive. Always nudge codex sessions; Grok also. Skip terminal
 /// claim + `clear_on_input` when `synthetic` (#11).
 fn handle_mark_active(
@@ -297,6 +311,9 @@ pub(crate) fn spawn_ipc_server(
                         status: model_status_json(&shared, &paths, || ttsq.tts_status_sample()),
                     });
                 }
+                ds_ipc::Request::AgentUsage { refresh } => {
+                    emit(&agent_usage_response(refresh));
+                }
                 ds_ipc::Request::WaitModelStatus { since, timeout_ms } => {
                     // PUSH transport: block this (dedicated) connection until the
                     // dictation status changes or the cap elapses, then reply with the
@@ -529,6 +546,21 @@ fn diarize_named_segments(json: &str, paths: &Paths) -> Result<serde_json::Value
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn agent_usage_response_forwards_refresh_and_serializes_the_deck() {
+        let response = agent_usage_response_with(true, |refresh| {
+            assert!(refresh);
+            ds_agent_usage::UsageDeck::empty()
+        });
+
+        match response {
+            ds_ipc::Response::AgentUsage { deck } => {
+                assert_eq!(deck, serde_json::json!({ "cards": [] }));
+            }
+            other => panic!("expected agent usage response, got {other:?}"),
+        }
+    }
 
     #[test]
     fn speak_tts_args_are_validated_before_queue_admission() {

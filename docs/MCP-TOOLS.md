@@ -96,6 +96,9 @@ Coding-agent subscription usage shown in the Agents tab.
 | `refresh` | boolean | no | Bypass the 60-second cache and query providers. Default false. |
 
 Gated by config `agents` (off by default; `set_config agents=true` enables it live).
+When the app is running, the MCP server asks its in-process engine for the deck so
+macOS keychain access uses the app's authorized code identity. With the app stopped,
+the MCP server retains the same non-interactive local cache/provider fallback.
 
 ## voices
 

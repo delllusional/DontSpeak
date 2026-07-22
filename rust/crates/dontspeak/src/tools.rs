@@ -1,6 +1,6 @@
 //! `tools/call` router and `call_*` handlers (strict arg structs). Most bridge to the
-//! engine over `ds-ipc`; `voices`/`set_config`/`status`/`usage` are direct and never
-//! spawn the engine (`set_config` still best-effort-nudges Reload).
+//! engine over `ds-ipc`; `voices`/`set_config` are direct. Read-only `status`/`usage`
+//! never spawn the engine; usage falls back to a local probe while the engine is down.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -106,8 +106,8 @@ pub(crate) fn tools_call_cancellable(
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Shared cache/provider logic with the Agents tab.
-        "usage" => call_usage(&args).map(ToolSuccess::Structured),
+        // Prefer the app-hosted engine so macOS keychain ACL authorization applies.
+        "usage" => call_usage(sock, &args).map(ToolSuccess::Structured),
         "speak" | "stop" | "mute" | "listen" | "diarize" | "manage_speakers" => {
             let Some(sock) = sock else {
                 return ok(
@@ -385,18 +385,44 @@ fn probe_engine(sock: Option<&PathBuf>, since: Option<u64>, timeout_ms: u64) -> 
     }
 }
 
-fn call_usage(args: &Value) -> Result<Value, String> {
-    call_usage_with(args, ds_agent_usage::snapshot)
+fn call_usage(sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
+    call_usage_with(
+        args,
+        |refresh| probe_agent_usage(sock, refresh),
+        ds_agent_usage::snapshot,
+    )
 }
 
 fn call_usage_with(
     args: &Value,
-    snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
+    engine_snapshot: impl FnOnce(bool) -> Result<Option<ds_agent_usage::UsageDeck>, String>,
+    local_snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
 ) -> Result<Value, String> {
     let a: UsageArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid usage arguments: {e}"))?;
-    serde_json::to_value(snapshot(a.refresh.unwrap_or(false)))
-        .map_err(|e| format!("usage failed: {e}"))
+    let refresh = a.refresh.unwrap_or(false);
+    let deck = match engine_snapshot(refresh)? {
+        Some(deck) => deck,
+        None => local_snapshot(refresh),
+    };
+    serde_json::to_value(deck).map_err(|e| format!("usage failed: {e}"))
+}
+
+fn probe_agent_usage(
+    sock: Option<&PathBuf>,
+    refresh: bool,
+) -> Result<Option<ds_agent_usage::UsageDeck>, String> {
+    let Some(sock) = sock else {
+        return Ok(None);
+    };
+    match ds_ipc::request(sock, &Request::AgentUsage { refresh }) {
+        Ok(Response::AgentUsage { deck }) => serde_json::from_value(deck)
+            .map(Some)
+            .map_err(|error| format!("usage failed: invalid engine response: {error}")),
+        Ok(Response::Error { message }) => Err(message),
+        Ok(_) => Err("usage failed: unexpected engine response".into()),
+        Err(_) => Ok(None),
+    }
 }
 
 // config.toml is source of truth; engine Reload nudge (mtime-watch if down).
@@ -844,24 +870,55 @@ mod drift {
 mod usage_output {
     use super::*;
     use ds_agent_usage::{Period, UsageCard, UsageDeck, UsageRow};
+    use std::io::{BufRead, BufReader, Write};
+
+    fn serve_usage_once(
+        deck: Value,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::mpsc::Receiver<Request>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("usage.sock");
+        let listener = ds_ipc::transport::bind(&sock).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            tx.send(serde_json::from_str(&line).unwrap()).unwrap();
+            let mut response = serde_json::to_string(&Response::AgentUsage { deck }).unwrap();
+            response.push('\n');
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (dir, sock, rx, thread)
+    }
 
     #[test]
-    fn usage_returns_the_shared_deck_and_forwards_refresh() {
-        let value = call_usage_with(&json!({ "refresh": true }), |refresh| {
-            assert!(refresh);
-            UsageDeck {
-                cards: vec![UsageCard {
-                    agent: ClientSource::Codex,
-                    account: Some("dev@example.com".into()),
-                    rows: vec![UsageRow {
-                        period: Period::Week,
-                        used_percent: 42.0,
-                        resets_at_unix: 1_900_000_000,
+    fn usage_prefers_the_engine_deck_and_forwards_refresh() {
+        let value = call_usage_with(
+            &json!({ "refresh": true }),
+            |refresh| {
+                assert!(refresh);
+                Ok(Some(UsageDeck {
+                    cards: vec![UsageCard {
+                        agent: ClientSource::Codex,
+                        account: Some("dev@example.com".into()),
+                        rows: vec![UsageRow {
+                            period: Period::Week,
+                            used_percent: 42.0,
+                            resets_at_unix: 1_900_000_000,
+                        }],
+                        needs_auth: false,
                     }],
-                    needs_auth: false,
-                }],
-            }
-        })
+                }))
+            },
+            |_| panic!("a live engine deck must suppress the CLI-local probe"),
+        )
         .expect("usage serializes");
 
         // needs_auth skip-when-false (legacy decks omit the key).
@@ -888,8 +945,8 @@ mod usage_output {
     }
 
     #[test]
-    fn guarded_card_serializes_needs_auth() {
-        let value = call_usage_with(&json!({}), |_| UsageDeck {
+    fn usage_sends_the_refresh_flag_to_a_reachable_engine() {
+        let deck = serde_json::to_value(UsageDeck {
             cards: vec![UsageCard {
                 agent: ClientSource::ClaudeCode,
                 account: None,
@@ -897,18 +954,66 @@ mod usage_output {
                 needs_auth: true,
             }],
         })
+        .unwrap();
+        let (_dir, sock, rx, thread) = serve_usage_once(deck);
+
+        let value = call_usage(Some(&sock), &json!({ "refresh": true })).unwrap();
+
+        assert!(matches!(
+            rx.recv().unwrap(),
+            Request::AgentUsage { refresh: true }
+        ));
+        assert_eq!(value["cards"][0]["needs_auth"], json!(true));
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn guarded_engine_card_serializes_needs_auth() {
+        let value = call_usage_with(
+            &json!({}),
+            |_| {
+                Ok(Some(UsageDeck {
+                    cards: vec![UsageCard {
+                        agent: ClientSource::ClaudeCode,
+                        account: None,
+                        rows: Vec::new(),
+                        needs_auth: true,
+                    }],
+                }))
+            },
+            |_| panic!("a live engine deck must suppress the CLI-local probe"),
+        )
         .expect("usage serializes");
 
         assert_eq!(value["cards"][0]["needs_auth"], json!(true));
     }
 
     #[test]
-    fn usage_defaults_to_the_soft_cache() {
-        call_usage_with(&json!({}), |refresh| {
-            assert!(!refresh);
-            UsageDeck::empty()
-        })
+    fn usage_defaults_to_the_local_soft_cache_while_engine_is_unreachable() {
+        call_usage_with(
+            &json!({}),
+            |refresh| {
+                assert!(!refresh);
+                Ok(None)
+            },
+            |refresh| {
+                assert!(!refresh);
+                UsageDeck::empty()
+            },
+        )
         .expect("empty deck serializes");
+    }
+
+    #[test]
+    fn engine_errors_are_not_hidden_by_a_local_probe() {
+        let error = call_usage_with(
+            &json!({}),
+            |_| Err("engine rejected usage".into()),
+            |_| panic!("an engine error must not trigger a second provider probe"),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "engine rejected usage");
     }
 }
 

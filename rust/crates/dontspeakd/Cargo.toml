@@ -28,6 +28,8 @@ path = "src/bin/fake_ds_helper.rs"
 ds-platform = { workspace = true }
 ds-proc = { workspace = true }
 ds-config = { workspace = true }
+# App-process usage probes let MCP share the host's macOS keychain ACL authorization.
+ds-agent-usage = { workspace = true }
 # Client-wiring reconcile: the engine converges each client's wiring to config.toml's
 # declared `exclude_clients` at boot / on config change (the shared home is ds-wire, NOT the
 # `dontspeak` CLI crate — so no engine→CLI dependency is introduced).

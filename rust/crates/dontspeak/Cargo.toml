@@ -20,10 +20,10 @@ name = "dontspeak"
 path = "src/main.rs"
 
 # Thin bridge: JSON-RPC over stdin/stdout — the ONLY transport. Most tools forward to the
-# resident engine over ds-ipc; usage shares the Agents tab's read-only HTTP probes. No
-# async runtime (the workspace's no-tokio stance).
+# resident engine over ds-ipc; usage prefers the app-hosted engine and retains a direct
+# engine-down fallback. No async runtime (the workspace's no-tokio stance).
 [dependencies]
-# Shared quota cache/provider pipeline; do not duplicate Usage-tab fetch logic here.
+# Shared quota types plus the engine-down fallback; do not duplicate provider logic here.
 ds-agent-usage = { workspace = true }
 ds-config = { workspace = true }
 # The client-wiring orchestrator + writers (extracted from this crate). `dontspeak wire`

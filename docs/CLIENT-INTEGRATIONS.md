@@ -143,9 +143,11 @@ cold-start default while enabled). Opt-in via config `agents` (off by default �
 usage probing may touch the macOS keychain): the tab appears/disappears live via
 the `model_status` push (root `agents` field; initial / engine-down probe is
 `ds_agents_ui_enabled`, fail-closed 0). While off, the default nav page is
-Status. Usage data itself is independent of the speech engine: works with the
-engine stopped and does not extend `model_status`. Domain crate
-`ds-agent-usage`; hosts call `ds-core` FFI only.
+Status. Usage data itself is independent of speech state and does not extend
+`model_status`. MCP prefers an `AgentUsage` request to the app-hosted engine, then
+falls back to the same local collector when the engine is unreachable. This keeps
+engine-down usage working while making macOS keychain reads use the host app's code
+identity. Domain crate `ds-agent-usage`; hosts call `ds-core` FFI only.
 
 ### Model
 
@@ -260,5 +262,8 @@ known install roots. Qwen Coding Plan keys: process env, `$QWEN_HOME/.env`,
   `errSecInteractionNotAllowed` instead of prompting, and only that guarded
   state produces `needs_auth: true` (stale rows kept).
 - “Always Allow” persists via OS keychain ACL (no config flag — Claude may
-  recreate the item). Production HTTPS only for live probes; tests use fixtures /
-  loopback. Secrets and raw payloads never appear in FFI JSON or logs.
+  recreate the item). MCP routes usage through the running app so that ACL grant
+  covers both the Agents tab and MCP; its engine-down fallback remains silent and
+  may report `needs_auth` until the app runs. Production HTTPS only for live probes;
+  tests use fixtures / loopback. Secrets and raw payloads never appear in FFI JSON
+  or logs.

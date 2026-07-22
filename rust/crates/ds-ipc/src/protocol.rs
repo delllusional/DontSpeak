@@ -98,6 +98,10 @@ pub enum Request {
     ListSpeakers,
     /// Presence/removability; engine is authority. File IO in app.
     ModelStatus,
+    /// Coding-agent quota deck. Runs in the host app so macOS keychain ACL grants apply.
+    AgentUsage {
+        refresh: bool,
+    },
     /// Block until `seq` ≠ `since` or timeout. `since = 0` immediate.
     WaitModelStatus {
         since: u64,
@@ -152,6 +156,9 @@ pub enum Response {
     ModelStatus {
         status: Value,
     },
+    AgentUsage {
+        deck: Value,
+    },
     Error {
         message: String,
     },
@@ -180,6 +187,7 @@ impl Response {
                 | Response::Enrolled { .. }
                 | Response::Speakers { .. }
                 | Response::ModelStatus { .. }
+                | Response::AgentUsage { .. }
                 | Response::Error { .. }
                 | Response::Unknown
         )
@@ -255,6 +263,7 @@ mod tests {
             },
             Request::TestRecognitionStart,
             Request::ModelStatus,
+            Request::AgentUsage { refresh: true },
             Request::SetProvider {
                 provider: "mlx".into(),
             },
@@ -303,6 +312,12 @@ mod tests {
         assert!(
             Response::ModelStatus {
                 status: serde_json::Value::Null
+            }
+            .is_terminal()
+        );
+        assert!(
+            Response::AgentUsage {
+                deck: serde_json::json!({ "cards": [] })
             }
             .is_terminal()
         );
