@@ -34,8 +34,8 @@ after publish, CI patches **only** the Lines table's Binaries size cells
   (cd rust && cargo fmt --all) && (cd apps/linux/gtk && cargo fmt --all)
   (cd rust && cargo fmt --all --check) && (cd apps/linux/gtk && cargo fmt --all --check)
   (cd rust && RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked)
-  cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
-  cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
+  cargo deny --manifest-path rust/Cargo.toml --all-features --config rust/deny.toml check
+  cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features --config rust/deny.toml check
   ```
   Both workspaces, all-features deny. Commit fmt/advisory fixes. Use `cargo fmt --all`
   from each package root (not bare `--manifest-path` from repo root — that misses targets).

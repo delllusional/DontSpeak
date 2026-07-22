@@ -55,8 +55,8 @@ All green → push. Any fail → fix and re-run.
 If you touched `Cargo.toml` / lock / `deny.toml`:
 
 ```bash
-cargo deny --manifest-path rust/Cargo.toml --all-features check --config rust/deny.toml
-cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features check --config rust/deny.toml
+cargo deny --manifest-path rust/Cargo.toml --all-features --config rust/deny.toml check
+cargo deny --manifest-path apps/linux/gtk/Cargo.toml --all-features --config rust/deny.toml check
 ```
 
 `cargo install cargo-deny --locked`. New advisories/licenses need a dated scoped
