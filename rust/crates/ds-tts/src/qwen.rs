@@ -8,12 +8,12 @@ use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 use serde::Deserialize;
 use tokenizers::AddedToken;
+use tokenizers::SplitDelimiterBehavior;
 use tokenizers::models::bpe::BPE;
+use tokenizers::pre_tokenizers::PreTokenizerWrapper;
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::pre_tokenizers::sequence::Sequence;
 use tokenizers::pre_tokenizers::split::{Split, SplitPattern};
-use tokenizers::pre_tokenizers::PreTokenizerWrapper;
-use tokenizers::SplitDelimiterBehavior;
 
 /// Qwen2 regex; leading punctuation stays with letters so BPE sees trained spans.
 const QWEN2_PRETOKENIZE_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
@@ -767,8 +767,8 @@ fn argmax(values: &[f32]) -> usize {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use tokenizers::tokenizer::{OffsetReferential, OffsetType, PreTokenizedString};
     use tokenizers::PreTokenizer;
+    use tokenizers::tokenizer::{OffsetReferential, OffsetType, PreTokenizedString};
 
     #[test]
     fn repetition_penalty_changes_each_seen_token_once() {
