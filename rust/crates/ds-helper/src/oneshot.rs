@@ -99,7 +99,7 @@ impl Backend {
                 synth.synthesize(chunk, voice, language, params, cancelled)
             }
             (Self::OmniVoice(synth), FrontendBatch::Text(chunk)) => {
-                synth.synthesize(chunk, voice, language, cancelled)
+                synth.synthesize(chunk, voice, language, params, cancelled)
             }
             #[cfg(target_os = "macos")]
             (Self::Mlx { synth, .. }, FrontendBatch::Kokoro(batch)) => {

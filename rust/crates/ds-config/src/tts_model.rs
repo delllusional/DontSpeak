@@ -391,17 +391,34 @@ const QWEN_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
     honored_ort: true,
     honored_mlx: false,
 }];
-// Iterative-unmasking step count. Upstream defaults to 32; 16 halves the `2 * steps`
-// LLM forwards per piece with per-codebook code diversity measured unchanged (50-70
-// band held at both settings — see the decode-rewrite commit body).
-const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
-    key: "steps",
-    kind: TtsParamKind::Int { min: 1, max: 64 },
-    default: TtsParamDefault::Int(16),
-    user_visible: true,
-    honored_ort: true,
-    honored_mlx: false,
-}];
+const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[
+    // Iterative-unmasking step count. Upstream defaults to 32; 16 halves the
+    // `2 * steps` LLM forwards per piece with per-codebook code diversity measured
+    // unchanged (50-70 band held at both settings — see the decode-rewrite commit body).
+    TtsParamDescriptor {
+        key: "steps",
+        kind: TtsParamKind::Int { min: 1, max: 64 },
+        default: TtsParamDefault::Int(16),
+        user_visible: true,
+        honored_ort: true,
+        honored_mlx: false,
+    },
+    // Gumbel position-noise seed OVERRIDE: >= 0 replaces the derived seed for every
+    // piece of the utterance; the -1 default keeps the per-request FNV-1a derivation
+    // over (runtime_lang, instruct, piece text) — reproducible either way, never
+    // entropy (ds-tts omnivoice::stable_seed).
+    TtsParamDescriptor {
+        key: "seed",
+        kind: TtsParamKind::Int {
+            min: -1,
+            max: i64::MAX,
+        },
+        default: TtsParamDefault::Int(-1),
+        user_visible: false,
+        honored_ort: true,
+        honored_mlx: false,
+    },
+];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
 // One pinned OmniVoice ONNX profile for every ORT provider: FP16 audio sub-models plus
 // the single fp32 bidirectional LLM backbone (no per-provider variants).
@@ -642,6 +659,18 @@ mod tests {
             .expect("omnivoice declares steps");
         assert_eq!(steps.default, TtsParamDefault::Int(16));
         assert_eq!(steps.kind, TtsParamKind::Int { min: 1, max: 64 });
+        // Seed default -1 = "derive per request" — MUST stay the default, or every
+        // utterance of an agent would share one noise stream.
+        let seed = TtsModel::OmniVoice
+            .descriptor()
+            .param("seed")
+            .expect("omnivoice declares seed");
+        assert_eq!(seed.default, TtsParamDefault::Int(-1));
+        assert!(!seed.user_visible);
+        assert!(
+            matches!(seed.kind, TtsParamKind::Int { min: -1, max } if max == i64::MAX),
+            "seed must accept the full non-negative u32/u64-style range plus the -1 sentinel"
+        );
         // Every declared default must itself validate (a default outside its own range
         // would make resolve_params produce out-of-contract values).
         for model in TtsModel::ALL.iter().copied() {

@@ -1259,7 +1259,9 @@ mod tests {
         model_tokens.sort_unstable();
         assert_eq!(pool_names, model_tokens);
         for descriptor in &ds_config::TTS_MODELS {
-            let declared: Vec<&str> = descriptor.params.iter().map(|p| p.key).collect();
+            // serde_json's Map sorts keys; compare as sets.
+            let mut declared: Vec<&str> = descriptor.params.iter().map(|p| p.key).collect();
+            declared.sort_unstable();
             let advertised: Vec<&str> = pools[descriptor.id]["properties"]
                 .as_object()
                 .unwrap()

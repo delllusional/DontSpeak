@@ -71,7 +71,7 @@ let ttsParamMirror: [String: [String: Bool]] = [
     "kokoro": [:],
     "chatterbox": ["exaggeration": false],
     "qwen": ["repetition_penalty": false],
-    "omnivoice": ["steps": false],
+    "omnivoice": ["steps": false, "seed": false],
 ]
 
 /// Classification of one `params_json` payload against the mirror.

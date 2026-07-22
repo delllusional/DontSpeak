@@ -58,15 +58,9 @@ const VOCAB: usize = CODEBOOK_SIZE + 1;
 /// Generation frame budget per model run; text is pre-split to fit it
 /// (`split_for_frame_budget`) because clamping the estimate truncates audio. 200 (not
 /// the export's 600 ceiling) bounds time-to-first-audio: every piece costs
-/// `2 * STEPS` LLM forwards whose cost grows with sequence length, so smaller pieces
+/// `2 * steps` LLM forwards whose cost grows with sequence length, so smaller pieces
 /// start playback sooner on both EPs.
 const MAX_FRAMES: usize = 200;
-/// Iterative unmasking steps. Upstream defaults to `num_step: int = 32`
-/// (omnivoice/models/omnivoice.py:177 @ 468e927); 16 halves the `2 * STEPS` LLM
-/// forwards per piece with per-codebook code diversity measured unchanged (50-70
-/// band held at both settings — see the decode-rewrite commit body). Named const so
-/// the planned parameter-surface lift stays mechanical.
-const STEPS: usize = 16;
 /// Upstream `guidance_scale: float = 2.0` (omnivoice/models/omnivoice.py:178 @ 468e927),
 /// applied as the `w` in `c + w*(c - u)` — see [`guided_logits`].
 const GUIDANCE_SCALE: f32 = 2.0;
@@ -199,12 +193,16 @@ impl OmniVoiceSynth {
         text: &str,
         voice: &str,
         language: &str,
+        params: &ds_config::ResolvedTtsParams,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
-        let language = ds_config::TtsModel::OmniVoice
-            .descriptor()
-            .runtime_language(language)
-            .to_string();
+        let model = ds_config::TtsModel::OmniVoice;
+        let language = model.descriptor().runtime_language(language).to_string();
+        // Declared params (defaults + ranges live on the registry descriptors).
+        let steps = params.int(model, "steps") as usize;
+        // Seed override: >= 0 replaces the derived seed for EVERY piece; the -1
+        // default keeps the per-piece derivation in synthesize_piece.
+        let seed_override = u64::try_from(params.int(model, "seed")).ok();
         // Preset ids resolve through OMNIVOICE_PRESETS; an unknown non-empty voice is
         // treated as a raw instruct. An empty instruct omits the block entirely (same
         // rule as the MLX shim's nil voice).
@@ -214,7 +212,14 @@ impl OmniVoiceSynth {
             if cancelled() {
                 return Ok(Vec::new());
             }
-            waveform.extend(self.synthesize_piece(&piece, &language, instruct, cancelled)?);
+            waveform.extend(self.synthesize_piece(
+                &piece,
+                &language,
+                instruct,
+                steps,
+                seed_override,
+                cancelled,
+            )?);
         }
         Ok(waveform)
     }
@@ -224,6 +229,8 @@ impl OmniVoiceSynth {
         text: &str,
         language: &str,
         instruct: &str,
+        steps: usize,
+        seed_override: Option<u64>,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
         let estimate = estimate_audio_frames(text);
@@ -254,8 +261,9 @@ impl OmniVoiceSynth {
 
         // Deliberate divergence from upstream's nondeterministic sampling: the Gumbel
         // position noise is seeded from the request so identical requests reproduce
-        // identical audio (reproducible bug reports).
-        let seed = stable_seed(language, instruct, text);
+        // identical audio (reproducible bug reports). A seed param override replaces
+        // the derivation wholesale (same value for every piece).
+        let seed = seed_override.unwrap_or_else(|| stable_seed(language, instruct, text));
 
         let mut cond_ids = prompt.ids.clone();
         // Unconditional pass input: the target region alone with audio_mask all true —
@@ -265,7 +273,7 @@ impl OmniVoiceSynth {
         let mut remaining_mask = vec![true; total];
         let mut remaining = total;
 
-        for (step, count) in schedule_counts(total, STEPS).into_iter().enumerate() {
+        for (step, count) in schedule_counts(total, steps).into_iter().enumerate() {
             if cancelled() {
                 return Ok(Vec::new());
             }
@@ -834,14 +842,20 @@ mod tests {
         assert_eq!(argmax(&[f32::NEG_INFINITY, -1.0]), 1);
     }
 
-    /// Defaults-equal-consts: the descriptor default IS this decode's step count, so an
-    /// absent `[tts_params]` block stays byte-identical. Removed when the const becomes
-    /// a descriptor read (parameter-surface S6).
+    /// The decode's step count comes from the registry (default 16). The seed default
+    /// is the -1 "derive per request" sentinel — its resolved value must NOT convert to
+    /// an override, or every utterance would share one noise stream.
     #[test]
-    fn steps_const_matches_the_declared_default() {
+    fn declared_params_resolve_to_the_decode_defaults() {
         let model = ds_config::TtsModel::OmniVoice;
         let resolved = model.descriptor().resolve_params(&Default::default());
-        assert_eq!(resolved.int(model, "steps"), STEPS as i64);
+        assert_eq!(resolved.int(model, "steps"), 16);
+        assert_eq!(u64::try_from(resolved.int(model, "seed")).ok(), None);
+        // An explicit non-negative seed becomes the override.
+        let mut stored = ds_config::TtsParamMap::new();
+        stored.insert("seed".into(), ds_config::TtsParamValue::Int(42));
+        let resolved = model.descriptor().resolve_params(&stored);
+        assert_eq!(u64::try_from(resolved.int(model, "seed")).ok(), Some(42));
     }
 
     // ── schedule_counts ─────────────────────────────────────────────────────

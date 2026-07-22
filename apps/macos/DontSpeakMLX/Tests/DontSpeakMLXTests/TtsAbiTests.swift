@@ -17,7 +17,7 @@ final class TtsAbiTests: XCTestCase {
         XCTAssertEqual(ttsParamMirror["kokoro"], [:])
         XCTAssertEqual(ttsParamMirror["chatterbox"], ["exaggeration": false])
         XCTAssertEqual(ttsParamMirror["qwen"], ["repetition_penalty": false])
-        XCTAssertEqual(ttsParamMirror["omnivoice"], ["steps": false])
+        XCTAssertEqual(ttsParamMirror["omnivoice"], ["steps": false, "seed": false])
     }
 
     /// Pins the shim's decode behavior for params_json payloads: declared keys classify
@@ -28,8 +28,8 @@ final class TtsAbiTests: XCTestCase {
             ttsParamsDecode(model: "chatterbox", json: #"{"exaggeration":0.7,"bogus":1}"#),
             TtsParamDecode(applied: [], ignored: ["exaggeration"], unknown: ["bogus"]))
         XCTAssertEqual(
-            ttsParamsDecode(model: "omnivoice", json: #"{"steps":16}"#),
-            TtsParamDecode(applied: [], ignored: ["steps"], unknown: []))
+            ttsParamsDecode(model: "omnivoice", json: #"{"steps":16,"seed":-1}"#),
+            TtsParamDecode(applied: [], ignored: ["seed", "steps"], unknown: []))
         XCTAssertEqual(ttsParamsDecode(model: "kokoro", json: "{}"), TtsParamDecode())
         XCTAssertNil(ttsParamsDecode(model: "qwen", json: "not json"))
     }
