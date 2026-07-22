@@ -56,5 +56,9 @@ windows = { workspace = true, features = ["Win32_System_Threading", "Win32_Found
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = { workspace = true }
 
+[dev-dependencies]
+# Tempdir + DONTSPEAK_LOG_FILE for integration tests that spawn the real binary.
+tempfile = { workspace = true }
+
 [lints]
 workspace = true
