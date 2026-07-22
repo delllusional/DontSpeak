@@ -31,15 +31,10 @@ pub(crate) const STUCK_RETRIES_BEFORE_RELAUNCH: u32 = 3;
 /// threshold" and "still at/above it" fall out of the one number. Meant to be a
 /// `static` at each call site (not a field on a per-instance struct): `MacOsPlatform`
 /// is reconstructed fresh whenever `ds_engine_start()` (`ds-core::host`) runs again in
-/// the SAME OS process after the previous engine thread has already exited on its own
-/// — which happens after an IPC `Request::Shutdown` (`dontspeakd::ipc`) or after
-/// `dontspeakd::boot::engine_run`'s relaunch-budget-exhausted give-up path returns.
-/// Neither a config reload nor any RPC-driven "restart" reconstructs it: a config
-/// reload (`Engine::reload`) reuses the existing `MacOsPlatform` in place, and no
-/// RPC-driven restart request exists in the wire protocol at all (`ds_ipc::Request` has
-/// only `Shutdown`). A per-instance counter would reset on each of those legitimate
-/// in-process restarts and could let denials spread across two of them never cross the
-/// threshold, silently defeating the detector.
+/// the SAME OS process after the previous engine thread has exited and the host starts it
+/// again. A config reload (`Engine::reload`) reuses the existing `MacOsPlatform` in place.
+/// A per-instance counter would reset on each in-process restart and could let denials
+/// spread across two of them without ever crossing the threshold.
 pub(crate) struct StuckGrantLatch {
     denied_while_trusted: AtomicU32,
     threshold: u32,

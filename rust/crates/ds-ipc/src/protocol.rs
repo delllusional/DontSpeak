@@ -19,8 +19,6 @@ use serde_json::Value;
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Ping,
-    /// Kokoro frontend assets; returns immediately (single-flight download).
-    EnsureKokoroFrontend,
     /// Codex app-server ready after narration subscriber attaches (TUI race).
     EnsureCodexStream,
     /// Global mute; speech drains silently, cues suppressed.
@@ -111,8 +109,6 @@ pub enum Request {
     SetProvider {
         provider: String,
     },
-    /// IPC exit; real quit is FFI `ds_engine_stop`.
-    Shutdown,
     /// Same as mtime poll (shared debounce).
     Reload,
     /// Earcon (Stop / Notification). Disabled cue ⇒ no-op.
@@ -202,7 +198,6 @@ mod tests {
     fn request_roundtrips_through_json_lines() {
         let cases = [
             Request::Ping,
-            Request::EnsureKokoroFrontend,
             Request::EnsureCodexStream,
             Request::Diarize { seconds: 10 },
             Request::Enroll {
@@ -273,7 +268,6 @@ mod tests {
                 session: Some("sess-1".into()),
                 source: ClientSource::Grok,
             },
-            Request::Shutdown,
         ];
         for req in cases {
             let line = serde_json::to_string(&req).unwrap();
@@ -296,12 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn kokoro_frontend_request_uses_its_canonical_wire_name() {
-        assert_eq!(
-            serde_json::to_string(&Request::EnsureKokoroFrontend).unwrap(),
-            r#"{"cmd":"ensure_kokoro_frontend"}"#
-        );
-        assert!(serde_json::from_str::<Request>(r#"{"cmd":"ensure_kokoro_voices"}"#).is_err());
+    fn unused_engine_only_commands_are_not_part_of_the_wire_contract() {
+        for line in [
+            r#"{"cmd":"ensure_kokoro_frontend"}"#,
+            r#"{"cmd":"shutdown"}"#,
+        ] {
+            assert!(serde_json::from_str::<Request>(line).is_err(), "{line}");
+        }
     }
 
     #[test]

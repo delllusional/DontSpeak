@@ -28,7 +28,7 @@ pub(crate) fn tools_call(
 }
 
 /// Validate `tools/call` shape + advertised schema before any handler/FS/IPC work.
-pub(crate) fn validate_tools_call(msg: &Value) -> Result<(), String> {
+pub(crate) fn validate_tools_call(msg: &Value, agents: bool) -> Result<(), String> {
     let params = msg
         .get("params")
         .and_then(Value::as_object)
@@ -38,7 +38,7 @@ pub(crate) fn validate_tools_call(msg: &Value) -> Result<(), String> {
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "params.name must be a non-empty string".to_string())?;
-    if !ds_tools::tool_names(crate::mcp::agents_enabled()).any(|candidate| candidate == name) {
+    if !ds_tools::tool_names(agents).any(|candidate| candidate == name) {
         return Err(format!("unknown tool: {name}"));
     }
     if params
@@ -56,15 +56,14 @@ pub(crate) fn tools_call_validated(
     sock: Option<&PathBuf>,
     client: ClientSource,
     cancelled: Arc<AtomicBool>,
+    agents: bool,
 ) -> Value {
     let name = msg["params"]["name"].as_str().unwrap_or_default();
     let arguments = msg["params"]
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if let Err(reason) =
-        ds_tools::validate_arguments(name, &arguments, crate::mcp::agents_enabled())
-    {
+    if let Err(reason) = ds_tools::validate_arguments(name, &arguments, agents) {
         return ok(
             id,
             tool_result(format!("invalid {name} arguments: {reason}"), true),
@@ -350,7 +349,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         out["status"] = match probe {
             EngineProbe::Live(status) => serde_json::to_value(status)
                 .map_err(|error| format!("status serialization failed: {error}"))?,
-            EngineProbe::Invalid => json!({ "running": false, "note": "invalid engine response" }),
+            EngineProbe::Invalid => json!({ "running": true, "note": "invalid engine response" }),
             EngineProbe::Unreachable => json!({ "running": false, "note": "engine unavailable" }),
             EngineProbe::Unresolved => {
                 json!({ "running": false, "note": "cannot resolve engine socket" })
@@ -1187,6 +1186,19 @@ mod status_output {
             "status: `timeout_ms` requires `since`"
         );
     }
+
+    #[test]
+    fn invalid_engine_reply_is_consistently_reported_as_running() {
+        let (_socket_dir, sock, _requests, server) = serve_status_once(json!({"invalid": true}));
+        let config_dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(config_dir.path());
+
+        let value = call_status(&paths, Some(&sock), &json!({ "detail": true })).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(value["state"]["running"], true);
+        assert_eq!(value["status"]["running"], true);
+    }
 }
 
 #[cfg(test)]
@@ -1410,6 +1422,14 @@ mod voices_tests {
         )
         .expect("normalized language is accepted");
         assert_eq!(out["language"], json!("ru"));
+    }
+
+    #[test]
+    fn system_voices_without_a_filter_have_a_null_language() {
+        let (_dir, paths) = rooted_paths();
+        let out = call_voices(&paths, &json!({ "tts_engine": "system" }))
+            .expect("system voices succeed without a language filter");
+        assert_eq!(out["language"], Value::Null);
     }
 
     #[test]

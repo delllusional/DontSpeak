@@ -92,6 +92,17 @@ fn handle_conn<H: Handler, B: Fn(&str) + ?Sized>(
     let mut reader = BufReader::new(stream);
     let mut line_buf = Vec::new();
     while let Some(line) = read_line_bounded(&mut reader, &mut line_buf)? {
+        let line = match line {
+            RequestLine::Text(line) => line,
+            RequestLine::Rejected(reason) => {
+                on_bad_request(&format!("rejected request: {reason}"));
+                write_line(
+                    &mut writer,
+                    &Response::error(format!("bad request: {reason}")),
+                )?;
+                continue;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -145,9 +156,17 @@ fn sanitize(s: &str, max: usize, keep: impl Fn(char) -> bool) -> String {
     out
 }
 
-/// Bounded line read (see `MAX_LINE_LEN`). Semantics like `BufRead::lines()`; over-limit
-/// or invalid UTF-8 → `InvalidData`.
-fn read_line_bounded<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> io::Result<Option<String>> {
+enum RequestLine {
+    Text(String),
+    Rejected(String),
+}
+
+/// Bounded line read (see `MAX_LINE_LEN`). Rejected frames are drained through their
+/// newline so the connection can process the next request without retaining payload bytes.
+fn read_line_bounded<R: BufRead>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<RequestLine>> {
     buf.clear();
     // +1 so a line of exactly MAX_LINE_LEN still finds its terminator within the Take cap.
     let cap = MAX_LINE_LEN as u64 + 1;
@@ -156,10 +175,10 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> io::Resul
         return Ok(None);
     }
     if buf.last() != Some(&b'\n') && n as u64 >= cap {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("request line exceeds {MAX_LINE_LEN}-byte limit"),
-        ));
+        discard_through_newline(reader)?;
+        return Ok(Some(RequestLine::Rejected(format!(
+            "request line exceeds {MAX_LINE_LEN}-byte limit"
+        ))));
     }
     if buf.last() == Some(&b'\n') {
         buf.pop();
@@ -167,13 +186,25 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, buf: &mut Vec<u8>) -> io::Resul
             buf.pop();
         }
     }
-    let s = String::from_utf8(std::mem::take(buf)).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "stream did not contain valid UTF-8",
-        )
-    })?;
-    Ok(Some(s))
+    Ok(Some(match String::from_utf8(std::mem::take(buf)) {
+        Ok(line) => RequestLine::Text(line),
+        Err(_) => RequestLine::Rejected("request line is not valid UTF-8".into()),
+    }))
+}
+
+fn discard_through_newline(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(());
+        }
+    }
 }
 
 fn write_line(w: &mut impl Write, resp: &Response) -> io::Result<()> {
@@ -266,41 +297,52 @@ mod tests {
         );
     }
 
-    /// `handle_conn` surfaces invalid UTF-8 as `InvalidData` (`serve` discards it).
-    #[test]
-    fn handle_conn_errors_on_invalid_utf8_instead_of_silently_ignoring_it() {
+    fn assert_rejected_frame_recovers(frame: &[u8], expected_reason: &str) {
         let (mut client, server) = socket_pair();
-        struct NoOp;
-        impl Handler for NoOp {
-            fn handle(&self, _req: Request, _emit: &mut dyn FnMut(&Response)) {}
-        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler = Recorder(Arc::clone(&seen));
+        let (reported, on_bad) = reports();
+        let server_thread = thread::spawn(move || handle_conn(server, &handler, &on_bad));
 
-        let (_reports, on_bad) = reports();
-        let server_thread = thread::spawn(move || handle_conn(server, &NoOp, &on_bad));
+        client.write_all(frame).unwrap();
+        client.write_all(b"{\"cmd\":\"ping\"}\n").unwrap();
 
-        client.write_all(&[0xFF, 0xFE, b'\n']).unwrap();
-        drop(client); // EOF after the bad bytes so handle_conn doesn't block forever
-
-        let result = server_thread.join().unwrap();
-        let err =
-            result.expect_err("invalid UTF-8 on the wire must surface as an Err from handle_conn");
-        assert_eq!(
-            err.kind(),
-            io::ErrorKind::InvalidData,
-            "expected the InvalidData kind that BufRead::lines()/read_line_bounded use for bad UTF-8"
+        let mut reader = BufReader::new(client);
+        let mut rejected = String::new();
+        reader.read_line(&mut rejected).expect("rejection response");
+        let response: Response = serde_json::from_str(rejected.trim()).unwrap();
+        assert!(
+            matches!(response, Response::Error { ref message } if message.contains(expected_reason)),
+            "got: {response:?}"
         );
+
+        let mut recovered = String::new();
+        reader
+            .read_line(&mut recovered)
+            .expect("response after rejection");
+        assert!(matches!(
+            serde_json::from_str::<Response>(recovered.trim()).unwrap(),
+            Response::Done
+        ));
+        drop(reader);
+        server_thread.join().unwrap().expect("clean disconnect");
+
+        assert_eq!(seen.lock().unwrap().len(), 1);
+        let reports = reported.lock().unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].contains(expected_reason), "got: {}", reports[0]);
     }
 
-    /// Over-limit line must error (not grow the buffer unboundedly).
     #[test]
-    fn read_line_bounded_rejects_a_line_over_the_max_length() {
-        let mut buf = Vec::new();
-        let mut data = vec![b'a'; MAX_LINE_LEN + 1];
-        data.push(b'\n');
-        let mut reader = BufReader::new(&data[..]);
-        let err = read_line_bounded(&mut reader, &mut buf)
-            .expect_err("an over-limit line must error, not buffer without bound");
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    fn handle_conn_reports_invalid_utf8_and_recovers() {
+        assert_rejected_frame_recovers(&[0xFF, 0xFE, b'\n'], "not valid UTF-8");
+    }
+
+    #[test]
+    fn handle_conn_reports_an_oversized_line_and_recovers() {
+        let mut frame = vec![b'a'; MAX_LINE_LEN + 1];
+        frame.push(b'\n');
+        assert_rejected_frame_recovers(&frame, "exceeds");
     }
 
     /// Stale CLI missing `source`: callback must fire and name cmd + missing field.
@@ -382,6 +424,9 @@ mod tests {
         let line = read_line_bounded(&mut reader, &mut buf)
             .expect("a line exactly at the limit must still be accepted")
             .expect("Some(line), not EOF");
+        let RequestLine::Text(line) = line else {
+            panic!("a line at the limit must not be rejected");
+        };
         assert_eq!(line.len(), MAX_LINE_LEN);
     }
 }

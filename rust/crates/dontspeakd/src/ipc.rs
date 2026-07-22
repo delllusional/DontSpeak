@@ -5,7 +5,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds_config::{CancelSpeechScope, ClientSource, Paths, TtsArgPools, VoiceConfig};
 
-use crate::downloads::{DownloadProg, start_download};
 use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
@@ -96,11 +95,9 @@ fn handle_mark_active(
 pub(crate) fn spawn_ipc_server(
     shared: EngineShared,
     paths: Paths,
-    running: Arc<AtomicBool>,
     stt_test: Arc<TestSession>,
     ttsq: Arc<TtsQueue>,
     reload_requested: Arc<AtomicBool>,
-    downloads: DownloadProg,
     codex_sessions: Arc<crate::codex_stream::SessionRegistry>,
     grok_sessions: Arc<crate::grok_stream::SessionRegistry>,
 ) {
@@ -125,16 +122,6 @@ pub(crate) fn spawn_ipc_server(
         let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
-                ds_ipc::Request::EnsureKokoroFrontend => {
-                    // Non-blocking: kick the shared-frontend download if any asset is absent.
-                    // `start_download` is single-flight PER TARGET — if this target is
-                    // already fetching, the request ATTACHES to it (and it runs in
-                    // parallel with any other target's download, never queued behind one).
-                    if !ds_model::is_kokoro_frontend_present() {
-                        start_download(&downloads, ds_model::DownloadTarget::KokoroFrontend);
-                    }
-                    emit(&ds_ipc::Response::Done);
-                }
                 ds_ipc::Request::EnsureCodexStream => {
                     match codex_sessions.ensure_remote(std::time::Duration::from_secs(20)) {
                         Ok(endpoint) => emit(&ds_ipc::Response::CodexStreamReady { endpoint }),
@@ -436,12 +423,6 @@ pub(crate) fn spawn_ipc_server(
                     emit(&ds_ipc::Response::Speakers {
                         names: store.names(),
                     });
-                }
-                ds_ipc::Request::Shutdown => {
-                    // Ack first, then ask the main loop to exit (it tears down the
-                    // warm child, removes the pidfile + socket, and process::exits).
-                    emit(&ds_ipc::Response::Done);
-                    running.store(false, Ordering::Relaxed);
                 }
             }
         };

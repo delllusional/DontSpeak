@@ -109,7 +109,7 @@ static TOOLS: &[Tool] = &[
         description: LISTEN,
         params: &[p("seconds", PType::Int(1, 60), false, LISTEN_SECONDS)],
         min_one: false,
-        annotations: annotations(true, false, false),
+        annotations: annotations(false, false, false),
         output: None,
     },
     Tool {
@@ -186,7 +186,7 @@ static TOOLS: &[Tool] = &[
         description: DIARIZE,
         params: &[p("seconds", PType::Int(1, 60), false, DIARIZE_SECONDS)],
         min_one: false,
-        annotations: annotations(true, false, false),
+        annotations: annotations(false, false, false),
         output: None,
     },
     Tool {
@@ -736,7 +736,7 @@ fn output_schema_for(output: Output) -> Value {
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system"] },
                 "model": { "type": ["string", "null"], "enum": model_enum_or_null() },
-                "language": { "type": "string" },
+                "language": { "type": ["string", "null"] },
                 "languages": {
                     "type": "array",
                     "items": {
@@ -1337,6 +1337,25 @@ mod tests {
         assert!(output_schema("get_status").is_none());
         assert!(output_schema("list_voices").is_none());
         assert!(output_schema("get_usage").is_none());
+    }
+
+    #[test]
+    fn tools_that_launch_the_host_are_not_annotated_read_only() {
+        for name in ["listen", "diarize"] {
+            let tool = TOOLS
+                .iter()
+                .find(|tool| tool.name == name)
+                .expect("tool definition");
+            assert!(!tool.annotations.read_only, "{name}");
+        }
+    }
+
+    #[test]
+    fn voices_output_schema_allows_an_unfiltered_system_language() {
+        assert_eq!(
+            output_schema("voices").unwrap()["properties"]["language"]["type"],
+            json!(["string", "null"])
+        );
     }
 
     /// UI params are ordered (MCP `properties` can't convey order).

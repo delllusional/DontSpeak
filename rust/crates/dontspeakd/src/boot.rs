@@ -186,11 +186,9 @@ pub fn engine_run(
     spawn_ipc_server(
         shared.clone(),
         paths.clone(),
-        running.clone(),
         stt_test.clone(),
         ttsq.clone(),
         reload_requested.clone(),
-        downloads.clone(),
         codex_sessions.clone(),
         grok_sessions.clone(),
     );

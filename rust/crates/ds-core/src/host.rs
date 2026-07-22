@@ -61,7 +61,7 @@ pub(crate) fn engine_start() -> bool {
         }
     };
     // Join stale handle first: without this, engine_start while the old thread still
-    // drains (IPC Shutdown / relaunch-budget give-up clear `running` early) overlaps two
+    // drains (the relaunch-budget give-up path clears `running` early) overlaps two
     // engines, and on macOS two IOHIDManager caps monitors (see iohid's debug_assert_eq!).
     if let Some(mut h) = stale
         && let Some(t) = h.thread.take()

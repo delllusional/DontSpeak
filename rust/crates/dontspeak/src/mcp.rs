@@ -21,9 +21,11 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_STDIN_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_TOOL_CALLS: usize = 8;
 
-type Executor = dyn Fn(Option<Value>, &Value, Option<&PathBuf>, ClientSource, Arc<AtomicBool>) -> Value
+type Executor = dyn Fn(Option<Value>, &Value, Option<&PathBuf>, ClientSource, Arc<AtomicBool>, bool) -> Value
     + Send
     + Sync;
+
+type AgentsEnabled = dyn Fn() -> bool + Send + Sync;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum RequestId {
@@ -77,6 +79,7 @@ enum Route {
         id: RequestId,
         message: Value,
         client: ClientSource,
+        agents: bool,
     },
     Cancel(RequestId),
 }
@@ -102,18 +105,32 @@ pub(crate) fn serve() {
             }
             None => log("cannot resolve engine socket path; skipping standalone-run fallback"),
         },
+        agents_enabled,
     );
 }
 
-fn serve_on<R, W>(reader: R, out: W, sock: Option<&PathBuf>, on_no_traffic: impl FnOnce())
-where
+fn serve_on<R, W, A>(
+    reader: R,
+    out: W,
+    sock: Option<&PathBuf>,
+    on_no_traffic: impl FnOnce(),
+    agents_enabled: A,
+) where
     R: BufRead,
     W: Write + Send + 'static,
+    A: Fn() -> bool + Send + Sync + 'static,
 {
-    let executor: Arc<Executor> = Arc::new(|id, message, sock, client, cancelled| {
-        tools::tools_call_validated(id, message, sock, client, cancelled)
+    let executor: Arc<Executor> = Arc::new(|id, message, sock, client, cancelled, agents| {
+        tools::tools_call_validated(id, message, sock, client, cancelled, agents)
     });
-    serve_on_with(reader, out, sock, on_no_traffic, executor);
+    serve_on_with(
+        reader,
+        out,
+        sock,
+        on_no_traffic,
+        executor,
+        Arc::new(agents_enabled),
+    );
 }
 
 fn serve_on_with<R, W>(
@@ -122,6 +139,7 @@ fn serve_on_with<R, W>(
     sock: Option<&PathBuf>,
     on_no_traffic: impl FnOnce(),
     executor: Arc<Executor>,
+    agents_enabled: Arc<AgentsEnabled>,
 ) where
     R: BufRead,
     W: Write + Send + 'static,
@@ -134,16 +152,12 @@ fn serve_on_with<R, W>(
     let mut in_flight = HashMap::<RequestId, Arc<AtomicBool>>::new();
     let mut session = Session::default();
     let sock = sock.cloned();
+    let catalog_agents = Arc::new(AtomicBool::new(agents_enabled()));
     let mut handled_any = false;
     let mut reached_eof = false;
 
     loop {
-        while let Ok(id) = completed_rx.try_recv() {
-            in_flight.remove(&id);
-            if let Some(worker) = workers.remove(&id) {
-                let _ = worker.join();
-            }
-        }
+        reap_workers(&completed_rx, &mut workers, &mut in_flight);
         let frame = match read_frame(&mut reader) {
             Ok(Some(frame)) => frame,
             Ok(None) => {
@@ -155,6 +169,15 @@ fn serve_on_with<R, W>(
                 break;
             }
         };
+        reap_workers(&completed_rx, &mut workers, &mut in_flight);
+        let current_agents = agents_enabled();
+        if session.lifecycle == Lifecycle::Initialized {
+            if !publish_tool_list_change(&out, &catalog_agents, current_agents) {
+                break;
+            }
+        } else {
+            catalog_agents.store(current_agents, Ordering::Release);
+        }
         let message = match frame {
             Frame::TooLarge => {
                 handled_any = true;
@@ -184,7 +207,7 @@ fn serve_on_with<R, W>(
             }
         };
 
-        match route(&message, &mut session) {
+        match route(&message, &mut session, current_agents) {
             Route::Reply(response) => {
                 if !write_response(&out, &response) {
                     break;
@@ -200,6 +223,7 @@ fn serve_on_with<R, W>(
                 id,
                 message,
                 client,
+                agents,
             } => {
                 if in_flight.contains_key(&id) {
                     if !write_response(
@@ -231,6 +255,8 @@ fn serve_on_with<R, W>(
                 let worker_sock = sock.clone();
                 let worker_executor = executor.clone();
                 let worker_completed = completed_tx.clone();
+                let worker_catalog_agents = catalog_agents.clone();
+                let worker_agents_enabled = agents_enabled.clone();
                 let worker_id = id.clone();
                 let worker = std::thread::spawn(move || {
                     let _slot = SlotGuard(worker_active);
@@ -240,12 +266,20 @@ fn serve_on_with<R, W>(
                         worker_sock.as_ref(),
                         client,
                         cancelled.clone(),
+                        agents,
                     );
+                    let _ = worker_completed.send(id);
                     if !cancelled.load(Ordering::Acquire) && !write_response(&worker_out, &response)
                     {
                         worker_output_open.store(false, Ordering::Release);
                     }
-                    let _ = worker_completed.send(id);
+                    if !publish_tool_list_change(
+                        &worker_out,
+                        &worker_catalog_agents,
+                        worker_agents_enabled(),
+                    ) {
+                        worker_output_open.store(false, Ordering::Release);
+                    }
                 });
                 workers.insert(worker_id, worker);
             }
@@ -264,6 +298,33 @@ fn serve_on_with<R, W>(
     if reached_eof && !handled_any {
         on_no_traffic();
     }
+}
+
+fn reap_workers(
+    completed: &mpsc::Receiver<RequestId>,
+    workers: &mut HashMap<RequestId, std::thread::JoinHandle<()>>,
+    in_flight: &mut HashMap<RequestId, Arc<AtomicBool>>,
+) {
+    while let Ok(id) = completed.try_recv() {
+        if let Some(worker) = workers.remove(&id) {
+            let _ = worker.join();
+        }
+        in_flight.remove(&id);
+    }
+}
+
+fn publish_tool_list_change<W: Write>(
+    out: &Arc<Mutex<W>>,
+    known_agents: &AtomicBool,
+    current_agents: bool,
+) -> bool {
+    if known_agents.swap(current_agents, Ordering::AcqRel) == current_agents {
+        return true;
+    }
+    write_response(
+        out,
+        &json!({ "jsonrpc": "2.0", "method": "notifications/tools/list_changed" }),
+    )
 }
 
 fn reserve_slot(active: &AtomicUsize) -> bool {
@@ -327,7 +388,7 @@ fn write_response<W: Write>(out: &Arc<Mutex<W>>, response: &Value) -> bool {
     writeln!(out, "{response}").is_ok() && out.flush().is_ok()
 }
 
-fn route(message: &Value, session: &mut Session) -> Route {
+fn route(message: &Value, session: &mut Session, agents: bool) -> Route {
     let envelope = match validate_envelope(message) {
         Ok(envelope) => envelope,
         Err(response) => return Route::Reply(response),
@@ -370,18 +431,19 @@ fn route(message: &Value, session: &mut Session) -> Route {
                         "Invalid params: cursor must be a string",
                     ))
                 } else {
-                    Route::Reply(ok(Some(id.value()), json!({ "tools": tools() })))
+                    Route::Reply(ok(Some(id.value()), json!({ "tools": tools(agents) })))
                 }
             }
             None => Route::Notification,
         },
         "tools/call" => match envelope.id {
             None => Route::Notification,
-            Some(id) => match tools::validate_tools_call(message) {
+            Some(id) => match tools::validate_tools_call(message, agents) {
                 Ok(()) => Route::ToolCall {
                     id,
                     message: message.clone(),
                     client: session.client,
+                    agents,
                 },
                 Err(reason) => Route::Reply(err(
                     Some(id.value()),
@@ -553,7 +615,7 @@ fn initialize(message: &Value) -> Value {
         .unwrap_or(PROTOCOL_VERSION);
     let mut result = json!({
         "protocolVersion": version,
-        "capabilities": { "tools": { "listChanged": false } },
+        "capabilities": { "tools": { "listChanged": true } },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
     });
     // Grok ignores passive-hook additionalContext (#95); MCP initialize.instructions still
@@ -583,8 +645,8 @@ pub(crate) fn agents_enabled() -> bool {
     ds_config::VoiceConfig::load(&paths).agents
 }
 
-fn tools() -> Value {
-    ds_tools::catalog(agents_enabled())
+fn tools(agents: bool) -> Value {
+    ds_tools::catalog(agents)
 }
 
 pub(crate) fn ok(id: Option<Value>, result: Value) -> Value {
@@ -616,7 +678,7 @@ pub(crate) fn log(message: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io;
+    use std::io::{self, Read};
 
     #[derive(Clone, Default)]
     struct SharedWriter(Arc<Mutex<Vec<u8>>>);
@@ -663,9 +725,13 @@ mod tests {
         let bytes = writer.0.clone();
         let fell_back = Arc::new(AtomicBool::new(false));
         let fallback = fell_back.clone();
-        serve_on(io::Cursor::new(input.into()), writer, None, move || {
-            fallback.store(true, Ordering::Release)
-        });
+        serve_on(
+            io::Cursor::new(input.into()),
+            writer,
+            None,
+            move || fallback.store(true, Ordering::Release),
+            || false,
+        );
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         let messages = output
             .lines()
@@ -816,12 +882,13 @@ mod tests {
             });
             let mut session = Session::default();
             let init: Value = serde_json::from_str(&initialize_line(1)).unwrap();
-            assert!(matches!(route(&init, &mut session), Route::Reply(_)));
+            assert!(matches!(route(&init, &mut session, false), Route::Reply(_)));
             let Route::ToolCall {
                 id,
                 message,
                 client,
-            } = route(&request, &mut session)
+                agents,
+            } = route(&request, &mut session, false)
             else {
                 panic!("valid tools/call structure must reach execution: {request}");
             };
@@ -831,6 +898,7 @@ mod tests {
                 None,
                 client,
                 Arc::new(AtomicBool::new(false)),
+                agents,
             );
             assert_eq!(response["result"]["isError"], true, "{request}");
             assert!(response.get("error").is_none(), "{request}");
@@ -841,7 +909,7 @@ mod tests {
     fn cancellation_is_observed_while_a_tool_call_is_running() {
         let writer = SharedWriter::default();
         let bytes = writer.0.clone();
-        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled| {
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled, _| {
             while !cancelled.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -853,7 +921,14 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": "listen-1", "method": "tools/call", "params": {"name": "listen", "arguments": {}}}),
             json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": "listen-1", "reason": "test"}})
         );
-        serve_on_with(io::Cursor::new(input), writer, None, || {}, executor);
+        serve_on_with(
+            io::Cursor::new(input),
+            writer,
+            None,
+            || {},
+            executor,
+            Arc::new(|| false),
+        );
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         let responses: Vec<Value> = output
             .lines()
@@ -876,11 +951,199 @@ mod tests {
         assert_eq!(active.load(Ordering::Acquire), MAX_IN_FLIGHT_TOOL_CALLS);
     }
 
+    struct BlockingReader {
+        receiver: mpsc::Receiver<Vec<u8>>,
+        current: io::Cursor<Vec<u8>>,
+        waiting: mpsc::Sender<()>,
+    }
+
+    impl Read for BlockingReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            loop {
+                let read = self.current.read(output)?;
+                if read != 0 {
+                    return Ok(read);
+                }
+                let next = match self.receiver.try_recv() {
+                    Ok(bytes) => bytes,
+                    Err(mpsc::TryRecvError::Empty) => {
+                        let _ = self.waiting.send(());
+                        match self.receiver.recv() {
+                            Ok(bytes) => bytes,
+                            Err(_) => return Ok(0),
+                        }
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => return Ok(0),
+                };
+                self.current = io::Cursor::new(next);
+            }
+        }
+    }
+
+    struct LineWriter {
+        sender: mpsc::Sender<Vec<u8>>,
+        pending: Vec<u8>,
+    }
+
+    impl Write for LineWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.pending.extend_from_slice(bytes);
+            while let Some(end) = self.pending.iter().position(|byte| *byte == b'\n') {
+                let line: Vec<u8> = self.pending.drain(..=end).collect();
+                let _ = self.sender.send(line);
+            }
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn agents_gate_change_after_a_tool_call_emits_one_catalog_notification() {
+        let (input_tx, input_rx) = mpsc::channel();
+        let (waiting_tx, _waiting_rx) = mpsc::channel();
+        let (output_tx, output_rx) = mpsc::channel();
+        let enabled = Arc::new(AtomicBool::new(false));
+        let provider_enabled = enabled.clone();
+        let executor_enabled = enabled.clone();
+        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, agents| {
+            assert!(!agents, "this call was admitted by the pre-change catalog");
+            executor_enabled.store(true, Ordering::Release);
+            ok(id, tool_result("updated".into(), false))
+        });
+
+        let call = json!({
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "set_config", "arguments": {"agents": true}}
+        });
+        input_tx
+            .send(format!("{}\n{call}\n", initialize_line(1)).into_bytes())
+            .unwrap();
+
+        let server = std::thread::spawn(move || {
+            serve_on_with(
+                io::BufReader::new(BlockingReader {
+                    receiver: input_rx,
+                    current: io::Cursor::new(Vec::new()),
+                    waiting: waiting_tx,
+                }),
+                LineWriter {
+                    sender: output_tx,
+                    pending: Vec::new(),
+                },
+                None,
+                || {},
+                executor,
+                Arc::new(move || provider_enabled.load(Ordering::Acquire)),
+            )
+        });
+
+        let timeout = std::time::Duration::from_secs(5);
+        let initialized: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(
+            initialized["result"]["capabilities"]["tools"]["listChanged"],
+            true
+        );
+        let response: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(response["id"], 2);
+        let notification: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(notification["method"], "notifications/tools/list_changed");
+        assert!(notification.get("id").is_none());
+
+        let ping = json!({"jsonrpc": "2.0", "id": 3, "method": "ping"});
+        input_tx.send(format!("{ping}\n").into_bytes()).unwrap();
+        let ping: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(ping["id"], 3, "the unchanged gate must not notify again");
+
+        drop(input_tx);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn completed_tool_call_id_can_be_reused_immediately() {
+        let (input_tx, input_rx) = mpsc::channel();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (output_tx, output_rx) = mpsc::channel();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        let tool_call = json!({
+            "jsonrpc": "2.0", "id": "reused", "method": "tools/call",
+            "params": {"name": "status", "arguments": {}}
+        })
+        .to_string();
+        input_tx
+            .send(format!("{}\n{tool_call}\n", initialize_line(1)).into_bytes())
+            .unwrap();
+
+        let executor_calls = calls.clone();
+        let executor_release = release_rx.clone();
+        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, _| {
+            if executor_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                started_tx.send(()).unwrap();
+                executor_release.lock().unwrap().recv().unwrap();
+            }
+            ok(id, tool_result("done".into(), false))
+        });
+        let server = std::thread::spawn(move || {
+            serve_on_with(
+                io::BufReader::new(BlockingReader {
+                    receiver: input_rx,
+                    current: io::Cursor::new(Vec::new()),
+                    waiting: waiting_tx,
+                }),
+                LineWriter {
+                    sender: output_tx,
+                    pending: Vec::new(),
+                },
+                None,
+                || {},
+                executor,
+                Arc::new(|| false),
+            )
+        });
+
+        let timeout = std::time::Duration::from_secs(5);
+        let initialized: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(initialized["id"], 1);
+        started_rx.recv_timeout(timeout).unwrap();
+        waiting_rx
+            .recv_timeout(timeout)
+            .expect("server must block for the next frame before the first call completes");
+        release_tx.send(()).unwrap();
+
+        let first: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(first["id"], "reused");
+        assert!(first.get("error").is_none());
+
+        input_tx
+            .send(format!("{tool_call}\n").into_bytes())
+            .unwrap();
+        let second: Value =
+            serde_json::from_slice(&output_rx.recv_timeout(timeout).unwrap()).unwrap();
+        assert_eq!(second["id"], "reused");
+        assert!(second.get("error").is_none());
+
+        drop(input_tx);
+        server.join().unwrap();
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+    }
+
     #[test]
     fn stdio_boundary_applies_backpressure_to_concurrent_calls() {
         let writer = SharedWriter::default();
         let bytes = writer.0.clone();
-        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled| {
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled, _| {
             while !cancelled.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -908,7 +1171,14 @@ mod tests {
             input.push('\n');
         }
 
-        serve_on_with(io::Cursor::new(input), writer, None, || {}, executor);
+        serve_on_with(
+            io::Cursor::new(input),
+            writer,
+            None,
+            || {},
+            executor,
+            Arc::new(|| false),
+        );
         let output = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
         let responses: Vec<Value> = output
             .lines()
@@ -932,6 +1202,10 @@ mod tests {
             }
         });
         assert_eq!(initialize(&message)["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(
+            initialize(&message)["capabilities"]["tools"]["listChanged"],
+            true
+        );
         assert_eq!(
             client_from_initialize(&message),
             (ClientSource::ClaudeCode, "claude-code".to_string())
