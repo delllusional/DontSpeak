@@ -1,6 +1,12 @@
 //! `VoiceConfig` — typed speech config from `config.toml`.
 
-use std::{collections::HashSet, io};
+use std::{
+    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    io,
+    path::PathBuf,
+    sync::{Mutex, OnceLock},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -317,7 +323,7 @@ pub struct VoiceConfig {
     #[serde(default)]
     pub extra_editors: Vec<String>,
 
-    /// Opt-out unwire list. None/`[]` = wire all. Boot reconcile only.
+    /// Persistent opt-out unwire list. None/`[]` = wire all.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -671,31 +677,40 @@ impl<'de> serde::Deserializer<'de> for StructFieldNames<'_> {
 impl VoiceConfig {
     /// Load config.toml; fail-open defaults. Unknown keys warned; numbers clamped.
     pub fn load(paths: &Paths) -> Self {
-        let Ok(text) = std::fs::read_to_string(&paths.config_toml) else {
-            return Self::default();
+        let text = match std::fs::read_to_string(&paths.config_toml) {
+            Ok(text) => text,
+            Err(_) => {
+                forget_config_diagnostics(&paths.config_toml);
+                return Self::default();
+            }
         };
+        let emit_diagnostics = config_diagnostics_changed(&paths.config_toml, &text);
         let Ok(table) = toml::from_str::<toml::Table>(&text) else {
-            log(
-                &paths.log_file,
-                LogLevel::Warn,
-                "config",
-                "config.toml is not valid TOML; using defaults",
-            );
-            return Self::default();
-        };
-        // Warn on unknown keys (serde would drop typos silently).
-        let known = Self::known_keys();
-        for k in table.keys() {
-            if !known.contains(k.as_str()) {
+            if emit_diagnostics {
                 log(
                     &paths.log_file,
                     LogLevel::Warn,
                     "config",
-                    &format!("unknown key in config.toml: {k:?} (ignored)"),
+                    "config.toml is not valid TOML; using defaults",
                 );
             }
+            return Self::default();
+        };
+        if emit_diagnostics {
+            // Warn on unknown keys (serde would drop typos silently).
+            let known = Self::known_keys();
+            for k in table.keys() {
+                if !known.contains(k.as_str()) {
+                    log(
+                        &paths.log_file,
+                        LogLevel::Warn,
+                        "config",
+                        &format!("unknown key in config.toml: {k:?} (ignored)"),
+                    );
+                }
+            }
+            warn_dropped_tts_params(&table, paths);
         }
-        warn_dropped_tts_params(&table, paths);
         let mut cfg: VoiceConfig = toml::Value::Table(table).try_into().unwrap_or_default();
         cfg.clamp();
         cfg
@@ -811,6 +826,28 @@ impl VoiceConfig {
     /// Excluded clients (empty when unset). Engine wires everyone else.
     pub fn excluded_clients(&self) -> Vec<ClientSource> {
         self.exclude_clients.clone().unwrap_or_default()
+    }
+}
+
+static CONFIG_DIAGNOSTICS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+
+/// Emit warnings once per distinct file content, not on every status poll.
+fn config_diagnostics_changed(path: &std::path::Path, text: &str) -> bool {
+    let mut hasher = DefaultHasher::new();
+    text.hash(&mut hasher);
+    let fingerprint = hasher.finish();
+    let mut seen = CONFIG_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    seen.insert(path.to_path_buf(), fingerprint) != Some(fingerprint)
+}
+
+fn forget_config_diagnostics(path: &std::path::Path) {
+    if let Some(seen) = CONFIG_DIAGNOSTICS.get() {
+        seen.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(path);
     }
 }
 
@@ -1950,6 +1987,29 @@ pub(crate) mod tests {
         );
         assert!(VoiceConfig::known_keys().contains("stt_engine_ladder"));
         assert!(!VoiceConfig::known_keys().contains("narate"));
+    }
+
+    #[test]
+    fn load_logs_each_config_diagnostic_once_until_content_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let invalid = "narate = \"off\"\n[tts_params.qwen]\nbogus = 1.0\n";
+        std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
+        std::fs::write(&paths.config_toml, invalid).unwrap();
+
+        VoiceConfig::load(&paths);
+        VoiceConfig::load(&paths);
+        let first = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(first.matches("unknown key in config.toml").count(), 1);
+        assert_eq!(first.matches("tts_params.qwen").count(), 1);
+
+        std::fs::write(&paths.config_toml, "greet = true\n").unwrap();
+        VoiceConfig::load(&paths);
+        std::fs::write(&paths.config_toml, invalid).unwrap();
+        VoiceConfig::load(&paths);
+        let second = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(second.matches("unknown key in config.toml").count(), 2);
+        assert_eq!(second.matches("tts_params.qwen").count(), 2);
     }
 
     #[test]

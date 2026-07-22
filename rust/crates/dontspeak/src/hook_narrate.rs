@@ -729,6 +729,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         return None;
     };
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
+    let grok_fp_session = session.as_deref().unwrap_or("-");
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
     // Retry queue-full; witness still suppresses whole-reply fallback. Grok mid-turn:
@@ -787,16 +788,14 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            let sess = session.as_deref().unwrap_or("-");
             let fp = direct_grok_reply_fingerprint(&hook, paths, direct);
-            if load_last_spoken_fingerprint(paths, sess) == Some(fp) {
+            if load_last_spoken_fingerprint(paths, grok_fp_session) == Some(fp) {
                 (None, None, None)
             } else {
                 (Some(direct.to_owned()), None, Some(fp))
             }
         } else {
-            let sess = session.as_deref().unwrap_or("-");
-            match select_grok_stop_text_detailed(&hook, paths, sess, messages_on) {
+            match select_grok_stop_text_detailed(&hook, paths, grok_fp_session, messages_on) {
                 Some(sel) => (Some(sel.text.clone()), Some(sel), None),
                 None => (None, None, None),
             }
@@ -876,14 +875,15 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     let mut any_failed = false;
     // Deterministic ids collapse concurrent Stop at admission (fp alone is sequential).
     let narration_fp = direct_fp.or_else(|| grok_selection.as_ref().and_then(|s| s.digest_fp));
-    let real_sess = session.as_deref().unwrap_or("-");
+    let fingerprint_session = grok_fp_session;
     // Every line of this Stop body shares the same corpus, capped for the IPC line limit.
     let stop_detection = assistant_text
         .as_ref()
         .map(|body| ds_narrate::cap_detection_text(body.clone()))
         .filter(|s| !s.is_empty());
     for (i, line) in speak.into_iter().enumerate() {
-        let narration_id = narration_fp.map(|fp| format!("grok-stop:{real_sess}:{fp}:{i}"));
+        let narration_id =
+            narration_fp.map(|fp| format!("grok-stop:{fingerprint_session}:{fp}:{i}"));
         match ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SpeakNarration {
@@ -908,9 +908,9 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     // Commit fp only after full list admitted — partial multi-line must not skip rest.
     if any_enqueued
         && !any_failed
-        && let (Some(fp), Some(s)) = (narration_fp, session.as_deref())
+        && let Some(fp) = narration_fp
     {
-        store_last_spoken_fingerprint(paths, s, fp);
+        store_last_spoken_fingerprint(paths, fingerprint_session, fp);
     }
     // Grok: reply_done under sticky session so digests play before the ding.
     if client == ClientSource::Grok {
@@ -1729,6 +1729,57 @@ mod tests {
 
         hook.prompt_id = Some("prompt-two".into());
         assert_ne!(first, direct_grok_reply_fingerprint(&hook, &paths, text));
+    }
+
+    #[test]
+    fn sessionless_grok_stop_commits_the_sentinel_fingerprint_after_enqueue() {
+        use std::io::{BufRead, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let transcript = dir.path().join("chat_history.jsonl");
+        std::fs::write(
+            &transcript,
+            "{\"type\":\"assistant\",\"content\":\"> Sessionless digest.\"}\n",
+        )
+        .unwrap();
+        let hook = StopHook {
+            transcript_path: Some(transcript.to_string_lossy().into_owned()),
+            ..StopHook::default()
+        };
+        let expected = select_grok_stop_text(&hook, &paths, "-", true)
+            .and_then(|(_, fingerprint)| fingerprint)
+            .expect("digest fingerprint");
+        let payload = serde_json::json!({
+            "transcriptPath": transcript.to_string_lossy()
+        })
+        .to_string();
+
+        let listener = ds_ipc::transport::bind(&paths.engine_sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            let request: ds_ipc::Request = serde_json::from_str(request.trim()).unwrap();
+            assert!(matches!(request, ds_ipc::Request::SpeakNarration { .. }));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::to_string(&ds_ipc::Response::Done).unwrap()
+            )
+            .unwrap();
+        });
+
+        speak_reply(&paths, &payload, ClientSource::Grok);
+        server.join().unwrap();
+        assert_eq!(load_last_spoken_fingerprint(&paths, "-"), Some(expected));
+        assert!(
+            select_grok_stop_text_detailed_with_retry(&hook, &paths, "-", true, 1, |_| {})
+                .is_none(),
+            "the same session-less Stop is durably deduplicated"
+        );
     }
 
     #[test]

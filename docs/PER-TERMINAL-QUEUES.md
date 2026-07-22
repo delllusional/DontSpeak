@@ -16,6 +16,31 @@ Engine poll thread publishes atomics (worker can't call platform focus APIs):
 No portable window→session map; active = last prompted. `pause_bg` default
 `false`.
 
+## Custom terminal and editor identifiers
+
+Two direct `config.toml` settings extend focus detection and hot-reload with the rest of
+the engine configuration:
+
+```toml
+extra_terminals = ["myterm.exe"]
+extra_editors = ["myeditor.exe"]
+```
+
+| OS | `extra_terminals` values | `extra_editors` values |
+|---|---|---|
+| Windows | Executable basename, such as `myterm.exe` | Executable basename |
+| macOS | Bundle identifier, such as `com.example.MyTerm` | Bundle identifier |
+| Linux | X11 `WM_CLASS` | Ignored |
+
+Matching is case-insensitive. Linux cannot query the active window portably on Wayland,
+so `extra_terminals` applies only to X11 there. These keys are configuration-file escape
+hatches and are not parameters of the `set_config` MCP tool.
+
+`extra_terminals` widens the terminal focus and transcript-injection gate; add only apps
+that should be treated as terminals. `extra_editors` does not mark an app as a terminal.
+On Windows and macOS it only suppresses a false no-paste-target warning for editors whose
+custom-drawn text surface is invisible to the accessibility probe.
+
 ## Queue shape
 
 Single FIFO (no reply vs narration split). Limits: 10 KiB/item; 128 items / 1 MiB global;

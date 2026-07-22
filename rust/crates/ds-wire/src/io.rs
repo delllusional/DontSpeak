@@ -42,15 +42,26 @@ fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
 
 /// Missing/empty → `Null` (shapers treat as `{}`). Malformed → report + `Err` (leave file).
 pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
-    match std::fs::read_to_string(cfg) {
-        Err(_) => Ok(Value::Null),
-        Ok(s) if s.trim().is_empty() => Ok(Value::Null),
-        Ok(s) => serde_json::from_str::<Value>(&s).map_err(|_| {
+    match read_text_or_empty(tool, cfg)? {
+        s if s.trim().is_empty() => Ok(Value::Null),
+        s => serde_json::from_str::<Value>(&s).map_err(|_| {
             eprintln!(
                 "{tool}: existing {} is not valid JSON; leaving it unchanged",
                 cfg.display()
             );
         }),
+    }
+}
+
+/// Missing file → empty. Every other read failure leaves the user file untouched.
+pub(crate) fn read_text_or_empty(tool: &str, cfg: &Path) -> Result<String, ()> {
+    match std::fs::read_to_string(cfg) {
+        Ok(text) => Ok(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => {
+            eprintln!("{tool}: could not read {} ({error})", cfg.display());
+            Err(())
+        }
     }
 }
 
@@ -107,5 +118,18 @@ mod tests {
             None
         );
         assert_eq!(bundle_cli_path(Path::new("/tmp/MacOS/DontSpeak")), None);
+    }
+
+    #[test]
+    fn text_and_json_reads_fail_closed_except_for_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.json");
+        assert_eq!(read_text_or_empty("wire-test", &missing), Ok(String::new()));
+        assert_eq!(read_json_or_bail("wire-test", &missing), Ok(Value::Null));
+
+        let unreadable = dir.path().join("config.json");
+        std::fs::create_dir(&unreadable).unwrap();
+        assert!(read_text_or_empty("wire-test", &unreadable).is_err());
+        assert!(read_json_or_bail("wire-test", &unreadable).is_err());
     }
 }

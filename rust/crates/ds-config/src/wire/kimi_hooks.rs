@@ -16,44 +16,14 @@ fn kimi_command(bin: &str, verb: &str, client: ClientSource) -> String {
     shell_client_command(bin, verb, client, ShellOverride::Unsupported)
 }
 
-/// Flat entries, SECONDS, sync (no `async` key). Stop at Kimi's 600s cap (`kimi doctor`).
+/// Flat entries, SECONDS, sync (no `async` key). Stop shares the one-minute hook bound.
 const KIMI_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("SessionStart", &[("notify --greet-only", 30)]),
     ("SessionEnd", &[("notify", 30)]),
     ("UserPromptSubmit", &[("notify", 5), ("provide", 5)]),
-    ("Stop", &[("notify", 600)]),
+    ("Stop", &[("notify", super::SYNC_STOP_TIMEOUT_SECS)]),
     ("Notification", &[("notify", 30)]),
 ];
-
-/// Same non-success contract as [`super::codex::CodexMergeError`].
-#[derive(Debug)]
-pub enum KimiMergeError {
-    Parse(toml_edit::TomlError),
-    /// `hooks` unappendable; leave file unchanged.
-    UnmergeableShape(String),
-}
-
-impl std::fmt::Display for KimiMergeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KimiMergeError::Parse(e) => write!(f, "config.toml is not valid TOML: {e}"),
-            KimiMergeError::UnmergeableShape(s) => {
-                write!(
-                    f,
-                    "config.toml has an unexpected `{s}` shape; left unchanged (Kimi hooks NOT wired)"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for KimiMergeError {}
-
-impl From<toml_edit::TomlError> for KimiMergeError {
-    fn from(e: toml_edit::TomlError) -> Self {
-        KimiMergeError::Parse(e)
-    }
-}
 
 /// Basename match via [`command_is_ours`].
 fn kimi_entry_is_ours(entry: &TomlTable) -> bool {
@@ -96,15 +66,13 @@ fn desired_entries(bin: &str, client: ClientSource) -> Vec<(String, String, i64)
 
 /// Additive + idempotent + REPLACE-OURS (self-heal when path/verbs change). User entries
 /// never touched.
-pub fn merge_kimi_hooks(
-    existing: &str,
-    bin: &str,
-    client: ClientSource,
-) -> Result<String, KimiMergeError> {
+pub fn merge_kimi_hooks(existing: &str, bin: &str, client: ClientSource) -> Result<String, String> {
     let mut doc: DocumentMut = if existing.trim().is_empty() {
         DocumentMut::new()
     } else {
-        existing.parse()?
+        existing
+            .parse()
+            .map_err(|e: toml_edit::TomlError| format!("config.toml is not valid TOML: {e}"))?
     };
     let desired = desired_entries(bin, client);
     match doc.get_mut("hooks") {
@@ -116,9 +84,10 @@ pub fn merge_kimi_hooks(
             doc.insert("hooks", TomlItem::ArrayOfTables(aot));
         }
         Some(item) => {
-            let aot = item
-                .as_array_of_tables_mut()
-                .ok_or_else(|| KimiMergeError::UnmergeableShape("hooks".into()))?;
+            let aot = item.as_array_of_tables_mut().ok_or_else(|| {
+                "config.toml has an unexpected `hooks` shape; left unchanged (Kimi hooks NOT wired)"
+                    .to_string()
+            })?;
             let already_current = {
                 let ours: Vec<&TomlTable> = aot.iter().filter(|t| kimi_entry_is_ours(t)).collect();
                 ours.len() == desired.len()
@@ -139,11 +108,13 @@ pub fn merge_kimi_hooks(
 }
 
 /// Drop every DontSpeak `[[hooks]]` entry; remove empty `hooks` array. User entries kept.
-pub fn strip_kimi_hooks(existing: &str) -> Result<String, KimiMergeError> {
+pub fn strip_kimi_hooks(existing: &str) -> Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
-    let mut doc: DocumentMut = existing.parse()?;
+    let mut doc: DocumentMut = existing
+        .parse()
+        .map_err(|e: toml_edit::TomlError| format!("config.toml is not valid TOML: {e}"))?;
     let Some(item) = doc.get_mut("hooks") else {
         return Ok(doc.to_string());
     };
@@ -213,7 +184,7 @@ mod tests {
                 ("SessionEnd".into(), cmd("notify"), 30),
                 ("UserPromptSubmit".into(), cmd("notify"), 5),
                 ("UserPromptSubmit".into(), cmd("provide"), 5),
-                ("Stop".into(), cmd("notify"), 600),
+                ("Stop".into(), cmd("notify"), 60),
                 ("Notification".into(), cmd("notify"), 30),
             ]
         );
@@ -330,18 +301,14 @@ mod tests {
     #[test]
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks = \"oops\"\n";
-        assert!(matches!(
-            merge_kimi_hooks(bad, BIN, ClientSource::KimiCode),
-            Err(KimiMergeError::UnmergeableShape(_))
-        ));
+        let err = merge_kimi_hooks(bad, BIN, ClientSource::KimiCode).unwrap_err();
+        assert!(err.contains("unexpected `hooks` shape"), "{err}");
     }
 
     #[test]
     fn parse_error_surfaces() {
         let bad = "this is = = not toml\n";
-        assert!(matches!(
-            merge_kimi_hooks(bad, BIN, ClientSource::KimiCode),
-            Err(KimiMergeError::Parse(_))
-        ));
+        let err = merge_kimi_hooks(bad, BIN, ClientSource::KimiCode).unwrap_err();
+        assert!(err.contains("not valid TOML"), "{err}");
     }
 }

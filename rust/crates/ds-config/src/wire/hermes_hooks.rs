@@ -24,40 +24,23 @@ fn hermes_command(bin: &str, verb: &str, client: ClientSource) -> String {
 const HERMES_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("on_session_start", &[("notify --greet-only", 30)]),
     ("pre_llm_call", &[("notify", 5), ("provide", 5)]),
-    ("post_llm_call", &[("notify", 60)]),
+    (
+        "post_llm_call",
+        &[("notify", super::SYNC_STOP_TIMEOUT_SECS)],
+    ),
     ("on_session_finalize", &[("notify", 30)]),
 ];
 
-/// Same non-success contract as [`super::codex::CodexMergeError`].
-#[derive(Debug)]
-pub enum HermesMergeError {
-    Parse(String),
-    /// `hooks` unappendable; leave file unchanged.
-    UnmergeableShape(String),
+fn parse_yaml(existing: &str) -> Result<Value, String> {
+    yaml_doc::parse(existing).map_err(|e| format!("config.yaml is not valid YAML: {e}"))
 }
 
-impl std::fmt::Display for HermesMergeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HermesMergeError::Parse(e) => write!(f, "config.yaml is not valid YAML: {e}"),
-            HermesMergeError::UnmergeableShape(s) => {
-                write!(
-                    f,
-                    "config.yaml has an unexpected `{s}` shape; left unchanged (Hermes hooks NOT wired)"
-                )
-            }
-        }
-    }
+fn emit_yaml(root: &Value) -> Result<String, String> {
+    yaml_doc::emit(root).map_err(|e| format!("config.yaml serialize failed: {e}"))
 }
 
-impl std::error::Error for HermesMergeError {}
-
-fn parse_yaml(existing: &str) -> Result<Value, HermesMergeError> {
-    yaml_doc::parse(existing).map_err(HermesMergeError::Parse)
-}
-
-fn emit_yaml(root: &Value) -> Result<String, HermesMergeError> {
-    yaml_doc::emit(root).map_err(HermesMergeError::Parse)
+fn unmergeable_shape(path: &str) -> String {
+    format!("config.yaml has an unexpected `{path}` shape; left unchanged (Hermes hooks NOT wired)")
 }
 
 fn entry_command(entry: &Value) -> Option<&str> {
@@ -108,10 +91,10 @@ pub fn merge_hermes_hooks(
     existing: &str,
     bin: &str,
     client: ClientSource,
-) -> Result<String, HermesMergeError> {
+) -> Result<String, String> {
     let mut root = parse_yaml(existing)?;
     if !root.is_object() {
-        return Err(HermesMergeError::UnmergeableShape("root".into()));
+        return Err(unmergeable_shape("root"));
     }
     let desired = desired_entries(bin, client);
 
@@ -120,13 +103,13 @@ pub fn merge_hermes_hooks(
         .entry("hooks".to_string())
         .or_insert_with(|| Value::Object(Map::new()));
     if !hooks.is_object() {
-        return Err(HermesMergeError::UnmergeableShape("hooks".into()));
+        return Err(unmergeable_shape("hooks"));
     }
     let hooks_obj = hooks.as_object_mut().expect("object checked above");
 
     // Per-event ours lists (YAML map key order is not stable across re-emit).
     if ours_match_desired(hooks_obj, &desired) {
-        return emit_yaml(&root);
+        return Ok(existing.to_string());
     }
 
     // Strip ours from every event list; drop empty event keys we emptied.
@@ -142,8 +125,9 @@ pub fn merge_hermes_hooks(
             // Non-list event key we didn't write — leave alone.
             continue;
         };
+        let before = arr.len();
         arr.retain(|e| !entry_is_ours(e));
-        if arr.is_empty() {
+        if arr.len() != before && arr.is_empty() {
             hooks_obj.remove(&event);
         }
     }
@@ -154,7 +138,7 @@ pub fn merge_hermes_hooks(
             .entry(event.clone())
             .or_insert_with(|| Value::Array(Vec::new()));
         if !list.is_array() {
-            return Err(HermesMergeError::UnmergeableShape(format!("hooks.{event}")));
+            return Err(unmergeable_shape(&format!("hooks.{event}")));
         }
         list.as_array_mut()
             .expect("array checked above")
@@ -194,7 +178,7 @@ fn ours_match_desired(hooks_obj: &Map<String, Value>, desired: &[(String, String
 }
 
 /// Drop every DontSpeak hook entry; remove empty event keys and empty `hooks`.
-pub fn strip_hermes_hooks(existing: &str) -> Result<String, HermesMergeError> {
+pub fn strip_hermes_hooks(existing: &str) -> Result<String, String> {
     if existing.trim().is_empty() {
         return Ok(existing.to_string());
     }
@@ -203,12 +187,13 @@ pub fn strip_hermes_hooks(existing: &str) -> Result<String, HermesMergeError> {
         return Ok(existing.to_string());
     };
     let Some(hooks) = obj.get_mut("hooks") else {
-        return emit_yaml(&root);
+        return Ok(existing.to_string());
     };
     let Some(hooks_obj) = hooks.as_object_mut() else {
         // Scalar/list `hooks` can't hold entries we wrote → leave alone.
-        return emit_yaml(&root);
+        return Ok(existing.to_string());
     };
+    let mut changed = false;
     let events: Vec<String> = hooks_obj.keys().cloned().collect();
     for event in events {
         if event == "output_spill" {
@@ -220,10 +205,15 @@ pub fn strip_hermes_hooks(existing: &str) -> Result<String, HermesMergeError> {
         let Some(arr) = entries.as_array_mut() else {
             continue;
         };
+        let before = arr.len();
         arr.retain(|e| !entry_is_ours(e));
-        if arr.is_empty() {
+        changed |= arr.len() != before;
+        if arr.len() != before && arr.is_empty() {
             hooks_obj.remove(&event);
         }
+    }
+    if !changed {
+        return Ok(existing.to_string());
     }
     if hooks_obj.is_empty() {
         obj.remove("hooks");
@@ -332,9 +322,15 @@ hooks:
             "user's hook preserved: {once}"
         );
         let twice = merged(&once);
-        // Idempotent content (YAML key order may vary across re-emit — compare parsed).
-        assert_eq!(parse(&once), parse(&twice), "idempotent");
+        assert_eq!(once, twice, "idempotent");
         assert_eq!(our_entries(&parse(&twice)), expected(), "no duplicates");
+
+        let commented = format!("# keep this comment\n{once}");
+        assert_eq!(
+            merged(&commented),
+            commented,
+            "semantic no-op preserves bytes"
+        );
     }
 
     #[test]
@@ -416,21 +412,23 @@ hooks:
     }
 
     #[test]
+    fn strip_without_our_hooks_preserves_bytes() {
+        let existing = "# keep\nhooks:\n  post_tool_call: [{command: /usr/bin/true}]\n";
+        assert_eq!(strip_hermes_hooks(existing).unwrap(), existing);
+    }
+
+    #[test]
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks: oops\n";
-        assert!(matches!(
-            merge_hermes_hooks(bad, BIN, ClientSource::Hermes),
-            Err(HermesMergeError::UnmergeableShape(_))
-        ));
+        let err = merge_hermes_hooks(bad, BIN, ClientSource::Hermes).unwrap_err();
+        assert!(err.contains("unexpected `hooks` shape"), "{err}");
     }
 
     #[test]
     fn parse_error_surfaces() {
         let bad = "hooks: [\n  - :\n";
-        assert!(matches!(
-            merge_hermes_hooks(bad, BIN, ClientSource::Hermes),
-            Err(HermesMergeError::Parse(_))
-        ));
+        let err = merge_hermes_hooks(bad, BIN, ClientSource::Hermes).unwrap_err();
+        assert!(err.contains("not valid YAML"), "{err}");
     }
 
     #[test]

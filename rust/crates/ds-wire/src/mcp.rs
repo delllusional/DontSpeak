@@ -66,8 +66,7 @@ pub fn apply(
         }
         None => {
             let Ok(v) = io::read_json_or_bail(tool, cfg) else {
-                // Match hooks: shared-file clients must not report contradictory outcomes.
-                return 0;
+                return 1;
             };
             v
         }
@@ -146,7 +145,10 @@ pub fn apply_toml(
         Some(PreviewDoc::Json(_) | PreviewDoc::Yaml(_)) => {
             panic!("mcp::apply_toml: seed must be PreviewDoc::Toml for a TOML mechanism")
         }
-        None => std::fs::read_to_string(cfg).unwrap_or_default(),
+        None => match io::read_text_or_empty(tool, cfg) {
+            Ok(text) => text,
+            Err(()) => return 1,
+        },
     };
 
     let merged = if remove {
@@ -296,14 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_file_is_left_untouched_and_is_non_fatal() {
+    fn malformed_file_is_left_untouched_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "{ this is not json").unwrap();
         assert_eq!(
             apply(&target(&cfg, true), false, false, &paths, None, None),
-            0
+            1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "{ this is not json");
     }

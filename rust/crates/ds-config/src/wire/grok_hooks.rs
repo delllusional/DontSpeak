@@ -10,7 +10,7 @@ const GROK_HOOKS: &[(&str, i64)] = &[
     ("SessionStart", 30),
     ("SessionEnd", 30),
     ("UserPromptSubmit", 5),
-    ("Stop", 1800),
+    ("Stop", super::SYNC_STOP_TIMEOUT_SECS),
     ("Notification", 30),
 ];
 
@@ -118,5 +118,10 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stop_uses_a_sixty_second_fail_open_bound() {
+        assert_eq!(event_entries(&value(), "Stop"), [(BIN.to_string(), 60)]);
     }
 }

@@ -56,7 +56,7 @@ Hooks read session JSON from stdin, talk to engine over the socket, never synthe
 `dontspeak notify` (fire-and-forget) vs `dontspeak provide` (query). Event table:
 [../docs/HOOKS.md](../docs/HOOKS.md).
 
-`wire claude_code` merges only `hooks` + `preferredNotifChannel` in `settings.json`.
+`wire claude_code` merges only DontSpeak's `hooks` in `settings.json`.
 DontSpeak settings stay in `config.toml` via MCP `set_config`.
 
 ## Build / test

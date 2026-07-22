@@ -33,6 +33,14 @@ pub fn merge_hermes_mcp(
         return Err(format!("mcp_servers.{name} is not a mapping"));
     }
     let entry = entry.as_object_mut().expect("object checked above");
+    let args_match = if args.is_empty() {
+        !entry.contains_key("args")
+    } else {
+        entry.get("args") == Some(&json!(args))
+    };
+    if entry.get("command").and_then(Value::as_str) == Some(command) && args_match {
+        return Ok(existing.to_string());
+    }
     entry.insert("command".to_string(), json!(command));
     if args.is_empty() {
         entry.remove("args");
@@ -52,10 +60,14 @@ pub fn strip_hermes_mcp(existing: &str, name: &str) -> Result<String, String> {
         return Ok(existing.to_string());
     };
     if let Some(servers) = obj.get_mut("mcp_servers").and_then(|s| s.as_object_mut()) {
-        servers.remove(name);
+        if servers.remove(name).is_none() {
+            return Ok(existing.to_string());
+        }
         if servers.is_empty() {
             obj.remove("mcp_servers");
         }
+    } else {
+        return Ok(existing.to_string());
     }
     yaml_doc::emit(&root).map_err(|e| format!("YAML serialize failed: {e}"))
 }
@@ -103,6 +115,16 @@ mcp_servers:
     }
 
     #[test]
+    fn current_entry_preserves_user_yaml_bytes() {
+        let emitted = merge_hermes_mcp("", "DontSpeak", "/abs/dontspeak", &[]).unwrap();
+        let existing = format!("# keep this comment\n{emitted}");
+        assert_eq!(
+            merge_hermes_mcp(&existing, "DontSpeak", "/abs/dontspeak", &[]).unwrap(),
+            existing
+        );
+    }
+
+    #[test]
     fn strip_removes_entry_and_prunes_empty_table() {
         let existing = r#"
 mcp_servers:
@@ -121,6 +143,12 @@ mcp_servers:
         let existing = "mcp_servers:\n  DontSpeak:\n    command: /x\n";
         let out = strip_hermes_mcp(existing, "DontSpeak").unwrap();
         assert!(!out.contains("mcp_servers"), "{out}");
+    }
+
+    #[test]
+    fn strip_without_our_server_preserves_user_yaml_bytes() {
+        let existing = "# keep\nmcp_servers: {other: {command: npx}}\n";
+        assert_eq!(strip_hermes_mcp(existing, "DontSpeak").unwrap(), existing);
     }
 
     #[test]

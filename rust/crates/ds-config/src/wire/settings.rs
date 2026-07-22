@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use serde_json::{Map, Value};
 
 use crate::voice::{read_config_table, write_config_table};
-use crate::{Paths, VoiceConfig};
+use crate::{ClientSource, Paths, VoiceConfig};
 
 /// Insert `dontspeak` from serde Serialize (field single source). Pure; non-object → `{}`.
 /// IPC via [`voice_to_value`]; config file via [`write_settings`].
@@ -52,6 +52,68 @@ pub fn write_settings(paths: &Paths, voice: &VoiceConfig) -> io::Result<()> {
         table.insert(k, v);
     }
     write_config_table(paths, &table)
+}
+
+/// Persist manual wire/unwire intent without fail-open parsing the rest of `config.toml`.
+pub fn set_clients_excluded(
+    paths: &Paths,
+    clients: &[ClientSource],
+    excluded: bool,
+) -> Result<(), String> {
+    let existing = match std::fs::read_to_string(&paths.config_toml) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => {
+            return Err(format!(
+                "could not read {} ({error})",
+                paths.config_toml.display()
+            ));
+        }
+    };
+    let mut doc: toml_edit::DocumentMut = if existing.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        existing.parse().map_err(|error| {
+            format!(
+                "{} is not valid TOML ({error}); left unchanged",
+                paths.config_toml.display()
+            )
+        })?
+    };
+
+    if doc.get("exclude_clients").is_none() {
+        doc.insert("exclude_clients", toml_edit::value(toml_edit::Array::new()));
+    }
+    let array = doc
+        .get_mut("exclude_clients")
+        .and_then(toml_edit::Item::as_array_mut)
+        .ok_or_else(|| {
+            format!(
+                "{} has a non-array `exclude_clients`; left unchanged",
+                paths.config_toml.display()
+            )
+        })?;
+
+    for client in clients {
+        let token = client.as_str();
+        if excluded {
+            if !array
+                .iter()
+                .any(|value| value.as_str().and_then(ClientSource::parse) == Some(*client))
+            {
+                array.push(token);
+            }
+        } else {
+            array.retain(|value| value.as_str().and_then(ClientSource::parse) != Some(*client));
+        }
+    }
+
+    let updated = doc.to_string();
+    if updated == existing {
+        return Ok(());
+    }
+    atomic_write_str(&paths.config_toml, &updated)
+        .map_err(|error| format!("could not write {} ({error})", paths.config_toml.display()))
 }
 
 /// Atomic JSON: pretty + trailing newline, temp in same dir, rename.
@@ -302,6 +364,34 @@ mod tests {
         let loaded = root.dontspeak.unwrap();
         assert_eq!(loaded.stt_engine, None);
         assert_eq!(loaded.tts_engine, None);
+    }
+
+    #[test]
+    fn client_exclusions_update_surgically_and_reject_bad_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
+        std::fs::write(
+            &paths.config_toml,
+            "custom = \"keep\"\nexclude_clients = [\"codex\", \"future-client\"]\n",
+        )
+        .unwrap();
+
+        set_clients_excluded(&paths, &[ClientSource::QwenCode], true).unwrap();
+        set_clients_excluded(&paths, &[ClientSource::Codex], false).unwrap();
+        let updated = std::fs::read_to_string(&paths.config_toml).unwrap();
+        assert!(updated.contains("custom = \"keep\""));
+        assert!(updated.contains("future-client"));
+        assert!(updated.contains("qwen_code"));
+        assert!(!updated.contains("\"codex\""));
+
+        let malformed = "exclude_clients = [\n";
+        std::fs::write(&paths.config_toml, malformed).unwrap();
+        assert!(set_clients_excluded(&paths, &[ClientSource::Codex], true).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&paths.config_toml).unwrap(),
+            malformed
+        );
     }
 
     #[test]

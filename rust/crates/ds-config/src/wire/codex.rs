@@ -30,7 +30,7 @@ fn codex_command(bin: &str, verb: &str, client: ClientSource) -> String {
 const CODEX_HOOKS: &[(&str, &[(&str, i64)])] = &[
     ("SessionStart", &[("notify --greet-only", 30)]),
     ("UserPromptSubmit", &[("notify", 5), ("provide", 5)]),
-    ("Stop", &[("notify", 1800)]),
+    ("Stop", &[("notify", super::SYNC_STOP_TIMEOUT_SECS)]),
 ];
 
 /// Merge/strip failure — both variants are non-success (no silent "wired" claim).
@@ -90,31 +90,42 @@ fn codex_group_is_ours(group: &TomlTable) -> bool {
 }
 
 /// Exact command list match → re-wire is byte-identical no-op; older one-verb shapes heal.
-fn codex_group_matches(group: &TomlTable, commands: &[String]) -> bool {
+fn codex_group_matches(group: &TomlTable, commands: &[(String, i64)]) -> bool {
     group
         .get("hooks")
         .and_then(|h| h.as_array_of_tables())
         .is_some_and(|aot| {
-            let got: Vec<&str> = aot
+            let got: Vec<(&str, i64)> = aot
                 .iter()
-                .filter_map(|t| t.get("command").and_then(|c| c.as_str()))
+                .filter_map(|t| {
+                    Some((t.get("command")?.as_str()?, t.get("timeout")?.as_integer()?))
+                })
                 .collect();
-            got == commands.iter().map(String::as_str).collect::<Vec<_>>()
+            got == commands
+                .iter()
+                .map(|(command, timeout)| (command.as_str(), *timeout))
+                .collect::<Vec<_>>()
         })
 }
 
 /// Inline-array form of [`codex_group_matches`].
-fn inner_hooks_value_matches(v: &toml_edit::Value, commands: &[String]) -> bool {
+fn inner_hooks_value_matches(v: &toml_edit::Value, commands: &[(String, i64)]) -> bool {
     if let Some(arr) = v.as_array() {
-        let got: Vec<&str> = arr
+        let got: Vec<(&str, i64)> = arr
             .iter()
             .filter_map(|e| {
-                e.as_inline_table()
-                    .and_then(|t| t.get("command"))
-                    .and_then(|c| c.as_str())
+                let table = e.as_inline_table()?;
+                Some((
+                    table.get("command")?.as_str()?,
+                    table.get("timeout")?.as_integer()?,
+                ))
             })
             .collect();
-        return got == commands.iter().map(String::as_str).collect::<Vec<_>>();
+        return got
+            == commands
+                .iter()
+                .map(|(command, timeout)| (command.as_str(), *timeout))
+                .collect::<Vec<_>>();
     }
     false
 }
@@ -152,7 +163,7 @@ fn append_to_event(
     htbl: &mut TomlTable,
     event: &str,
     group: TomlTable,
-    commands: &[String],
+    commands: &[(String, i64)],
 ) -> Result<(), CodexMergeError> {
     match htbl.get_mut(event) {
         None => {
@@ -242,8 +253,7 @@ pub fn merge_codex_hooks(
                 .iter()
                 .map(|(verb, timeout)| (codex_command(bin, verb, client), *timeout))
                 .collect();
-            let cmd_strings: Vec<String> = commands.iter().map(|(c, _)| c.clone()).collect();
-            append_to_event(htbl, event, codex_our_group(&commands), &cmd_strings)?;
+            append_to_event(htbl, event, codex_our_group(&commands), &commands)?;
         }
     }
     Ok(doc.to_string())
@@ -336,6 +346,21 @@ mod tests {
         cmds.remove(0)
     }
 
+    fn event_timeouts(doc: &DocumentMut, event: &str) -> Vec<i64> {
+        doc["hooks"][event]
+            .as_array_of_tables()
+            .unwrap_or_else(|| panic!("{event}: array-of-tables"))
+            .iter()
+            .flat_map(|group| {
+                group["hooks"]
+                    .as_array_of_tables()
+                    .unwrap_or_else(|| panic!("{event}: inner hooks array-of-tables"))
+                    .iter()
+                    .map(|hook| hook["timeout"].as_integer().expect("timeout integer"))
+            })
+            .collect()
+    }
+
     #[test]
     fn merge_into_empty_wires_all_events() {
         let out = merged("");
@@ -353,6 +378,7 @@ mod tests {
             vec![cmd("notify"), cmd("provide")]
         );
         assert_eq!(event_command(&doc, "Stop"), cmd("notify"));
+        assert_eq!(event_timeouts(&doc, "Stop"), [60]);
     }
 
     #[test]
@@ -504,6 +530,22 @@ mod tests {
                 1,
                 "{event}: stale group replaced, not duplicated"
             );
+        }
+    }
+
+    #[test]
+    fn rewire_heals_stale_stop_timeouts_in_both_supported_shapes() {
+        let command = cmd("notify");
+        let grouped = format!(
+            "[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {command:?}\ntimeout = 1800\n"
+        );
+        let inline = format!(
+            "hooks.Stop = [{{ hooks = [{{ type = \"command\", command = {command:?}, timeout = 1800 }}] }}]\n"
+        );
+        for existing in [grouped, inline] {
+            let rendered = merged(&existing);
+            assert_eq!(rendered.matches("timeout = 60").count(), 1, "{rendered}");
+            assert!(!rendered.contains("1800"), "{rendered}");
         }
     }
 

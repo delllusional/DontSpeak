@@ -62,17 +62,17 @@ pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hermes_allowlist::{
     desired_approvals as hermes_desired_approvals, merge_hermes_allowlist, strip_hermes_allowlist,
 };
-pub use wire::hermes_hooks::{HermesMergeError, merge_hermes_hooks, strip_hermes_hooks};
+pub use wire::hermes_hooks::{merge_hermes_hooks, strip_hermes_hooks};
 pub use wire::hermes_mcp::{merge_hermes_mcp, strip_hermes_mcp};
 pub use wire::hooks::{HookSpec, HooksMergeError, merge_hooks, strip_hooks};
 pub use wire::json_mcp::{merge_mcp_server, strip_mcp_server};
-pub use wire::kimi_hooks::{KimiMergeError, merge_kimi_hooks, strip_kimi_hooks};
+pub use wire::kimi_hooks::{merge_kimi_hooks, strip_kimi_hooks};
 pub use wire::registry::{
     CLIENT_REGISTRY, ClientKind, ClientSpec, DocRef, HookCommandStyle, LaunchMode, LaunchSpec,
     Surface, WireMechanism, client_from_mcp_name, client_spec, client_spec_for_launch,
 };
 pub use wire::settings::{
-    atomic_write_json, atomic_write_str, backup_before_write, merge_settings, voice_from_value,
-    voice_to_value, write_settings,
+    atomic_write_json, atomic_write_str, backup_before_write, merge_settings, set_clients_excluded,
+    voice_from_value, voice_to_value, write_settings,
 };
 pub use wire::toml_mcp::{merge_mcp_server_toml, strip_mcp_server_toml};

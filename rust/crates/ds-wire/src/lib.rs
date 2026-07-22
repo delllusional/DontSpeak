@@ -29,6 +29,8 @@ pub fn run(args: &[String]) -> i32 {
     let mut print_only = false;
     let mut all = false;
     let mut do_reconcile = false;
+    let mut list = false;
+    let mut help = false;
     // Registry-driven usage tokens.
     let tokens = || {
         ds_config::CLIENT_REGISTRY
@@ -43,18 +45,12 @@ pub fn run(args: &[String]) -> i32 {
             "--reconcile" => do_reconcile = true,
             "--remove" => remove = true,
             "--print-only" | "--print" => print_only = true,
-            "--list" => {
-                print_registry(ds_config::Paths::resolve().as_ref());
-                return 0;
+            "--list" => list = true,
+            "-h" | "--help" => help = true,
+            other if other.starts_with('-') => {
+                eprintln!("wire: unknown flag {other:?}");
+                return 1;
             }
-            "-h" | "--help" => {
-                eprintln!(
-                    "usage: dontspeak wire <{}> [--remove] [--print-only]\n       dontspeak wire --all [--remove] [--print-only]   (every known client; each self-skips if absent)\n       dontspeak wire --reconcile                        (converge every client to config.toml's exclude_clients)\n       dontspeak wire --list                             (the client registry: surfaces, files, docs)",
-                    tokens()
-                );
-                return 0;
-            }
-            other if other.starts_with('-') => eprintln!("wire: ignoring unknown flag {other:?}"),
             other => match ClientSource::parse(other) {
                 Some(t) if ds_config::client_spec(t).is_some() => {
                     if let Some(prev) = client {
@@ -73,6 +69,29 @@ pub fn run(args: &[String]) -> i32 {
             },
         }
     }
+    if help {
+        eprintln!(
+            "usage: dontspeak wire <{}> [--remove] [--print-only]\n       dontspeak wire --all [--remove] [--print-only]   (every known client; each self-skips if absent)\n       dontspeak wire --reconcile                        (converge every client to config.toml's exclude_clients)\n       dontspeak wire --list                             (the client registry: surfaces, files, docs)",
+            tokens()
+        );
+        return 0;
+    }
+    if list {
+        if client.is_some() || all || do_reconcile || remove || print_only {
+            eprintln!("wire: --list cannot be combined with clients or mutation flags");
+            return 1;
+        }
+        print_registry(ds_config::Paths::resolve().as_ref());
+        return 0;
+    }
+    if do_reconcile && (client.is_some() || all || remove || print_only) {
+        eprintln!("wire: --reconcile must be used alone");
+        return 1;
+    }
+    if all && client.is_some() {
+        eprintln!("wire: --all cannot be combined with a client");
+        return 1;
+    }
     if !all && !do_reconcile && client.is_none() {
         eprintln!("wire: missing client ({}), or use --all", tokens());
         return 1;
@@ -82,24 +101,38 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
 
-    if !remove && !print_only {
-        hooks::seed_config(&paths);
-    }
-
     // Before `--all` so `--reconcile` is not also an unconditional wire.
     if do_reconcile {
         return reconcile(&paths);
     }
 
-    if all {
-        return ClientSource::CLIENTS
-            .iter()
-            .map(|&c| wire_client(c, &paths, remove, print_only))
-            .max()
-            .unwrap_or(0);
+    if !remove && !print_only {
+        hooks::seed_config(&paths);
     }
 
-    wire_client(client.expect("checked above"), &paths, remove, print_only)
+    if all {
+        return wire_selected(ClientSource::CLIENTS, &paths, remove, print_only);
+    }
+
+    wire_selected(
+        &[client.expect("checked above")],
+        &paths,
+        remove,
+        print_only,
+    )
+}
+
+/// Manual selections update the desired state before converging client files.
+fn wire_selected(clients: &[ClientSource], paths: &Paths, remove: bool, print_only: bool) -> i32 {
+    if !print_only && let Err(error) = ds_config::set_clients_excluded(paths, clients, remove) {
+        eprintln!("wire: {error}");
+        return 1;
+    }
+    clients
+        .iter()
+        .map(|&client| wire_client(client, paths, remove, print_only))
+        .max()
+        .unwrap_or(0)
 }
 
 /// Converge every client to `exclude_clients` (absent/empty ⇒ wire all). No seed/prune.
@@ -429,10 +462,13 @@ mod tests {
         print_registry(Some(&paths));
     }
 
-    /// Unknown flag is soft; still falls through to missing-client (exit 1), not $HOME I/O.
     #[test]
-    fn unknown_flag_without_a_client_is_tolerated_not_a_hard_failure() {
+    fn unknown_flags_and_conflicting_modes_are_hard_errors_before_io() {
         assert_eq!(run(&args(&["--not-a-real-flag"])), 1);
+        assert_eq!(run(&args(&["codex", "--remvoe"])), 1);
+        assert_eq!(run(&args(&["--reconcile", "--print-only"])), 1);
+        assert_eq!(run(&args(&["--reconcile", "--remove"])), 1);
+        assert_eq!(run(&args(&["--all", "codex"])), 1);
     }
 
     #[test]
@@ -669,9 +705,11 @@ mod tests {
             text.contains(" provide --client kimi_code"),
             "provide wired: {text}"
         );
-        assert!(text.contains("timeout = 600"), "Stop timeout: {text}");
-        // Kimi rejects timeouts above 600 (kimi doctor: "expected number to be <=600").
-        assert!(!text.contains("timeout = 1800"), "over-cap timeout: {text}");
+        assert!(text.contains("timeout = 60"), "wrong Stop timeout: {text}");
+        assert!(
+            !text.contains("timeout = 1800"),
+            "stale Stop timeout: {text}"
+        );
         // THE HARD CONSTRAINT: nothing but event/command/timeout may appear in an entry —
         // any extra key makes Kimi reject the whole config.
         for forbidden in ["matcher", "async", "args", "shell"] {
@@ -793,6 +831,33 @@ mod tests {
             allow2.get("approvals").is_none(),
             "allowlist stripped: {allow2}"
         );
+    }
+
+    #[test]
+    fn malformed_shared_configs_are_unchanged_hard_errors_for_every_surface() {
+        let qwen_dir = tempfile::tempdir().unwrap();
+        let qwen = Paths::rooted_at(qwen_dir.path());
+        std::fs::create_dir_all(&qwen.qwen_dir).unwrap();
+        let bad_json = b"{ not json";
+        std::fs::write(&qwen.qwen_settings, bad_json).unwrap();
+        assert_eq!(wire_client(ClientSource::QwenCode, &qwen, false, false), 1);
+        assert_eq!(std::fs::read(&qwen.qwen_settings).unwrap(), bad_json);
+
+        let codex_dir = tempfile::tempdir().unwrap();
+        let codex = Paths::rooted_at(codex_dir.path());
+        std::fs::create_dir_all(&codex.codex_dir).unwrap();
+        let bad_toml = b"hooks = [not valid toml";
+        std::fs::write(&codex.codex_config, bad_toml).unwrap();
+        assert_eq!(wire_client(ClientSource::Codex, &codex, false, false), 1);
+        assert_eq!(std::fs::read(&codex.codex_config).unwrap(), bad_toml);
+
+        let hermes_dir = tempfile::tempdir().unwrap();
+        let hermes = Paths::rooted_at(hermes_dir.path());
+        std::fs::create_dir_all(&hermes.hermes_dir).unwrap();
+        let bad_yaml = b"hooks: [\n  - :\n";
+        std::fs::write(&hermes.hermes_config_yaml, bad_yaml).unwrap();
+        assert_eq!(wire_client(ClientSource::Hermes, &hermes, false, false), 1);
+        assert_eq!(std::fs::read(&hermes.hermes_config_yaml).unwrap(), bad_yaml);
     }
 
     /// Issue #30: print-only must show hooks+MCP union for Hermes config.yaml.
@@ -945,6 +1010,57 @@ mod tests {
             after.get("mcpServers").is_none(),
             "qwen mcp entry stripped: {after}"
         );
+    }
+
+    #[test]
+    fn manual_wire_selection_survives_boot_reconcile_in_both_directions() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+
+        assert_eq!(
+            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            0
+        );
+        assert_eq!(
+            wire_selected(&[ClientSource::QwenCode], &paths, true, false),
+            0
+        );
+        assert_eq!(reconcile(&paths), 0);
+        let removed: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        assert!(removed.get("hooks").is_none());
+        assert!(removed.get("mcpServers").is_none());
+
+        assert_eq!(
+            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            0
+        );
+        assert_eq!(reconcile(&paths), 0);
+        let rewired: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
+        assert!(rewired["hooks"]["Stop"].is_array());
+        assert!(rewired["mcpServers"]["DontSpeak"].is_object());
+    }
+
+    #[test]
+    fn manual_wire_rejects_malformed_config_before_touching_client_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+        let malformed = "exclude_clients = [\n";
+        std::fs::write(&paths.config_toml, malformed).unwrap();
+
+        assert_eq!(
+            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            1
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.config_toml).unwrap(),
+            malformed
+        );
+        assert!(!paths.qwen_settings.exists());
     }
 
     /// Load-bearing: second boot reconcile is zero-write (no new `.bak`) across writers.

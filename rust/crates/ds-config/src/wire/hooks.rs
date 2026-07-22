@@ -12,8 +12,6 @@ pub struct HookSpec<'a> {
     /// Absolute `dontspeak[.exe]`. Verbs via `args` ([`HookCommandStyle::ArgsArray`]) or
     /// inlined ([`HookCommandStyle::InlineShell`]): `notify` (async sink) / `provide` (sync query).
     pub bin: &'a str,
-    /// Optional `preferredNotifChannel` (e.g. `"iterm2_with_bell"`).
-    pub notif_channel: Option<&'a str>,
     /// `true` → wire `MessageDisplay` (per-batch). `false` → voice whole reply from `Stop`.
     pub streaming: bool,
     /// ArgsArray: spawn `command`+`args`, timeout SECONDS. InlineShell: shell `command` only,
@@ -142,8 +140,7 @@ impl std::error::Error for HooksMergeError {}
 /// Merge canonical hooks into parsed `settings.json`. Pure; preserves foreign keys.
 /// Replace-ours + idempotent (self-heals stale bin path / verb shape on re-wire).
 /// Non-array `hooks.<Event>` → [`HooksMergeError::UnmergeableShape`].
-/// Drops stale top-level `dontspeak` block; leaves CC `voice` read-only.
-/// `preferredNotifChannel` is updated (not get-or-create) on re-wire.
+/// Drops stale top-level `dontspeak` block; leaves CC-owned settings read-only.
 pub fn merge_hooks(mut root: Value, spec: &HookSpec) -> Result<Value, HooksMergeError> {
     if !root.is_object() {
         root = Value::Object(Map::new());
@@ -174,14 +171,10 @@ pub fn merge_hooks(mut root: Value, spec: &HookSpec) -> Result<Value, HooksMerge
         }
     }
     obj.remove("dontspeak");
-    if let Some(ch) = spec.notif_channel {
-        obj.insert("preferredNotifChannel".to_string(), json!(ch));
-    }
     Ok(root)
 }
 
-/// Strip our groups; prune empty events / empty `hooks` / `preferredNotifChannel`.
-/// Leaves CC `voice` and foreign keys.
+/// Strip our groups; prune empty events / empty `hooks`. Leaves CC-owned settings intact.
 pub fn strip_hooks(mut root: Value) -> Value {
     if let Some(obj) = root.as_object_mut() {
         let mut hooks_now_empty = false;
@@ -200,7 +193,6 @@ pub fn strip_hooks(mut root: Value) -> Value {
         if hooks_now_empty {
             obj.remove("hooks");
         }
-        obj.remove("preferredNotifChannel");
     }
     root
 }
@@ -213,7 +205,6 @@ mod tests {
     fn spec() -> HookSpec<'static> {
         HookSpec {
             bin: "/bin/dontspeak",
-            notif_channel: None,
             streaming: true,
             command_style: HookCommandStyle::ArgsArray,
             client: ClientSource::ClaudeCode,
@@ -224,7 +215,6 @@ mod tests {
     fn inline_spec() -> HookSpec<'static> {
         HookSpec {
             bin: "/bin/dontspeak",
-            notif_channel: None,
             streaming: true,
             command_style: HookCommandStyle::InlineShell,
             client: ClientSource::QwenCode,
@@ -403,7 +393,6 @@ mod tests {
     fn non_streaming_client_omits_messagedisplay_keeps_stop_provide() {
         let spec_ns = HookSpec {
             bin: "/bin/dontspeak",
-            notif_channel: None,
             streaming: false,
             command_style: HookCommandStyle::ArgsArray,
             client: ClientSource::QwenCode,
@@ -472,56 +461,25 @@ mod tests {
     }
 
     #[test]
-    fn merge_hooks_updates_preferred_notif_channel_on_rewire() {
-        // Update (not get-or-create) so channel changes reach existing installs.
-        let spec_a = HookSpec {
-            bin: "/bin/dontspeak",
-            notif_channel: Some("iterm2_with_bell"),
-            streaming: true,
-            command_style: HookCommandStyle::ArgsArray,
-            client: ClientSource::ClaudeCode,
-        };
-        let once = merge_hooks(json!({}), &spec_a).expect("merge ok");
-        assert_eq!(once["preferredNotifChannel"], json!("iterm2_with_bell"));
-
-        let spec_b = HookSpec {
-            bin: "/bin/dontspeak",
-            notif_channel: Some("other_channel"),
-            streaming: true,
-            command_style: HookCommandStyle::ArgsArray,
-            client: ClientSource::ClaudeCode,
-        };
-        let twice = merge_hooks(once, &spec_b).expect("merge ok");
-        assert_eq!(
-            twice["preferredNotifChannel"],
-            json!("other_channel"),
-            "re-wire updates a changed channel, not stuck on the first value"
-        );
-    }
-
-    #[test]
-    fn strip_hooks_removes_preferred_notif_channel_and_empty_hooks_scaffold() {
-        // Strip undoes merge's scaffold + preferredNotifChannel exactly.
-        let spec_with_channel = HookSpec {
-            bin: "/bin/dontspeak",
-            notif_channel: Some("iterm2_with_bell"),
-            streaming: true,
-            command_style: HookCommandStyle::ArgsArray,
-            client: ClientSource::ClaudeCode,
-        };
-        let wired = merge_hooks(json!({ "model": "opus" }), &spec_with_channel).expect("merge ok");
-        assert!(wired.get("preferredNotifChannel").is_some());
-
+    fn merge_and_strip_leave_preferred_notif_channel_user_owned() {
+        let preferred = json!("terminal_bell");
+        let wired = merged(json!({
+            "model": "opus",
+            "preferredNotifChannel": preferred.clone()
+        }));
+        assert_eq!(wired["preferredNotifChannel"], preferred);
         let stripped = strip_hooks(wired);
-        assert!(
-            stripped.get("preferredNotifChannel").is_none(),
-            "preferredNotifChannel removed on strip"
-        );
+        assert_eq!(stripped["preferredNotifChannel"], preferred);
         assert!(
             stripped.get("hooks").is_none(),
             "emptied hooks scaffold pruned, not left behind as `hooks: {{}}`"
         );
         assert_eq!(stripped["model"], json!("opus"), "unrelated key untouched");
+
+        assert!(
+            merged(json!({})).get("preferredNotifChannel").is_none(),
+            "wiring does not create a Claude-owned preference"
+        );
     }
 
     #[test]
@@ -634,7 +592,6 @@ mod tests {
         );
         let spec_ns = HookSpec {
             bin: "/bin/dontspeak",
-            notif_channel: None,
             streaming: false,
             command_style: HookCommandStyle::ArgsArray,
             client: ClientSource::QwenCode,
@@ -652,7 +609,6 @@ mod tests {
         // Streaming InlineShell: MessageDisplay inlined + ms timeout; SessionStart plain notify.
         let spec_streaming = HookSpec {
             bin: "/bin/dontspeak",
-            notif_channel: None,
             streaming: true,
             command_style: HookCommandStyle::InlineShell,
             client: ClientSource::QwenCode,

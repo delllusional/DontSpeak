@@ -17,3 +17,6 @@ pub mod kimi_hooks;
 pub mod registry;
 pub mod settings;
 pub mod toml_mcp;
+
+/// Synchronous Stop hooks must fail open well before the IPC read ceiling.
+const SYNC_STOP_TIMEOUT_SECS: i64 = 60;

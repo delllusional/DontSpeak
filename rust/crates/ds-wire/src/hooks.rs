@@ -22,7 +22,7 @@ pub(crate) fn seed_config(paths: &Paths) {
     }
 }
 
-/// Claude-contract JSON hooks. Malformed/unmergeable → leave untouched (exit 0).
+/// Claude-contract JSON hooks. Malformed/unmergeable → leave untouched (exit 1).
 /// `seed`/`capture`: print-only grouping (issue #30).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
@@ -43,7 +43,7 @@ pub(crate) fn claude_json_hooks(
         }
         None => {
             let Ok(v) = io::read_json_or_bail("wire", cfg) else {
-                return 0; // user file: leave, don't fail (match toml writer)
+                return 1;
             };
             v
         }
@@ -57,14 +57,8 @@ pub(crate) fn claude_json_hooks(
             eprintln!("wire: could not resolve the dontspeak binary path");
             return 1;
         };
-        let notif_channel = if cfg!(target_os = "macos") {
-            Some("iterm2_with_bell")
-        } else {
-            None
-        };
         let spec = HookSpec {
             bin: &bin,
-            notif_channel,
             streaming,
             command_style,
             client,
@@ -76,7 +70,7 @@ pub(crate) fn claude_json_hooks(
         Ok(v) => v,
         Err(e) => {
             eprintln!("wire: {} left unchanged ({e})", cfg.display());
-            return 0;
+            return 1;
         }
     };
 
@@ -120,7 +114,7 @@ fn hook_action(remove: bool) -> &'static str {
     }
 }
 
-/// Shared TOML hook body: format-preserving; malformed/unmergeable → exit 0; zero-write when
+/// Shared TOML hook body: format-preserving; malformed/unmergeable → exit 1; zero-write when
 /// unchanged; backup before write; print-only seed/capture. Bin resolve only on merge path.
 #[allow(clippy::too_many_arguments)]
 fn toml_hooks_body<E: std::fmt::Display>(
@@ -178,7 +172,7 @@ fn toml_hooks_body<E: std::fmt::Display>(
         Ok(_) => 0,
         Err(e) => {
             eprintln!("wire: {} left unchanged ({e})", cfg.display());
-            0
+            1
         }
     }
 }
@@ -232,8 +226,7 @@ pub(crate) fn kimi_toml_hooks(
 /// Shared YAML text body (Hermes config.yaml): same contract as [`toml_hooks_body`].
 ///
 /// `write_action(remove)` labels the backup write; `load_hint` prints after a
-/// successful non-remove write (MCP); `fatal_err` makes merge/strip errors
-/// exit 1 (MCP) vs leave-unchanged exit 0 (hooks).
+/// successful non-remove write (MCP).
 #[allow(clippy::too_many_arguments)]
 fn yaml_text_body<E: std::fmt::Display>(
     cfg: &std::path::Path,
@@ -247,7 +240,6 @@ fn yaml_text_body<E: std::fmt::Display>(
     strip: impl FnOnce(&str) -> Result<String, E>,
     write_action: impl FnOnce(bool) -> &'static str,
     load_hint: Option<&str>,
-    fatal_err: bool,
 ) -> i32 {
     let existing = match seed {
         Some(PreviewDoc::Yaml(s)) => s,
@@ -301,13 +293,8 @@ fn yaml_text_body<E: std::fmt::Display>(
         }
         Ok(_) => 0,
         Err(e) => {
-            if fatal_err {
-                eprintln!("wire: {e}");
-                1
-            } else {
-                eprintln!("wire: {} left unchanged ({e})", cfg.display());
-                0
-            }
+            eprintln!("wire: {} left unchanged ({e})", cfg.display());
+            1
         }
     }
 }
@@ -334,7 +321,6 @@ pub(crate) fn hermes_yaml_hooks(
         ds_config::strip_hermes_hooks,
         hook_action,
         None,
-        false,
     )
 }
 
@@ -366,7 +352,6 @@ pub(crate) fn hermes_yaml_mcp(
             }
         },
         Some(load_hint),
-        true,
     )
 }
 
@@ -383,7 +368,7 @@ pub(crate) fn hermes_shell_allowlist(
     }
     let existing = match io::read_json_or_bail("wire", cfg) {
         Ok(v) => v,
-        Err(()) => return 0,
+        Err(()) => return 1,
     };
     let before = existing.clone();
     let merged = if remove {
@@ -622,15 +607,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_json_hooks_malformed_json_is_left_unchanged_non_fatal() {
+    fn claude_json_hooks_malformed_json_is_left_unchanged_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
         let raw = b"{ not json";
         std::fs::write(&cfg, raw).unwrap();
 
-        // Caught in `io::read_json_or_bail`, but non-fatal — reported and the file left
-        // byte-identical — never reaches `resolve_dontspeak_bin`.
+        // Reported and left byte-identical; never reaches `resolve_dontspeak_bin`.
         assert_eq!(
             claude_json_hooks(
                 &cfg,
@@ -643,13 +627,13 @@ mod tests {
                 None,
                 None,
             ),
-            0
+            1
         );
         assert_eq!(std::fs::read(&cfg).unwrap(), raw);
     }
 
     #[test]
-    fn claude_json_hooks_unmergeable_event_shape_is_left_unchanged_non_fatal() {
+    fn claude_json_hooks_unmergeable_event_shape_is_left_unchanged_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("settings.json");
         let paths = Paths::rooted_at(dir.path());
@@ -671,8 +655,8 @@ mod tests {
                 None,
                 None,
             ),
-            0
-        ); // non-fatal
+            1
+        );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw); // byte-identical
     }
 
@@ -858,9 +842,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
 
-        // `existing` is `unwrap_or_default()` on the missing-file read → "", and
-        // `strip_codex_hooks("")` short-circuits `Ok("")` before ever calling
-        // `resolve_dontspeak_bin` (that call is skipped entirely on the `remove` path anyway).
+        // Missing is an empty document, so strip stays a no-op without resolving the binary.
         assert_eq!(
             claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths, None, None),
             0
@@ -869,18 +851,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_toml_hooks_malformed_toml_is_left_unchanged_non_fatal() {
+    fn claude_toml_hooks_malformed_toml_is_left_unchanged_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
         let raw = "hooks = [not valid toml";
         std::fs::write(&cfg, raw).unwrap();
 
-        // `CodexMergeError::Parse` → the final `Err(e)` arm: reported, non-fatal, unchanged —
-        // same convention `claude_json_hooks` now matches.
         assert_eq!(
             claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
-            0
+            1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
     }
@@ -1022,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_toml_hooks_malformed_toml_is_left_unchanged_non_fatal() {
+    fn kimi_toml_hooks_malformed_toml_is_left_unchanged_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         let paths = Paths::rooted_at(dir.path());
@@ -1039,7 +1019,7 @@ mod tests {
                 None,
                 None
             ),
-            0
+            1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
     }
