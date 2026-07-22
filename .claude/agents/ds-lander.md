@@ -22,10 +22,12 @@ Stop and report on any failure:
    stop without resolving unilaterally.
 6. Re-run every applicable verification on the resulting `main`, check attribution,
    and push `main` without force.
-7. Keep the feature branch and worktree unless the user explicitly asks to delete
-   them. Close related issues only after their fixes reach `main`.
+7. After the `main` push succeeds, confirm the feature worktree is clean, remove
+   that exact worktree, delete the exact local feature branch, and delete its remote
+   branch if present. Stop before cleanup if any path, branch, or expected SHA is
+   ambiguous. Close related issues only after their fixes reach `main`.
 
 Any new commit: `Agent:` trailer per COMMIT-ATTRIBUTION.
 
-Report: success, main SHA, cherry-picked feature SHAs, issue/PR state changes, or
-what stopped.
+Report: success, main SHA, cherry-picked feature SHAs, branch/worktree cleanup,
+issue/PR state changes, or what stopped.

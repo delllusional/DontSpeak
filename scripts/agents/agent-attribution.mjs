@@ -167,6 +167,32 @@ function codexContextFromTranscript(file, activeModel) {
   });
 }
 
+function findFileByName(directory, predicate) {
+  const pending = [directory];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const candidate = join(current, entry.name);
+      if (entry.isDirectory()) pending.push(candidate);
+      else if (entry.isFile() && predicate(entry.name)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function findCodexTranscript(home, sessionId) {
+  if (!sessionId) return undefined;
+  const matches = (name) => name.endsWith(".jsonl") && name.includes(sessionId);
+  return findFileByName(join(home, ".codex", "sessions"), matches)
+    ?? findFileByName(join(home, ".codex", "archived_sessions"), matches);
+}
+
 function loadJson(file) {
   if (!file || !existsSync(file)) return undefined;
   return parseJson(readFileSync(file, "utf8"));
@@ -318,12 +344,14 @@ function modelDoesNotReason(home, model) {
   return false;
 }
 
-function resolveCodex(input) {
+function resolveCodex(input, env, home) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
   // Transcript only when hook input is incomplete.
   if (hookModel && hookEffort) return { model: hookModel, effort: hookEffort };
-  const context = codexContextFromTranscript(transcriptPath(input), hookModel);
+  const sessionId = firstString(input?.sessionId, input?.session_id, env.CODEX_THREAD_ID);
+  const transcript = transcriptPath(input) ?? findCodexTranscript(home, sessionId);
+  const context = codexContextFromTranscript(transcript, hookModel);
   return {
     model: firstString(hookModel, context?.model),
     effort: normalizedEffort(firstString(hookEffort, context?.effort)),
@@ -387,7 +415,7 @@ export function resolveAttribution(client, input, options = {}) {
   let resolved;
   switch (client) {
     case "codex":
-      resolved = resolveCodex(input);
+      resolved = resolveCodex(input, env, home);
       break;
     case "claude":
       resolved = resolveClaude(input, env);

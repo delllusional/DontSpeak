@@ -312,6 +312,35 @@ test("Codex uses the hook model and matching turn effort", (t) => {
   );
 });
 
+test("Codex resolves the active session transcript without hook input", (t) => {
+  const home = temporaryDirectory(t);
+  const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
+  const transcript = join(
+    home,
+    ".codex",
+    "sessions",
+    "2026",
+    "07",
+    "22",
+    `rollout-2026-07-22T10-09-33-${sessionId}.jsonl`,
+  );
+  jsonLines(transcript, [
+    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "xhigh" } },
+  ]);
+  assert.deepEqual(
+    resolveAttribution(
+      "codex",
+      {},
+      { home, env: { CODEX_THREAD_ID: sessionId } },
+    ),
+    {
+      model: "gpt-5.6-sol",
+      effort: "xhigh",
+      errors: [],
+    },
+  );
+});
+
 test("Claude combines its transcript model with applied hook effort", (t) => {
   const transcript = join(temporaryDirectory(t), "session.jsonl");
   jsonLines(transcript, [
@@ -445,6 +474,43 @@ test("conflicting runtime markers fail closed", () => {
     activeAgentEnvironment({ GROK_AGENT: "1", CODEX_THREAD_ID: "thread" }),
     { conflict: ["grok", "codex"] },
   );
+});
+
+test("commit-msg live-resolves Codex when PreToolUse capture is missing", (t) => {
+  const { env: isolatedEnv } = isolatedGitEnvironment(t);
+  const home = temporaryDirectory(t);
+  const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
+  const transcript = join(
+    home,
+    ".codex",
+    "sessions",
+    "2026",
+    "07",
+    "22",
+    `rollout-2026-07-22T10-09-33-${sessionId}.jsonl`,
+  );
+  jsonLines(transcript, [
+    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "xhigh" } },
+  ]);
+  const env = {
+    ...isolatedEnv,
+    CODEX_THREAD_ID: sessionId,
+    USERPROFILE: home,
+    HOME: home,
+  };
+  const { root } = initializedRepository(t, env);
+  ensureCommitMessageHook(root);
+  writeFileSync(join(root, "f.txt"), "x\n");
+  assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
+  const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+  assert.equal(existsSync(cache), false);
+  const commit = spawnSync("git", ["commit", "-m", "Live resolve"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(commit.status, 0, commit.stderr + commit.stdout);
+  assert.equal(headMessage(root, env), "Live resolve\n\nAgent: gpt-5.6-sol xhigh");
 });
 
 test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) => {

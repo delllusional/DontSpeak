@@ -23,7 +23,9 @@ shape later but can't recover which runtime produced it).
 
 Capture sources:
 
-- **Codex** — hook model slug; turn context for effort.
+- **Codex** — hook model slug; turn context for effort. When a tool surface skips
+  `PreToolUse`, **`commit-msg` live-resolves** both values from the active transcript
+  under `~/.codex/sessions` using `CODEX_THREAD_ID`.
 - **Claude** — transcript for model; tool hooks for applied effort.
 - **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
 - **Grok** — session model + effort (`summary.reasoning_effort` / chat turns /

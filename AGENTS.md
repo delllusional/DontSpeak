@@ -33,10 +33,11 @@ publishes installer assets the site references.
 
 **Always in force:** start every task from freshly pulled `main` unless the task
 names another target. Commit and push work on its feature branch. Land selected
-commits on `main` only when the user explicitly asks, using cherry-pick; keep the
-feature branch unless the user asks to delete it. Close related issues only after
-their fixes reach `main` — [TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps
-and exceptions. Read-only work (reviews, audits, Q&A over the repo) is not exempt.
+commits on `main` only when the user explicitly asks, using cherry-pick. After the
+`main` push succeeds, remove the clean feature worktree and delete its local and
+remote branch. Close related issues only after their fixes reach `main` —
+[TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps and exceptions. Read-only
+work (reviews, audits, Q&A over the repo) is not exempt.
 
 ## Out-of-scope findings
 

@@ -49,9 +49,10 @@ Pure Q&A that doesn't inspect the repo needs no worktree.
 Keep all work on its feature branch, including branches created under the default
 workflow and handed-off feature worktrees. Preserve its history unless the user
 asks for a rewrite, fetch `origin/main` for comparison, re-run every applicable
-verification, commit, and push the feature branch. Do not land on `main`, delete
-the branch or worktree, or close related issues or pull requests unless the user
-explicitly asks.
+verification, commit, and push the feature branch. Do not land on `main` or close
+related issues or pull requests unless the user explicitly asks. Preserve the
+feature branch and worktree until a requested landing is pushed successfully, then
+clean them up as part of landing.
 
 Report the feature-branch SHA and any issue or pull request state changes.
 
@@ -66,12 +67,14 @@ Land only when the user explicitly asks:
 3. Re-run every applicable verification on the resulting `main`.
 4. Push `main` without force. Do not merge or rebase the feature branch into
    `main`.
-5. Keep the feature branch and worktree unless the user explicitly asks to delete
-   them.
+5. After the `main` push succeeds, confirm the feature worktree is clean, remove
+   that exact worktree, delete the exact local feature branch, and delete its remote
+   branch if present. Stop without deleting anything if the worktree is dirty or a
+   path, branch name, or expected feature SHA is ambiguous.
 6. Close related GitHub issues only for fixes now present on `main`. Prefer
    `Closes #N` or `Fixes #N` in the cherry-picked commit; otherwise close the issue
    with a one-line pointer to the main SHA. Close a related pull request only when
    the user asks or the requested landing makes it obsolete.
 
-Report the main SHA, the cherry-picked commit SHAs, and any issue or pull request
-state changes.
+Report the main SHA, the cherry-picked commit SHAs, branch/worktree cleanup, and any
+issue or pull request state changes.

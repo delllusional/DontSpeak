@@ -201,12 +201,14 @@ Steps, in order, stopping and reporting instead of proceeding if any step fails:
    any conflict rather than resolving it unilaterally.
 6. Re-run every applicable verification on main, check attribution, and push main
    without force. Do not open a PR unless the user asked.
-7. Keep the feature branch and worktree unless the user explicitly asked to delete
-   them. Close related issues only after their fixes reach main.
+7. After the main push succeeds, confirm the feature worktree is clean, remove that
+   exact worktree, delete the exact local feature branch, and delete its remote
+   branch if present. Stop before cleanup if any path, branch, or expected SHA is
+   ambiguous. Close related issues only after their fixes reach main.
 
 Report: whether you landed successfully, the resulting main commit SHA, the
-cherry-picked feature SHAs, issue/PR state changes, and anything you stopped short
-on and why.`
+cherry-picked feature SHAs, branch/worktree cleanup, issue/PR state changes, and
+anything you stopped short on and why.`
 
 const FILED_ISSUES_PROP = { filedIssues: { type: 'array', items: { type: 'string' }, description: 'GitHub issue numbers/URLs filed for out-of-scope findings, if any.' } }
 

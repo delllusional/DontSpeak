@@ -45,11 +45,11 @@ if (active?.conflict) {
 }
 
 if (!record) {
-  // Grok often skips PreToolUse (no session id / untrusted hooks). Live-resolve
-  // from ~/.grok/sessions + active_sessions.json so the trailer still stamps.
-  if (active?.client === "grok") {
+  // Some tool surfaces skip PreToolUse capture. Resolve from the active client's
+  // session store so the trailer still stamps from exact runtime metadata.
+  if (active?.client === "codex" || active?.client === "grok") {
     const resolved = resolveAttribution(
-      "grok",
+      active.client,
       { cwd: root, sessionId: active.sessionId },
       { root },
     );
