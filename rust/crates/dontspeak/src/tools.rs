@@ -157,8 +157,7 @@ struct UsageArgs {
 #[serde(default, deny_unknown_fields)]
 struct SpeakArgs {
     text: Option<String>,
-    voice: Option<String>,
-    rate: Option<f32>,
+    tts_args: Option<Value>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -459,12 +458,15 @@ fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String,
     if text.trim().is_empty() {
         return Err("`text` is required.".into());
     }
+    if let Some(args) = &a.tts_args {
+        ds_config::TtsArgPools::parse(args)
+            .map_err(|error| format!("invalid speak arguments: {error}"))?;
+    }
     match ds_ipc::request(
         sock,
         &Request::Speak {
             text,
-            voice: a.voice,
-            rate: a.rate,
+            tts_args: a.tts_args,
             session: session_id(),
             source: client,
         },
@@ -772,15 +774,16 @@ mod drift {
     }
 
     /// Drift guard: exhaustive literals break compile on new fields; schema name/type mismatch
-    /// fails asserts. `rate` non-integral so it is `number` not `integer`.
+    /// fails asserts.
     #[test]
     fn tool_schemas_match_arg_structs() {
         assert_tool_matches(
             "speak",
             serde_json::to_value(SpeakArgs {
                 text: Some("hi".into()),
-                voice: Some("af_sarah".into()),
-                rate: Some(1.25),
+                tts_args: Some(json!({
+                    "kokoro": { "voice": "af_sarah", "language": "en", "rate": 1.25 }
+                })),
             })
             .unwrap(),
         );

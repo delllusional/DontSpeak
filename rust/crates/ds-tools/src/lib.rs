@@ -35,6 +35,8 @@ enum PType {
     /// Nested per-engine/model string-array voice pools.
     VoicePools,
     ParamPools,
+    /// Per-engine/model arguments for one utterance.
+    TtsArgs,
     /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
     Gain,
 }
@@ -96,8 +98,7 @@ static TOOLS: &[Tool] = &[
         description: SPEAK,
         params: &[
             p("text", PType::Str, true, SPEAK_TEXT),
-            p("voice", PType::Str, false, SPEAK_VOICE),
-            p("rate", PType::Num(0.5, 2.0), false, SPEAK_RATE),
+            p("tts_args", PType::TtsArgs, false, SPEAK_TTS_ARGS),
         ],
         min_one: false,
         annotations: annotations(false, false, false),
@@ -407,6 +408,11 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
             "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice parameter objects; see voices"
                 .into(),
         ),
+        PType::TtsArgs if ds_config::TtsArgPools::parse(value).is_ok() => Ok(()),
+        PType::TtsArgs => Err(
+            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice utterance arguments; see voices"
+                .into(),
+        ),
         PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
         PType::Gain => Err("must be `auto` or a number from 0.5 to 20".into()),
     }
@@ -549,6 +555,47 @@ fn tts_param_pool_properties() -> Value {
         properties.insert(
             descriptor.id.to_string(),
             setting_object(descriptor.config_params),
+        );
+    }
+    Value::Object(properties)
+}
+
+fn tts_arg_pool_properties() -> Value {
+    let target = |params: &[ds_config::TtsParamDescriptor], language: Value| {
+        let mut args = Map::new();
+        args.insert(
+            "voice".to_string(),
+            json!({ "type": "string", "minLength": 1 }),
+        );
+        args.insert("language".to_string(), language);
+        for param in params {
+            args.insert(param.key.to_string(), tts_param_schema(param));
+        }
+        json!({
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": Value::Object(args),
+        })
+    };
+
+    let mut properties = Map::new();
+    properties.insert(
+        "system".to_string(),
+        target(
+            ds_config::SYSTEM_TTS_PARAMS,
+            json!({ "type": "string", "minLength": 1 }),
+        ),
+    );
+    for descriptor in &ds_config::TTS_MODELS {
+        let language = if descriptor.detects_language_automatically() {
+            json!({ "type": "string", "minLength": 1 })
+        } else {
+            json!({ "type": "string", "enum": descriptor.languages })
+        };
+        properties.insert(
+            descriptor.id.to_string(),
+            target(descriptor.config_params, language),
         );
     }
     Value::Object(properties)
@@ -834,6 +881,13 @@ fn param_schema(param: &Param) -> Value {
             "additionalProperties": false,
             "properties": tts_param_pool_properties()
         }),
+        PType::TtsArgs => json!({
+            "type": "object",
+            "description": d,
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": tts_arg_pool_properties()
+        }),
         // No top-level `type` — `oneOf` of the two accepted shapes.
         PType::Gain => json!({
             "description": d,
@@ -878,6 +932,9 @@ fn param_ui(param: &Param) -> Value {
         PType::ParamPools => {
             o.insert("type".into(), json!("object"));
         }
+        PType::TtsArgs => {
+            o.insert("type".into(), json!("object"));
+        }
         PType::Gain => {
             o.insert("type".into(), json!("number_or_enum"));
             o.insert("enum".into(), json!(["auto"]));
@@ -895,10 +952,33 @@ mod tests {
     #[test]
     fn runtime_validation_matches_advertised_constraints() {
         let cases = [
-            ("speak", json!({"text": "hello", "rate": 1.25}), true),
-            ("speak", json!({"rate": 1.25}), false),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"kokoro": {"voice": "af_sarah", "language": "en", "rate": 1.25}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"tts_args": {"system": {"rate": 1.25}}}),
+                false,
+            ),
             ("speak", json!({"text": 7}), false),
-            ("speak", json!({"text": "hello", "rate": 2.1}), false),
+            ("speak", json!({"text": "hello", "rate": 1.25}), false),
+            (
+                "speak",
+                json!({"text": "hello", "voice": "af_sarah"}),
+                false,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"qwen": {"rate": 1.25}}}),
+                false,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"kokoro": {"language": "ru"}}}),
+                false,
+            ),
             ("listen", json!({"seconds": 60}), true),
             ("listen", json!({"seconds": 0}), false),
             ("listen", json!({"seconds": 1.5}), false),
@@ -1239,9 +1319,59 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["text", "voice", "rate"],
+            ["text", "tts_args"],
             "speak params keep their authored order"
         );
+    }
+
+    #[test]
+    fn speak_tts_args_schema_matches_every_target_descriptor() {
+        let catalog = catalog();
+        let speak = catalog
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "speak")
+            .unwrap();
+        let targets = speak["inputSchema"]["properties"]["tts_args"]["properties"]
+            .as_object()
+            .unwrap();
+        let mut advertised_targets: Vec<&str> = targets.keys().map(String::as_str).collect();
+        advertised_targets.sort_unstable();
+        let mut expected_targets = ds_config::TtsModel::TOKENS.to_vec();
+        expected_targets.push("system");
+        expected_targets.sort_unstable();
+        assert_eq!(advertised_targets, expected_targets);
+
+        let assert_target = |target: &str, params: &[ds_config::TtsParamDescriptor]| {
+            let properties = targets[target]["properties"].as_object().unwrap();
+            let mut advertised: Vec<&str> = properties.keys().map(String::as_str).collect();
+            advertised.sort_unstable();
+            let mut expected = vec!["language", "voice"];
+            expected.extend(params.iter().map(|param| param.key));
+            expected.sort_unstable();
+            assert_eq!(advertised, expected, "{target} speak arguments drifted");
+            assert_eq!(targets[target]["minProperties"], 1);
+            assert_eq!(targets[target]["additionalProperties"], false);
+        };
+        assert_target("system", ds_config::SYSTEM_TTS_PARAMS);
+        for descriptor in &ds_config::TTS_MODELS {
+            assert_target(descriptor.id, descriptor.config_params);
+            if descriptor.detects_language_automatically() {
+                assert!(
+                    targets[descriptor.id]["properties"]["language"]
+                        .get("enum")
+                        .is_none()
+                );
+            } else {
+                assert_eq!(
+                    targets[descriptor.id]["properties"]["language"]["enum"],
+                    json!(descriptor.languages),
+                    "{} language schema drifted",
+                    descriptor.id
+                );
+            }
+        }
     }
 
     /// PARITY GUARD: set_config enums must list exactly the backing ds_config tokens.

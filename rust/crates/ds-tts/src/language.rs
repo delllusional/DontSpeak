@@ -98,6 +98,11 @@ fn detector_for(model: ds_config::TtsModel) -> &'static Detector {
     DETECTORS[model as usize].get_or_init(|| Detector::with_allowlist(model_allowlist(model)))
 }
 
+fn detector_for_any_language() -> &'static Detector {
+    static DETECTOR: OnceLock<Detector> = OnceLock::new();
+    DETECTOR.get_or_init(|| Detector::with_allowlist(full_range()))
+}
+
 /// One whatlang verdict scoped to `model`: the ISO code plus how much evidence backs it.
 struct Classified {
     code: &'static str,
@@ -107,9 +112,9 @@ struct Classified {
     reliable: bool,
 }
 
-fn classify(text: &str, model: ds_config::TtsModel) -> Classified {
+fn classify_with(text: &str, detector: &Detector, target: &str) -> Classified {
     let prose = crate::normalize_spoken_text(text);
-    let detected: Option<Info> = detector_for(model).detect(&prose);
+    let detected: Option<Info> = detector.detect(&prose);
     let code = detected
         .as_ref()
         .map(|info| language_code(info.lang()))
@@ -121,7 +126,7 @@ fn classify(text: &str, model: ds_config::TtsModel) -> Classified {
     log::debug!(
         target: "tts",
         "whatlang detected {code} for {}{} at confidence {:.2} over {} chars",
-        model.as_str(),
+        target,
         if detected.is_none() { " (no match, default)" } else { "" },
         detected.as_ref().map_or(0.0, Info::confidence),
         prose.chars().count()
@@ -131,6 +136,14 @@ fn classify(text: &str, model: ds_config::TtsModel) -> Classified {
         confidence: detected.as_ref().map_or(0.0, Info::confidence),
         reliable: detected.as_ref().is_some_and(Info::is_reliable),
     }
+}
+
+fn classify(text: &str, model: ds_config::TtsModel) -> Classified {
+    classify_with(text, detector_for(model), model.as_str())
+}
+
+fn classify_any_language(text: &str) -> Classified {
+    classify_with(text, detector_for_any_language(), "system")
 }
 
 /// Detect the language of `text` scoped to `model`'s supported set; ambiguous / unspeakable
@@ -158,11 +171,25 @@ const MIN_CHUNK_CONFIDENCE: f64 = 0.3;
 /// the chunk's own evidence is too thin to stand, letting a bare digest inherit the
 /// language of the reply it came from instead of taking a coin flip.
 pub fn chunk_language(chunk: &str, corpus: Option<&str>, model: ds_config::TtsModel) -> String {
-    let own = classify(chunk, model);
+    choose_chunk_language(chunk, corpus, |text| classify(text, model))
+}
+
+/// System speech has no built-in-model language allowlist, so classify across every mapped
+/// language while retaining the same short-chunk confidence policy.
+pub fn chunk_language_any(chunk: &str, corpus: Option<&str>) -> String {
+    choose_chunk_language(chunk, corpus, classify_any_language)
+}
+
+fn choose_chunk_language(
+    chunk: &str,
+    corpus: Option<&str>,
+    classify: impl Fn(&str) -> Classified,
+) -> String {
+    let own = classify(chunk);
     if own.reliable || own.confidence >= MIN_CHUNK_CONFIDENCE {
         return own.code.to_string();
     }
-    match corpus.map(|text| classify(text, model)) {
+    match corpus.map(classify) {
         Some(turn) if turn.reliable => turn.code.to_string(),
         _ => DEFAULT_LANGUAGE.to_string(),
     }
@@ -254,6 +281,13 @@ mod tests {
         assert_eq!(detect_language(russian, TtsModel::Qwen), "ru");
         assert_eq!(detect_language(russian, TtsModel::Chatterbox), "ru");
         assert_eq!(detect_language(russian, TtsModel::OmniVoice), "ru");
+    }
+
+    #[test]
+    fn system_detection_is_not_scoped_to_the_built_in_model() {
+        let russian = "Этот ответ написан на русском языке.";
+        assert_eq!(chunk_language_any(russian, None), "ru");
+        assert_ne!(chunk_language(russian, None, TtsModel::Kokoro), "ru");
     }
 
     #[test]

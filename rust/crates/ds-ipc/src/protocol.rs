@@ -43,13 +43,11 @@ pub enum Request {
         synthetic: bool,
         source: ClientSource,
     },
-    /// MCP speak (reply; survives record-barge when resume policy set). Overrides optional.
+    /// MCP speak (reply; survives record-barge when resume policy set).
     Speak {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        voice: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        rate: Option<f32>,
+        tts_args: Option<Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         source: ClientSource,
@@ -209,8 +207,9 @@ mod tests {
             Request::ListSpeakers,
             Request::Speak {
                 text: "hello".into(),
-                voice: Some("af_sarah".into()),
-                rate: Some(1.5),
+                tts_args: Some(serde_json::json!({
+                    "kokoro": { "voice": "af_sarah", "language": "en", "rate": 1.5 }
+                })),
                 session: Some("sess-1".into()),
                 source: ClientSource::ClaudeCode,
             },

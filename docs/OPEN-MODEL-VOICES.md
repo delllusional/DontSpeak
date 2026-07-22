@@ -5,7 +5,7 @@ Plan for [#152](https://github.com/delllusional/DontSpeak/issues/152).
 **Risk:** yes (TTS inference contracts, MCP surface, on-disk user voice packages)
 
 **Invariant: all voice-selection interaction is via MCP.**  
-No host-only picker, no hand-editing `config.toml` as the supported way to choose a voice, no CLI-only sticky select. Agents and any future UI use the same MCP tools (`voices`, `manage_voices`, `set_config` for pool membership, `speak.voice`).
+No host-only picker, no hand-editing `config.toml` as the supported way to choose a voice, no CLI-only sticky select. Agents and any future UI use the same MCP tools (`voices`, `manage_voices`, `set_config` for pool membership, `speak.tts_args.<target>.voice`).
 
 ---
 
@@ -75,7 +75,7 @@ Stop treating every model as `Vec<catalog_id>`. Introduce **voice kinds** under 
 
 ```text
 VoiceSpec {
-  id: String,                 // pool key, agent assignment, speak.voice
+  id: String,                 // pool key, agent assignment, per-target speak voice
   kind: Catalog | Design | Clone,
   // Catalog: kokoro/qwen fixed id
   // Design:  structured instruct (Omni) + optional materialize-to-clone
@@ -102,7 +102,7 @@ VoiceSpec {
 | **`voices`** | Discover packages: `id`, `kind`, label, attributes/ref summary, `active` (in pool), optional “assigned to this agent”. Read-only. |
 | **`manage_voices`** (new) | Lifecycle + pin: `list`, `create`, `update`, `delete`, **`select`**, `materialize`. |
 | **`set_config`** | Global pool membership only: `tts_voices.chatterbox` / `omnivoice` = **registered package ids**. Does **not** create packages or accept raw instruct prose as pool entries. Invoked via MCP like any other config change. |
-| **`speak`** | Optional `voice` = package id for this utterance; omit → agent sticky from last `select` / assignment. |
+| **`speak`** | Optional `tts_args.<target>.voice` = package id for this utterance; omit → agent sticky from last `select` / assignment. |
 
 Not supported as product paths for selection:
 
@@ -150,7 +150,7 @@ Wire sketch (illustrative):
 | **Agent sticky** | `(ClientSource, language) → voice id` | Same map; ids are **package ids**. `manage_voices select` writes it deliberately. |
 | **Session sticky** | No | Optional later; not required for #152. |
 | **Description sticky** | No | Design alone drifts; `materialize` → clone for true lock. |
-| **Per-utterance** | `speak.voice` | Package id override; does not change sticky unless product chooses to. |
+| **Per-utterance** | `speak.tts_args.<target>.voice` | Package id override; does not change sticky unless product chooses to. |
 
 **UX promise agents can rely on:**
 

@@ -23,8 +23,22 @@ Queue text for spoken playback.
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | Text to speak. |
-| `voice` | string | no | Voice ID. Omit to use the calling agent's assigned voice. |
-| `rate` | number 0.5–2.0 | no | System/Kokoro playback speed. Defaults to that engine/model's configured rate; other models ignore it. |
+| `tts_args` | object | no | Per-engine/model utterance arguments keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice`. Each target accepts `voice`, `language`, and its configured parameter names (see `voices`). Omitted values use the assigned voice, detected language, and configured parameters. |
+
+Only the target active at playback is applied. Its parameter values override the matching
+configured values for this utterance; other configured values remain in effect. `rate` is valid
+only under `system` and `kokoro`; the other model blocks use the parameters advertised by
+`voices`. Flat `voice`, `language`, and `rate` arguments are not accepted.
+
+```json
+{
+  "text": "Guten Morgen.",
+  "tts_args": {
+    "system": { "voice": "Anna", "language": "de", "rate": 1.1 },
+    "qwen": { "voice": "ryan", "language": "de", "repetition_penalty": 1.2 }
+  }
+}
+```
 
 ## listen
 
@@ -60,8 +74,9 @@ With `detail=true`, nested model lifecycle/stats land under the `status` key
 (not `models`). Engine tokens are config tokens (`built_in` / `system` / `off`).
 Concise `model` is the configured built-in model even when the engine resolves to
 `system`/`off`. `rates` reports the independently configured `system` and `kokoro`
-rates. Language is detected per utterance and is not a persisted setting; the detailed
-`status` section reports runtime model-language state only.
+rates. Language is detected per utterance and is not a persisted setting;
+`speak.tts_args` may override it for one utterance. The detailed `status` section reports
+runtime model-language state only.
 
 The concise `state` includes the status sequence, TTS/STT lifecycle rows, active download
 targets with byte totals plus starting bytes and elapsed seconds, the current resolved voice

@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use ds_config::{ClientSource, Paths, VoiceConfig};
+use ds_config::{ClientSource, Paths, TtsArgPools, VoiceConfig};
 
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
@@ -120,17 +120,30 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
     }
 }
 
-fn playback_rate(
-    cfg: &VoiceConfig,
-    engine: Option<ds_config::TtsEngine>,
-    override_rate: Option<f32>,
-) -> f32 {
+fn playback_rate(cfg: &VoiceConfig, engine: Option<ds_config::TtsEngine>) -> f32 {
     match engine {
-        Some(ds_config::TtsEngine::System) => override_rate.unwrap_or_else(|| cfg.system_rate()),
+        Some(ds_config::TtsEngine::System) => cfg.system_rate(),
         Some(ds_config::TtsEngine::BuiltIn) if cfg.tts_model.descriptor().supports_rate => {
-            override_rate.unwrap_or_else(|| cfg.model_rate(cfg.tts_model))
+            cfg.model_rate(cfg.tts_model)
         }
         _ => 1.0,
+    }
+}
+
+fn apply_tts_arg_params(
+    cfg: &mut VoiceConfig,
+    engine: Option<ds_config::TtsEngine>,
+    args: Option<&ds_config::TtsTargetArgs>,
+) {
+    let (Some(engine), Some(args)) = (engine, args) else {
+        return;
+    };
+    match engine {
+        ds_config::TtsEngine::System => cfg.tts_params.system.extend(args.params().clone()),
+        ds_config::TtsEngine::BuiltIn => cfg
+            .tts_params
+            .for_model_mut(cfg.tts_model)
+            .extend(args.params().clone()),
     }
 }
 
@@ -172,8 +185,7 @@ enum QueueAction {
         text: String,
         /// ISO code detected for this chunk at admit; clamped to the live model at play.
         language: String,
-        voice: Option<String>,
-        rate: Option<f32>,
+        tts_args: Option<Box<TtsArgPools>>,
     },
     Earcon(ds_earcon::EarconEvent),
 }
@@ -478,12 +490,11 @@ impl TtsQueue {
         self.tts_active.store(on, Ordering::SeqCst);
     }
 
-    /// Enqueue speech (empty ignored). Optional `voice`/`rate`; `source` → `activity.speaker`.
+    /// Enqueue speech (empty ignored). Optional target args; `source` → `activity.speaker`.
     pub fn enqueue(
         &self,
         text: String,
-        voice: Option<String>,
-        rate: Option<f32>,
+        tts_args: Option<TtsArgPools>,
         source: ClientSource,
         session: Option<String>,
     ) -> Result<(), String> {
@@ -498,8 +509,7 @@ impl TtsQueue {
             QueueAction::Speech {
                 language: self.chunk_language(&text, None),
                 text,
-                voice,
-                rate,
+                tts_args: tts_args.map(Box::new),
             },
             source,
             session,
@@ -683,8 +693,7 @@ impl TtsQueue {
         let action = QueueAction::Speech {
             language: self.chunk_language(&text, detection_text.as_deref()),
             text,
-            voice: None,
-            rate: None,
+            tts_args: None,
         };
 
         if let Some(id) = narration_id {
@@ -705,8 +714,11 @@ impl TtsQueue {
     /// the turn text the producer sent, used only when the chunk cannot classify itself.
     fn chunk_language(&self, text: &str, corpus: Option<&str>) -> String {
         // Config Copy, so the lock drops before detection runs (same as play_speech).
-        let model = self.config.lock().unwrap().tts_model;
-        ds_tts::chunk_language(text, corpus, model)
+        let cfg = self.config.lock().unwrap();
+        match cfg.resolved_tts() {
+            Some(ds_config::TtsEngine::System) => ds_tts::chunk_language_any(text, corpus),
+            _ => ds_tts::chunk_language(text, corpus, cfg.tts_model),
+        }
     }
 
     pub fn forget_narration_session(&self, session: &str) {
@@ -1203,7 +1215,8 @@ impl TtsQueue {
         let name = ds_tts::enumerate::voice_display_name(engine, cfg.tts_model, &voice);
         let idx = GREET_ROTATION.fetch_add(1, Ordering::Relaxed);
         let text = greeting_line(name.as_deref(), idx);
-        if let Err(e) = self.enqueue(text, Some(voice), None, source, session) {
+        let args = TtsArgPools::with_voice(engine, cfg.tts_model, voice);
+        if let Err(e) = self.enqueue(text, Some(args), source, session) {
             log::warn!(target: "ttsq", "greeting rejected: {e}");
         }
     }
@@ -1249,11 +1262,10 @@ impl TtsQueue {
                 QueueAction::Speech {
                     text,
                     language,
-                    voice,
-                    rate,
+                    tts_args,
                 } => {
                     let (outcome, resume_skip) =
-                        self.play_speech(&item, gen0, text, language, voice.as_ref(), *rate);
+                        self.play_speech(&item, gen0, text, language, tts_args.as_deref());
                     item.resume_skip = resume_skip;
                     if outcome == SpeechOutcome::Requeue {
                         self.requeue_if_resuming(item, gen0);
@@ -1284,27 +1296,22 @@ impl TtsQueue {
         item: &Item,
         gen0: u64,
         text: &str,
-        language: &str,
-        voice_override: Option<&String>,
-        rate_override: Option<f32>,
+        detected_language: &str,
+        tts_args: Option<&TtsArgPools>,
     ) -> (SpeechOutcome, usize) {
-        // Read the model as a Copy local so the config lock drops before the clamp.
-        let model = self.config.lock().unwrap().tts_model;
-        // The item's language was detected under the admit-time model's language set; a
-        // model switch since then can leave a code the live model cannot speak, which the
-        // clamp resolves to that model's default.
-        let language = ds_tts::supported_language(language, model);
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
-            let (engine, voice, rate, params) =
-                match self.gate_item(item, gen0, voice_override, rate_override, Some(&language)) {
+            let (engine, model, voice, language, rate, params) =
+                match self.gate_item(item, gen0, detected_language, tts_args) {
                     GateOutcome::Play {
                         engine,
+                        model,
                         voice,
+                        language,
                         rate,
                         params,
-                    } => (engine, voice, rate, params),
+                    } => (engine, model, voice, language, rate, params),
                     GateOutcome::Requeue => return (SpeechOutcome::Requeue, resume_skip),
                     GateOutcome::Drop(reason) => {
                         log::warn!(target: "ttsq", "queued speak could not start: {reason}");
@@ -1320,12 +1327,7 @@ impl TtsQueue {
             self.set_tts_active(true);
             let result =
                 self.speak_one(engine, text, &voice, &language, rate, &params, resume_skip);
-            let model_supports_resume = self
-                .config
-                .lock()
-                .unwrap()
-                .tts_model_descriptor()
-                .supports_resume;
+            let model_supports_resume = model.descriptor().supports_resume;
             if matches!(engine, Some(ds_config::TtsEngine::BuiltIn)) && model_supports_resume {
                 resume_skip = resume_skip.max(self.tts.last_speak_progress());
             }
@@ -1357,9 +1359,8 @@ impl TtsQueue {
         &self,
         item: &Item,
         gen0: u64,
-        voice_override: Option<&String>,
-        rate_override: Option<f32>,
-        language: Option<&str>,
+        detected_language: &str,
+        tts_args: Option<&TtsArgPools>,
     ) -> GateOutcome {
         loop {
             // Hold (don't drop): half-duplex mic live; focus gate (both duplex modes;
@@ -1385,23 +1386,32 @@ impl TtsQueue {
                 return GateOutcome::Requeue;
             }
 
-            let cfg = self.config.lock().unwrap().clone();
+            let mut cfg = self.config.lock().unwrap().clone();
+            let selected_engine = cfg.resolved_tts();
+            let target_args = selected_engine.and_then(|engine| {
+                tts_args.and_then(|args| args.for_target(engine, cfg.tts_model))
+            });
+            let requested_language = target_args
+                .and_then(ds_config::TtsTargetArgs::language)
+                .unwrap_or(detected_language);
+            // System accepts the detector/explicit code directly. Built-in models clamp an
+            // admit-time code after a model switch to the live model's supported default.
+            let language = match selected_engine {
+                Some(ds_config::TtsEngine::System) => requested_language.to_string(),
+                _ => ds_tts::supported_language(requested_language, cfg.tts_model),
+            };
             // Engine + base voice come from config via the SAME shared helper the greeting
             // uses — System and built-in both claim this agent's configured pool
             // voice. Off / no usable rung / empty pool ⇒ a blank voice (speak_one no-ops,
-            // value unused). A per-call `item.voice` (e.g. the MCP `speak` voice arg) then
-            // overrides just the voice string within the chosen engine.
-            let (engine, base_voice) = match self.resolve_engine_voice(&cfg, item.source, language)
-            {
-                Some((e, v)) => (Some(e), v),
-                None => (None, String::new()),
-            };
-            // A per-item voice (MCP `speak` arg, greeting, queued narration) is captured under the
-            // model active at enqueue time. If the model changed before playback, a built-in voice
-            // that belongs to another model must NOT reach the shim — Kokoro would waste a synth on
-            // it and fall back, and Chatterbox/Qwen/OmniVoice have no fallback and would drop the
-            // utterance. Fall back to the voice resolved for the ACTIVE model instead. System voices
-            // are freeform names, so only built-in ids are validated.
+            // value unused). The selected target's `voice` then overrides that base.
+            let (engine, base_voice) =
+                match self.resolve_engine_voice(&cfg, item.source, Some(&language)) {
+                    Some((e, v)) => (Some(e), v),
+                    None => (None, String::new()),
+                };
+            // Only the live target's block participates, so an override for another model cannot
+            // leak across a config switch. System voices remain freeform; built-in ids are clamped.
+            let voice_override = target_args.and_then(ds_config::TtsTargetArgs::voice);
             let voice = match voice_override {
                 Some(v)
                     if engine == Some(ds_config::TtsEngine::BuiltIn)
@@ -1414,10 +1424,11 @@ impl TtsQueue {
                     );
                     base_voice
                 }
-                Some(v) => v.clone(),
+                Some(v) => v.to_string(),
                 None => base_voice,
             };
-            let rate = playback_rate(&cfg, engine, rate_override);
+            apply_tts_arg_params(&mut cfg, selected_engine, target_args);
+            let rate = playback_rate(&cfg, engine);
             let params = cfg
                 .tts_model
                 .descriptor()
@@ -1443,7 +1454,9 @@ impl TtsQueue {
             }
             return GateOutcome::Play {
                 engine,
+                model: cfg.tts_model,
                 voice,
+                language,
                 rate,
                 params,
             };
@@ -1653,7 +1666,9 @@ enum ReadyOutcome {
 enum GateOutcome {
     Play {
         engine: Option<ds_config::TtsEngine>,
+        model: ds_config::TtsModel,
         voice: String,
+        language: String,
         rate: f32,
         /// Helper re-resolution handles model-switch races by falling back to defaults.
         params: ds_config::ResolvedTtsParams,
@@ -1842,20 +1857,12 @@ mod tests {
             .insert("rate".into(), ds_config::TtsParamValue::Float(0.8));
 
         assert_eq!(
-            playback_rate(&cfg, Some(ds_config::TtsEngine::System), None),
+            playback_rate(&cfg, Some(ds_config::TtsEngine::System)),
             1.25
         );
         assert_eq!(
-            playback_rate(&cfg, Some(ds_config::TtsEngine::System), Some(1.5)),
-            1.5
-        );
-        assert_eq!(
-            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), None),
+            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn)),
             0.8
-        );
-        assert_eq!(
-            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), Some(1.1)),
-            1.1
         );
 
         for model in [
@@ -1865,13 +1872,44 @@ mod tests {
         ] {
             cfg.tts_model = model;
             assert_eq!(
-                playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), Some(1.5)),
+                playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn)),
                 1.0,
-                "{} must ignore rate overrides",
+                "{} has no rate parameter",
                 model.as_str()
             );
         }
-        assert_eq!(playback_rate(&cfg, None, Some(1.5)), 1.0);
+        assert_eq!(playback_rate(&cfg, None), 1.0);
+    }
+
+    #[test]
+    fn per_target_args_override_only_the_live_target_settings() {
+        let pools = TtsArgPools::parse(&serde_json::json!({
+            "system": { "rate": 1.5 },
+            "kokoro": { "rate": 1.1 },
+            "qwen": { "repetition_penalty": 1.8 }
+        }))
+        .unwrap();
+        let mut cfg = VoiceConfig::default();
+        let model = cfg.tts_model;
+
+        apply_tts_arg_params(
+            &mut cfg,
+            Some(ds_config::TtsEngine::System),
+            pools.for_target(ds_config::TtsEngine::System, model),
+        );
+        assert_eq!(playback_rate(&cfg, Some(ds_config::TtsEngine::System)), 1.5);
+        assert!(cfg.tts_params.kokoro.is_empty());
+
+        apply_tts_arg_params(
+            &mut cfg,
+            Some(ds_config::TtsEngine::BuiltIn),
+            pools.for_target(ds_config::TtsEngine::BuiltIn, model),
+        );
+        assert_eq!(
+            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn)),
+            1.1
+        );
+        assert!(cfg.tts_params.qwen.is_empty());
     }
 
     #[test]
@@ -1879,8 +1917,7 @@ mod tests {
         let speech = QueueAction::Speech {
             text: "the held narration".into(),
             language: "en".into(),
-            voice: None,
-            rate: None,
+            tts_args: None,
         };
         // Resume mode (paused) keeps a non-empty item → re-enqueued to continue.
         assert!(should_requeue(true, &speech));
@@ -1892,8 +1929,7 @@ mod tests {
             &QueueAction::Speech {
                 text: "   \n\t ".into(),
                 language: "en".into(),
-                voice: None,
-                rate: None,
+                tts_args: None,
             }
         ));
         assert!(should_requeue(
@@ -2112,8 +2148,7 @@ mod tests {
             action: QueueAction::Speech {
                 text: "x".into(),
                 language: "en".into(),
-                voice: None,
-                rate: None,
+                tts_args: None,
             },
             source: ClientSource::Unknown,
             session: session.map(str::to_string),
@@ -2308,8 +2343,7 @@ mod tests {
             action: QueueAction::Speech {
                 text: text.to_string(),
                 language: "en".into(),
-                voice: None,
-                rate: None,
+                tts_args: None,
             },
             source: ClientSource::Unknown,
             session: None,
@@ -2440,23 +2474,17 @@ mod tests {
     #[test]
     fn enqueue_drops_empty_text_and_counts_real_items() {
         let q = mk_queue();
-        q.enqueue("".into(), None, None, ClientSource::Unknown, None)
+        q.enqueue("".into(), None, ClientSource::Unknown, None)
             .unwrap();
-        q.enqueue("   \n\t".into(), None, None, ClientSource::Unknown, None)
+        q.enqueue("   \n\t".into(), None, ClientSource::Unknown, None)
             .unwrap();
         assert_eq!(
             q.tts_status_sample().queued,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
-        q.enqueue(
-            "hello there".into(),
-            None,
-            None,
-            ClientSource::Unknown,
-            None,
-        )
-        .unwrap();
+        q.enqueue("hello there".into(), None, ClientSource::Unknown, None)
+            .unwrap();
         assert_eq!(
             q.tts_status_sample().queued,
             1,
@@ -2468,21 +2496,15 @@ mod tests {
     fn speech_and_cues_preserve_fifo_action_order() {
         let q = mk_queue();
         let session = Some("turn-1".to_string());
-        q.enqueue(
-            "first".into(),
-            None,
-            None,
-            ClientSource::Unknown,
-            session.clone(),
-        )
-        .unwrap();
+        q.enqueue("first".into(), None, ClientSource::Unknown, session.clone())
+            .unwrap();
         q.enqueue_earcon(
             ds_earcon::EarconEvent::ReplyDone,
             ClientSource::Unknown,
             session.clone(),
         )
         .unwrap();
-        q.enqueue("later".into(), None, None, ClientSource::Unknown, session)
+        q.enqueue("later".into(), None, ClientSource::Unknown, session)
             .unwrap();
 
         let items = q.items.lock().unwrap();
@@ -2711,7 +2733,6 @@ mod tests {
             .enqueue(
                 "x".repeat(MAX_SPEAK_BYTES + 1),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some("oversize".into()),
             )
@@ -2734,7 +2755,6 @@ mod tests {
 
         q.enqueue(
             "hello".into(),
-            None,
             None,
             ClientSource::ClaudeCode,
             Some("sess".into()),
@@ -2814,7 +2834,6 @@ mod tests {
         q.enqueue(
             "spoken".into(),
             None,
-            None,
             ClientSource::ClaudeCode,
             Some("sess".into()),
         )
@@ -2849,7 +2868,6 @@ mod tests {
         q.enqueue(
             "waiting".into(),
             None,
-            None,
             ClientSource::ClaudeCode,
             Some("a".into()),
         )
@@ -2880,7 +2898,6 @@ mod tests {
         q.enqueue(
             "   ".into(),
             None,
-            None,
             ClientSource::ClaudeCode,
             Some("a".into()),
         )
@@ -2889,7 +2906,6 @@ mod tests {
         let _ = q
             .enqueue(
                 "x".repeat(MAX_SPEAK_BYTES + 1),
-                None,
                 None,
                 ClientSource::ClaudeCode,
                 Some("a".into()),
@@ -2956,7 +2972,6 @@ mod tests {
         q.enqueue(
             "pending".into(),
             None,
-            None,
             ClientSource::ClaudeCode,
             Some("a".into()),
         )
@@ -2984,20 +2999,13 @@ mod tests {
     fn enqueue_bounds_each_session_and_keeps_other_sessions_usable() {
         let q = mk_queue();
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
-            q.enqueue(
-                "x".into(),
-                None,
-                None,
-                ClientSource::Unknown,
-                Some("full".into()),
-            )
-            .unwrap();
+            q.enqueue("x".into(), None, ClientSource::Unknown, Some("full".into()))
+                .unwrap();
         }
 
         let err = q
             .enqueue(
                 "overflow".into(),
-                None,
                 None,
                 ClientSource::Unknown,
                 Some("full".into()),
@@ -3006,7 +3014,6 @@ mod tests {
         assert!(err.contains("session speech queue is full"));
         q.enqueue(
             "still accepted".into(),
-            None,
             None,
             ClientSource::Unknown,
             Some("other".into()),
@@ -3025,7 +3032,6 @@ mod tests {
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
             q.enqueue(
                 "filler".into(),
-                None,
                 None,
                 ClientSource::Unknown,
                 Some(session.into()),
@@ -3115,7 +3121,6 @@ mod tests {
             q.enqueue(
                 "x".into(),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some(format!("session-{i}")),
             )
@@ -3125,7 +3130,6 @@ mod tests {
         let err = q
             .enqueue(
                 "overflow".into(),
-                None,
                 None,
                 ClientSource::Unknown,
                 Some("last".into()),
@@ -3161,7 +3165,6 @@ mod tests {
             .enqueue(
                 "narration survives".into(),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some("overflow".into()),
             )
@@ -3191,7 +3194,6 @@ mod tests {
             .enqueue(
                 "still admitted".into(),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some("held".into()),
             )
@@ -3204,7 +3206,6 @@ mod tests {
         for i in 0..MAX_PENDING_ITEMS {
             q.enqueue(
                 "x".into(),
-                None,
                 None,
                 ClientSource::Unknown,
                 Some(format!("session-{i}")),
@@ -3228,7 +3229,6 @@ mod tests {
                 .enqueue(
                     "x".repeat(MAX_SPEAK_BYTES),
                     None,
-                    None,
                     ClientSource::Unknown,
                     Some("same".into()),
                 )
@@ -3238,20 +3238,13 @@ mod tests {
             .enqueue(
                 "x".repeat(6144),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some("same".into()),
             )
             .unwrap();
         assert!(
             per_session
-                .enqueue(
-                    "x".into(),
-                    None,
-                    None,
-                    ClientSource::Unknown,
-                    Some("same".into())
-                )
+                .enqueue("x".into(), None, ClientSource::Unknown, Some("same".into()))
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -3262,7 +3255,6 @@ mod tests {
                 .enqueue(
                     "x".repeat(MAX_SPEAK_BYTES),
                     None,
-                    None,
                     ClientSource::Unknown,
                     Some(format!("session-{i}")),
                 )
@@ -3272,20 +3264,13 @@ mod tests {
             .enqueue(
                 "x".repeat(4096),
                 None,
-                None,
                 ClientSource::Unknown,
                 Some("exact".into()),
             )
             .unwrap();
         assert!(
             global
-                .enqueue(
-                    "x".into(),
-                    None,
-                    None,
-                    ClientSource::Unknown,
-                    Some("over".into())
-                )
+                .enqueue("x".into(), None, ClientSource::Unknown, Some("over".into()))
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -3997,8 +3982,7 @@ mod tests {
             let QueueAction::Speech {
                 text,
                 language,
-                voice,
-                rate,
+                tts_args,
             } = &spoken.action
             else {
                 unreachable!()
@@ -4008,8 +3992,7 @@ mod tests {
                 worker.generation.load(Ordering::SeqCst),
                 text,
                 language,
-                voice.as_ref(),
-                *rate,
+                tts_args.as_deref(),
             )
         })
     }
@@ -4308,7 +4291,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             done_tx
-                .send(gated.gate_item(&item("held across warm-up"), gen0, None, None, None))
+                .send(gated.gate_item(&item("held across warm-up"), gen0, "en", None))
                 .unwrap();
         });
         // The gate publishes in-flight once it passes the (currently clear) hold gate; give it
@@ -4343,7 +4326,6 @@ mod tests {
         // `enqueue` records the recency fallback.
         q.enqueue(
             "hi".into(),
-            None,
             None,
             ClientSource::Unknown,
             Some("recent-sess".into()),
@@ -4797,8 +4779,15 @@ mod tests {
         {
             let items = q.items.lock().unwrap();
             match &items[0].action {
-                QueueAction::Speech { voice, .. } => {
-                    assert_eq!(voice.as_deref(), Some(claimed.as_str()));
+                QueueAction::Speech {
+                    tts_args: Some(args),
+                    ..
+                } => {
+                    assert_eq!(
+                        args.for_target(ds_config::TtsEngine::BuiltIn, ds_config::TtsModel::Kokoro)
+                            .and_then(ds_config::TtsTargetArgs::voice),
+                        Some(claimed.as_str())
+                    );
                 }
                 other => panic!("greeting must queue speech, got {other:?}"),
             }
@@ -4879,14 +4868,8 @@ mod tests {
         let q = mk_queue();
         q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
         for text in ["hello from MCP", IT_QUOTE] {
-            q.enqueue(
-                text.into(),
-                None,
-                None,
-                ClientSource::Unknown,
-                Some("s".into()),
-            )
-            .unwrap();
+            q.enqueue(text.into(), None, ClientSource::Unknown, Some("s".into()))
+                .unwrap();
         }
         assert_eq!(queued_languages(&q), vec!["en", "it"]);
     }

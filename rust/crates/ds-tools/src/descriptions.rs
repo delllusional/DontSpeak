@@ -3,8 +3,10 @@
 
 pub const SPEAK: &str = "Queue text for spoken playback.";
 pub const SPEAK_TEXT: &str = "Text to speak.";
-pub const SPEAK_VOICE: &str = "Voice ID. Omit to use the calling agent's assigned voice.";
-pub const SPEAK_RATE: &str = "System/Kokoro playback speed. Defaults to that engine/model's configured rate; other models ignore it.";
+pub const SPEAK_TTS_ARGS: &str = "Per-engine/model utterance arguments keyed by `system`, \
+`kokoro`, `chatterbox`, `qwen`, or `omnivoice`. Each target accepts `voice`, `language`, and \
+its configured parameter names (see voices). Omitted values use the assigned voice, detected \
+language, and configured parameters.";
 
 pub const STOP: &str = "Stop this session's speech, or all speech if no session. Fades out.";
 

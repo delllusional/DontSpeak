@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::Provider;
+use crate::{Provider, TtsEngine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TtsModel {
@@ -116,6 +116,147 @@ pub struct TtsParamDescriptor {
 }
 
 pub type TtsParamMap = BTreeMap<String, TtsParamValue>;
+
+/// Overrides for one `speak` target. Parameter keys share the persistent
+/// `tts_params.<target>` descriptors; voice and language are utterance-only.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TtsTargetArgs {
+    voice: Option<String>,
+    language: Option<String>,
+    params: TtsParamMap,
+}
+
+impl TtsTargetArgs {
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.as_deref()
+    }
+
+    pub fn language(&self) -> Option<&str> {
+        self.language.as_deref()
+    }
+
+    pub fn params(&self) -> &TtsParamMap {
+        &self.params
+    }
+}
+
+/// Per-engine/model utterance overrides accepted by MCP `speak`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TtsArgPools {
+    system: Option<TtsTargetArgs>,
+    kokoro: Option<TtsTargetArgs>,
+    chatterbox: Option<TtsTargetArgs>,
+    qwen: Option<TtsTargetArgs>,
+    omnivoice: Option<TtsTargetArgs>,
+}
+
+impl TtsArgPools {
+    pub fn parse(value: &serde_json::Value) -> Result<Self, String> {
+        let targets = value
+            .as_object()
+            .filter(|targets| !targets.is_empty())
+            .ok_or_else(|| "tts_args must be a non-empty object".to_string())?;
+        let mut pools = Self::default();
+        for (target, raw) in targets {
+            let model = (target != "system")
+                .then(|| TtsModel::parse(target))
+                .flatten();
+            if target != "system" && model.is_none() {
+                return Err(format!("unknown tts_args target `{target}`"));
+            }
+            let entries = raw
+                .as_object()
+                .filter(|entries| !entries.is_empty())
+                .ok_or_else(|| format!("tts_args.{target} must be a non-empty object"))?;
+            let mut args = TtsTargetArgs::default();
+            for (key, raw) in entries {
+                match key.as_str() {
+                    "voice" => {
+                        let voice = raw
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|voice| !voice.is_empty())
+                            .ok_or_else(|| {
+                                format!("tts_args.{target}.voice must be a non-empty string")
+                            })?;
+                        args.voice = Some(voice.to_string());
+                    }
+                    "language" => {
+                        let language = raw
+                            .as_str()
+                            .map(str::trim)
+                            .filter(|language| !language.is_empty())
+                            .map(str::to_ascii_lowercase)
+                            .ok_or_else(|| {
+                                format!("tts_args.{target}.language must be a non-empty string")
+                            })?;
+                        if let Some(model) = model
+                            && !model.descriptor().accepts_detected_language(&language)
+                        {
+                            return Err(format!(
+                                "tts_args.{target}.language `{language}` is not supported"
+                            ));
+                        }
+                        args.language = Some(language);
+                    }
+                    _ => {
+                        let value: TtsParamValue =
+                            serde_json::from_value(raw.clone()).map_err(|_| {
+                                format!("tts_args.{target}.{key} has an unsupported value")
+                            })?;
+                        let value = match model {
+                            Some(model) => model.descriptor().validate_param(key, &value),
+                            None => validate_tts_param("system", SYSTEM_TTS_PARAMS, key, &value),
+                        }
+                        .map_err(|error| format!("tts_args.{target}: {error}"))?;
+                        args.params.insert(key.clone(), value);
+                    }
+                }
+            }
+            *pools.target_mut(target, model) = Some(args);
+        }
+        Ok(pools)
+    }
+
+    pub fn for_target(&self, engine: TtsEngine, model: TtsModel) -> Option<&TtsTargetArgs> {
+        match engine {
+            TtsEngine::System => self.system.as_ref(),
+            TtsEngine::BuiltIn => match model {
+                TtsModel::Kokoro => self.kokoro.as_ref(),
+                TtsModel::Chatterbox => self.chatterbox.as_ref(),
+                TtsModel::Qwen => self.qwen.as_ref(),
+                TtsModel::OmniVoice => self.omnivoice.as_ref(),
+            },
+        }
+    }
+
+    pub fn with_voice(engine: TtsEngine, model: TtsModel, voice: String) -> Self {
+        let mut pools = Self::default();
+        let target = if engine == TtsEngine::System {
+            "system"
+        } else {
+            model.as_str()
+        };
+        *pools.target_mut(target, (engine == TtsEngine::BuiltIn).then_some(model)) =
+            Some(TtsTargetArgs {
+                voice: Some(voice),
+                ..Default::default()
+            });
+        pools
+    }
+
+    fn target_mut(&mut self, target: &str, model: Option<TtsModel>) -> &mut Option<TtsTargetArgs> {
+        if target == "system" {
+            return &mut self.system;
+        }
+        match model.expect("validated model target") {
+            TtsModel::Kokoro => &mut self.kokoro,
+            TtsModel::Chatterbox => &mut self.chatterbox,
+            TtsModel::Qwen => &mut self.qwen,
+            TtsModel::OmniVoice => &mut self.omnivoice,
+        }
+    }
+}
 
 /// Complete validated params for one model: every declared key present
 /// ([`TtsModelDescriptor::resolve_params`] fills defaults and drops invalid entries).
@@ -518,6 +659,72 @@ pub fn tts_model_descriptor(id: &str) -> Option<&'static TtsModelDescriptor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speak_args_parse_target_specific_voice_language_and_params() {
+        let pools = TtsArgPools::parse(&serde_json::json!({
+            "system": { "voice": "Ava", "language": "RU", "rate": 1.25 },
+            "kokoro": { "voice": "af_sarah", "language": "it", "rate": 0.8 },
+            "chatterbox": { "language": "ru", "exaggeration": 1.5 },
+            "qwen": { "voice": "ryan", "repetition_penalty": 1.2 },
+            "omnivoice": { "language": "cs", "steps": 32, "seed": 7 }
+        }))
+        .unwrap();
+
+        let system = pools
+            .for_target(TtsEngine::System, TtsModel::Kokoro)
+            .unwrap();
+        assert_eq!(system.voice(), Some("Ava"));
+        assert_eq!(system.language(), Some("ru"));
+        assert_eq!(system.params()["rate"], TtsParamValue::Float(1.25));
+
+        let kokoro = pools
+            .for_target(TtsEngine::BuiltIn, TtsModel::Kokoro)
+            .unwrap();
+        assert_eq!(kokoro.voice(), Some("af_sarah"));
+        assert_eq!(kokoro.language(), Some("it"));
+        assert_eq!(kokoro.params()["rate"], TtsParamValue::Float(0.8));
+
+        let omnivoice = pools
+            .for_target(TtsEngine::BuiltIn, TtsModel::OmniVoice)
+            .unwrap();
+        assert_eq!(omnivoice.language(), Some("cs"));
+        assert_eq!(omnivoice.params()["steps"], TtsParamValue::Int(32));
+        assert_eq!(omnivoice.params()["seed"], TtsParamValue::Int(7));
+    }
+
+    #[test]
+    fn speak_args_reject_unknown_or_cross_target_fields() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({ "wavenet": { "voice": "x" } }),
+            serde_json::json!({ "kokoro": {} }),
+            serde_json::json!({ "kokoro": { "language": "ru" } }),
+            serde_json::json!({ "kokoro": { "exaggeration": 1.0 } }),
+            serde_json::json!({ "qwen": { "rate": 1.2 } }),
+            serde_json::json!({ "system": { "steps": 8 } }),
+            serde_json::json!({ "system": { "voice": " " } }),
+        ] {
+            assert!(TtsArgPools::parse(&value).is_err(), "accepted {value}");
+        }
+    }
+
+    #[test]
+    fn speak_arg_reserved_names_do_not_drift_into_model_params() {
+        for descriptor in &TTS_MODELS {
+            for param in descriptor.config_params {
+                assert!(
+                    !matches!(param.key, "voice" | "language"),
+                    "{} parameter `{}` collides with a speak argument",
+                    descriptor.id,
+                    param.key
+                );
+            }
+        }
+        for param in SYSTEM_TTS_PARAMS {
+            assert!(!matches!(param.key, "voice" | "language"));
+        }
+    }
 
     #[test]
     fn registry_order_matches_enum_discriminants() {

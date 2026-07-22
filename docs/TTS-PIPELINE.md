@@ -22,17 +22,18 @@ Canonical path from assistant text to built-in or system speech. Streaming mecha
 | Assistant text | Client hooks / Codex subscriber / MCP `speak` | Streamed batches or final utterance |
 | Narration select | `ds-narrate` | Emit completed top-level blockquotes once; optional short non-quote final; preserve selected text for the shared frontend |
 | Delivery | Hook/MCP IPC or in-process Codex | `SpeakNarration` / `Speak` / direct enqueue |
-| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect one ISO language per **utterance** at admit and carry it on the queued item |
+| Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect one ISO language per **utterance** at admit and carry it with optional target-keyed MCP arguments |
 | Text frontend | `ds-tts` | One GFM → prose cleanup for every route; model-capability frontend → bounded typed chunks; System stops at prose |
 | Synthesis | `ds-helper` (built-in) / OS voice (System) | Selected built-in model → ORT CPU everywhere or a supported accelerator; System → `say` / SAPI / spd-say |
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
 
 Narration selection decides what to speak but does not rewrite it. Every delivery route
 converges on `ds_tts::normalize_spoken_text` (markup, URL, hash, whitespace once).
-Backend normalization starts from that prose. The `whatlang` detector sees that prose,
-scoped to the selected model's languages, so detection only yields a speakable language
-(or English for ambiguous/unspeakable input). The model is never swapped for language;
-the **voice** is (see [Voice selection](#voice-selection)).
+Backend normalization starts from that prose. For built-in speech, the `whatlang` detector
+sees that prose scoped to the selected model's languages, so detection only yields a
+speakable language (or English for ambiguous/unspeakable input). System speech detects over
+the full mapped language range because it has no built-in-model allowlist. The model is never
+swapped for language; the **voice** is (see [Voice selection](#voice-selection)).
 
 **Per-utterance language.** Every queued speech item carries the ISO code decided when it
 was admitted, so a reply that switches language is voiced per utterance instead of under
@@ -40,7 +41,8 @@ one turn-wide verdict. `ds_tts::chunk_language` decides it: the utterance's own 
 whatlang calls that reliable or its confidence clears 0.3, else the turn corpus when that
 is reliable, else English. Streaming and Stop narration supply the corpus as
 `detection_text` (reconstructed message-so-far, capped at 10 KiB); MCP `Speak` has none
-and stands on its spoken text. The confidence floor is what keeps a one-line English
+and stands on its spoken text unless the active `tts_args.<target>.language` overrides the
+result. The confidence floor is what keeps a one-line English
 digest out of a French voice — such misfires sit under 0.25, while short prose that really
 is Romance clears 0.3 (`digest_confidence_separates_english_from_the_rest`). A digest with
 neither its own evidence nor a corpus is spoken English rather than a coin flip.
@@ -50,7 +52,9 @@ switch between admit and play.
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
 Codex (in-process). Streaming routes retry rejected work. Status exposes the current and
 most recently resolved voice/language, but no route yet propagates a per-utterance terminal
-playback ACK to the producer.
+playback ACK to the producer. MCP `Speak` chooses the active `tts_args` target at playback,
+so a queued config switch cannot leak one model's voice, language, or parameters into another.
+Named parameter values merge over that target's configured values for the utterance.
 
 ## Kokoro language frontends
 

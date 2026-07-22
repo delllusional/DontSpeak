@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ds_config::{CancelSpeechScope, ClientSource, Paths, VoiceConfig};
+use ds_config::{CancelSpeechScope, ClientSource, Paths, TtsArgPools, VoiceConfig};
 
 use crate::downloads::{DownloadProg, start_download};
 use crate::status::{EngineShared, model_status_json};
@@ -29,6 +29,14 @@ pub(crate) fn should_cancel_on_submit(was_voice: bool, scope_configured: bool) -
 /// Missing session → active stream (not global).
 fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> {
     requested.or_else(|| ttsq.active_session())
+}
+
+fn speak_tts_args(value: Option<serde_json::Value>) -> Result<Option<TtsArgPools>, String> {
+    value
+        .as_ref()
+        .map(TtsArgPools::parse)
+        .transpose()
+        .map_err(|error| format!("invalid tts_args: {error}"))
 }
 
 /// UserPromptSubmit MarkActive. Always nudge codex sessions; Grok also. Skip terminal
@@ -174,8 +182,7 @@ pub(crate) fn spawn_ipc_server(
                 }
                 ds_ipc::Request::Speak {
                     text,
-                    voice,
-                    rate,
+                    tts_args,
                     session,
                     source,
                 } => {
@@ -192,7 +199,9 @@ pub(crate) fn spawn_ipc_server(
                             text.chars().count()
                         ),
                     );
-                    match ttsq.enqueue(text, voice, rate, source, session) {
+                    match speak_tts_args(tts_args)
+                        .and_then(|args| ttsq.enqueue(text, args, source, session))
+                    {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => emit(&ds_ipc::Response::error(format!("speak: {e}"))),
                     }
@@ -522,6 +531,28 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn speak_tts_args_are_validated_before_queue_admission() {
+        let parsed = speak_tts_args(Some(serde_json::json!({
+            "qwen": { "voice": "ryan", "language": "ja", "repetition_penalty": 1.2 }
+        })))
+        .unwrap()
+        .unwrap();
+        let qwen = parsed
+            .for_target(ds_config::TtsEngine::BuiltIn, ds_config::TtsModel::Qwen)
+            .unwrap();
+        assert_eq!(qwen.voice(), Some("ryan"));
+        assert_eq!(qwen.language(), Some("ja"));
+        assert!(
+            speak_tts_args(Some(serde_json::json!({
+                "qwen": { "exaggeration": 1.0 }
+            })))
+            .unwrap_err()
+            .contains("invalid tts_args")
+        );
+        assert!(speak_tts_args(None).unwrap().is_none());
+    }
+
+    #[test]
     fn should_cancel_on_submit_decision_table() {
         // A voice submit's own echo: never treated as a separate submit, regardless of config.
         assert!(!should_cancel_on_submit(true, true));
@@ -553,14 +584,8 @@ mod tests {
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
         ttsq.set_active_session(Some("other".into()));
-        ttsq.enqueue(
-            "hi".into(),
-            None,
-            None,
-            ClientSource::Unknown,
-            Some("a".into()),
-        )
-        .unwrap();
+        ttsq.enqueue("hi".into(), None, ClientSource::Unknown, Some("a".into()))
+            .unwrap();
 
         handle_mark_active(
             &ttsq,
@@ -593,14 +618,8 @@ mod tests {
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-        ttsq.enqueue(
-            "hi".into(),
-            None,
-            None,
-            ClientSource::Unknown,
-            Some("a".into()),
-        )
-        .unwrap();
+        ttsq.enqueue("hi".into(), None, ClientSource::Unknown, Some("a".into()))
+            .unwrap();
 
         handle_mark_active(
             &ttsq,
