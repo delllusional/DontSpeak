@@ -49,7 +49,10 @@ pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_sta
 pub use paths::{Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, model_dir};
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};
-pub use tts_model::{TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, tts_model_descriptor};
+pub use tts_model::{
+    ResolvedTtsParams, TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, TtsParamDefault,
+    TtsParamDescriptor, TtsParamKind, TtsParamMap, TtsParamValue, tts_model_descriptor,
+};
 pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, TtsVoicePools, VoiceConfig};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::grok_hooks::grok_hooks_value;

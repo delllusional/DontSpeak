@@ -741,6 +741,16 @@ fn argmax(values: &[f32]) -> usize {
 mod tests {
     use super::*;
 
+    /// Defaults-equal-consts: the descriptor default IS this port's hardcoded penalty,
+    /// so an absent `[tts_params]` block stays byte-identical. Removed when the const
+    /// becomes a descriptor read (parameter-surface S3).
+    #[test]
+    fn repetition_penalty_const_matches_the_declared_default() {
+        let model = ds_config::TtsModel::Qwen;
+        let resolved = model.descriptor().resolve_params(&Default::default());
+        assert_eq!(resolved.float(model, "repetition_penalty"), REPETITION_PENALTY);
+    }
+
     #[test]
     fn repetition_penalty_changes_each_seen_token_once() {
         let mut scores = vec![4.0, -2.0, 3.0];

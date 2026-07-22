@@ -1,6 +1,8 @@
 //! Built-in TTS model registry.
 
-use serde::{Deserialize, Deserializer};
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::Provider;
 
@@ -57,6 +59,118 @@ pub enum TtsFrontend {
     PlainText,
 }
 
+/// Value space of one declared TTS parameter.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TtsParamKind {
+    Float { min: f32, max: f32 },
+    Int { min: i64, max: i64 },
+    Choice(&'static [&'static str]),
+}
+
+/// Static-constructible default for the `pub static` registry (an owned
+/// [`TtsParamValue::Choice`] String cannot live in a const initializer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TtsParamDefault {
+    Float(f32),
+    Int(i64),
+    Choice(&'static str),
+}
+
+impl TtsParamDefault {
+    pub fn value(self) -> TtsParamValue {
+        match self {
+            Self::Float(value) => TtsParamValue::Float(value),
+            Self::Int(value) => TtsParamValue::Int(value),
+            Self::Choice(value) => TtsParamValue::Choice(value.to_string()),
+        }
+    }
+}
+
+/// Owned runtime/config parameter value. Untagged wire form: a JSON/TOML integer is
+/// `Int`, any other number `Float`, a string `Choice` — [`TtsModelDescriptor::validate_param`]
+/// coerces an integral number where the declared kind is `Float`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TtsParamValue {
+    Int(i64),
+    Float(f32),
+    Choice(String),
+}
+
+impl std::fmt::Display for TtsParamValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Int(value) => write!(f, "{value}"),
+            Self::Float(value) => write!(f, "{value}"),
+            Self::Choice(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+/// One declared inference knob. `honored_ort`/`honored_mlx` record which backend
+/// actually consumes the key — the Swift shim keeps a hand-maintained mirror of this
+/// registry (`apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift`); update both
+/// together with the `mlx_params` drift test in ds-tts.
+#[derive(Debug)]
+pub struct TtsParamDescriptor {
+    pub key: &'static str,
+    pub kind: TtsParamKind,
+    pub default: TtsParamDefault,
+    pub user_visible: bool,
+    pub honored_ort: bool,
+    pub honored_mlx: bool,
+}
+
+/// Sparse stored/wire form: overrides only, keyed by descriptor key.
+pub type TtsParamMap = BTreeMap<String, TtsParamValue>;
+
+/// Complete validated params for one model: every declared key present
+/// ([`TtsModelDescriptor::resolve_params`] fills defaults and drops invalid entries).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ResolvedTtsParams(TtsParamMap);
+
+impl ResolvedTtsParams {
+    pub fn get(&self, key: &str) -> Option<&TtsParamValue> {
+        self.0.get(key)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &TtsParamValue)> {
+        self.0.iter().map(|(key, value)| (key.as_str(), value))
+    }
+
+    /// Declared float param, falling back to the registry default. An undeclared key
+    /// is a programmer error (debug assert), not a runtime failure.
+    pub fn float(&self, model: TtsModel, key: &str) -> f32 {
+        match self.get(key) {
+            Some(TtsParamValue::Float(value)) => *value,
+            Some(TtsParamValue::Int(value)) => *value as f32,
+            _ => match model.descriptor().param(key).map(|p| p.default) {
+                Some(TtsParamDefault::Float(value)) => value,
+                Some(TtsParamDefault::Int(value)) => value as f32,
+                _ => {
+                    debug_assert!(false, "{key} is not a declared {} float param", model.as_str());
+                    0.0
+                }
+            },
+        }
+    }
+
+    /// Declared int param, falling back to the registry default (see [`Self::float`]).
+    pub fn int(&self, model: TtsModel, key: &str) -> i64 {
+        match self.get(key) {
+            Some(TtsParamValue::Int(value)) => *value,
+            _ => match model.descriptor().param(key).map(|p| p.default) {
+                Some(TtsParamDefault::Int(value)) => value,
+                _ => {
+                    debug_assert!(false, "{key} is not a declared {} int param", model.as_str());
+                    0
+                }
+            },
+        }
+    }
+}
+
 /// Static behavior shared by config, downloads, helpers, status, and tools.
 #[derive(Debug)]
 pub struct TtsModelDescriptor {
@@ -78,6 +192,9 @@ pub struct TtsModelDescriptor {
     pub supports_rate: bool,
     pub supports_full_duplex: bool,
     pub supports_resume: bool,
+    /// Declared inference knobs; absent config entries resolve to each default, so an
+    /// empty `[tts_params]` block is byte-identical to pre-parameter behavior.
+    pub params: &'static [TtsParamDescriptor],
 }
 
 impl TtsModelDescriptor {
@@ -123,6 +240,70 @@ impl TtsModelDescriptor {
     /// Whether an automatically detected ISO language can be sent to this model.
     pub fn accepts_detected_language(&self, language: &str) -> bool {
         self.model == TtsModel::OmniVoice || self.supports_language(language)
+    }
+
+    pub fn param(&self, key: &str) -> Option<&'static TtsParamDescriptor> {
+        self.params.iter().find(|param| param.key == key)
+    }
+
+    /// Strict validation (MCP `set_config`): unknown key, wrong type, or out-of-range
+    /// value is an `Err`. Returns the value normalized to the declared kind (an
+    /// integral number is coerced for a `Float` param).
+    pub fn validate_param(&self, key: &str, raw: &TtsParamValue) -> Result<TtsParamValue, String> {
+        let Some(param) = self.param(key) else {
+            return Err(format!("`{key}` is not a {} parameter", self.id));
+        };
+        match param.kind {
+            TtsParamKind::Float { min, max } => {
+                let value = match raw {
+                    TtsParamValue::Float(value) => *value,
+                    TtsParamValue::Int(value) => *value as f32,
+                    TtsParamValue::Choice(_) => {
+                        return Err(format!("`{key}` must be a number from {min} to {max}"));
+                    }
+                };
+                if !value.is_finite() || value < min || value > max {
+                    return Err(format!("`{key}` must be a number from {min} to {max}"));
+                }
+                Ok(TtsParamValue::Float(value))
+            }
+            TtsParamKind::Int { min, max } => {
+                let value = match raw {
+                    TtsParamValue::Int(value) => *value,
+                    // Accept a lossless integral float (TOML/JSON clients may send 32.0).
+                    TtsParamValue::Float(value) if value.fract() == 0.0 => *value as i64,
+                    _ => {
+                        return Err(format!("`{key}` must be an integer from {min} to {max}"));
+                    }
+                };
+                if value < min || value > max {
+                    return Err(format!("`{key}` must be an integer from {min} to {max}"));
+                }
+                Ok(TtsParamValue::Int(value))
+            }
+            TtsParamKind::Choice(choices) => match raw {
+                TtsParamValue::Choice(value) if choices.contains(&value.as_str()) => {
+                    Ok(raw.clone())
+                }
+                _ => Err(format!("`{key}` must be one of: {}", choices.join(", "))),
+            },
+        }
+    }
+
+    /// Fail-open resolution (helper playback + config load): every declared key comes
+    /// back — a stored value that validates is kept, anything else (unknown key after a
+    /// model switch, out-of-range, wrong type) falls to the declared default. Never
+    /// refuses an utterance; mirrors the voice/language model-switch clamps.
+    pub fn resolve_params(&self, stored: &TtsParamMap) -> ResolvedTtsParams {
+        let mut resolved = TtsParamMap::new();
+        for param in self.params {
+            let value = stored
+                .get(param.key)
+                .and_then(|raw| self.validate_param(param.key, raw).ok())
+                .unwrap_or_else(|| param.default.value());
+            resolved.insert(param.key.to_string(), value);
+        }
+        ResolvedTtsParams(resolved)
     }
 
     /// Language token expected by the model implementation. The seam every backend
@@ -190,6 +371,37 @@ const OMNIVOICE_VOICES: &[&str] = &[
     "whisper",
 ];
 const OMNIVOICE_DEFAULT_VOICE: &[&str] = &["young_woman"];
+const NO_PARAMS: &[TtsParamDescriptor] = &[];
+// Emotion exaggeration fed to the pinned export's `exaggeration` input each embed step
+// (model card range; 0.5 = neutral — the value the ORT port hardcoded before params).
+const CHATTERBOX_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
+    key: "exaggeration",
+    kind: TtsParamKind::Float { min: 0.25, max: 2.0 },
+    default: TtsParamDefault::Float(0.5),
+    user_visible: true,
+    honored_ort: true,
+    honored_mlx: false,
+}];
+// Greedy-decode repetition penalty (reference generation_config default 1.05).
+const QWEN_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
+    key: "repetition_penalty",
+    kind: TtsParamKind::Float { min: 1.0, max: 3.0 },
+    default: TtsParamDefault::Float(1.05),
+    user_visible: true,
+    honored_ort: true,
+    honored_mlx: false,
+}];
+// Iterative-unmasking step count. Upstream defaults to 32; 16 halves the `2 * steps`
+// LLM forwards per piece with per-codebook code diversity measured unchanged (50-70
+// band held at both settings — see the decode-rewrite commit body).
+const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
+    key: "steps",
+    kind: TtsParamKind::Int { min: 1, max: 64 },
+    default: TtsParamDefault::Int(16),
+    user_visible: true,
+    honored_ort: true,
+    honored_mlx: false,
+}];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
 // One pinned OmniVoice ONNX profile for every ORT provider: FP16 audio sub-models plus
 // the single fp32 bidirectional LLM backbone (no per-provider variants).
@@ -216,6 +428,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_rate: true,
         supports_full_duplex: true,
         supports_resume: true,
+        params: NO_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::Chatterbox,
@@ -232,6 +445,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_rate: false,
         supports_full_duplex: false,
         supports_resume: true,
+        params: CHATTERBOX_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::Qwen,
@@ -248,6 +462,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_rate: false,
         supports_full_duplex: false,
         supports_resume: true,
+        params: QWEN_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::OmniVoice,
@@ -264,6 +479,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_rate: false,
         supports_full_duplex: false,
         supports_resume: true,
+        params: OMNIVOICE_PARAMS,
     },
 ];
 
@@ -392,6 +608,138 @@ mod tests {
                 descriptor.default_language
             );
         }
+    }
+
+    #[test]
+    fn declared_params_pin_their_defaults_as_literals() {
+        // The literals ARE the pre-parameter hardcoded behavior; ds-tts pins the same
+        // values against its backend consts until S3/S6 turn those consts into
+        // descriptor reads.
+        assert!(TtsModel::Kokoro.descriptor().params.is_empty());
+        let exaggeration = TtsModel::Chatterbox
+            .descriptor()
+            .param("exaggeration")
+            .expect("chatterbox declares exaggeration");
+        assert_eq!(exaggeration.default, TtsParamDefault::Float(0.5));
+        assert_eq!(
+            exaggeration.kind,
+            TtsParamKind::Float {
+                min: 0.25,
+                max: 2.0
+            }
+        );
+        assert!(exaggeration.user_visible && exaggeration.honored_ort);
+        assert!(!exaggeration.honored_mlx);
+        let penalty = TtsModel::Qwen
+            .descriptor()
+            .param("repetition_penalty")
+            .expect("qwen declares repetition_penalty");
+        assert_eq!(penalty.default, TtsParamDefault::Float(1.05));
+        assert_eq!(penalty.kind, TtsParamKind::Float { min: 1.0, max: 3.0 });
+        let steps = TtsModel::OmniVoice
+            .descriptor()
+            .param("steps")
+            .expect("omnivoice declares steps");
+        assert_eq!(steps.default, TtsParamDefault::Int(16));
+        assert_eq!(steps.kind, TtsParamKind::Int { min: 1, max: 64 });
+        // Every declared default must itself validate (a default outside its own range
+        // would make resolve_params produce out-of-contract values).
+        for model in TtsModel::ALL.iter().copied() {
+            for param in model.descriptor().params {
+                assert_eq!(
+                    model
+                        .descriptor()
+                        .validate_param(param.key, &param.default.value()),
+                    Ok(param.default.value()),
+                    "{} {} default fails its own validation",
+                    model.as_str(),
+                    param.key
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_param_rejects_unknown_type_and_range_errors() {
+        let chatterbox = TtsModel::Chatterbox.descriptor();
+        let err = chatterbox
+            .validate_param("bogus", &TtsParamValue::Float(1.0))
+            .unwrap_err();
+        assert!(err.contains("not a chatterbox parameter"), "{err}");
+        let err = chatterbox
+            .validate_param("exaggeration", &TtsParamValue::Float(2.5))
+            .unwrap_err();
+        assert!(err.contains("0.25 to 2"), "{err}");
+        assert!(
+            chatterbox
+                .validate_param("exaggeration", &TtsParamValue::Choice("high".into()))
+                .is_err()
+        );
+        assert!(
+            chatterbox
+                .validate_param("exaggeration", &TtsParamValue::Float(f32::NAN))
+                .is_err()
+        );
+        // Integral numbers coerce to the declared kind, lossy floats don't.
+        assert_eq!(
+            chatterbox.validate_param("exaggeration", &TtsParamValue::Int(1)),
+            Ok(TtsParamValue::Float(1.0))
+        );
+        let omnivoice = TtsModel::OmniVoice.descriptor();
+        assert_eq!(
+            omnivoice.validate_param("steps", &TtsParamValue::Float(32.0)),
+            Ok(TtsParamValue::Int(32))
+        );
+        assert!(
+            omnivoice
+                .validate_param("steps", &TtsParamValue::Float(31.5))
+                .is_err()
+        );
+        assert!(
+            omnivoice
+                .validate_param("steps", &TtsParamValue::Int(0))
+                .is_err()
+        );
+        assert!(
+            omnivoice
+                .validate_param("steps", &TtsParamValue::Int(65))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_params_fills_defaults_and_falls_invalid_entries_to_defaults() {
+        let chatterbox = TtsModel::Chatterbox.descriptor();
+        // Absent config ⇒ all defaults (byte-identical pre-parameter behavior).
+        let resolved = chatterbox.resolve_params(&TtsParamMap::new());
+        assert_eq!(
+            resolved.float(TtsModel::Chatterbox, "exaggeration"),
+            0.5
+        );
+        assert_eq!(resolved.iter().count(), chatterbox.params.len());
+        // A valid override is kept.
+        let mut stored = TtsParamMap::new();
+        stored.insert("exaggeration".into(), TtsParamValue::Float(1.5));
+        assert_eq!(
+            chatterbox
+                .resolve_params(&stored)
+                .float(TtsModel::Chatterbox, "exaggeration"),
+            1.5
+        );
+        // Out-of-range and stale (other-model) keys fall to defaults — never refused.
+        let mut stale = TtsParamMap::new();
+        stale.insert("exaggeration".into(), TtsParamValue::Float(9.0));
+        stale.insert("steps".into(), TtsParamValue::Int(8));
+        let resolved = chatterbox.resolve_params(&stale);
+        assert_eq!(resolved.float(TtsModel::Chatterbox, "exaggeration"), 0.5);
+        assert!(resolved.get("steps").is_none(), "stale keys must drop");
+        // Wire form: the untagged value round-trips as bare JSON scalars.
+        let json = serde_json::to_string(&resolved).unwrap();
+        assert_eq!(json, r#"{"exaggeration":0.5}"#);
+        let back: TtsParamMap = serde_json::from_str(r#"{"steps":24,"x":1.5,"v":"a"}"#).unwrap();
+        assert_eq!(back["steps"], TtsParamValue::Int(24));
+        assert_eq!(back["x"], TtsParamValue::Float(1.5));
+        assert_eq!(back["v"], TtsParamValue::Choice("a".into()));
     }
 
     #[test]

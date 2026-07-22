@@ -834,6 +834,16 @@ mod tests {
         assert_eq!(argmax(&[f32::NEG_INFINITY, -1.0]), 1);
     }
 
+    /// Defaults-equal-consts: the descriptor default IS this decode's step count, so an
+    /// absent `[tts_params]` block stays byte-identical. Removed when the const becomes
+    /// a descriptor read (parameter-surface S6).
+    #[test]
+    fn steps_const_matches_the_declared_default() {
+        let model = ds_config::TtsModel::OmniVoice;
+        let resolved = model.descriptor().resolve_params(&Default::default());
+        assert_eq!(resolved.int(model, "steps"), STEPS as i64);
+    }
+
     // ── schedule_counts ─────────────────────────────────────────────────────
 
     #[test]
