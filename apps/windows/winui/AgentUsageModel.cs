@@ -51,7 +51,7 @@ internal sealed record UsageCardDto(
     [property: JsonPropertyName("agent")] string Agent,
     [property: JsonPropertyName("rows")] List<UsageRowDto> Rows,
     [property: JsonPropertyName("account")] string? Account = null,
-    // Skip-when-false; true = credentials unreadable or refused (authorize retries).
+    // Skip-when-false; true = Claude's macOS keychain access is guarded.
     [property: JsonPropertyName("needs_auth")] bool NeedsAuth = false);
 
 internal sealed record UsageRowDto(

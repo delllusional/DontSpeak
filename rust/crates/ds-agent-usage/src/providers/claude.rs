@@ -114,8 +114,7 @@ fn resolve_credentials(
     now_ms: i64,
     probe: impl FnOnce() -> KeychainProbe,
 ) -> Result<(Value, CredentialSource), FetchError> {
-    // No keychain to fall back on: a lapsed token wants re-auth, a missing one has
-    // nothing to authorize.
+    // No keychain to fall back on: preserve whether the file token is lapsed or absent.
     let no_keychain = match file {
         Ok(credentials) if !is_expired(&credentials, now_ms) => {
             return Ok((credentials, CredentialSource::File));
@@ -391,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_file_token_without_a_keychain_asks_for_reauth() {
+    fn expired_file_token_without_a_keychain_is_unauthorized() {
         let resolved = resolve_credentials(expired_file_token(), NOW_MS, || KeychainProbe::Absent);
         assert!(matches!(resolved, Err(FetchError::Unauthorized)));
     }

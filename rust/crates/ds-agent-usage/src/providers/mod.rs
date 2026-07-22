@@ -15,21 +15,21 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
-/// Internal; FFI surfaces Guarded/Unauthorized as `UsageCard.needs_auth`.
+/// Internal; only Guarded Claude credentials surface as `UsageCard.needs_auth`.
 #[derive(Debug)]
 pub(crate) enum FetchError {
     /// Silent keychain read blocked (macOS Claude only).
     Guarded,
-    /// Provider rejected the token (stale/revoked) — re-auth, not a transport failure.
+    /// Provider rejected a stale or revoked token; Claude may retry its keychain copy.
     Unauthorized,
-    // Tests assert kinds; prod branches on the re-auth variants only.
+    // Tests assert kinds; production branches on the credential variants only.
     Io(#[allow(dead_code)] std::io::Error),
 }
 
 impl From<std::io::Error> for FetchError {
     fn from(error: std::io::Error) -> Self {
-        // Credentials refused (provider 401/403, unreadable credential file) — the card
-        // must ask for re-auth instead of going rowless and being dropped by the hosts.
+        // Preserve refused-credential semantics for Claude's file-to-keychain retry.
+        // Other providers fall back to their last-good card without an auth action.
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             return Self::Unauthorized;
         }
@@ -63,7 +63,7 @@ fn request(method: ds_http::Method, url: &str) -> std::io::Result<ds_http::Reque
     ))
 }
 
-/// 401/403 → `PermissionDenied`, which [`FetchError`] turns into a re-auth prompt.
+/// Preserve 401/403 as a credential error without exposing response bodies.
 fn send_json<B: ds_http::body::Body>(
     builder: ds_http::RequestBuilder<B>,
 ) -> std::io::Result<Value> {
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_credential_becomes_a_reauth_fetch_error() {
+    fn rejected_credential_becomes_an_unauthorized_fetch_error() {
         let server = httpmock::MockServer::start();
         for status in [401, 403] {
             let mut endpoint = server.mock(|when, then| {

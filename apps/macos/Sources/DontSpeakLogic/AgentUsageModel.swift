@@ -52,8 +52,8 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card (Rust UsageCard). `needsAuth`: skip-when-false; true = credentials
-/// unreadable (keychain ACL) or refused by the provider — authorize retries.
+/// One card (Rust UsageCard). `needsAuth` is true only when Claude's keychain
+/// item needs user-approved access.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String

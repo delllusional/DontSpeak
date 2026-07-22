@@ -21,7 +21,7 @@ usage:
   unavailable: Agents unavailable
   no_data: No usage data
   account_hidden: Account
-  needs_auth: "Stats need credential access or a fresh sign-in"
+  needs_auth: "Stats need Keychain access"
   authorize: Authorize
   session: Session
   week: Week

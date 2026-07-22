@@ -246,8 +246,9 @@ known install roots. Qwen Coding Plan keys: process env, `$QWEN_HOME/.env`,
 
 - Credential reads are read-only, size-bounded, documented paths only.
 - Implicit reads (tab paint, MCP `usage`, skeleton/card FFI) never prompt. Sole
-  prompter: `ds_agent_usage_card_authorize_json` (click-only). On macOS, silent
-  search skips ACL items; guarded → `needs_auth: true` (stale rows kept).
+  prompter: `ds_agent_usage_card_authorize_json` (click-only). On macOS, Claude
+  Code's silent keychain search skips ACL items; only that guarded state produces
+  `needs_auth: true` (stale rows kept).
 - “Always Allow” persists via OS keychain ACL (no config flag — Claude may
   recreate the item). Production HTTPS only for live probes; tests use fixtures /
   loopback. Secrets and raw payloads never appear in FFI JSON or logs.

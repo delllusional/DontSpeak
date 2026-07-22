@@ -57,7 +57,7 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
-    /// Credentials unreadable (macOS keychain ACL) or rejected (401/403);
+    /// Claude Code's macOS keychain item needs user-approved access;
     /// [`authorize_card`] retries interactively.
     /// Skip-when-false on wire; never cached (`UsageCache::store`).
     #[serde(default, skip_serializing_if = "is_false")]
@@ -83,7 +83,8 @@ impl UsageCard {
         account: Option<String>,
         result: Result<Vec<UsageRow>, FetchError>,
     ) -> Self {
-        let needs_auth = matches!(result, Err(FetchError::Guarded | FetchError::Unauthorized));
+        let needs_auth =
+            agent == ClientSource::ClaudeCode && matches!(result, Err(FetchError::Guarded));
         let mut card = Self {
             agent,
             account,
@@ -299,8 +300,6 @@ fn fetch_rows(
     agent: ClientSource,
     interactive: bool,
 ) -> Result<Vec<UsageRow>, FetchError> {
-    // `From<io::Error>`, not `FetchError::Io`: a refused credential (401/403) must stay
-    // a re-auth signal for every provider, not just Claude.
     match agent {
         ClientSource::ClaudeCode => providers::claude::fetch(paths, interactive),
         ClientSource::Codex => providers::codex::fetch(paths).map_err(FetchError::from),
@@ -808,6 +807,51 @@ mod tests {
         assert!(!disk.contains("needs_auth"));
         let reloaded = cached_card(&cache, &paths, agent).unwrap().card;
         assert!(!reloaded.needs_auth);
+    }
+
+    #[test]
+    fn only_guarded_claude_credentials_offer_authorize() {
+        for agent in ClientSource::CLIENTS {
+            let guarded = UsageCard::from_result(*agent, None, Err(FetchError::Guarded));
+            assert_eq!(guarded.needs_auth, *agent == ClientSource::ClaudeCode);
+
+            let unauthorized = UsageCard::from_result(*agent, None, Err(FetchError::Unauthorized));
+            assert!(!unauthorized.needs_auth);
+        }
+    }
+
+    #[test]
+    fn unauthorized_non_claude_refreshes_keep_cached_rows_without_authorize() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = ds_config::Paths::rooted_at(root.path());
+
+        for agent in ClientSource::CLIENTS
+            .iter()
+            .copied()
+            .filter(|agent| *agent != ClientSource::ClaudeCode)
+        {
+            let good = UsageCard {
+                agent,
+                account: None,
+                rows: vec![UsageRow::checked(Period::Week, 25.0, 1_900_000_000).unwrap()],
+                needs_auth: false,
+            };
+            let cache = Mutex::new(UsageCache::default());
+            cache.lock().unwrap().store(&paths, good.clone());
+
+            let returned = refresh_card_with(
+                &cache,
+                &Mutex::new(RefreshSlot::default()),
+                &paths,
+                agent,
+                true,
+                false,
+                || None,
+                || Err(FetchError::Unauthorized),
+            );
+            assert_eq!(returned.rows, good.rows, "{agent:?}");
+            assert!(!returned.needs_auth, "{agent:?}");
+        }
     }
 
     #[test]

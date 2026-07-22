@@ -19,7 +19,7 @@ pub(crate) struct UsageCard {
     #[serde(default)]
     pub(crate) account: Option<String>,
     pub(crate) rows: Vec<UsageRow>,
-    /// Skip-when-false; true = credentials unreadable or refused (authorize retries).
+    /// Skip-when-false; true = Claude's macOS keychain access is guarded.
     #[serde(default)]
     pub(crate) needs_auth: bool,
 }

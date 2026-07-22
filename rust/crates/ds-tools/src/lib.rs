@@ -582,7 +582,7 @@ fn output_schema_for(output: Output) -> Value {
                                     .collect::<Vec<_>>()
                             },
                             "account": { "type": "string" },
-                            // true only when guarded (macOS ACL); authorize FFI unlocks.
+                            // true only when Claude's macOS keychain access is guarded.
                             "needs_auth": { "type": "boolean" },
                             "rows": {
                                 "type": "array",
