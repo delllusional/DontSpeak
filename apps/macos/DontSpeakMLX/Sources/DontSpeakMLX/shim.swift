@@ -65,15 +65,59 @@ private enum TtsKind: String {
 /// Registry edits must update this map and the Rust/Swift literal drift tests together.
 let ttsParamMirror: [String: [String: Bool]] = [
     "kokoro": [:],
-    "chatterbox": ["exaggeration": false],
-    "qwen": ["repetition_penalty": false],
-    "omnivoice": ["steps": false, "seed": false],
+    "chatterbox": ["exaggeration": true],
+    "qwen": ["repetition_penalty": true],
+    "omnivoice": ["steps": true, "seed": true],
 ]
+
+struct TtsAppliedParams: Equatable, Sendable {
+    var chatterboxExaggeration: Float?
+    var qwenRepetitionPenalty: Float?
+    var omniVoiceSteps: Int?
+    var omniVoiceSeed: Int64?
+}
 
 struct TtsParamDecode: Equatable {
     var applied: [String] = []
     var ignored: [String] = []
     var unknown: [String] = []
+    var values = TtsAppliedParams()
+}
+
+private func finiteFloat(_ value: Any) -> Float? {
+    guard !(value is Bool), let number = value as? NSNumber else { return nil }
+    let decoded = number.floatValue
+    return decoded.isFinite ? decoded : nil
+}
+
+private func integer(_ value: Any) -> Int64? {
+    guard !(value is Bool), let number = value as? NSNumber else { return nil }
+    let encoding = String(cString: number.objCType)
+    guard encoding != "f", encoding != "d" else { return nil }
+    return number.int64Value
+}
+
+private func decodeTtsParam(
+    model: String, key: String, value: Any, into params: inout TtsAppliedParams
+) -> Bool {
+    switch (model, key) {
+    case ("chatterbox", "exaggeration"):
+        guard let value = finiteFloat(value), (0.25...2.0).contains(value) else { return false }
+        params.chatterboxExaggeration = value
+    case ("qwen", "repetition_penalty"):
+        guard let value = finiteFloat(value), (1.0...3.0).contains(value) else { return false }
+        params.qwenRepetitionPenalty = value
+    case ("omnivoice", "steps"):
+        guard let value = integer(value), (1...64).contains(value), let value = Int(exactly: value)
+        else { return false }
+        params.omniVoiceSteps = value
+    case ("omnivoice", "seed"):
+        guard let value = integer(value), value >= -1 else { return false }
+        params.omniVoiceSeed = value
+    default:
+        return false
+    }
+    return true
 }
 
 /// Sorted classification; malformed JSON returns nil without failing synthesis.
@@ -85,12 +129,27 @@ func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
     var decode = TtsParamDecode()
     for key in object.keys.sorted() {
         switch mirror[key] {
-        case .some(true): decode.applied.append(key)
+        case .some(true):
+            guard decodeTtsParam(model: model, key: key, value: object[key]!, into: &decode.values)
+            else { return nil }
+            decode.applied.append(key)
         case .some(false): decode.ignored.append(key)
         case .none: decode.unknown.append(key)
         }
     }
     return decode
+}
+
+/// FNV-1a with NUL-separated fields, matching the ORT OmniVoice backend.
+func stableOmniVoiceSeed(language: String, instruct: String, text: String) -> UInt64 {
+    var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+    for bytes in [Array(language.utf8), [0], Array(instruct.utf8), [0], Array(text.utf8)] {
+        for byte in bytes {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x0000_0100_0000_01b3
+        }
+    }
+    return hash
 }
 private final class ShimState: @unchecked Sendable {
     let lock = NSLock()
@@ -188,9 +247,11 @@ public func ds_mlx_tts_synthesize2(
         logErr("ds_mlx_tts_synthesize2: not initialized")
         return 2
     }
+    var appliedParams = TtsAppliedParams()
     // Settings are advisory; only unknown or malformed input is logged.
     if let paramsJson = cString(paramsJson) {
         if let decode = ttsParamsDecode(model: kind.rawValue, json: paramsJson) {
+            appliedParams = decode.values
             if !decode.unknown.isEmpty {
                 logErr(
                     "ds_mlx_tts_synthesize2: unknown params ignored: "
@@ -203,16 +264,56 @@ public func ds_mlx_tts_synthesize2(
     if kind == .kokoro, let kokoro = model as? KokoroModel {
         kokoro.speed = speed.isFinite ? max(0.25, min(speed, 4.0)) : 1.0
     }
+    if kind == .chatterbox, let chatterbox = model as? ChatterboxModel,
+        let exaggeration = appliedParams.chatterboxExaggeration
+    {
+        chatterbox.emotionAdvOverride = exaggeration
+        // mlx-audio-swift 0.1.3 only consults the override while preparing reference
+        // conditioning. DontSpeak uses the bundled default conditioning, so update it too.
+        chatterbox.defaultConditioning?.emotionAdv = MLXArray(exaggeration)
+    }
     let selectedVoice: String? = switch kind {
     case .chatterbox: nil
     case .omnivoice: v == "default" ? nil : v
     case .kokoro, .qwen: v
     }
+    let synthesisParams = appliedParams
     let sendableModel = SendableValue(model)
     let result: Result<(MLXArray, Int), Error> = runBlocking {
         let model = sendableModel.value
-        let audio = try await model.generate(
-            text: text, voice: selectedVoice, refAudio: nil, refText: nil, language: language)
+        let audio: MLXArray
+        if kind == .omnivoice, let omniVoice = model as? OmniVoiceModel {
+            var parameters = OmniVoiceGenerateParameters()
+            if let steps = synthesisParams.omniVoiceSteps {
+                parameters.numStep = steps
+            }
+            if let configuredSeed = synthesisParams.omniVoiceSeed {
+                let seed = configuredSeed >= 0
+                    ? UInt64(configuredSeed)
+                    : stableOmniVoiceSeed(
+                        language: language ?? "", instruct: selectedVoice ?? "", text: text)
+                MLXRandom.seed(seed)
+            }
+            audio = try await omniVoice.generate(
+                text: text,
+                voice: selectedVoice,
+                refAudio: nil,
+                refText: nil,
+                language: language,
+                ovParameters: parameters)
+        } else {
+            var generationParameters = model.defaultGenerationParameters
+            if let repetitionPenalty = synthesisParams.qwenRepetitionPenalty {
+                generationParameters.repetitionPenalty = repetitionPenalty
+            }
+            audio = try await model.generate(
+                text: text,
+                voice: selectedVoice,
+                refAudio: nil,
+                refText: nil,
+                language: language,
+                generationParameters: generationParameters)
+        }
         return (audio, model.sampleRate)
     }
     state.lock.unlock()

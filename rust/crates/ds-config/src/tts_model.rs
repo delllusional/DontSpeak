@@ -534,7 +534,7 @@ const CHATTERBOX_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
     default: TtsParamDefault::Float(0.5),
     user_visible: true,
     honored_ort: true,
-    honored_mlx: false,
+    honored_mlx: true,
 }];
 // Greedy-decode repetition penalty (reference generation_config default 1.05).
 const QWEN_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
@@ -543,7 +543,7 @@ const QWEN_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
     default: TtsParamDefault::Float(1.05),
     user_visible: true,
     honored_ort: true,
-    honored_mlx: false,
+    honored_mlx: true,
 }];
 const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[
     // 16 halves the `2 * steps` LLM forwards with unchanged measured code diversity.
@@ -553,7 +553,7 @@ const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[
         default: TtsParamDefault::Int(16),
         user_visible: true,
         honored_ort: true,
-        honored_mlx: false,
+        honored_mlx: true,
     },
     // -1 derives a stable seed from language + voice; non-negative values override it.
     TtsParamDescriptor {
@@ -565,7 +565,7 @@ const OMNIVOICE_PARAMS: &[TtsParamDescriptor] = &[
         default: TtsParamDefault::Int(-1),
         user_visible: false,
         honored_ort: true,
-        honored_mlx: false,
+        honored_mlx: true,
     },
 ];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
@@ -874,25 +874,28 @@ mod tests {
             }
         );
         assert!(exaggeration.user_visible && exaggeration.honored_ort);
-        assert!(!exaggeration.honored_mlx);
+        assert!(exaggeration.honored_mlx);
         let penalty = TtsModel::Qwen
             .descriptor()
             .param("repetition_penalty")
             .expect("qwen declares repetition_penalty");
         assert_eq!(penalty.default, TtsParamDefault::Float(1.05));
         assert_eq!(penalty.kind, TtsParamKind::Float { min: 1.0, max: 3.0 });
+        assert!(penalty.user_visible && penalty.honored_ort && penalty.honored_mlx);
         let steps = TtsModel::OmniVoice
             .descriptor()
             .param("steps")
             .expect("omnivoice declares steps");
         assert_eq!(steps.default, TtsParamDefault::Int(16));
         assert_eq!(steps.kind, TtsParamKind::Int { min: 1, max: 64 });
+        assert!(steps.user_visible && steps.honored_ort && steps.honored_mlx);
         let seed = TtsModel::OmniVoice
             .descriptor()
             .param("seed")
             .expect("omnivoice declares seed");
         assert_eq!(seed.default, TtsParamDefault::Int(-1));
         assert!(!seed.user_visible);
+        assert!(seed.honored_ort && seed.honored_mlx);
         assert!(
             matches!(seed.kind, TtsParamKind::Int { min: -1, max } if max == i64::MAX),
             "seed must accept the full non-negative u32/u64-style range plus the -1 sentinel"

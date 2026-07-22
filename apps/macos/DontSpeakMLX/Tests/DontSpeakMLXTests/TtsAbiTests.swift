@@ -12,20 +12,42 @@ final class TtsAbiTests: XCTestCase {
     func testTtsParamMirrorPinsDeclaredKeysPerModel() {
         XCTAssertEqual(Set(ttsParamMirror.keys), ["kokoro", "chatterbox", "qwen", "omnivoice"])
         XCTAssertEqual(ttsParamMirror["kokoro"], [:])
-        XCTAssertEqual(ttsParamMirror["chatterbox"], ["exaggeration": false])
-        XCTAssertEqual(ttsParamMirror["qwen"], ["repetition_penalty": false])
-        XCTAssertEqual(ttsParamMirror["omnivoice"], ["steps": false, "seed": false])
+        XCTAssertEqual(ttsParamMirror["chatterbox"], ["exaggeration": true])
+        XCTAssertEqual(ttsParamMirror["qwen"], ["repetition_penalty": true])
+        XCTAssertEqual(ttsParamMirror["omnivoice"], ["steps": true, "seed": true])
     }
 
     func testParamsDecodeClassifiesDeclaredUnknownAndMalformed() {
         XCTAssertEqual(
             ttsParamsDecode(model: "chatterbox", json: #"{"exaggeration":0.7,"bogus":1}"#),
-            TtsParamDecode(applied: [], ignored: ["exaggeration"], unknown: ["bogus"]))
+            TtsParamDecode(
+                applied: ["exaggeration"],
+                unknown: ["bogus"],
+                values: TtsAppliedParams(chatterboxExaggeration: 0.7)))
         XCTAssertEqual(
             ttsParamsDecode(model: "omnivoice", json: #"{"steps":16,"seed":-1}"#),
-            TtsParamDecode(applied: [], ignored: ["seed", "steps"], unknown: []))
+            TtsParamDecode(
+                applied: ["seed", "steps"],
+                values: TtsAppliedParams(omniVoiceSteps: 16, omniVoiceSeed: -1)))
+        XCTAssertEqual(
+            ttsParamsDecode(model: "qwen", json: #"{"repetition_penalty":1.25}"#),
+            TtsParamDecode(
+                applied: ["repetition_penalty"],
+                values: TtsAppliedParams(qwenRepetitionPenalty: 1.25)))
         XCTAssertEqual(ttsParamsDecode(model: "kokoro", json: "{}"), TtsParamDecode())
         XCTAssertNil(ttsParamsDecode(model: "qwen", json: "not json"))
+        XCTAssertNil(ttsParamsDecode(model: "omnivoice", json: #"{"steps":16.5,"seed":-1}"#))
+        XCTAssertNil(ttsParamsDecode(model: "omnivoice", json: #"{"steps":65,"seed":-1}"#))
+        XCTAssertNil(ttsParamsDecode(model: "chatterbox", json: #"{"exaggeration":true}"#))
+    }
+
+    func testStableOmniVoiceSeedMatchesOrtBackend() {
+        XCTAssertEqual(
+            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi."),
+            0xaa49_2a17_b014_8759)
+        XCTAssertNotEqual(
+            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi."),
+            stableOmniVoiceSeed(language: "en", instruct: "", text: "Hi!"))
     }
 
     func testInitRejectsMissingAndUnknownModels() {
