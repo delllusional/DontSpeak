@@ -47,7 +47,12 @@ struct MainWindow: View {
     var body: some View {
         @Bindable var core = core
         return NavigationSplitView {
-            List(AppScreen.allCases, selection: $core.screen) { screen in
+            // Agents row exists only while the config gate is on; Core.apply flips
+            // `screen` off .agents in the same update, so the selection never dangles.
+            List(
+                AppScreen.allCases.filter { $0 != .agents || core.agentsEnabled },
+                selection: $core.screen
+            ) { screen in
                 Label(L.t(screen.titleKey), systemImage: screen.systemImage)
                     .tag(screen)
             }

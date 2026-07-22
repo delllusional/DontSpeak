@@ -53,14 +53,17 @@ private func loadTools() -> [ToolInfo] {
 }
 
 struct ToolsView: View {
+    @Environment(Core.self) private var core
     @State private var tools: [ToolInfo] = []
     @State private var expanded: Set<String> = []
 
     var body: some View {
         toolList
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // Catalog is process-immutable; re-navigating re-fires onAppear — load once.
+            // Catalog varies only with the agents gate (`tools_usage`); load once per
+            // mount, reload on flip.
             .onAppear { if tools.isEmpty { tools = loadTools() } }
+            .onChange(of: core.agentsEnabled) { _, _ in tools = loadTools() }
     }
 
     @ViewBuilder private var toolList: some View {

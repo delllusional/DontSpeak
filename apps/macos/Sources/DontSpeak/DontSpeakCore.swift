@@ -93,8 +93,10 @@ struct HealthSnapshot: Sendable, Equatable {
 /// Read-only health bridge. Main-actor mutations; blocking FFI off-thread → Sendable snapshot.
 @Observable @MainActor
 final class Core {
-    /// Starts on Agents; survives tray hide/reopen.
-    var screen: AppScreen = .agents
+    /// Config `agents` gate; hides the Agents tab and its sidebar entry when off.
+    var agentsEnabled: Bool
+    /// Survives tray hide/reopen. Starts on Agents when the gate is on.
+    var screen: AppScreen
 
     var activity = Activity()
     /// Agents heard this launch. The Agents tab keeps a card for them even when the
@@ -132,6 +134,10 @@ final class Core {
     @ObservationIgnored private nonisolated(unsafe) var pushThread: Thread?
 
     init() {
+        let agents = ds_agents_ui_enabled() != 0
+        agentsEnabled = agents
+        screen = agents ? .agents : .status
+
         // Prime from non-blocking probe; first stream value can wait ~1s.
         let snap = Core.probe()
         apply(snap)
@@ -250,6 +256,12 @@ final class Core {
         if diarization != s.diarization { diarization = s.diarization }
         if dictation != s.dictation { dictation = s.dictation }
         if stats != s.stats { stats = s.stats }
+        // nil = undecodable snapshot / engine down: keep last known instead of hiding on a blip.
+        if let a = s.agentsEnabled, a != agentsEnabled {
+            agentsEnabled = a
+            // Same main-actor update: sidebar row disappears and detail leaves Agents together.
+            if !a && screen == .agents { screen = .status }
+        }
         maybeRequestMicAccess()
         DictationPanelController.shared.apply(
             state: s.dictation.state,
