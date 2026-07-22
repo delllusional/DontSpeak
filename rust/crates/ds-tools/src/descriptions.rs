@@ -4,7 +4,7 @@
 pub const SPEAK: &str = "Queue text for spoken playback.";
 pub const SPEAK_TEXT: &str = "Text to speak.";
 pub const SPEAK_VOICE: &str = "Voice ID. Omit to use the calling agent's assigned voice.";
-pub const SPEAK_RATE: &str = "Playback speed. Defaults to the configured rate.";
+pub const SPEAK_RATE: &str = "System/Kokoro playback speed. Defaults to that engine/model's configured rate; other models ignore it.";
 
 pub const STOP: &str = "Stop this session's speech, or all speech if no session. Fades out.";
 
@@ -50,11 +50,10 @@ pub const SET_CONFIG_TTS_VOICES: &str = "Voice arrays keyed by `system`, `kokoro
 `qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. A pool \
 may mix languages: each utterance is spoken by a pooled voice for its detected language, or by \
 one of the model's own voices for that language when the pool has none.";
-pub const SET_CONFIG_TTS_RATE: &str = "Speech rate. 1.0 = normal. Model support is validated.";
-pub const SET_CONFIG_TTS_PARAMS: &str = "Model parameter objects keyed by `kokoro`, \
-`chatterbox`, `qwen`, or `omnivoice` (see voices for each model's parameters and ranges). A \
-provided object replaces that model's stored parameters; `{}` resets to defaults. Unset \
-parameters use their defaults.";
+pub const SET_CONFIG_TTS_PARAMS: &str = "Engine/model parameter objects keyed by `system`, \
+`kokoro`, `chatterbox`, `qwen`, or `omnivoice` (see voices for model parameters and ranges). \
+`rate` (0.5-2.0, default 1.0) belongs only under `system` and `kokoro`. A provided object replaces that target's \
+stored parameters; `{}` resets to defaults. Unset parameters use their defaults.";
 pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\" = long-reply \
     summaries; \"shorts\" = short replies whole. [] off.";
 pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its agent's pool voice. Default on.";

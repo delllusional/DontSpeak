@@ -115,7 +115,8 @@ mod tests {
         let v: VoiceConfig =
             serde_json::from_str(r#"{"tts_voices":{"kokoro":["am_adam"]}}"#).unwrap();
         assert_eq!(v.tts_voices.kokoro, vec!["am_adam"]);
-        assert_eq!(v.rate, 1.0);
+        assert_eq!(v.system_rate(), 1.0);
+        assert_eq!(v.model_rate(crate::TtsModel::Kokoro), 1.0);
     }
 
     #[test]
@@ -157,6 +158,9 @@ mod tests {
         // Unset prefs are `skip_serializing_if`'d — absent from wire.
         assert!(merged["dontspeak"].get("tts_engine").is_none());
         assert!(merged["dontspeak"].get("stt_engine").is_none());
+        assert!(merged["dontspeak"].get("language").is_none());
+        assert!(merged["dontspeak"].get("tts_language").is_none());
+        assert!(merged["dontspeak"].get("rate").is_none());
     }
 
     #[test]
@@ -172,7 +176,7 @@ mod tests {
         assert_eq!(back.stt_engine, v.stt_engine);
         assert_eq!(back.stt_engine_ladder, v.stt_engine_ladder);
         assert_eq!(back.tts_voices, v.tts_voices);
-        assert_eq!(back.rate, v.rate);
+        assert_eq!(back.tts_params, v.tts_params);
     }
 
     #[test]
@@ -240,7 +244,7 @@ mod tests {
         assert_eq!(lv.stt_engine_ladder, v.stt_engine_ladder);
         assert_eq!(lv.tts_engine, v.tts_engine);
         assert_eq!(lv.tts_engine_ladder, v.tts_engine_ladder);
-        assert_eq!(lv.rate, v.rate);
+        assert_eq!(lv.tts_params, v.tts_params);
         assert_eq!(lv.narrate, v.narrate);
         assert_eq!(lv.long_press_ms, v.long_press_ms);
     }

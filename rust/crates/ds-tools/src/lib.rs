@@ -235,7 +235,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_PARAMS,
             ),
-            p("rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
             p(
                 "narrate",
                 PType::EnumArray(&["shorts", "digests"]),
@@ -406,7 +405,7 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
         ),
         PType::ParamPools if tts_param_pools_valid(value) => Ok(()),
         PType::ParamPools => Err(
-            "must be a non-empty object of kokoro, chatterbox, qwen, or omnivoice parameter objects; see voices"
+            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice parameter objects; see voices"
                 .into(),
         ),
         PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
@@ -432,23 +431,30 @@ fn voice_pools_valid(value: &Value) -> bool {
     })
 }
 
-/// Runtime mirror of the generated `tts_params` schema: model-token keys, each an
-/// object of DECLARED params whose values validate against the descriptor.
+/// Runtime mirror of the generated `tts_params` schema: engine/model keys, each an
+/// object of declared settings whose values validate against the descriptor.
 fn tts_param_pools_valid(value: &Value) -> bool {
     let Some(pools) = value.as_object().filter(|pools| !pools.is_empty()) else {
         return false;
     };
     pools.iter().all(|(name, params)| {
-        if !ds_config::TtsModel::TOKENS.contains(&name.as_str()) {
-            return false;
-        }
-        let descriptor = ds_config::tts_model_descriptor(name).expect("token parses");
         let Some(params) = params.as_object() else {
             return false;
         };
         params.iter().all(|(key, raw)| {
-            serde_json::from_value::<ds_config::TtsParamValue>(raw.clone())
-                .is_ok_and(|value| descriptor.validate_param(key, &value).is_ok())
+            serde_json::from_value::<ds_config::TtsParamValue>(raw.clone()).is_ok_and(|value| {
+                match ds_config::tts_model_descriptor(name) {
+                    Some(descriptor) => descriptor.validate_param(key, &value).is_ok(),
+                    None if name == "system" => ds_config::validate_tts_param(
+                        "system",
+                        ds_config::SYSTEM_TTS_PARAMS,
+                        key,
+                        &value,
+                    )
+                    .is_ok(),
+                    None => false,
+                }
+            })
         })
     })
 }
@@ -526,22 +532,28 @@ fn tts_param_schema(param: &ds_config::TtsParamDescriptor) -> Value {
     }
 }
 
-/// One parameter object per built-in model. A model with no declared params (Kokoro)
-/// accepts only `{}` (reset), matching apply's strict rejection of undeclared keys.
+/// One setting object per engine/model target.
 fn tts_param_pool_properties() -> Value {
     let mut properties = Map::new();
-    for descriptor in &ds_config::TTS_MODELS {
-        let mut params = Map::new();
-        for param in descriptor.params {
-            params.insert(param.key.to_string(), tts_param_schema(param));
+    let setting_object = |params: &[ds_config::TtsParamDescriptor]| {
+        let mut settings = Map::new();
+        for param in params {
+            settings.insert(param.key.to_string(), tts_param_schema(param));
         }
+        json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": Value::Object(settings),
+        })
+    };
+    properties.insert(
+        "system".to_string(),
+        setting_object(ds_config::SYSTEM_TTS_PARAMS),
+    );
+    for descriptor in &ds_config::TTS_MODELS {
         properties.insert(
             descriptor.id.to_string(),
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": Value::Object(params),
-            }),
+            setting_object(descriptor.config_params),
         );
     }
     Value::Object(properties)
@@ -554,9 +566,16 @@ fn output_schema_for(output: Output) -> Value {
             "properties": {
                 "engine": { "type": "string", "enum": ["built_in", "system", "off"] },
                 "model": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
-                "language": { "type": "string" },
                 "voices": { "type": "array", "items": { "type": "string" } },
-                "rate": { "type": "number" },
+                "rates": {
+                    "type": "object",
+                    "properties": {
+                        "system": { "type": "number" },
+                        "kokoro": { "type": "number" }
+                    },
+                    "required": ["system", "kokoro"],
+                    "additionalProperties": false
+                },
                 "state": {
                     "type": "object",
                     "properties": {
@@ -611,7 +630,7 @@ fn output_schema_for(output: Output) -> Value {
                 },
                 "status": { "type": "object" }
             },
-            "required": ["engine", "model", "language", "voices", "rate", "state"],
+            "required": ["engine", "model", "voices", "rates", "state"],
             "additionalProperties": false
         }),
         Output::Usage => json!({
@@ -914,6 +933,11 @@ mod tests {
             ),
             (
                 "set_config",
+                json!({"tts_params": {"system": {"rate": 1.25}, "kokoro": {"rate": 0.8}}}),
+                true,
+            ),
+            (
+                "set_config",
                 json!({"tts_params": {"omnivoice": {"steps": 32}}}),
                 true,
             ),
@@ -932,6 +956,16 @@ mod tests {
             ),
             (
                 "set_config",
+                json!({"tts_params": {"system": {"language": "en"}}}),
+                false,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"qwen": {"rate": 1.2}}}),
+                false,
+            ),
+            (
+                "set_config",
                 json!({"tts_params": {"legacy": {"steps": 8}}}),
                 false,
             ),
@@ -941,7 +975,8 @@ mod tests {
                 false,
             ),
             ("set_config", json!({"tts_language": "ru"}), false),
-            ("set_config", json!({"rate": 0.49}), false),
+            ("set_config", json!({"language": "ru"}), false),
+            ("set_config", json!({"rate": 1.0}), false),
             ("set_config", json!({"capture_gain": "auto"}), true),
             ("set_config", json!({"capture_gain": 20.1}), false),
             ("set_config", json!({}), false),
@@ -1021,11 +1056,9 @@ mod tests {
             "system: []` uses the OS default",
             "tts_voices.system",
         );
-        mentions(
-            SET_CONFIG_TTS_RATE,
-            &format!("{:.1} = normal", v.rate),
-            "rate",
-        );
+        assert_eq!(v.system_rate(), 1.0);
+        assert_eq!(v.model_rate(ds_config::TtsModel::Kokoro), 1.0);
+        mentions(SET_CONFIG_TTS_PARAMS, "default 1.0", "tts_params.*.rate");
 
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         mentions(SET_CONFIG_NARRATE, "Default both", "narrate");
@@ -1304,12 +1337,22 @@ mod tests {
             .expect("tts_params should be an object schema");
         let mut pool_names: Vec<&str> = pools.keys().map(String::as_str).collect();
         pool_names.sort_unstable();
-        let mut model_tokens: Vec<&str> = ds_config::TtsModel::TOKENS.to_vec();
-        model_tokens.sort_unstable();
-        assert_eq!(pool_names, model_tokens);
+        let mut target_tokens: Vec<&str> = ds_config::TtsModel::TOKENS.to_vec();
+        target_tokens.push("system");
+        target_tokens.sort_unstable();
+        assert_eq!(pool_names, target_tokens);
+        assert_eq!(
+            pools["system"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["rate"]
+        );
         for descriptor in &ds_config::TTS_MODELS {
             // serde_json's Map sorts keys; compare as sets.
-            let mut declared: Vec<&str> = descriptor.params.iter().map(|p| p.key).collect();
+            let mut declared: Vec<&str> = descriptor.config_params.iter().map(|p| p.key).collect();
             declared.sort_unstable();
             let advertised: Vec<&str> = pools[descriptor.id]["properties"]
                 .as_object()
@@ -1353,7 +1396,6 @@ mod tests {
         };
 
         let populated = SetConfigArgs {
-            rate: Some(1.25),
             tts_voices: Some(TtsVoiceUpdates {
                 system: Some(vec!["Samantha".to_string()]),
                 kokoro: Some(vec!["af_sarah".to_string()]),
@@ -1362,7 +1404,8 @@ mod tests {
                 omnivoice: Some(vec!["whisper".to_string()]),
             }),
             tts_params: Some(TtsParamUpdates {
-                kokoro: None,
+                system: Some([("rate".to_string(), TtsParamValue::Float(1.25))].into()),
+                kokoro: Some([("rate".to_string(), TtsParamValue::Float(0.8))].into()),
                 chatterbox: Some([("exaggeration".to_string(), TtsParamValue::Float(1.5))].into()),
                 qwen: Some([("repetition_penalty".to_string(), TtsParamValue::Float(1.2))].into()),
                 omnivoice: Some([("steps".to_string(), TtsParamValue::Int(32))].into()),

@@ -50,8 +50,9 @@ pub use paths::{Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, model_dir};
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};
 pub use tts_model::{
-    ResolvedTtsParams, TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, TtsParamDefault,
-    TtsParamDescriptor, TtsParamKind, TtsParamMap, TtsParamValue, tts_model_descriptor,
+    ResolvedTtsParams, SYSTEM_TTS_PARAMS, TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor,
+    TtsParamDefault, TtsParamDescriptor, TtsParamKind, TtsParamMap, TtsParamValue,
+    tts_model_descriptor, validate_tts_param,
 };
 pub use voice::{
     CaptureGain, ConfigChange, HandsFreePhrases, TtsParamPools, TtsVoicePools, VoiceConfig,

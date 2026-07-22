@@ -24,7 +24,7 @@ Queue text for spoken playback.
 |---|---|---|---|
 | `text` | string | yes | Text to speak. |
 | `voice` | string | no | Voice ID. Omit to use the calling agent's assigned voice. |
-| `rate` | number 0.5–2.0 | no | Playback speed. Defaults to the configured rate. |
+| `rate` | number 0.5–2.0 | no | System/Kokoro playback speed. Defaults to that engine/model's configured rate; other models ignore it. |
 
 ## listen
 
@@ -58,9 +58,10 @@ Speech config and runtime state.
 
 With `detail=true`, nested model lifecycle/stats land under the `status` key
 (not `models`). Engine tokens are config tokens (`built_in` / `system` / `off`).
-Concise `model` is the configured built-in model and `language` is `auto` (both non-null by
-schema even when the engine resolves to `system`/`off`); the `detail` `status` section uses resolved
-`ModelStatus` semantics and nulls them when no built-in model is active.
+Concise `model` is the configured built-in model even when the engine resolves to
+`system`/`off`. `rates` reports the independently configured `system` and `kokoro`
+rates. Language is detected per utterance and is not a persisted setting; the detailed
+`status` section reports runtime model-language state only.
 
 The concise `state` includes the status sequence, TTS/STT lifecycle rows, active download
 targets with byte totals plus starting bytes and elapsed seconds, the current resolved voice
@@ -86,6 +87,9 @@ List selectable models, languages, and voices.
 | `tts_engine` | enum: `built_in`, `system` | no | Engine to inspect. Defaults to configured speech engine, or built-in when speech is off. |
 | `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | no | Built-in model to inspect. Defaults to the configured model. |
 | `language` | string | no | Language to inspect. Defaults to the model's catalog default. |
+
+The `language` argument only filters this catalog query. It does not configure synthesis;
+spoken text is language-detected per utterance.
 
 ## diarize
 
@@ -116,7 +120,7 @@ Atomically update and reload persistent settings.
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech: "built_in", "system", or "off". Omit to keep the automatic preference. Unsupported engines are rejected. |
 | `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | Built-in model: "kokoro", "chatterbox", "qwen", or "omnivoice". |
 | `tts_voices` | object | Voice arrays keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice`. `system: []` uses the OS default; model pools must be non-empty. A pool may mix languages: each utterance is spoken by a pooled voice for its detected language, or by one of the model's own voices for that language when the pool has none. |
-| `rate` | number 0.5–2.0 | Speech rate. 1.0 = normal. Model support is validated. |
+| `tts_params` | object | Engine/model parameter objects keyed by `system`, `kokoro`, `chatterbox`, `qwen`, or `omnivoice` (see voices for model parameters and ranges). `rate` (0.5-2.0, default 1.0) belongs only under `system` and `kokoro`. A provided object replaces that target's stored parameters; `{}` resets to defaults. Unset parameters use their defaults. |
 
 **Narration**
 

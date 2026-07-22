@@ -11,7 +11,7 @@ use crate::enums::{
     default_stt_engine_ladder, default_tray, default_tts_engine_ladder, se_stt_engine_pref,
     se_tts_engine_pref,
 };
-use crate::tts_model::de_tts_model;
+use crate::tts_model::{SYSTEM_TTS_PARAMS, de_tts_model, validate_tts_param};
 use ds_log::{LogLevel, log};
 
 use crate::{
@@ -82,12 +82,14 @@ impl TtsVoicePools {
     }
 }
 
-/// Per-model TTS parameter overrides (`[tts_params.<model>]`). Sparse: only set keys
-/// are stored; descriptor defaults fill at resolve time
+/// Per-engine/model TTS setting overrides (`[tts_params.<target>]`). Sparse: only set
+/// keys are stored; descriptor defaults fill at resolve time
 /// ([`TtsModelDescriptor::resolve_params`]). Each block survives a model switch
 /// (mirrors `tts_voices`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TtsParamPools {
+    #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
+    pub system: TtsParamMap,
     #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
     pub kokoro: TtsParamMap,
     #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
@@ -100,7 +102,8 @@ pub struct TtsParamPools {
 
 impl TtsParamPools {
     pub fn is_empty(&self) -> bool {
-        self.kokoro.is_empty()
+        self.system.is_empty()
+            && self.kokoro.is_empty()
             && self.chatterbox.is_empty()
             && self.qwen.is_empty()
             && self.omnivoice.is_empty()
@@ -130,10 +133,21 @@ impl TtsParamPools {
             return pools;
         };
         for (token, entries) in models {
-            let Some(model) = TtsModel::parse(token) else {
+            let Some(entries) = entries.as_object() else {
                 continue;
             };
-            let Some(entries) = entries.as_object() else {
+            if token == "system" {
+                for (key, raw) in entries {
+                    let Ok(raw) = serde_json::from_value(raw.clone()) else {
+                        continue;
+                    };
+                    if let Ok(value) = validate_tts_param("system", SYSTEM_TTS_PARAMS, key, &raw) {
+                        pools.system.insert(key.clone(), value);
+                    }
+                }
+                continue;
+            }
+            let Some(model) = TtsModel::parse(token) else {
                 continue;
             };
             let descriptor = model.descriptor();
@@ -166,7 +180,7 @@ pub struct VoiceConfig {
     /// Per-engine/model voice pools (stable per-agent).
     #[serde(default)]
     pub tts_voices: TtsVoicePools,
-    /// Per-model TTS parameter overrides; empty = descriptor defaults.
+    /// Per-engine/model TTS setting overrides; empty = descriptor defaults.
     #[serde(default, skip_serializing_if = "TtsParamPools::is_empty")]
     pub tts_params: TtsParamPools,
     /// Model hosted by the built-in engine.
@@ -226,9 +240,6 @@ pub struct VoiceConfig {
         deserialize_with = "de_tts_engine_ladder"
     )]
     pub tts_engine_ladder: Vec<TtsEngine>,
-    /// 0.5–2.0; 1.0 = normal.
-    #[serde(default = "default_rate")]
-    pub rate: f32,
     /// Compute ladder (default MLX→CUDA→CPU). Always has a backend.
     #[serde(default = "default_provider", deserialize_with = "de_provider")]
     pub provider: Vec<Provider>,
@@ -363,9 +374,6 @@ fn default_model_voices(model: TtsModel) -> Vec<String> {
 fn default_long_press_ms() -> u64 {
     600
 }
-fn default_rate() -> f32 {
-    1.0
-}
 fn default_activity_threshold() -> f32 {
     0.5
 }
@@ -449,7 +457,6 @@ impl Default for VoiceConfig {
             speaker_lock: false,
             tts_engine: None,
             tts_engine_ladder: default_tts_engine_ladder(),
-            rate: default_rate(),
             provider: default_provider(),
             caps: default_enabled(),
             tray: default_tray(),
@@ -478,6 +485,46 @@ impl Default for VoiceConfig {
 }
 
 impl VoiceConfig {
+    fn stored_rate(
+        owner: &str,
+        descriptors: &[crate::TtsParamDescriptor],
+        stored: &TtsParamMap,
+    ) -> f32 {
+        let default = descriptors
+            .iter()
+            .find(|param| param.key == "rate")
+            .and_then(|param| match param.default {
+                crate::TtsParamDefault::Float(value) => Some(value),
+                crate::TtsParamDefault::Int(value) => Some(value as f32),
+                crate::TtsParamDefault::Choice(_) => None,
+            })
+            .unwrap_or(1.0);
+        stored
+            .get("rate")
+            .and_then(|raw| validate_tts_param(owner, descriptors, "rate", raw).ok())
+            .and_then(|value| match value {
+                TtsParamValue::Float(value) => Some(value),
+                TtsParamValue::Int(value) => Some(value as f32),
+                TtsParamValue::Choice(_) => None,
+            })
+            .unwrap_or(default)
+    }
+
+    /// Persisted System playback rate (default 1.0).
+    pub fn system_rate(&self) -> f32 {
+        Self::stored_rate("system", SYSTEM_TTS_PARAMS, &self.tts_params.system)
+    }
+
+    /// Persisted playback rate for a built-in model. Models without rate control return 1.0.
+    pub fn model_rate(&self, model: TtsModel) -> f32 {
+        let descriptor = model.descriptor();
+        Self::stored_rate(
+            descriptor.id,
+            descriptor.config_params,
+            self.tts_params.for_model(model),
+        )
+    }
+
     /// Spoken replies on ([`Self::resolved_tts`] is Some).
     pub fn is_tts_on(&self) -> bool {
         self.resolved_tts().is_some()
@@ -536,16 +583,17 @@ fn warn_dropped_tts_params(table: &toml::Table, paths: &Paths) {
         return warn("tts_params is not a table; using defaults");
     };
     for (token, entries) in models {
-        let Some(model) = TtsModel::parse(token) else {
-            warn(&format!(
-                "unknown model in [tts_params]: {token:?} (ignored)"
-            ));
-            continue;
-        };
         let Some(entries) = entries.as_table() else {
             warn(&format!("tts_params.{token} is not a table (ignored)"));
             continue;
         };
+        let model = TtsModel::parse(token);
+        if token != "system" && model.is_none() {
+            warn(&format!(
+                "unknown engine or model in [tts_params]: {token:?} (ignored)"
+            ));
+            continue;
+        }
         for (key, raw) in entries {
             let value = match raw {
                 toml::Value::Integer(value) => TtsParamValue::Int(*value),
@@ -559,7 +607,11 @@ fn warn_dropped_tts_params(table: &toml::Table, paths: &Paths) {
                     continue;
                 }
             };
-            if let Err(error) = model.descriptor().validate_param(key, &value) {
+            let result = match model {
+                Some(model) => model.descriptor().validate_param(key, &value),
+                None => validate_tts_param("system", SYSTEM_TTS_PARAMS, key, &value),
+            };
+            if let Err(error) = result {
                 warn(&format!("tts_params.{token}: {error} (ignored)"));
             }
         }
@@ -661,7 +713,6 @@ impl VoiceConfig {
 
     /// Clamp numerics so hand-edits can't feed the engine bad values.
     fn clamp(&mut self) {
-        self.rate = self.rate.clamp(0.5, 2.0);
         self.activity_threshold = self.activity_threshold.clamp(0.1, 0.9);
         self.match_threshold = self.match_threshold.clamp(0.0, 1.0);
         // Same 0..5000 as set_config.
@@ -831,7 +882,8 @@ pub(crate) mod tests {
         assert_eq!(v.activity_threshold, 0.5);
         assert_eq!(v.match_threshold, 0.65);
         assert!(!v.speaker_lock);
-        assert_eq!(v.rate, 1.0);
+        assert_eq!(v.system_rate(), 1.0);
+        assert_eq!(v.model_rate(TtsModel::Kokoro), 1.0);
         assert!(v.caps);
         assert_eq!(v.listen_mode, ListenMode::RecordSubmit);
         assert_eq!(v.hands_free.start, "computer");
@@ -888,6 +940,8 @@ pub(crate) mod tests {
         // valid siblings (fail-open per entry, not per block).
         let v: VoiceConfig = serde_json::from_str(
             r#"{"tts_params":{
+                "system":{"rate":1.25,"language":"en"},
+                "kokoro":{"rate":0.8,"language":"fr"},
                 "chatterbox":{"exaggeration":1.5,"bogus":1.0},
                 "qwen":{"repetition_penalty":9.0},
                 "omnivoice":{"steps":8,"exaggeration":0.7},
@@ -895,6 +949,10 @@ pub(crate) mod tests {
             }}"#,
         )
         .unwrap();
+        assert_eq!(v.system_rate(), 1.25);
+        assert_eq!(v.model_rate(TtsModel::Kokoro), 0.8);
+        assert!(!v.tts_params.system.contains_key("language"));
+        assert!(!v.tts_params.kokoro.contains_key("language"));
         assert_eq!(
             v.tts_params.chatterbox["exaggeration"],
             TtsParamValue::Float(1.5)
@@ -920,6 +978,12 @@ pub(crate) mod tests {
         write_settings(&paths, &cfg).unwrap();
         let text = std::fs::read_to_string(&paths.config_toml).unwrap();
         assert!(!text.contains("tts_params"), "empty pools stay absent");
+        cfg.tts_params
+            .system
+            .insert("rate".into(), TtsParamValue::Float(1.25));
+        cfg.tts_params
+            .for_model_mut(TtsModel::Kokoro)
+            .insert("rate".into(), TtsParamValue::Float(0.8));
         cfg.tts_params
             .for_model_mut(TtsModel::Chatterbox)
             .insert("exaggeration".into(), TtsParamValue::Float(1.25));
@@ -1472,7 +1536,11 @@ pub(crate) mod tests {
         };
         assert_eq!(selected.resolved_tts_provider(), expected_provider);
         assert!(VoiceConfig::known_keys().contains("tts_model"));
-        assert!(!VoiceConfig::known_keys().contains("tts_language"));
+        let wire = serde_json::to_value(&selected).unwrap();
+        for absent in ["language", "tts_language", "rate"] {
+            assert!(!VoiceConfig::known_keys().contains(absent));
+            assert!(wire.get(absent).is_none(), "{absent} must not persist");
+        }
 
         let changed = VoiceConfig {
             tts_model: TtsModel::Qwen,
@@ -1607,6 +1675,8 @@ pub(crate) mod tests {
             },
             tts_model: TtsModel::Kokoro,
             tts_params: TtsParamPools {
+                system: [("rate".to_string(), TtsParamValue::Float(1.25))].into(),
+                kokoro: [("rate".to_string(), TtsParamValue::Float(0.8))].into(),
                 omnivoice: [("steps".to_string(), TtsParamValue::Int(32))].into(),
                 ..Default::default()
             },
@@ -1620,7 +1690,6 @@ pub(crate) mod tests {
             tts_engine: None,
             tts_engine_ladder: vec![TtsEngine::System],
             provider: vec![Provider::OrtCpu],
-            rate: 1.25,
             narrate: vec![NarrateKind::Digests],
             long_press_ms: 750,
             caps: false,
@@ -1655,13 +1724,16 @@ pub(crate) mod tests {
     fn changes_since_flags_only_what_changed() {
         let base = VoiceConfig::default();
 
-        // A per-call-only change (voice/rate) flags nothing warm.
+        // A voice/rate setting change flags nothing warm.
         let only_voice = VoiceConfig {
             tts_voices: TtsVoicePools {
                 kokoro: vec!["am_michael".into()],
                 ..Default::default()
             },
-            rate: 1.5,
+            tts_params: TtsParamPools {
+                kokoro: [("rate".to_string(), TtsParamValue::Float(1.5))].into(),
+                ..Default::default()
+            },
             ..base.clone()
         };
         assert!(only_voice.changes_since(&base).is_noop());
@@ -1752,7 +1824,11 @@ pub(crate) mod tests {
             tts_engine_ladder: vec![TtsEngine::System],
             narrate: Vec::new(),
             full_duplex: true,
-            rate: 1.25,
+            tts_params: TtsParamPools {
+                system: [("rate".to_string(), TtsParamValue::Float(1.25))].into(),
+                kokoro: [("rate".to_string(), TtsParamValue::Float(0.8))].into(),
+                ..Default::default()
+            },
             capture_gain: CaptureGain::Manual(3.5),
             tts_voices: TtsVoicePools {
                 kokoro: vec!["am_adam".into(), "af_bella".into()],
@@ -1784,21 +1860,25 @@ pub(crate) mod tests {
             "empty narrate set round-trips through TOML"
         );
         assert!(r.full_duplex);
-        assert_eq!(r.rate, 1.25);
+        assert_eq!(r.system_rate(), 1.25);
+        assert_eq!(r.model_rate(TtsModel::Kokoro), 0.8);
         assert_eq!(r.capture_gain.manual(), Some(3.5));
         assert_eq!(r.active_voices(), ["am_adam", "af_bella"]);
     }
 
     #[test]
-    fn load_clamps_out_of_range_rate() {
+    fn load_drops_out_of_range_per_target_rates() {
         let dir = tempfile::tempdir().unwrap();
         let mut paths = Paths::rooted_at(dir.path());
         paths.config_toml = dir.path().join("config.toml");
-        // A hand-edited rate well past the 0.5–2.0 range is clamped on load.
-        std::fs::write(&paths.config_toml, "rate = 5.0\n").unwrap();
-        assert_eq!(VoiceConfig::load(&paths).rate, 2.0);
-        std::fs::write(&paths.config_toml, "rate = 0.1\n").unwrap();
-        assert_eq!(VoiceConfig::load(&paths).rate, 0.5);
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_params.system]\nrate = 5.0\n[tts_params.kokoro]\nrate = 0.1\n",
+        )
+        .unwrap();
+        let cfg = VoiceConfig::load(&paths);
+        assert_eq!(cfg.system_rate(), 1.0);
+        assert_eq!(cfg.model_rate(TtsModel::Kokoro), 1.0);
     }
 
     #[test]

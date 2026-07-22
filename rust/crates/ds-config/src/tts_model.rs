@@ -203,6 +203,10 @@ pub struct TtsModelDescriptor {
     /// Declared inference knobs; absent config entries resolve to each default, so an
     /// empty `[tts_params]` block is byte-identical to pre-parameter behavior.
     pub params: &'static [TtsParamDescriptor],
+    /// Persisted synthesis settings advertised by `set_config`. Usually identical to
+    /// `params`; Kokoro also exposes transport-level `rate`, which stays out of the
+    /// model-parameter ABI because helpers receive it in the dedicated rate slot.
+    pub config_params: &'static [TtsParamDescriptor],
 }
 
 impl TtsModelDescriptor {
@@ -254,54 +258,21 @@ impl TtsModelDescriptor {
         self.params.iter().find(|param| param.key == key)
     }
 
+    pub fn config_param(&self, key: &str) -> Option<&'static TtsParamDescriptor> {
+        self.config_params.iter().find(|param| param.key == key)
+    }
+
     /// Strict validation (MCP `set_config`): unknown key, wrong type, or out-of-range
     /// value is an `Err`. Returns the value normalized to the declared kind (an
     /// integral number is coerced for a `Float` param).
     pub fn validate_param(&self, key: &str, raw: &TtsParamValue) -> Result<TtsParamValue, String> {
-        let Some(param) = self.param(key) else {
-            return Err(format!("`{key}` is not a {} parameter", self.id));
-        };
-        match param.kind {
-            TtsParamKind::Float { min, max } => {
-                let value = match raw {
-                    TtsParamValue::Float(value) => *value,
-                    TtsParamValue::Int(value) => *value as f32,
-                    TtsParamValue::Choice(_) => {
-                        return Err(format!("`{key}` must be a number from {min} to {max}"));
-                    }
-                };
-                if !value.is_finite() || value < min || value > max {
-                    return Err(format!("`{key}` must be a number from {min} to {max}"));
-                }
-                Ok(TtsParamValue::Float(value))
-            }
-            TtsParamKind::Int { min, max } => {
-                let value = match raw {
-                    TtsParamValue::Int(value) => *value,
-                    // Accept a lossless integral float (TOML/JSON clients may send 32.0).
-                    TtsParamValue::Float(value) if value.fract() == 0.0 => *value as i64,
-                    _ => {
-                        return Err(format!("`{key}` must be an integer from {min} to {max}"));
-                    }
-                };
-                if value < min || value > max {
-                    return Err(format!("`{key}` must be an integer from {min} to {max}"));
-                }
-                Ok(TtsParamValue::Int(value))
-            }
-            TtsParamKind::Choice(choices) => match raw {
-                TtsParamValue::Choice(value) if choices.contains(&value.as_str()) => {
-                    Ok(raw.clone())
-                }
-                _ => Err(format!("`{key}` must be one of: {}", choices.join(", "))),
-            },
-        }
+        validate_tts_param(self.id, self.config_params, key, raw)
     }
 
-    /// Fail-open resolution (helper playback + config load): every declared key comes
+    /// Fail-open resolution (helper playback + config load): every inference key comes
     /// back — a stored value that validates is kept, anything else (unknown key after a
-    /// model switch, out-of-range, wrong type) falls to the declared default. Never
-    /// refuses an utterance; mirrors the voice/language model-switch clamps.
+    /// model switch, out-of-range, wrong type) falls to the declared default. Transport
+    /// settings such as Kokoro `rate` remain in their dedicated helper arguments.
     pub fn resolve_params(&self, stored: &TtsParamMap) -> ResolvedTtsParams {
         let mut resolved = TtsParamMap::new();
         for param in self.params {
@@ -346,6 +317,51 @@ impl TtsModelDescriptor {
     }
 }
 
+/// Strict validation shared by model and System synthesis-setting pools.
+pub fn validate_tts_param(
+    owner: &str,
+    params: &[TtsParamDescriptor],
+    key: &str,
+    raw: &TtsParamValue,
+) -> Result<TtsParamValue, String> {
+    let Some(param) = params.iter().find(|param| param.key == key) else {
+        return Err(format!("`{key}` is not a {owner} parameter"));
+    };
+    match param.kind {
+        TtsParamKind::Float { min, max } => {
+            let value = match raw {
+                TtsParamValue::Float(value) => *value,
+                TtsParamValue::Int(value) => *value as f32,
+                TtsParamValue::Choice(_) => {
+                    return Err(format!("`{key}` must be a number from {min} to {max}"));
+                }
+            };
+            if !value.is_finite() || value < min || value > max {
+                return Err(format!("`{key}` must be a number from {min} to {max}"));
+            }
+            Ok(TtsParamValue::Float(value))
+        }
+        TtsParamKind::Int { min, max } => {
+            let value = match raw {
+                TtsParamValue::Int(value) => *value,
+                // Accept a lossless integral float (TOML/JSON clients may send 32.0).
+                TtsParamValue::Float(value) if value.fract() == 0.0 => *value as i64,
+                _ => {
+                    return Err(format!("`{key}` must be an integer from {min} to {max}"));
+                }
+            };
+            if value < min || value > max {
+                return Err(format!("`{key}` must be an integer from {min} to {max}"));
+            }
+            Ok(TtsParamValue::Int(value))
+        }
+        TtsParamKind::Choice(choices) => match raw {
+            TtsParamValue::Choice(value) if choices.contains(&value.as_str()) => Ok(raw.clone()),
+            _ => Err(format!("`{key}` must be one of: {}", choices.join(", "))),
+        },
+    }
+}
+
 // Japanese and Mandarin are dropped: their frontends cost ~3.6 MiB in every binary and
 // a 27 MiB dictionary download for a pipeline eSpeak cannot stand in for.
 const KOKORO_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "pt"];
@@ -380,6 +396,16 @@ const OMNIVOICE_VOICES: &[&str] = &[
 ];
 const OMNIVOICE_DEFAULT_VOICE: &[&str] = &["young_woman"];
 const NO_PARAMS: &[TtsParamDescriptor] = &[];
+const RATE_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
+    key: "rate",
+    kind: TtsParamKind::Float { min: 0.5, max: 2.0 },
+    default: TtsParamDefault::Float(1.0),
+    user_visible: true,
+    honored_ort: true,
+    honored_mlx: true,
+}];
+/// Settings accepted for OS speech synthesis.
+pub const SYSTEM_TTS_PARAMS: &[TtsParamDescriptor] = RATE_PARAMS;
 // Emotion exaggeration fed to the pinned export's `exaggeration` input each embed step
 // (model card range; 0.5 = neutral — the value the ORT port hardcoded before params).
 const CHATTERBOX_PARAMS: &[TtsParamDescriptor] = &[TtsParamDescriptor {
@@ -457,6 +483,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_full_duplex: true,
         supports_resume: true,
         params: NO_PARAMS,
+        config_params: RATE_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::Chatterbox,
@@ -474,6 +501,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_full_duplex: false,
         supports_resume: true,
         params: CHATTERBOX_PARAMS,
+        config_params: CHATTERBOX_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::Qwen,
@@ -491,6 +519,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_full_duplex: false,
         supports_resume: true,
         params: QWEN_PARAMS,
+        config_params: QWEN_PARAMS,
     },
     TtsModelDescriptor {
         model: TtsModel::OmniVoice,
@@ -508,6 +537,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         supports_full_duplex: false,
         supports_resume: true,
         params: OMNIVOICE_PARAMS,
+        config_params: OMNIVOICE_PARAMS,
     },
 ];
 
@@ -528,6 +558,12 @@ mod tests {
             // TOKENS is hand-written for const contexts; it must stay the descriptors'
             // ids in ALL's order, or MCP schemas advertise a model that cannot parse.
             assert_eq!(TtsModel::TOKENS[index], model.as_str());
+            assert_eq!(
+                model.descriptor().supports_rate,
+                model.descriptor().config_param("rate").is_some(),
+                "{} rate capability drifted from its persisted settings",
+                model.as_str()
+            );
         }
         assert_eq!(TtsModel::TOKENS.len(), TtsModel::ALL.len());
         // parse trims + lowercases like every other config-token enum; unknown stays None.
@@ -644,6 +680,15 @@ mod tests {
         // values against its backend consts until S3/S6 turn those consts into
         // descriptor reads.
         assert!(TtsModel::Kokoro.descriptor().params.is_empty());
+        let rate = TtsModel::Kokoro
+            .descriptor()
+            .config_param("rate")
+            .expect("kokoro declares persisted rate");
+        assert_eq!(rate.default, TtsParamDefault::Float(1.0));
+        assert_eq!(rate.kind, TtsParamKind::Float { min: 0.5, max: 2.0 });
+        assert!(rate.user_visible && rate.honored_ort && rate.honored_mlx);
+        assert_eq!(SYSTEM_TTS_PARAMS.len(), 1);
+        assert_eq!(SYSTEM_TTS_PARAMS[0].key, rate.key);
         let exaggeration = TtsModel::Chatterbox
             .descriptor()
             .param("exaggeration")
@@ -685,7 +730,7 @@ mod tests {
         // Every declared default must itself validate (a default outside its own range
         // would make resolve_params produce out-of-contract values).
         for model in TtsModel::ALL.iter().copied() {
-            for param in model.descriptor().params {
+            for param in model.descriptor().config_params {
                 assert_eq!(
                     model
                         .descriptor()
@@ -697,6 +742,15 @@ mod tests {
                 );
             }
         }
+        assert_eq!(
+            validate_tts_param(
+                "system",
+                SYSTEM_TTS_PARAMS,
+                "rate",
+                &TtsParamValue::Float(1.5),
+            ),
+            Ok(TtsParamValue::Float(1.5))
+        );
     }
 
     #[test]

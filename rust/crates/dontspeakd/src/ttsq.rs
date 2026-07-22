@@ -121,6 +121,20 @@ fn greeting_line(name: Option<&str>, idx: usize) -> String {
     }
 }
 
+fn playback_rate(
+    cfg: &VoiceConfig,
+    engine: Option<ds_config::TtsEngine>,
+    override_rate: Option<f32>,
+) -> f32 {
+    match engine {
+        Some(ds_config::TtsEngine::System) => override_rate.unwrap_or_else(|| cfg.system_rate()),
+        Some(ds_config::TtsEngine::BuiltIn) if cfg.tts_model.descriptor().supports_rate => {
+            override_rate.unwrap_or_else(|| cfg.model_rate(cfg.tts_model))
+        }
+        _ => 1.0,
+    }
+}
+
 /// Reuse if still in `pool`; else free; else least-loaded. `pool` non-empty; `roll(n) < n`.
 /// Load is counted only among agents holding a voice for the SAME language, so spreading
 /// voices across agents stays independent per language.
@@ -1411,7 +1425,7 @@ impl TtsQueue {
                 Some(v) => v.clone(),
                 None => base_voice,
             };
-            let rate = rate_override.unwrap_or(cfg.rate);
+            let rate = playback_rate(&cfg, engine, rate_override);
             // Stored per-model overrides → complete validated set for the active model.
             let params = cfg
                 .tts_model
@@ -1835,6 +1849,49 @@ mod tests {
         let mic_only = hold_state(false, true, true, true, true);
         assert!(mic_only.reports_busy());
         assert!(!hold_state(true, true, false, false, false).any());
+    }
+
+    #[test]
+    fn playback_rate_is_scoped_to_system_and_kokoro() {
+        let mut cfg = VoiceConfig::default();
+        cfg.tts_params
+            .system
+            .insert("rate".into(), ds_config::TtsParamValue::Float(1.25));
+        cfg.tts_params
+            .kokoro
+            .insert("rate".into(), ds_config::TtsParamValue::Float(0.8));
+
+        assert_eq!(
+            playback_rate(&cfg, Some(ds_config::TtsEngine::System), None),
+            1.25
+        );
+        assert_eq!(
+            playback_rate(&cfg, Some(ds_config::TtsEngine::System), Some(1.5)),
+            1.5
+        );
+        assert_eq!(
+            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), None),
+            0.8
+        );
+        assert_eq!(
+            playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), Some(1.1)),
+            1.1
+        );
+
+        for model in [
+            ds_config::TtsModel::Chatterbox,
+            ds_config::TtsModel::Qwen,
+            ds_config::TtsModel::OmniVoice,
+        ] {
+            cfg.tts_model = model;
+            assert_eq!(
+                playback_rate(&cfg, Some(ds_config::TtsEngine::BuiltIn), Some(1.5)),
+                1.0,
+                "{} must ignore rate overrides",
+                model.as_str()
+            );
+        }
+        assert_eq!(playback_rate(&cfg, None, Some(1.5)), 1.0);
     }
 
     #[test]

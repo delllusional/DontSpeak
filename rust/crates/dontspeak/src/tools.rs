@@ -261,7 +261,7 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
             "providers": descriptor.providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
             "supports_rate": descriptor.supports_rate,
             "supports_full_duplex": descriptor.supports_full_duplex,
-            "params": descriptor.params.iter().map(tts_param_json).collect::<Vec<_>>(),
+            "params": descriptor.config_params.iter().map(tts_param_json).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     });
     Ok(out)
@@ -294,7 +294,7 @@ fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
     out
 }
 
-/// Configured engine/voice/rate + live playback. `detail` adds model lifecycle/stats.
+/// Configured engine/voices/rates + live playback. `detail` adds model lifecycle/stats.
 /// Read-only — never spawns the engine.
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
@@ -341,9 +341,11 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     let mut out = json!({
         "engine": resolved_tts.map(|e| e.as_str()).unwrap_or("off"),
         "model": cfg.tts_model.as_str(),
-        "language": "auto",
         "voices": voices,
-        "rate": cfg.rate,
+        "rates": {
+            "system": cfg.system_rate(),
+            "kokoro": cfg.model_rate(ds_config::TtsModel::Kokoro),
+        },
         "state": state,
     });
     if a.detail.unwrap_or(false) {
@@ -1016,6 +1018,9 @@ mod status_output {
             Some(&Value::Bool(false)),
             "with no socket the engine reports not running"
         );
+        assert_eq!(v["rates"], json!({ "system": 1.0, "kokoro": 1.0 }));
+        assert!(v.get("language").is_none());
+        assert!(v.get("rate").is_none());
     }
 
     #[test]
@@ -1248,12 +1253,24 @@ mod set_config_tests {
         let (_dir, paths) = rooted_paths();
         assert!(!paths.config_toml.exists());
 
-        let msg = call_set_config(&paths, &json!({ "rate": 1.2 })).expect("a valid change applies");
-        assert_eq!(msg, "Updated rate=1.2.");
+        let msg = call_set_config(
+            &paths,
+            &json!({ "tts_params": { "system": { "rate": 1.2 } } }),
+        )
+        .expect("a valid change applies");
+        assert_eq!(msg, "Updated tts_params.system=[rate=1.2].");
         assert!(paths.config_toml.exists(), "config.toml was written");
 
         let cfg = VoiceConfig::load(&paths);
-        assert_eq!(cfg.rate, 1.2);
+        assert_eq!(cfg.system_rate(), 1.2);
+        let text = std::fs::read_to_string(&paths.config_toml).unwrap();
+        assert!(
+            !text
+                .lines()
+                .take_while(|line| !line.starts_with('['))
+                .any(|line| line.starts_with("rate ="))
+        );
+        assert!(!text.contains("language"));
     }
 }
 

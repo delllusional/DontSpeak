@@ -18,7 +18,7 @@ bundle.
 `~/Library/Application Support/DontSpeak/`). Separate from any client config —
 `~/.claude/settings.json` stays Claude's (hooks + `voice`). Hot-reload by mtime:
 engine, built-in model, and provider changes reconcile the shared helper;
-voice/rate/narrate apply on the next call.
+voice/model parameters/narrate apply on the next call.
 
 ## Pluggable STT/TTS
 
@@ -38,7 +38,7 @@ macOS-only today, so Parakeet leads on Windows/Linux.
 Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU, ORT CUDA,
 and MLX; Kokoro alone has Core ML, rate control, and full-duplex. Model capabilities
 drive voice, rate, full-duplex, download, and provider selection. Speech language is
-detected per utterance in the shared text pipeline.
+detected per utterance in the shared text pipeline and never persisted as a synthesis setting.
 
 ## Caps Lock
 
