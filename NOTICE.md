@@ -126,7 +126,26 @@ upstream license:
   conversion). The model **weights** are **CC-BY-NC 4.0** (non-commercial); upstream's
   Apache-2.0 license covers the OmniVoice source code only, not the published weights.
   The `higgs_decoder.onnx` waveform decoder derives from upstream's `audio_tokenizer/`
-  (Boson Higgs Audio 2) and carries the **Boson Higgs Audio 2 Community License**.
+  (Boson Higgs Audio 2) and carries the **Boson Higgs Audio 2 Community License**,
+  which incorporates the Meta Llama 3 Community License (Higgs Audio 2 derives from
+  Meta Llama 3). Copies of both agreements ship at
+  `licenses/Boson-Higgs-Audio-2-Community-License.txt` and
+  `licenses/Meta-Llama-3-Community-License.txt`. As the license requires, this
+  product displays: "Built with Higgs Materials licensed from Boson AI USA, Inc.,
+  Copyright Boson AI USA, Inc., All Rights Reserved and Meta Llama 3 licensed under
+  the Meta Llama 3 Community License, Copyright Meta Platforms, Inc., All Right
+  Reserved". Required attribution notices:
+
+  "Meta Llama 3 is licensed under the Meta Llama 3 Community License, Copyright ©
+  Meta Platforms, Inc. All Rights Reserved."
+
+  "Boson Higgs Audio 2 is licensed under the Boson Community License, Copyright ©
+  Boson AI USA, Inc. All Rights Reserved."
+
+  Use of the Higgs decoder is subject to the Meta Llama 3 Acceptable Use Policy
+  (https://llama.meta.com/llama3/use-policy/). Boson's license additionally requires
+  an expanded license from Boson AI once a product exceeds 100,000 annual active
+  users.
   The disclosed redistribution exception: the LLM backbone
   (`llm_backbone_fp32.onnx` + `.data`) is a bidirectional ONNX re-export of the
   OmniVoice diffusion backbone that this project itself publishes at

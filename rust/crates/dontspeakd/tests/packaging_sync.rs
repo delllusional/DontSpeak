@@ -227,7 +227,14 @@ fn linux_tarball_ships_the_installer_file_not_a_heredoc() {
 
 #[test]
 fn release_bundles_ship_the_legal_notice_and_embedded_data_license() {
-    for rel in ["licenses/Apache-2.0.txt", "licenses/voice-g2p-MIT.txt"] {
+    for rel in [
+        "licenses/Apache-2.0.txt",
+        "licenses/voice-g2p-MIT.txt",
+        // Boson §1.b.i(A): a copy of the Boson AND Meta Llama 3 agreements must ship
+        // with any product that uses the Higgs-derived OmniVoice decoder.
+        "licenses/Boson-Higgs-Audio-2-Community-License.txt",
+        "licenses/Meta-Llama-3-Community-License.txt",
+    ] {
         assert!(
             repo_root().join(rel).is_file(),
             "missing legal payload {rel}"
@@ -248,6 +255,8 @@ fn release_bundles_ship_the_legal_notice_and_embedded_data_license() {
         "LICENSE",
         "licenses/Apache-2.0.txt",
         "licenses/voice-g2p-MIT.txt",
+        "licenses/Boson-Higgs-Audio-2-Community-License.txt",
+        "licenses/Meta-Llama-3-Community-License.txt",
     ] {
         assert!(
             linux.contains(needle),

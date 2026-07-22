@@ -60,6 +60,8 @@ install -m0644 "$REPO/LICENSE" "$ROOT/LICENSE"
 install -m0644 "$REPO/NOTICE.md" "$ROOT/NOTICE.md"
 install -m0644 "$REPO/licenses/Apache-2.0.txt" "$ROOT/licenses/Apache-2.0.txt"
 install -m0644 "$REPO/licenses/voice-g2p-MIT.txt" "$ROOT/licenses/voice-g2p-MIT.txt"
+install -m0644 "$REPO/licenses/Boson-Higgs-Audio-2-Community-License.txt" "$ROOT/licenses/Boson-Higgs-Audio-2-Community-License.txt"
+install -m0644 "$REPO/licenses/Meta-Llama-3-Community-License.txt" "$ROOT/licenses/Meta-Llama-3-Community-License.txt"
 
 # Self-contained installer inside the tarball (mirrors the Windows portable zip's run
 # path). Shipped verbatim from tarball-install.sh — the single source; don't inline a
