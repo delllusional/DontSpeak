@@ -148,8 +148,6 @@ pub(crate) struct Engine<P: Platform + 'static> {
 
     /// INVARIANT: every `self.gesture = …` is followed by `sync_caps_led` (or a helper that does).
     gesture: GestureState,
-    /// Caps pause/resume when dictation is OFF.
-    voice_paused: bool,
     /// Last physical Caps sample; LED is pure output (not read back).
     caps_phys_prev: bool,
 
@@ -226,7 +224,6 @@ impl<P: Platform + 'static> Engine<P> {
             plat,
             stt,
             gesture: GestureState::Idle,
-            voice_paused: false,
             caps_phys_prev: false,
             long_press_ms,
             press: PressState::Up,
@@ -489,7 +486,11 @@ impl<P: Platform + 'static> Engine<P> {
             }
             ready
         };
-        match caps_tap_action(dictation_on, ready, self.is_recording(), self.voice_paused) {
+        // The queue's own pause is the single source of truth: paths that clear it without
+        // going through a tap (`cancel_all` → `clear`, global `Stop` over IPC) would desync
+        // a latch and invert the next tap.
+        let voice_paused = self.ttsq.as_ref().is_some_and(|q| q.is_paused());
+        match caps_tap_action(dictation_on, ready, self.is_recording(), voice_paused) {
             CapsTap::StartRecord => self.start_recording(),
             CapsTap::StopRecord => self.stop_recording(),
             // Voice alone (issue #1); cue already armed.
@@ -499,13 +500,11 @@ impl<P: Platform + 'static> Engine<P> {
                 if let Some(q) = &self.ttsq {
                     q.pause_for_record();
                 }
-                self.voice_paused = true;
             }
             CapsTap::ResumeVoice => {
                 if let Some(q) = &self.ttsq {
                     q.resume();
                 }
-                self.voice_paused = false;
             }
         }
     }
@@ -1459,16 +1458,53 @@ mod tests {
     fn caps_tap_pauses_then_resumes_with_dictation_off() {
         // End-to-end through the real gesture path: with dictation off, a Caps tap PAUSES
         // the voice (held — so any narration that arrives stays queued, not dropped) and
-        // the next tap RESUMES it. ttsq is None in tests, so the queue calls are no-ops;
-        // we assert the engine's pause STATE flips (the decision that replaced the old
-        // silence/clear behavior). Recording never starts (the mic stays shut).
+        // the next tap RESUMES it. The queue's own pause is the state under test.
+        // Recording never starts (the mic stays shut).
         let mut d = mk(600);
         d.cfg.stt_engine_ladder = Vec::new(); // dictation off
+        let q = crate::ttsq::TtsQueue::test_stub();
+        d.ttsq = Some(q.clone());
         MockPlatform::tap(&mut d);
-        assert!(d.voice_paused, "first tap pauses the voice");
+        assert!(q.is_paused(), "first tap pauses the voice");
         assert!(!d.is_recording(), "dictation off → the mic never opens");
         MockPlatform::tap(&mut d);
-        assert!(!d.voice_paused, "second tap resumes the voice");
+        assert!(!q.is_paused(), "second tap resumes the voice");
+    }
+
+    /// The long-press cancel clears the queue's pause without going through a tap. With a
+    /// latch mirroring it, the next tap decided as `ResumeVoice` and silently did nothing —
+    /// inverting the gesture.
+    #[test]
+    fn long_press_cancel_resyncs_the_caps_pause_gesture() {
+        let mut d = mk(5);
+        d.plat.terminal_frontmost.set(true);
+        d.cfg.stt_engine_ladder = Vec::new(); // dictation off
+        let q = crate::ttsq::TtsQueue::test_stub();
+        d.ttsq = Some(q.clone());
+
+        MockPlatform::tap(&mut d);
+        assert!(q.is_paused(), "the tap pauses the voice");
+        MockPlatform::hold(&mut d);
+        assert!(!q.is_paused(), "long-press cancel clears the queue's pause");
+        MockPlatform::tap(&mut d);
+        assert!(q.is_paused(), "the next tap pauses again, not resumes");
+    }
+
+    /// Same desync via the MCP/IPC `Stop { session: None }` path (`TtsQueue::clear`).
+    #[test]
+    fn a_global_stop_resyncs_the_caps_pause_gesture() {
+        let mut d = mk(5);
+        d.plat.terminal_frontmost.set(true);
+        d.cfg.stt_engine_ladder = Vec::new(); // dictation off
+        let q = crate::ttsq::TtsQueue::test_stub();
+        d.ttsq = Some(q.clone());
+
+        MockPlatform::tap(&mut d);
+        assert!(q.is_paused());
+        q.clear();
+        assert!(!q.is_paused(), "a global stop clears the queue's pause");
+        MockPlatform::tap(&mut d);
+        assert!(q.is_paused(), "the next tap pauses again, not resumes");
     }
 
     #[test]
@@ -1488,10 +1524,6 @@ mod tests {
         MockPlatform::tap(&mut d);
         assert!(!d.is_recording(), "not ready → the mic must not open");
         assert!(
-            !d.voice_paused,
-            "a refused start must not flip the pause latch"
-        );
-        assert!(
             !q.is_paused(),
             "a refused start must not pause the TTS queue"
         );
@@ -1502,7 +1534,7 @@ mod tests {
         // Tap-happy user during the download: every further tap stays a pure refusal —
         // in particular the second tap must not RESUME-toggle its way into weird states.
         MockPlatform::tap(&mut d);
-        assert!(!d.voice_paused && !q.is_paused() && !d.is_recording());
+        assert!(!q.is_paused() && !d.is_recording());
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
     use ds_platform::{CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError};
