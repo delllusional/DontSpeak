@@ -28,11 +28,22 @@ pub(crate) fn fetch(
     // stays current — its `expiresAt` can't reveal that, only the 401 can.
     if matches!(rows, Err(FetchError::Unauthorized))
         && source == CredentialSource::File
-        && let Some(keychain) = keychain_credentials(interactive)
+        && let Some(keychain) = keychain_retry(probe_keychain(interactive))?
     {
         return usage_rows(&keychain);
     }
     rows
+}
+
+/// Post-401 keychain fallback: a readable copy retries, a guarded item surfaces
+/// authorize (the ACL prompt is exactly what recovers it), an absent or
+/// unreadable one keeps the original refusal.
+fn keychain_retry(probe: KeychainProbe) -> Result<Option<Value>, FetchError> {
+    match probe {
+        KeychainProbe::Data(bytes) => Ok(credentials_from_bytes(bytes).ok()),
+        KeychainProbe::ItemPresent => Err(FetchError::Guarded),
+        KeychainProbe::Absent => Ok(None),
+    }
 }
 
 fn usage_rows(credentials: &Value) -> Result<Vec<UsageRow>, FetchError> {
@@ -96,14 +107,6 @@ fn probe_keychain(interactive: bool) -> KeychainProbe {
     {
         let _ = interactive;
         KeychainProbe::Absent
-    }
-}
-
-/// Keychain copy alone, for the retry after the file token was refused.
-fn keychain_credentials(interactive: bool) -> Option<Value> {
-    match probe_keychain(interactive) {
-        KeychainProbe::Data(bytes) => credentials_from_bytes(bytes).ok(),
-        KeychainProbe::ItemPresent | KeychainProbe::Absent => None,
     }
 }
 
@@ -421,6 +424,29 @@ mod tests {
             panic!("a future seconds-valued expiry must not read as 1970")
         });
         assert_eq!(token_of(&resolved), Some("file"));
+    }
+
+    // keychain_retry table — the post-401 fallback (synthetic probes).
+
+    /// Revoked file token + ACL-guarded keychain copy: the one state where the
+    /// authorize prompt genuinely recovers live stats — it must stay Guarded.
+    #[test]
+    fn refused_file_token_with_a_guarded_keychain_offers_authorize() {
+        assert!(matches!(
+            keychain_retry(KeychainProbe::ItemPresent),
+            Err(FetchError::Guarded)
+        ));
+    }
+
+    #[test]
+    fn refused_file_token_retries_readable_and_keeps_refusal_otherwise() {
+        let readable = keychain_retry(KeychainProbe::Data(
+            br#"{"claudeAiOauth":{"accessToken":"keychain"}}"#.to_vec(),
+        ));
+        assert!(matches!(readable, Ok(Some(_))));
+        assert!(matches!(keychain_retry(KeychainProbe::Absent), Ok(None)));
+        let unreadable = keychain_retry(KeychainProbe::Data(b"not json".to_vec()));
+        assert!(matches!(unreadable, Ok(None)));
     }
 
     #[test]
