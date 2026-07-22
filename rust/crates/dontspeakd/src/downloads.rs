@@ -445,8 +445,11 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         .then_some(target)
     };
     let downloading_full_kokoro_onnx = tts_model == Some(DownloadTarget::KokoroModel);
-    let kokoro_frontend =
-        needs_kokoro_frontend(kokoro_selected, frontend_present, downloading_full_kokoro_onnx);
+    let kokoro_frontend = needs_kokoro_frontend(
+        kokoro_selected,
+        frontend_present,
+        downloading_full_kokoro_onnx,
+    );
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());

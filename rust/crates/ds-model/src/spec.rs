@@ -307,14 +307,12 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         DownloadTarget::KokoroModel => {
             let model = ds_config::TtsModel::Kokoro;
             let dir = crate::tts_assets::tts_model_dir(model);
-            let mut items = tts_prefetch_items(
-                crate::tts_assets::tts_ort_asset_set(model).files,
-                |file| {
+            let mut items =
+                tts_prefetch_items(crate::tts_assets::tts_ort_asset_set(model).files, |file| {
                     dir.as_deref()
                         .map(|d| verify_sha256_cached(&d.join(file.file_name), file.sha256))
                         .unwrap_or(false)
-                },
-            );
+                });
             if let Some(dist) = espeak_dist()
                 && !is_espeak_loader_present()
             {
