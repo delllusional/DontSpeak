@@ -4,6 +4,12 @@ using System.Text.Json.Serialization;
 
 namespace DontSpeak;
 
+internal enum UsageUpdateKind
+{
+    Refresh,
+    Authorization,
+}
+
 /// <summary>
 /// Decoder for shared Usage card contract (Rust <c>UsageDeck</c> / <c>UsageCard</c>).
 /// Hosts only paint this model (no agent-specific layout branches).
@@ -40,6 +46,19 @@ internal static class AgentUsageModel
         {
             return null;
         }
+    }
+
+    /// <summary>An explicit authorization result is authoritative, including an empty
+    /// result after keychain access succeeds but the credential itself is rejected.</summary>
+    internal static bool Replaces(
+        UsageCardDto? painted,
+        UsageCardDto updated,
+        UsageUpdateKind kind = UsageUpdateKind.Refresh)
+    {
+        if (kind == UsageUpdateKind.Authorization) return true;
+        if (updated.Rows.Count > 0 || updated.NeedsAuth) return true;
+        return painted is { Rows.Count: 0, NeedsAuth: false }
+            && painted.Agent == updated.Agent;
     }
 }
 

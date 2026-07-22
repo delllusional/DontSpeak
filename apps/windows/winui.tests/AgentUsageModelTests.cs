@@ -65,4 +65,18 @@ public class AgentUsageModelTests
         Assert.NotNull(guarded);
         Assert.True(guarded.NeedsAuth);
     }
+
+    [Fact]
+    public void EmptyAuthorizationResultReplacesAuthPrompt()
+    {
+        var guarded = new UsageCardDto("claude_code", [], NeedsAuth: true);
+        var unauthorized = new UsageCardDto("claude_code", []);
+
+        Assert.False(AgentUsageModel.Replaces(guarded, unauthorized));
+        Assert.True(AgentUsageModel.Replaces(unauthorized, unauthorized));
+        Assert.True(AgentUsageModel.Replaces(
+            guarded,
+            unauthorized,
+            UsageUpdateKind.Authorization));
+    }
 }

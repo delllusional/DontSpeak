@@ -107,6 +107,20 @@ final class AgentUsageModelTests: XCTestCase {
         XCTAssertTrue(UsagePaint.replaces(painted: nil, with: card("qwen_code", rows: 1)))
     }
 
+    /// A completed authorize attempt resolves the prompt even when the credential is revoked.
+    func testEmptyAuthorizationResultReplacesAuthPrompt() {
+        let guarded = card("claude_code", needsAuth: true)
+        let unauthorized = card("claude_code")
+
+        XCTAssertTrue(
+            UsagePaint.replaces(
+                painted: guarded,
+                with: unauthorized,
+                kind: .authorization
+            )
+        )
+    }
+
     func testMaterializableIsCanonicalOrderedInstalledAndIdempotent() {
         let canonical = ["claude_code", "codex", "qwen_code"]
         XCTAssertEqual(

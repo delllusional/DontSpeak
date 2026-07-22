@@ -118,7 +118,8 @@ struct UsageView: View {
         let gen = generation
         let updated = await AgentUsageDataSource.authorizeCard(agent)
         guard gen == generation, let updated else { return }
-        if !updated.rows.isEmpty || updated.needsAuth {
+        let painted = cards.first { $0.agent == updated.agent }
+        if UsagePaint.replaces(painted: painted, with: updated, kind: .authorization) {
             applyCard(updated)
         }
     }

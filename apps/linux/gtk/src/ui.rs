@@ -11,6 +11,29 @@ use ds_status::{
 use crate::ffi::{UsageCard, UsageDeck, UsageRow};
 use crate::status::Snapshot;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UsageUpdateKind {
+    Refresh,
+    Authorization,
+}
+
+/// Explicit authorization is authoritative, including an empty result after keychain
+/// access succeeds but the credential itself is rejected. Refreshes stay conservative.
+fn usage_update_replaces(
+    painted: Option<&UsageCard>,
+    updated: &UsageCard,
+    kind: UsageUpdateKind,
+) -> bool {
+    if kind == UsageUpdateKind::Authorization {
+        return true;
+    }
+    if !updated.rows.is_empty() || updated.needs_auth {
+        return true;
+    }
+    painted
+        .is_some_and(|card| card.agent == updated.agent && card.rows.is_empty() && !card.needs_auth)
+}
+
 fn t(key: &str) -> String {
     crate::ffi::t(key)
 }
@@ -879,14 +902,6 @@ impl UsagePage {
         }
     }
 
-    /// Painted, but with nothing to show yet.
-    fn is_statless(&self, agent: &str) -> bool {
-        self.latest
-            .borrow()
-            .iter()
-            .any(|card| card.agent == agent && card.rows.is_empty() && !card.needs_auth)
-    }
-
     fn cancel_visible_request(&self) {
         self.generation.set(self.generation.get().saturating_add(1));
     }
@@ -1087,10 +1102,12 @@ impl UsagePage {
                             .borrow_mut()
                             .insert(updated.agent.clone(), updated.clone());
                         // Empty results refresh a statless card but never blank a good one.
-                        if !updated.rows.is_empty()
-                            || updated.needs_auth
-                            || page.is_statless(&updated.agent)
-                        {
+                        let replaces = {
+                            let latest = page.latest.borrow();
+                            let painted = latest.iter().find(|card| card.agent == updated.agent);
+                            usage_update_replaces(painted, &updated, UsageUpdateKind::Refresh)
+                        };
+                        if replaces {
                             page.apply_card(updated);
                         }
                     }
@@ -1259,15 +1276,20 @@ impl UsagePage {
             let button = button.clone();
             gtk::glib::spawn_future_local(async move {
                 let updated = rx.recv().await.ok().flatten();
-                // Re-enable always; deny keeps the same card (no repaint).
+                // Re-enable always; a denied prompt returns the same guarded card.
                 button.set_sensitive(true);
                 if page.generation.get() != generation {
                     return;
                 }
-                if let Some(updated) = updated
-                    && (!updated.rows.is_empty() || updated.needs_auth)
-                {
-                    page.apply_card(updated);
+                if let Some(updated) = updated {
+                    let replaces = {
+                        let latest = page.latest.borrow();
+                        let painted = latest.iter().find(|card| card.agent == updated.agent);
+                        usage_update_replaces(painted, &updated, UsageUpdateKind::Authorization)
+                    };
+                    if replaces {
+                        page.apply_card(updated);
+                    }
                 }
             });
         });
@@ -1513,4 +1535,40 @@ fn set_log_from_json(view: &gtk::TextView, json: &str, query: &str) {
         let mut end = view.buffer().end_iter();
         view.scroll_to_iter(&mut end, 0.0, false, 0.0, 1.0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UsageCard, UsageUpdateKind, usage_update_replaces};
+
+    fn card(needs_auth: bool) -> UsageCard {
+        UsageCard {
+            agent: "claude_code".to_string(),
+            account: None,
+            rows: Vec::new(),
+            needs_auth,
+        }
+    }
+
+    #[test]
+    fn empty_authorization_result_replaces_auth_prompt() {
+        let guarded = card(true);
+        let unauthorized = card(false);
+
+        assert!(!usage_update_replaces(
+            Some(&guarded),
+            &unauthorized,
+            UsageUpdateKind::Refresh,
+        ));
+        assert!(usage_update_replaces(
+            Some(&unauthorized),
+            &unauthorized,
+            UsageUpdateKind::Refresh,
+        ));
+        assert!(usage_update_replaces(
+            Some(&guarded),
+            &unauthorized,
+            UsageUpdateKind::Authorization,
+        ));
+    }
 }

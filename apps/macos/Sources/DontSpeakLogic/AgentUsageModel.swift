@@ -95,11 +95,22 @@ public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// Agents-tab paint rules; the WinUI/GTK ports mirror them inline.
+public enum UsageUpdateKind: Sendable {
+    case refresh
+    case authorization
+}
+
+/// Agents-tab paint rules; the WinUI/GTK ports mirror them.
 public enum UsagePaint {
-    /// A refresh result replaces the painted card when it carries rows or an auth
-    /// prompt — or when the painted card has nothing to lose (materialized by speech).
-    public static func replaces(painted: UsageCard?, with updated: UsageCard) -> Bool {
+    /// An explicit authorization result is authoritative, including an empty result
+    /// after keychain access succeeds but the credential itself is rejected. Background
+    /// refreshes stay conservative so a transient empty result cannot blank good data.
+    public static func replaces(
+        painted: UsageCard?,
+        with updated: UsageCard,
+        kind: UsageUpdateKind = .refresh
+    ) -> Bool {
+        if case .authorization = kind { return true }
         if !updated.rows.isEmpty || updated.needsAuth { return true }
         guard let painted, painted.agent == updated.agent else { return false }
         return painted.rows.isEmpty && !painted.needsAuth

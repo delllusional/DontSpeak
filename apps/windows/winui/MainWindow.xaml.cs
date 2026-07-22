@@ -238,7 +238,8 @@ public sealed partial class MainWindow : Window
                     {
                         _usageKnown[updated.Agent] = updated;
                         // Empty results refresh a statless card but never blank a good one.
-                        if (updated.Rows.Count > 0 || updated.NeedsAuth || IsUsageStatless(updated.Agent))
+                        _usageCards.TryGetValue(updated.Agent, out var painted);
+                        if (AgentUsageModel.Replaces(painted, updated))
                             ApplyUsageCard(updated);
                     }
                     if (--pending == 0)
@@ -275,10 +276,6 @@ public sealed partial class MainWindow : Window
                 : new UsageCardDto(agent, new List<UsageRowDto>()));
         }
     }
-
-    /// <summary>Painted, but with nothing to show yet.</summary>
-    private bool IsUsageStatless(string agent)
-        => _usageCards.TryGetValue(agent, out var card) && card.Rows.Count == 0 && !card.NeedsAuth;
 
     private void ShowUsageUnavailableIfEmpty()
     {
@@ -544,10 +541,12 @@ public sealed partial class MainWindow : Window
             catch { /* ignore */ }
             DispatcherQueue.TryEnqueue(() =>
             {
-                // Re-enable always; deny keeps the same card (no repaint).
+                // Re-enable always; a denied prompt returns the same guarded card.
                 authorize.IsEnabled = true;
                 if (generation != _usageGeneration) return;
-                if (updated != null && (updated.Rows.Count > 0 || updated.NeedsAuth))
+                _usageCards.TryGetValue(agent, out var painted);
+                if (updated != null
+                    && AgentUsageModel.Replaces(painted, updated, UsageUpdateKind.Authorization))
                     ApplyUsageCard(updated);
             });
         });
