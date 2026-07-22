@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use ds_config::{
     CancelSpeechScope, CaptureGain, DiarizerProvider, NarrateKind, Provider, SttEngine, TrayKind,
-    TtsEngine, TtsModel, VoiceConfig, de_opt_pref_stt_engine, de_opt_pref_tts_engine,
-    default_provider, normalize_tray,
+    TtsEngine, TtsModel, TtsParamMap, VoiceConfig, de_opt_pref_stt_engine,
+    de_opt_pref_tts_engine, default_provider, normalize_tray,
 };
 
 fn de_opt_tts_model<'de, D>(deserializer: D) -> Result<Option<TtsModel>, D::Error>
@@ -61,6 +61,37 @@ impl TtsVoiceUpdates {
     }
 }
 
+/// Partial update for the nested `tts_params` config object. A provided map REPLACES
+/// that model's stored overrides (`{}` = reset to defaults); apply validates every
+/// entry strictly via the descriptor (rate/supports_rate precedent — reject, never
+/// silently clamp).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TtsParamUpdates {
+    pub kokoro: Option<TtsParamMap>,
+    pub chatterbox: Option<TtsParamMap>,
+    pub qwen: Option<TtsParamMap>,
+    pub omnivoice: Option<TtsParamMap>,
+}
+
+impl TtsParamUpdates {
+    fn is_empty(&self) -> bool {
+        self.kokoro.is_none()
+            && self.chatterbox.is_none()
+            && self.qwen.is_none()
+            && self.omnivoice.is_none()
+    }
+
+    fn into_updates(self) -> [(TtsModel, Option<TtsParamMap>); 4] {
+        [
+            (TtsModel::Kokoro, self.kokoro),
+            (TtsModel::Chatterbox, self.chatterbox),
+            (TtsModel::Qwen, self.qwen),
+            (TtsModel::OmniVoice, self.omnivoice),
+        ]
+    }
+}
+
 /// Single source for set_config (schema/parse/apply can't drift). Guards:
 /// parse (`deny_unknown_fields` + strict enums); apply (no `..`); schema name parity test.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -68,6 +99,7 @@ impl TtsVoiceUpdates {
 pub struct SetConfigArgs {
     pub rate: Option<f32>,
     pub tts_voices: Option<TtsVoiceUpdates>,
+    pub tts_params: Option<TtsParamUpdates>,
     #[serde(deserialize_with = "de_opt_tts_model")]
     pub tts_model: Option<TtsModel>,
     #[serde(deserialize_with = "de_opt_pref_tts_engine")]
@@ -123,6 +155,7 @@ impl SetConfigArgs {
         let SetConfigArgs {
             rate,
             tts_voices,
+            tts_params,
             tts_model,
             tts_engine,
             stt_engine,
@@ -217,6 +250,33 @@ impl SetConfigArgs {
                 }
                 changes.push(format!("{key}=[{}]", voices.join(", ")));
                 *cfg.voices_for_mut(model) = voices;
+            }
+        }
+        if let Some(param_updates) = tts_params {
+            if param_updates.is_empty() {
+                return Err("`tts_params` needs at least one model".into());
+            }
+            for (model, params) in param_updates.into_updates() {
+                let Some(params) = params else { continue };
+                let key = format!("tts_params.{}", model.as_str());
+                let descriptor = model.descriptor();
+                let mut validated = TtsParamMap::new();
+                for (name, raw) in &params {
+                    let value = descriptor
+                        .validate_param(name, raw)
+                        .map_err(|error| format!("`{key}`: {error}; see voices"))?;
+                    validated.insert(name.clone(), value);
+                }
+                if validated.is_empty() {
+                    changes.push(format!("{key}=defaults"));
+                } else {
+                    let entries: Vec<String> = validated
+                        .iter()
+                        .map(|(name, value)| format!("{name}={value}"))
+                        .collect();
+                    changes.push(format!("{key}=[{}]", entries.join(", ")));
+                }
+                *cfg.tts_params.for_model_mut(model) = validated;
             }
         }
         if let Some(pref) = tts_engine {
@@ -738,6 +798,105 @@ mod tests {
         assert_eq!(cfg.tts_voices.kokoro, ["af_heart"]);
         assert_eq!(cfg.tts_voices.omnivoice, ["young_woman"]);
         assert_eq!(changes, vec!["tts_model=omnivoice"]);
+    }
+
+    /// Mirror of `model_change_preserves_per_model_pools` for the params axis: a model
+    /// switch must not clear another model's stored overrides.
+    #[test]
+    fn model_change_preserves_per_model_param_pools() {
+        use ds_config::TtsParamValue;
+        let mut cfg = VoiceConfig::default();
+        cfg.tts_params
+            .for_model_mut(TtsModel::Chatterbox)
+            .insert("exaggeration".into(), TtsParamValue::Float(1.5));
+        let args: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "tts_model": "omnivoice" })).unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(cfg.tts_model, TtsModel::OmniVoice);
+        assert_eq!(
+            cfg.tts_params.chatterbox["exaggeration"],
+            TtsParamValue::Float(1.5)
+        );
+        assert!(cfg.tts_params.omnivoice.is_empty());
+        assert_eq!(changes, vec!["tts_model=omnivoice"]);
+    }
+
+    #[test]
+    fn tts_params_apply_replaces_validated_and_resets_on_empty() {
+        use ds_config::TtsParamValue;
+        let mut cfg = VoiceConfig::default();
+        cfg.tts_params
+            .for_model_mut(TtsModel::OmniVoice)
+            .insert("steps".into(), TtsParamValue::Int(8));
+        let args: SetConfigArgs = serde_json::from_value(serde_json::json!({
+            "tts_params": {
+                "chatterbox": { "exaggeration": 1.25 },
+                "omnivoice": {},
+            }
+        }))
+        .unwrap();
+        let changes = args.apply(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.tts_params.chatterbox["exaggeration"],
+            TtsParamValue::Float(1.25)
+        );
+        assert!(
+            cfg.tts_params.omnivoice.is_empty(),
+            "`{{}}` resets the model's overrides to defaults"
+        );
+        assert!(
+            changes.contains(&"tts_params.chatterbox=[exaggeration=1.25]".to_string()),
+            "{changes:?}"
+        );
+        assert!(
+            changes.contains(&"tts_params.omnivoice=defaults".to_string()),
+            "{changes:?}"
+        );
+        // An integral number coerces to the declared Float kind (parity with the
+        // config-file path).
+        let args: SetConfigArgs = serde_json::from_value(serde_json::json!({
+            "tts_params": { "chatterbox": { "exaggeration": 1 } }
+        }))
+        .unwrap();
+        args.apply(&mut cfg).unwrap();
+        assert_eq!(
+            cfg.tts_params.chatterbox["exaggeration"],
+            TtsParamValue::Float(1.0)
+        );
+    }
+
+    #[test]
+    fn tts_params_apply_rejects_undeclared_and_out_of_range() {
+        // Strict rejection (rate/supports_rate precedent) — and the failed call must
+        // not partially mutate the config.
+        let mut cfg = VoiceConfig::default();
+        let reject = |json: serde_json::Value| {
+            serde_json::from_value::<SetConfigArgs>(json)
+                .unwrap()
+                .apply(&mut VoiceConfig::default())
+                .unwrap_err()
+        };
+        let err = reject(serde_json::json!({ "tts_params": { "kokoro": { "steps": 8 } } }));
+        assert!(err.contains("not a kokoro parameter"), "{err}");
+        let err = reject(
+            serde_json::json!({ "tts_params": { "chatterbox": { "exaggeration": 2.5 } } }),
+        );
+        assert!(err.contains("0.25 to 2"), "{err}");
+        let err = reject(serde_json::json!({ "tts_params": {} }));
+        assert!(err.contains("at least one model"), "{err}");
+        // Unknown model key is a parse error (deny_unknown_fields).
+        assert!(
+            serde_json::from_value::<SetConfigArgs>(
+                serde_json::json!({ "tts_params": { "wavenet": { "steps": 8 } } })
+            )
+            .is_err()
+        );
+        let args: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_params": { "omnivoice": { "steps": 100 } } }),
+        )
+        .unwrap();
+        assert!(args.apply(&mut cfg).is_err());
+        assert!(cfg.tts_params.omnivoice.is_empty(), "no partial mutation");
     }
 
     /// Forced `built_in` in the same call: model-descriptor gates apply — even before the

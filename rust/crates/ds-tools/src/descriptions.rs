@@ -47,6 +47,10 @@ pub const SET_CONFIG_TTS_VOICES: &str = "Voice arrays keyed by `system`, `kokoro
 may mix languages: each utterance is spoken by a pooled voice for its detected language, or by \
 one of the model's own voices for that language when the pool has none.";
 pub const SET_CONFIG_TTS_RATE: &str = "Speech rate. 1.0 = normal. Model support is validated.";
+pub const SET_CONFIG_TTS_PARAMS: &str = "Model parameter objects keyed by `kokoro`, \
+`chatterbox`, `qwen`, or `omnivoice` (see voices for each model's parameters and ranges). A \
+provided object replaces that model's stored parameters; `{}` resets to defaults. Unset \
+parameters use their defaults.";
 pub const SET_CONFIG_NARRATE: &str = "What to narrate. Default both: \"digests\" = long-reply \
     summaries; \"shorts\" = short replies whole. [] off.";
 pub const SET_CONFIG_GREET: &str = "Greet each new terminal in its agent's pool voice. Default on.";

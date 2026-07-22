@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, io};
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::enums::{
     de_clear_on_input, de_diarizer, de_exclude_clients, de_listen_mode, de_narrate, de_provider,
@@ -16,7 +16,7 @@ use ds_log::{LogLevel, log};
 
 use crate::{
     CancelSpeechScope, ClientSource, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider,
-    SttEngine, TrayKind, TtsEngine, TtsModel, TtsModelDescriptor,
+    SttEngine, TrayKind, TtsEngine, TtsModel, TtsModelDescriptor, TtsParamMap, TtsParamValue,
 };
 
 /// Hands-free phrases. START fuzzy; submit/cancel exact. Shelved (STT quality).
@@ -82,12 +82,93 @@ impl TtsVoicePools {
     }
 }
 
+/// Per-model TTS parameter overrides (`[tts_params.<model>]`). Sparse: only set keys
+/// are stored; descriptor defaults fill at resolve time
+/// ([`TtsModelDescriptor::resolve_params`]). Each block survives a model switch
+/// (mirrors `tts_voices`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct TtsParamPools {
+    #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
+    pub kokoro: TtsParamMap,
+    #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
+    pub chatterbox: TtsParamMap,
+    #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
+    pub qwen: TtsParamMap,
+    #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
+    pub omnivoice: TtsParamMap,
+}
+
+impl TtsParamPools {
+    pub fn is_empty(&self) -> bool {
+        self.kokoro.is_empty()
+            && self.chatterbox.is_empty()
+            && self.qwen.is_empty()
+            && self.omnivoice.is_empty()
+    }
+
+    pub fn for_model(&self, model: TtsModel) -> &TtsParamMap {
+        match model {
+            TtsModel::Kokoro => &self.kokoro,
+            TtsModel::Chatterbox => &self.chatterbox,
+            TtsModel::Qwen => &self.qwen,
+            TtsModel::OmniVoice => &self.omnivoice,
+        }
+    }
+
+    pub fn for_model_mut(&mut self, model: TtsModel) -> &mut TtsParamMap {
+        match model {
+            TtsModel::Kokoro => &mut self.kokoro,
+            TtsModel::Chatterbox => &mut self.chatterbox,
+            TtsModel::Qwen => &mut self.qwen,
+            TtsModel::OmniVoice => &mut self.omnivoice,
+        }
+    }
+
+    fn from_value(value: &serde_json::Value) -> Self {
+        let mut pools = Self::default();
+        let Some(models) = value.as_object() else {
+            return pools;
+        };
+        for (token, entries) in models {
+            let Some(model) = TtsModel::parse(token) else {
+                continue;
+            };
+            let Some(entries) = entries.as_object() else {
+                continue;
+            };
+            let descriptor = model.descriptor();
+            for (key, raw) in entries {
+                let Ok(raw) = serde_json::from_value(raw.clone()) else {
+                    continue;
+                };
+                if let Ok(value) = descriptor.validate_param(key, &raw) {
+                    pools.for_model_mut(model).insert(key.clone(), value);
+                }
+            }
+        }
+        pools
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TtsParamPools {
+    /// Fail-open per ENTRY, not per block: a typo'd key or out-of-range value drops
+    /// (named by [`VoiceConfig::load`]'s warn pass — deliberately stronger than the
+    /// silent `de_*` precedent) while the valid siblings survive.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d).unwrap_or_default();
+        Ok(Self::from_value(&value))
+    }
+}
+
 /// Speech config from `config.toml`. CC voice is read-only. Absent field = default.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoiceConfig {
     /// Per-engine/model voice pools (stable per-agent).
     #[serde(default)]
     pub tts_voices: TtsVoicePools,
+    /// Per-model TTS parameter overrides; empty = descriptor defaults.
+    #[serde(default, skip_serializing_if = "TtsParamPools::is_empty")]
+    pub tts_params: TtsParamPools,
     /// Model hosted by the built-in engine.
     #[serde(default, deserialize_with = "de_tts_model")]
     pub tts_model: TtsModel,
@@ -355,6 +436,7 @@ impl Default for VoiceConfig {
     fn default() -> Self {
         Self {
             tts_voices: TtsVoicePools::default(),
+            tts_params: TtsParamPools::default(),
             tts_model: TtsModel::default(),
             greet: true,
             narrate: default_narrate(),
@@ -442,6 +524,46 @@ impl VoiceConfig {
     }
 }
 
+/// Name every `[tts_params]` entry the fail-open deserializer will drop. Runs on the
+/// raw table because the deserializer has no `Paths` and its output no longer shows
+/// what was dropped.
+fn warn_dropped_tts_params(table: &toml::Table, paths: &Paths) {
+    let warn = |message: &str| log(&paths.log_file, LogLevel::Warn, "config", message);
+    let Some(params) = table.get("tts_params") else {
+        return;
+    };
+    let Some(models) = params.as_table() else {
+        return warn("tts_params is not a table; using defaults");
+    };
+    for (token, entries) in models {
+        let Some(model) = TtsModel::parse(token) else {
+            warn(&format!("unknown model in [tts_params]: {token:?} (ignored)"));
+            continue;
+        };
+        let Some(entries) = entries.as_table() else {
+            warn(&format!("tts_params.{token} is not a table (ignored)"));
+            continue;
+        };
+        for (key, raw) in entries {
+            let value = match raw {
+                toml::Value::Integer(value) => TtsParamValue::Int(*value),
+                toml::Value::Float(value) => TtsParamValue::Float(*value as f32),
+                toml::Value::String(value) => TtsParamValue::Choice(value.clone()),
+                other => {
+                    warn(&format!(
+                        "tts_params.{token}.{key} has unsupported type {} (ignored)",
+                        other.type_str()
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = model.descriptor().validate_param(key, &value) {
+                warn(&format!("tts_params.{token}: {error} (ignored)"));
+            }
+        }
+    }
+}
+
 /// config.toml as table. Fail-open → empty. Flat keys (VoiceConfig + MCP-HTTP).
 pub(crate) fn read_config_table(paths: &Paths) -> toml::Table {
     std::fs::read_to_string(&paths.config_toml)
@@ -521,6 +643,7 @@ impl VoiceConfig {
                 );
             }
         }
+        warn_dropped_tts_params(&table, paths);
         let mut cfg: VoiceConfig = toml::Value::Table(table).try_into().unwrap_or_default();
         cfg.clamp();
         cfg
@@ -750,6 +873,65 @@ pub(crate) mod tests {
         for model in TtsModel::ALL.iter().copied() {
             assert_eq!(cfg.voices_for(model), model.descriptor().default_voices);
         }
+    }
+
+    #[test]
+    fn tts_params_parse_per_entry_fail_open() {
+        // Absent ⇒ empty pools (descriptor defaults at resolve time).
+        let v: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(v.tts_params.is_empty());
+        assert!(VoiceConfig::known_keys().contains("tts_params"));
+        // Valid entries stay; an out-of-range value, an undeclared key, a stale
+        // other-model key, and an unknown model block all drop WITHOUT disturbing the
+        // valid siblings (fail-open per entry, not per block).
+        let v: VoiceConfig = serde_json::from_str(
+            r#"{"tts_params":{
+                "chatterbox":{"exaggeration":1.5,"bogus":1.0},
+                "qwen":{"repetition_penalty":9.0},
+                "omnivoice":{"steps":8,"exaggeration":0.7},
+                "wavenet":{"steps":8}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            v.tts_params.chatterbox["exaggeration"],
+            TtsParamValue::Float(1.5)
+        );
+        assert!(!v.tts_params.chatterbox.contains_key("bogus"));
+        assert!(v.tts_params.qwen.is_empty(), "out-of-range drops");
+        assert_eq!(v.tts_params.omnivoice["steps"], TtsParamValue::Int(8));
+        assert!(!v.tts_params.omnivoice.contains_key("exaggeration"));
+        // Wrong-shape values fail open to empty pools, never an error.
+        for raw in [r#"{"tts_params":7}"#, r#"{"tts_params":{"qwen":"fast"}}"#] {
+            let v: VoiceConfig = serde_json::from_str(raw).unwrap();
+            assert!(v.tts_params.is_empty(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn tts_params_round_trip_through_write_and_load() {
+        // Set blocks survive write→load; the empty default serializes ABSENT (no
+        // spurious [tts_params] table, no unknown-key warn on old files). Tempdir only.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let mut cfg = VoiceConfig::default();
+        write_settings(&paths, &cfg).unwrap();
+        let text = std::fs::read_to_string(&paths.config_toml).unwrap();
+        assert!(!text.contains("tts_params"), "empty pools stay absent");
+        cfg.tts_params
+            .for_model_mut(TtsModel::Chatterbox)
+            .insert("exaggeration".into(), TtsParamValue::Float(1.25));
+        cfg.tts_params
+            .for_model_mut(TtsModel::OmniVoice)
+            .insert("steps".into(), TtsParamValue::Int(32));
+        write_settings(&paths, &cfg).unwrap();
+        let loaded = VoiceConfig::load(&paths);
+        assert_eq!(loaded.tts_params, cfg.tts_params);
+        // The resolved view merges the override with defaults.
+        let resolved = TtsModel::OmniVoice
+            .descriptor()
+            .resolve_params(loaded.tts_params.for_model(TtsModel::OmniVoice));
+        assert_eq!(resolved.int(TtsModel::OmniVoice, "steps"), 32);
     }
 
     #[test]
@@ -1422,6 +1604,10 @@ pub(crate) mod tests {
                 omnivoice: vec!["deep_man".into()],
             },
             tts_model: TtsModel::Kokoro,
+            tts_params: TtsParamPools {
+                omnivoice: [("steps".to_string(), TtsParamValue::Int(32))].into(),
+                ..Default::default()
+            },
             greet: true,
             stt_engine: None,
             stt_engine_ladder: vec![SttEngine::BuiltIn],

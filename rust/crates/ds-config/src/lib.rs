@@ -53,7 +53,9 @@ pub use tts_model::{
     ResolvedTtsParams, TTS_MODELS, TtsFrontend, TtsModel, TtsModelDescriptor, TtsParamDefault,
     TtsParamDescriptor, TtsParamKind, TtsParamMap, TtsParamValue, tts_model_descriptor,
 };
-pub use voice::{CaptureGain, ConfigChange, HandsFreePhrases, TtsVoicePools, VoiceConfig};
+pub use voice::{
+    CaptureGain, ConfigChange, HandsFreePhrases, TtsParamPools, TtsVoicePools, VoiceConfig,
+};
 pub use wire::codex::{CodexMergeError, merge_codex_hooks, strip_codex_hooks};
 pub use wire::grok_hooks::grok_hooks_value;
 pub use wire::hermes_allowlist::{

@@ -259,9 +259,37 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
             "providers": descriptor.providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
             "supports_rate": descriptor.supports_rate,
             "supports_full_duplex": descriptor.supports_full_duplex,
+            "params": descriptor.params.iter().map(tts_param_json).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     });
     Ok(out)
+}
+
+/// One declared TTS parameter for the `voices` output (key/kind/default/range/visible).
+fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
+    let mut out = json!({ "key": param.key, "visible": param.user_visible });
+    match param.kind {
+        ds_config::TtsParamKind::Float { min, max } => {
+            out["kind"] = json!("float");
+            out["min"] = json!(min);
+            out["max"] = json!(max);
+        }
+        ds_config::TtsParamKind::Int { min, max } => {
+            out["kind"] = json!("int");
+            out["min"] = json!(min);
+            out["max"] = json!(max);
+        }
+        ds_config::TtsParamKind::Choice(choices) => {
+            out["kind"] = json!("choice");
+            out["choices"] = json!(choices);
+        }
+    }
+    out["default"] = match param.default {
+        ds_config::TtsParamDefault::Float(value) => json!(value),
+        ds_config::TtsParamDefault::Int(value) => json!(value),
+        ds_config::TtsParamDefault::Choice(value) => json!(value),
+    };
+    out
 }
 
 /// Configured engine/voice/rate + live playback. `detail` adds model lifecycle/stats.

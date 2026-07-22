@@ -12,7 +12,7 @@ mod descriptions;
 mod set_config;
 use descriptions::*;
 
-pub use set_config::{SetConfigArgs, TtsVoiceUpdates};
+pub use set_config::{SetConfigArgs, TtsParamUpdates, TtsVoiceUpdates};
 
 /// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
 pub const DIARIZATION_ENABLED: bool = false;
@@ -34,6 +34,8 @@ enum PType {
     EnumArray(&'static [&'static str]),
     /// Nested per-engine/model string-array voice pools.
     VoicePools,
+    /// Nested per-model TTS parameter objects (registry-driven keys/ranges).
+    ParamPools,
     /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
     Gain,
 }
@@ -218,6 +220,12 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_VOICES,
             ),
+            p(
+                "tts_params",
+                PType::ParamPools,
+                false,
+                SET_CONFIG_TTS_PARAMS,
+            ),
             p("rate", PType::Num(0.5, 2.0), false, SET_CONFIG_TTS_RATE),
             p(
                 "narrate",
@@ -387,6 +395,11 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
             "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice string arrays"
                 .into(),
         ),
+        PType::ParamPools if tts_param_pools_valid(value) => Ok(()),
+        PType::ParamPools => Err(
+            "must be a non-empty object of kokoro, chatterbox, qwen, or omnivoice parameter objects; see voices"
+                .into(),
+        ),
         PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
         PType::Gain => Err("must be `auto` or a number from 0.5 to 20".into()),
     }
@@ -407,6 +420,27 @@ fn voice_pools_valid(value: &Value) -> bool {
             && voices
                 .iter()
                 .all(|voice| voice.as_str().is_some_and(|voice| !voice.trim().is_empty()))
+    })
+}
+
+/// Runtime mirror of the generated `tts_params` schema: model-token keys, each an
+/// object of DECLARED params whose values validate against the descriptor.
+fn tts_param_pools_valid(value: &Value) -> bool {
+    let Some(pools) = value.as_object().filter(|pools| !pools.is_empty()) else {
+        return false;
+    };
+    pools.iter().all(|(name, params)| {
+        if !ds_config::TtsModel::TOKENS.contains(&name.as_str()) {
+            return false;
+        }
+        let descriptor = ds_config::tts_model_descriptor(name).expect("token parses");
+        let Some(params) = params.as_object() else {
+            return false;
+        };
+        params.iter().all(|(key, raw)| {
+            serde_json::from_value::<ds_config::TtsParamValue>(raw.clone())
+                .is_ok_and(|value| descriptor.validate_param(key, &value).is_ok())
+        })
     })
 }
 
@@ -462,6 +496,43 @@ fn voice_pool_properties() -> Value {
         properties.insert(
             (*token).to_string(),
             json!({ "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }),
+        );
+    }
+    Value::Object(properties)
+}
+
+/// JSON-Schema constraints for one declared TTS parameter, straight from the registry
+/// (kinds/ranges cannot drift from what apply validates).
+fn tts_param_schema(param: &ds_config::TtsParamDescriptor) -> Value {
+    match param.kind {
+        ds_config::TtsParamKind::Float { min, max } => {
+            json!({ "type": "number", "minimum": min, "maximum": max })
+        }
+        ds_config::TtsParamKind::Int { min, max } => {
+            json!({ "type": "integer", "minimum": min, "maximum": max })
+        }
+        ds_config::TtsParamKind::Choice(choices) => {
+            json!({ "type": "string", "enum": choices })
+        }
+    }
+}
+
+/// One parameter object per built-in model. A model with no declared params (Kokoro)
+/// accepts only `{}` (reset), matching apply's strict rejection of undeclared keys.
+fn tts_param_pool_properties() -> Value {
+    let mut properties = Map::new();
+    for descriptor in &ds_config::TTS_MODELS {
+        let mut params = Map::new();
+        for param in descriptor.params {
+            params.insert(param.key.to_string(), tts_param_schema(param));
+        }
+        properties.insert(
+            descriptor.id.to_string(),
+            json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": Value::Object(params),
+            }),
         );
     }
     Value::Object(properties)
@@ -587,9 +658,26 @@ fn output_schema_for(output: Output) -> Value {
                             "languages": { "type": "array", "items": { "type": "string" } },
                             "providers": { "type": "array", "items": { "type": "string", "enum": ["mlx", "cuda", "coreml", "cpu"] } },
                             "supports_rate": { "type": "boolean" },
-                            "supports_full_duplex": { "type": "boolean" }
+                            "supports_full_duplex": { "type": "boolean" },
+                            "params": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "key": { "type": "string" },
+                                        "kind": { "type": "string", "enum": ["float", "int", "choice"] },
+                                        "default": { "type": ["number", "string"] },
+                                        "min": { "type": "number" },
+                                        "max": { "type": "number" },
+                                        "choices": { "type": "array", "items": { "type": "string" } },
+                                        "visible": { "type": "boolean" }
+                                    },
+                                    "required": ["key", "kind", "default", "visible"],
+                                    "additionalProperties": false
+                                }
+                            }
                         },
-                        "required": ["id", "name", "default_language", "languages", "providers", "supports_rate", "supports_full_duplex"],
+                        "required": ["id", "name", "default_language", "languages", "providers", "supports_rate", "supports_full_duplex", "params"],
                         "additionalProperties": false
                     }
                 }
@@ -677,6 +765,13 @@ fn param_schema(param: &Param) -> Value {
             "additionalProperties": false,
             "properties": voice_pool_properties()
         }),
+        PType::ParamPools => json!({
+            "type": "object",
+            "description": d,
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": tts_param_pool_properties()
+        }),
         // No top-level `type` — `oneOf` of the two accepted shapes.
         PType::Gain => json!({
             "description": d,
@@ -716,6 +811,9 @@ fn param_ui(param: &Param) -> Value {
             o.insert("enum".into(), json!(vals));
         }
         PType::VoicePools => {
+            o.insert("type".into(), json!("object"));
+        }
+        PType::ParamPools => {
             o.insert("type".into(), json!("object"));
         }
         PType::Gain => {
@@ -758,6 +856,39 @@ mod tests {
             (
                 "set_config",
                 json!({"tts_voices": {"legacy": ["voice"]}}),
+                false,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"chatterbox": {"exaggeration": 1.5}}}),
+                true,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"omnivoice": {"steps": 32}}}),
+                true,
+            ),
+            // Reset-to-defaults spelling.
+            ("set_config", json!({"tts_params": {"qwen": {}}}), true),
+            ("set_config", json!({"tts_params": {}}), false),
+            (
+                "set_config",
+                json!({"tts_params": {"chatterbox": {"exaggeration": 2.5}}}),
+                false,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"kokoro": {"steps": 8}}}),
+                false,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"legacy": {"steps": 8}}}),
+                false,
+            ),
+            (
+                "set_config",
+                json!({"tts_params": {"omnivoice": {"steps": true}}}),
                 false,
             ),
             ("set_config", json!({"tts_language": "ru"}), false),
@@ -1116,6 +1247,27 @@ mod tests {
             schema_item_enum("clear_on_input"),
             toks(CancelSpeechScope::ALL, CancelSpeechScope::as_str)
         );
+
+        // tts_params is registry-driven twice over: model-token property names, and per
+        // model exactly the declared descriptor keys.
+        let pools = props["tts_params"]["properties"]
+            .as_object()
+            .expect("tts_params should be an object schema");
+        let mut pool_names: Vec<&str> = pools.keys().map(String::as_str).collect();
+        pool_names.sort_unstable();
+        let mut model_tokens: Vec<&str> = ds_config::TtsModel::TOKENS.to_vec();
+        model_tokens.sort_unstable();
+        assert_eq!(pool_names, model_tokens);
+        for descriptor in &ds_config::TTS_MODELS {
+            let declared: Vec<&str> = descriptor.params.iter().map(|p| p.key).collect();
+            let advertised: Vec<&str> = pools[descriptor.id]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(advertised, declared, "{} params drifted", descriptor.id);
+        }
     }
 
     /// Map a JSON value to the JSON-Schema scalar `type` token it satisfies.
@@ -1143,10 +1295,10 @@ mod tests {
     /// field breaks this at COMPILE time; the names come from serde, so this can't go stale.
     #[test]
     fn set_config_schema_matches_args() {
-        use crate::{SetConfigArgs, TtsVoiceUpdates};
+        use crate::{SetConfigArgs, TtsParamUpdates, TtsVoiceUpdates};
         use ds_config::{
             CancelSpeechScope, CaptureGain, DiarizerProvider, Provider, SttEngine, TrayKind,
-            TtsEngine, TtsModel,
+            TtsEngine, TtsModel, TtsParamValue,
         };
 
         let populated = SetConfigArgs {
@@ -1157,6 +1309,16 @@ mod tests {
                 chatterbox: Some(vec!["default".to_string()]),
                 qwen: Some(vec!["sohee".to_string()]),
                 omnivoice: Some(vec!["whisper".to_string()]),
+            }),
+            tts_params: Some(TtsParamUpdates {
+                kokoro: None,
+                chatterbox: Some(
+                    [("exaggeration".to_string(), TtsParamValue::Float(1.5))].into(),
+                ),
+                qwen: Some(
+                    [("repetition_penalty".to_string(), TtsParamValue::Float(1.2))].into(),
+                ),
+                omnivoice: Some([("steps".to_string(), TtsParamValue::Int(32))].into()),
             }),
             tts_model: Some(TtsModel::Kokoro),
             tts_engine: Some(vec![TtsEngine::BuiltIn]),
