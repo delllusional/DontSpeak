@@ -2215,8 +2215,8 @@ mod tests {
 
     #[test]
     fn untagged_global_audio_plays_under_any_active() {
-        // session == None (e.g. the MCP `speak` tool) isn't tied to a terminal → it
-        // plays even when another terminal is active.
+        // session == None is reserved for global/sessionless hook audio. It plays even
+        // when another terminal is active; MCP speak/stop never use this path.
         let q = deque(&[Some("a"), None, Some("a")]);
         assert_eq!(select_pos(&q, &Some("b".into())), Some(1));
     }
@@ -4869,9 +4869,9 @@ mod tests {
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn unknown_source_with_a_pool_claims_an_agent_voice() {
-        // Behavior change from the session-keyed pool: session-less/global speech from a
-        // client (e.g. MCP `speak` without a session) now resolves to the agent's stable
-        // voice, not a shared fixed one. All unknown clients share the one Unknown bucket.
+        // Behavior change from the session-keyed pool: sessionless/global audio from an
+        // unknown client resolves to the stable Unknown voice bucket, not a shared fixed
+        // voice. MCP speech itself is always session-scoped.
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],

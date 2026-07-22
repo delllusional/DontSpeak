@@ -47,6 +47,7 @@ fn prompt_from_payload(payload: &str) -> String {
 fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
     ds_ipc::Request::MarkActive {
         session: crate::hook_core::session_id_from_payload(payload),
+        queue_session: crate::session_scope::for_hook(payload),
         synthetic: is_synthetic_continuation(&prompt_from_payload(payload)),
         source: client,
     }
@@ -57,6 +58,7 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSourc
     let req = match ping {
         Ping::Greet => ds_ipc::Request::GreetSession {
             session: crate::hook_core::session_id_from_payload(payload),
+            queue_session: crate::session_scope::for_hook(payload),
             source: client,
         },
         Ping::MarkActive => mark_active_request(payload, client),
@@ -75,7 +77,7 @@ fn earcon_request(
 ) -> ds_ipc::Request {
     ds_ipc::Request::Earcon {
         event,
-        session: crate::hook_core::session_id_from_payload(payload),
+        session: crate::session_scope::for_hook(payload),
         source: client,
     }
 }
@@ -240,10 +242,15 @@ mod tests {
         match mark_active_request(synthetic_payload, ClientSource::ClaudeCode) {
             ds_ipc::Request::MarkActive {
                 session,
+                queue_session,
                 synthetic,
                 source,
             } => {
                 assert_eq!(session, Some("s1".to_string()));
+                assert_eq!(
+                    queue_session,
+                    crate::session_scope::for_hook(synthetic_payload)
+                );
                 assert!(synthetic);
                 assert_eq!(source, ClientSource::ClaudeCode);
             }
@@ -254,10 +261,15 @@ mod tests {
         match mark_active_request(ordinary_payload, ClientSource::Codex) {
             ds_ipc::Request::MarkActive {
                 session,
+                queue_session,
                 synthetic,
                 source,
             } => {
                 assert_eq!(session, Some("s2".to_string()));
+                assert_eq!(
+                    queue_session,
+                    crate::session_scope::for_hook(ordinary_payload)
+                );
                 assert!(!synthetic);
                 assert_eq!(
                     source,

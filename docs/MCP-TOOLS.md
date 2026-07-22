@@ -49,7 +49,8 @@ Record mic to transcript.
 
 ## stop
 
-Stop this session's speech, or all if no session. No parameters.
+Stop this MCP connection's speech. No parameters. The MCP server assigns every
+connection a non-empty queue identity, so `stop` never degrades to a global cancel.
 
 ## mute
 

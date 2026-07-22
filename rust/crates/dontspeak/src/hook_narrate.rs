@@ -11,7 +11,7 @@
 //! SessionStart for streaming clients; non-streaming pass `--greet-only`. Codex witness seeded
 //! by engine on app-server `thread/resume` — plain-TUI keeps Stop.
 //!
-//! [`barge_session`] (SessionEnd): scoped barge (`None` → global).
+//! [`barge_session`] (SessionEnd): queue-scoped barge (missing queue identity → global).
 
 use ds_config::{ClientSource, NarrateKind, Paths, VoiceConfig};
 use ds_narrate::{BatchPayload, StreamBatch};
@@ -20,35 +20,38 @@ use std::borrow::Cow;
 
 /// SessionEnd: barge this session only (no id → global).
 pub fn barge_session(paths: &Paths, payload: &str, client: ClientSource) {
-    let session = crate::hook_core::session_id_from_payload(payload);
+    let logical_session = crate::hook_core::session_id_from_payload(payload);
+    let queue_session = crate::session_scope::for_hook(payload);
     let _ = ds_ipc::request(
         &paths.engine_sock,
         &ds_ipc::Request::SessionEnd {
-            session: session.clone(),
+            session: logical_session.clone(),
+            queue_session: queue_session.clone(),
             source: client,
         },
     );
     // Grok digests use sticky tag so MarkActive cannot prune them; SessionEnd barges it too
     // (SessionEnd reclaims forget_narration_session state; Stop alone does not).
     if client == ClientSource::Grok {
-        let sticky = session
+        let sticky = queue_session
             .as_deref()
             .map(grok_stop_session_tag)
             .unwrap_or_else(|| "grok-stop".into());
         let _ = ds_ipc::request(
             &paths.engine_sock,
             &ds_ipc::Request::SessionEnd {
-                session: Some(sticky),
+                session: None,
+                queue_session: Some(sticky),
                 source: client,
             },
         );
-        if let Some(s) = &session {
+        if let Some(s) = &logical_session {
             let _ = std::fs::remove_file(last_spoken_fingerprint_path(paths, s));
         }
     }
     // Reclaim display-state + lock/tmp or they accumulate. Codex has no SessionEnd —
     // cleanup is engine codex_stream.
-    if let Some(s) = &session {
+    if let Some(s) = &logical_session {
         ds_narrate::clear_session_state(paths, s);
     }
 }
@@ -729,6 +732,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
         return None;
     };
     let session = hook.session_id.clone().filter(|s| !s.trim().is_empty());
+    let queue_session = crate::session_scope::for_hook(payload);
     let grok_fp_session = session.as_deref().unwrap_or("-");
     let streamed = streamed_via_message_display(paths, session.as_deref().unwrap_or_default());
 
@@ -736,7 +740,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     // flush trailing digests/shorts with is_final. No chat_history re-voice if witness set.
     if streamed {
         let session_id = session.as_deref().unwrap_or_default();
-        let session_tag = session.clone();
+        let session_tag = queue_session.clone();
         if let Err(message) = ds_narrate::retry_pending(paths, session_id, |utterance| {
             admit_narration(paths, session_tag.clone(), client, utterance)
         }) {
@@ -818,12 +822,12 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: ClientSource) -> Option
     );
     // Sticky tag: MarkActive cannot prune digests (ding-only race); barge_session clears.
     let admit_session = if client == ClientSource::Grok {
-        session
+        queue_session
             .as_deref()
             .map(grok_stop_session_tag)
             .or_else(|| Some("grok-stop".into()))
     } else {
-        session.clone()
+        queue_session
     };
     if client == ClientSource::Grok {
         let path_disp = grok_selection
@@ -989,7 +993,7 @@ pub fn message_display(paths: &Paths, payload: &str, client: ClientSource) {
     let batch = batch_from_hook(&hook);
 
     // Lock through admission so races don't double-offer; rejected work stays pending.
-    let session_tag = Some(session.clone()).filter(|s| !s.is_empty());
+    let session_tag = crate::session_scope::for_hook(payload);
     if let Err(message) = ds_narrate::deliver_batch(
         paths,
         &session,

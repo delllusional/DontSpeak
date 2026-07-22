@@ -56,7 +56,7 @@ pub const AGENTS: &str = "agents";
 
 pub const SPEAK: &str = "Queue text for spoken playback.";
 pub const LISTEN: &str = "Record mic to transcript.";
-pub const STOP: &str = "Stop this session's speech, or all if no session.";
+pub const STOP: &str = "Stop this MCP connection's speech.";
 pub const MUTE: &str = "Global mute until changed or engine restart.";
 pub const STATUS: &str = "Speech config and runtime state.";
 pub const USAGE: &str = "Coding-agent subscription usage.";

@@ -114,7 +114,10 @@ fn run_direct(
 
 fn client_command(bin: &Path, args: &[String]) -> Command {
     let mut command = Command::new(bin);
-    command.args(args);
+    command.args(args).env(
+        crate::session_scope::DONTSPEAK_SESSION_ID,
+        crate::session_scope::new_launcher_session(),
+    );
     command
 }
 
@@ -340,6 +343,13 @@ mod tests {
                 .map(|arg| OsString::from(arg.as_str()))
                 .collect::<Vec<_>>()
         );
+        let session = command
+            .get_envs()
+            .find(|(name, _)| *name == crate::session_scope::DONTSPEAK_SESSION_ID)
+            .and_then(|(_, value)| value)
+            .expect("launcher must give hooks and MCP a shared session")
+            .to_string_lossy();
+        assert!(session.starts_with("dontspeak:launch:"));
     }
 
     #[test]

@@ -48,3 +48,25 @@ Single FIFO (no reply vs narration split). Limits: 10 KiB/item; 128 items / 1 Mi
 all items. Each `Item` has `session: Option<String>`; worker holds non-active or
 no-terminal-frontmost items until the gate clears. Active session falls silent when quiet
 until next `MarkActive`.
+
+The optional queue field is retained for explicitly global audio and legacy/sessionless
+hook events. MCP `speak` and `stop` use a required string in the IPC protocol and never
+enqueue or cancel with `None`.
+
+Queue identity is deliberately separate from an agent's logical conversation ID. The
+logical ID still drives transcript discovery and narration deduplication; the queue ID
+must instead be stable across the hook and MCP child processes belonging to one terminal.
+Resolution order is:
+
+1. `DONTSPEAK_SESSION_ID`, injected by every `dontspeak <client>` launcher.
+2. A terminal identifier (`WT_SESSION`, `TERM_SESSION_ID`, `ITERM_SESSION_ID`,
+   `WEZTERM_PANE`, `KITTY_WINDOW_ID`, or `TMUX_PANE`).
+3. A generated identity scoped to the MCP server process.
+
+The final fallback keeps separate MCP servers isolated and makes global `stop`
+unrepresentable, but cannot correlate a direct-launched client's hook events. Use the
+DontSpeak launcher when hook/MCP queue alignment must be guaranteed.
+
+Agent conversation IDs are intentionally excluded. They either are unavailable to local
+stdio MCP startup or can change while the long-lived MCP child retains its original
+environment, causing hook and MCP queue scopes to drift.

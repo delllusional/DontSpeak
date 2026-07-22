@@ -21,8 +21,40 @@ dontspeak hermes [args...]
 
 Aliases: `claude_code`, `qwen_code`, `kimi-code`. Registry owns names/executables/modes; adding a
 client without a launcher fails tests. Launchers preserve cwd, streams, args, exit
-code; start the DontSpeak host first (except `--help` / `--version`). Windows: new
-terminal after first install for PATH.
+code; start the DontSpeak host first (except `--help` / `--version`), and inject a fresh
+`DONTSPEAK_SESSION_ID` inherited by that client's hooks and local MCP server. Windows:
+new terminal after first install for PATH.
+
+### MCP queue identity
+
+Speech queue identity is not inferred from a variable merely because an agent exposes it
+to shell tools. The variable must be available when the local stdio MCP child starts and
+must also agree with hook events. This was audited per supported client in July 2026:
+
+| Client | Upstream session-ID behavior | Queue-ID decision |
+|---|---|---|
+| Claude Code | `CLAUDE_CODE_SESSION_ID`; hooks update on `/clear`, but an existing MCP child retains its spawn ID | Excluded to prevent drift |
+| Qwen Code | `QWEN_CODE_SESSION_ID` is process-global and changes for a new session | Excluded because an existing MCP child's environment is a snapshot |
+| OpenAI Codex | `CODEX_THREAD_ID` is tool/shell-only, not local MCP startup | Unavailable |
+| Grok | Dynamic `{{session_id}}` is documented for HTTP headers, not local stdio | Unavailable |
+| Kimi Code | Stdio `env` is static configuration | Unavailable |
+| Hermes Agent | `HERMES_SESSION_ID` is documented for tool subprocesses, not MCP startup | No supported MCP-startup contract |
+
+Every client therefore uses launcher/terminal identity, then an isolated MCP-process
+fallback. Native conversation IDs are never treated as queue IDs.
+
+References: [Claude environment contract](https://code.claude.com/docs/en/env-vars),
+[Codex local stdio gap](https://github.com/openai/codex/issues/19937),
+[Qwen session context source](https://github.com/QwenLM/qwen-code/blob/v0.19.11/packages/core/src/utils/sessionIdContext.ts),
+[Grok MCP configuration](https://docs.x.ai/build/features/mcp-servers),
+[Kimi MCP configuration](https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html),
+[Hermes environment variables](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/environment-variables.md),
+and [Hermes MCP configuration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
+
+MCP `speak` and `stop` require a non-empty queue identity on the internal wire. The
+generated last-resort identity therefore preserves isolation instead of silently turning
+`stop` into a global operation. Logical conversation IDs remain separate for Codex/Grok
+stream discovery and per-agent narration state.
 
 ## Capability matrix
 

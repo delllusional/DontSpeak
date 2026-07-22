@@ -24,7 +24,14 @@ pub(crate) fn tools_call(
     sock: Option<&PathBuf>,
     client: ClientSource,
 ) -> Value {
-    tools_call_cancellable(id, msg, sock, client, Arc::new(AtomicBool::new(false)))
+    tools_call_cancellable(
+        id,
+        msg,
+        sock,
+        client,
+        "test-mcp-session",
+        Arc::new(AtomicBool::new(false)),
+    )
 }
 
 /// Validate `tools/call` shape + advertised schema before any handler/FS/IPC work.
@@ -55,6 +62,7 @@ pub(crate) fn tools_call_validated(
     msg: &Value,
     sock: Option<&PathBuf>,
     client: ClientSource,
+    queue_session: &str,
     cancelled: Arc<AtomicBool>,
     agents: bool,
 ) -> Value {
@@ -69,7 +77,7 @@ pub(crate) fn tools_call_validated(
             tool_result(format!("invalid {name} arguments: {reason}"), true),
         );
     }
-    tools_call_cancellable(id, msg, sock, client, cancelled)
+    tools_call_cancellable(id, msg, sock, client, queue_session, cancelled)
 }
 
 pub(crate) fn tools_call_cancellable(
@@ -77,6 +85,7 @@ pub(crate) fn tools_call_cancellable(
     msg: &Value,
     sock: Option<&PathBuf>,
     client: ClientSource,
+    queue_session: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Value {
     let params = msg.get("params");
@@ -126,8 +135,12 @@ pub(crate) fn tools_call_cancellable(
             };
             ensure_engine(sock);
             match name {
-                n if n == SPEAK_NAME => call_speak(sock, &args, client).map(ToolSuccess::Text),
-                n if n == STOP_NAME => call_stop(sock, client).map(ToolSuccess::Text),
+                n if n == SPEAK_NAME => {
+                    call_speak(sock, &args, client, queue_session).map(ToolSuccess::Text)
+                }
+                n if n == STOP_NAME => {
+                    call_stop(sock, client, queue_session).map(ToolSuccess::Text)
+                }
                 n if n == MUTE_NAME => call_mute(sock, &args).map(ToolSuccess::Text),
                 n if n == DIARIZE_NAME => call_diarize(sock, &args).map(ToolSuccess::Text),
                 n if n == MANAGE_SPEAKERS_NAME => call_speakers(sock, &args).map(ToolSuccess::Text),
@@ -480,16 +493,12 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
     Ok(format!("Updated {}.", changes.join(", ")))
 }
 
-/// Ambient Claude session (stdio = one process per session). Claude sets
-/// `CLAUDE_CODE_SESSION_ID` (undocumented for MCP; claude-code #41836). Never a tool arg.
-/// `None` ⇒ machine-global.
-fn session_id() -> Option<String> {
-    std::env::var("CLAUDE_CODE_SESSION_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
-
-fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String, String> {
+fn call_speak(
+    sock: &Path,
+    args: &Value,
+    client: ClientSource,
+    queue_session: &str,
+) -> Result<String, String> {
     let a: SpeakArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid speak arguments: {e}"))?;
     let text = a.text.unwrap_or_default();
@@ -505,7 +514,7 @@ fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String,
         &Request::Speak {
             text,
             tts_args: a.tts_args,
-            session: session_id(),
+            session: queue_session.to_string(),
             source: client,
         },
     ) {
@@ -516,27 +525,23 @@ fn call_speak(sock: &Path, args: &Value, client: ClientSource) -> Result<String,
     }
 }
 
-fn call_stop(sock: &Path, client: ClientSource) -> Result<String, String> {
-    // Scope barge to ambient session; None (bare CLI) → global hard barge.
-    let session = session_id();
-    let scoped = session.is_some();
+fn call_stop(sock: &Path, client: ClientSource, queue_session: &str) -> Result<String, String> {
     let response = ds_ipc::request(
         sock,
         &Request::Stop {
-            session,
+            session: queue_session.to_string(),
             source: client,
         },
     );
     match response {
-        Ok(response) => stop_response(response, scoped),
+        Ok(response) => stop_response(response),
         Err(e) => Err(format!("engine unavailable: {e}")),
     }
 }
 
-fn stop_response(response: Response, scoped: bool) -> Result<String, String> {
+fn stop_response(response: Response) -> Result<String, String> {
     match response {
-        Response::Done if scoped => Ok("Stopped this session's speech.".into()),
-        Response::Done => Ok("Stopped all speech.".into()),
+        Response::Done => Ok("Stopped this session's speech.".into()),
         Response::Error { message } => Err(format!("stop failed: {message}")),
         _ => Err("stop failed: unexpected engine response".into()),
     }
@@ -1222,13 +1227,15 @@ mod arg_validation {
 
     #[test]
     fn speak_requires_nonempty_text() {
-        let err = call_speak(&dead_sock(), &json!({}), ClientSource::ClaudeCode).unwrap_err();
+        let err =
+            call_speak(&dead_sock(), &json!({}), ClientSource::ClaudeCode, "scope").unwrap_err();
         assert_eq!(err, "`text` is required.");
 
         let err = call_speak(
             &dead_sock(),
             &json!({ "text": "   " }),
             ClientSource::ClaudeCode,
+            "scope",
         )
         .unwrap_err();
         assert_eq!(err, "`text` is required.");
@@ -1243,19 +1250,15 @@ mod arg_validation {
     #[test]
     fn stop_accepts_only_done_and_reports_its_scope() {
         assert_eq!(
-            stop_response(Response::Done, true).unwrap(),
+            stop_response(Response::Done).unwrap(),
             "Stopped this session's speech."
         );
         assert_eq!(
-            stop_response(Response::Done, false).unwrap(),
-            "Stopped all speech."
-        );
-        assert_eq!(
-            stop_response(Response::error("busy"), true).unwrap_err(),
+            stop_response(Response::error("busy")).unwrap_err(),
             "stop failed: busy"
         );
         assert_eq!(
-            stop_response(Response::Pong, true).unwrap_err(),
+            stop_response(Response::Pong).unwrap_err(),
             "stop failed: unexpected engine response"
         );
     }
@@ -1324,9 +1327,14 @@ mod engine_unavailable {
         let calls: &[(&str, Result<String, String>)] = &[
             (
                 "speak",
-                call_speak(&sock, &json!({ "text": "hello" }), ClientSource::ClaudeCode),
+                call_speak(
+                    &sock,
+                    &json!({ "text": "hello" }),
+                    ClientSource::ClaudeCode,
+                    "scope",
+                ),
             ),
-            ("stop", call_stop(&sock, ClientSource::ClaudeCode)),
+            ("stop", call_stop(&sock, ClientSource::ClaudeCode, "scope")),
             ("mute", call_mute(&sock, &json!({ "on": true }))),
             ("diarize", call_diarize(&sock, &json!({}))),
             (

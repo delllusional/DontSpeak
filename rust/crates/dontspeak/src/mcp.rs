@@ -21,7 +21,15 @@ const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_STDIN_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_IN_FLIGHT_TOOL_CALLS: usize = 8;
 
-type Executor = dyn Fn(Option<Value>, &Value, Option<&PathBuf>, ClientSource, Arc<AtomicBool>, bool) -> Value
+type Executor = dyn Fn(
+        Option<Value>,
+        &Value,
+        Option<&PathBuf>,
+        ClientSource,
+        String,
+        Arc<AtomicBool>,
+        bool,
+    ) -> Value
     + Send
     + Sync;
 
@@ -63,7 +71,12 @@ enum Lifecycle {
 struct Session {
     lifecycle: Lifecycle,
     initialized_notification: bool,
+    identity: Option<Identity>,
+}
+
+struct Identity {
     client: ClientSource,
+    queue_session: String,
 }
 
 struct Envelope<'a> {
@@ -79,6 +92,7 @@ enum Route {
         id: RequestId,
         message: Value,
         client: ClientSource,
+        queue_session: String,
         agents: bool,
     },
     Cancel(RequestId),
@@ -120,9 +134,19 @@ fn serve_on<R, W, A>(
     W: Write + Send + 'static,
     A: Fn() -> bool + Send + Sync + 'static,
 {
-    let executor: Arc<Executor> = Arc::new(|id, message, sock, client, cancelled, agents| {
-        tools::tools_call_validated(id, message, sock, client, cancelled, agents)
-    });
+    let executor: Arc<Executor> = Arc::new(
+        |id, message, sock, client, queue_session, cancelled, agents| {
+            tools::tools_call_validated(
+                id,
+                message,
+                sock,
+                client,
+                &queue_session,
+                cancelled,
+                agents,
+            )
+        },
+    );
     serve_on_with(
         reader,
         out,
@@ -223,6 +247,7 @@ fn serve_on_with<R, W>(
                 id,
                 message,
                 client,
+                queue_session,
                 agents,
             } => {
                 if in_flight.contains_key(&id) {
@@ -265,6 +290,7 @@ fn serve_on_with<R, W>(
                         &message,
                         worker_sock.as_ref(),
                         client,
+                        queue_session,
                         cancelled.clone(),
                         agents,
                     );
@@ -439,12 +465,19 @@ fn route(message: &Value, session: &mut Session, agents: bool) -> Route {
         "tools/call" => match envelope.id {
             None => Route::Notification,
             Some(id) => match tools::validate_tools_call(message, agents) {
-                Ok(()) => Route::ToolCall {
-                    id,
-                    message: message.clone(),
-                    client: session.client,
-                    agents,
-                },
+                Ok(()) => {
+                    let identity = session
+                        .identity
+                        .as_ref()
+                        .expect("initialized session has an identity");
+                    Route::ToolCall {
+                        id,
+                        message: message.clone(),
+                        client: identity.client,
+                        queue_session: identity.queue_session.clone(),
+                        agents,
+                    }
+                }
                 Err(reason) => Route::Reply(err(
                     Some(id.value()),
                     -32602,
@@ -484,7 +517,11 @@ fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Sessi
     }
 
     let (client, raw) = client_from_initialize(message);
-    session.client = client;
+    let queue_session = crate::session_scope::for_mcp(client);
+    session.identity = Some(Identity {
+        client,
+        queue_session,
+    });
     session.lifecycle = Lifecycle::Initialized;
     log(&format!(
         "initialize clientInfo.name={raw:?} client={}",
@@ -887,6 +924,7 @@ mod tests {
                 id,
                 message,
                 client,
+                queue_session,
                 agents,
             } = route(&request, &mut session, false)
             else {
@@ -897,6 +935,7 @@ mod tests {
                 &message,
                 None,
                 client,
+                &queue_session,
                 Arc::new(AtomicBool::new(false)),
                 agents,
             );
@@ -909,7 +948,7 @@ mod tests {
     fn cancellation_is_observed_while_a_tool_call_is_running() {
         let writer = SharedWriter::default();
         let bytes = writer.0.clone();
-        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled, _| {
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, _, cancelled, _| {
             while !cancelled.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -1008,7 +1047,7 @@ mod tests {
         let enabled = Arc::new(AtomicBool::new(false));
         let provider_enabled = enabled.clone();
         let executor_enabled = enabled.clone();
-        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, agents| {
+        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, _, agents| {
             assert!(!agents, "this call was admitted by the pre-change catalog");
             executor_enabled.store(true, Ordering::Release);
             ok(id, tool_result("updated".into(), false))
@@ -1086,7 +1125,7 @@ mod tests {
 
         let executor_calls = calls.clone();
         let executor_release = release_rx.clone();
-        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, _| {
+        let executor: Arc<Executor> = Arc::new(move |id, _, _, _, _, _, _| {
             if executor_calls.fetch_add(1, Ordering::AcqRel) == 0 {
                 started_tx.send(()).unwrap();
                 executor_release.lock().unwrap().recv().unwrap();
@@ -1143,7 +1182,7 @@ mod tests {
     fn stdio_boundary_applies_backpressure_to_concurrent_calls() {
         let writer = SharedWriter::default();
         let bytes = writer.0.clone();
-        let executor: Arc<Executor> = Arc::new(|id, _, _, _, cancelled, _| {
+        let executor: Arc<Executor> = Arc::new(|id, _, _, _, _, cancelled, _| {
             while !cancelled.load(Ordering::Acquire) {
                 std::thread::yield_now();
             }
@@ -1210,6 +1249,24 @@ mod tests {
             client_from_initialize(&message),
             (ClientSource::ClaudeCode, "claude-code".to_string())
         );
+    }
+
+    #[test]
+    fn initialized_mcp_calls_always_carry_a_queue_scope() {
+        let mut session = Session::default();
+        let init: Value = serde_json::from_str(&initialize_line(1)).unwrap();
+        assert!(matches!(route(&init, &mut session, false), Route::Reply(_)));
+
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "stop", "arguments": {}}
+        });
+        let Route::ToolCall { queue_session, .. } = route(&request, &mut session, false) else {
+            panic!("an initialized stop call must reach execution");
+        };
+        assert!(!queue_session.trim().is_empty());
     }
 
     #[test]

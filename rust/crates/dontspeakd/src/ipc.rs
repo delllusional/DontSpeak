@@ -52,6 +52,11 @@ fn agent_usage_response_with(
     }
 }
 
+struct HookSessions {
+    logical: Option<String>,
+    queue: Option<String>,
+}
+
 /// UserPromptSubmit MarkActive. Always nudge codex sessions; Grok also. Skip terminal
 /// claim + `clear_on_input` when `synthetic` (#11).
 fn handle_mark_active(
@@ -59,12 +64,12 @@ fn handle_mark_active(
     codex_sessions: &crate::codex_stream::SessionRegistry,
     grok_sessions: &crate::grok_stream::SessionRegistry,
     paths: &Paths,
-    session: Option<String>,
+    sessions: HookSessions,
     synthetic: bool,
     source: ClientSource,
 ) {
     // Unconditional liveness nudge (+ re-discovery / negative-cache re-arm).
-    if let Some(s) = &session {
+    if let Some(s) = &sessions.logical {
         codex_sessions.nudge(s);
         if source == ClientSource::Grok {
             grok_sessions.nudge(s);
@@ -73,18 +78,18 @@ fn handle_mark_active(
     if synthetic {
         return; // no active-terminal steal, no TTS queue touch
     }
-    ttsq.set_active_session(session.clone());
+    ttsq.set_active_session(sessions.queue.clone());
     // Voice-submit echo: engine already applied clear_on_input; skip re-cancel.
     let was_voice = ttsq.take_recent_voice_submit();
     // Skip config read when was_voice already forces no cancel.
     if !was_voice {
         let scopes = VoiceConfig::load(paths).clear_on_input;
         if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Current)) {
-            ttsq.clear_session(session.clone());
+            ttsq.clear_session(sessions.queue.clone());
         }
         if should_cancel_on_submit(was_voice, scopes.contains(&CancelSpeechScope::Other)) {
             // Use this request's session, not re-read active (concurrent MarkActive race).
-            ttsq.cancel_for_submit(session.clone(), false, true);
+            ttsq.cancel_for_submit(sessions.queue, false, true);
         }
     }
 }
@@ -128,7 +133,11 @@ pub(crate) fn spawn_ipc_server(
                         Err(message) => emit(&ds_ipc::Response::error(message)),
                     }
                 }
-                ds_ipc::Request::GreetSession { session, source } => {
+                ds_ipc::Request::GreetSession {
+                    session,
+                    queue_session,
+                    source,
+                } => {
                     // New terminal opened → greet in its agent's assigned voice (no-op unless
                     // `greet` is set). Claims the agent's voice at open time.
                     // Also the codex_stream supervisor's session DISCOVERY: a session id
@@ -144,8 +153,9 @@ pub(crate) fn spawn_ipc_server(
                         &paths,
                         source,
                         &format!(
-                            "greet_session session={}",
-                            session.as_deref().unwrap_or("-")
+                            "greet_session session={} queue_session={}",
+                            session.as_deref().unwrap_or("-"),
+                            queue_session.as_deref().unwrap_or("-")
                         ),
                     );
                     if let Some(s) = &session {
@@ -154,11 +164,12 @@ pub(crate) fn spawn_ipc_server(
                             grok_sessions.nudge(s);
                         }
                     }
-                    ttsq.greet_session(source, session);
+                    ttsq.greet_session(source, queue_session);
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::MarkActive {
                     session,
+                    queue_session,
                     synthetic,
                     source,
                 } => {
@@ -166,8 +177,9 @@ pub(crate) fn spawn_ipc_server(
                         &paths,
                         source,
                         &format!(
-                            "mark_active session={} synthetic={synthetic}",
-                            session.as_deref().unwrap_or("-")
+                            "mark_active session={} queue_session={} synthetic={synthetic}",
+                            session.as_deref().unwrap_or("-"),
+                            queue_session.as_deref().unwrap_or("-")
                         ),
                     );
                     handle_mark_active(
@@ -175,7 +187,10 @@ pub(crate) fn spawn_ipc_server(
                         &codex_sessions,
                         &grok_sessions,
                         &paths,
-                        session,
+                        HookSessions {
+                            logical: session,
+                            queue: queue_session,
+                        },
                         synthetic,
                         source,
                     );
@@ -194,14 +209,10 @@ pub(crate) fn spawn_ipc_server(
                     log_client(
                         &paths,
                         source,
-                        &format!(
-                            "speak session={} chars={}",
-                            session.as_deref().unwrap_or("-"),
-                            text.chars().count()
-                        ),
+                        &format!("speak session={} chars={}", session, text.chars().count()),
                     );
                     match speak_tts_args(tts_args)
-                        .and_then(|args| ttsq.enqueue(text, args, source, session))
+                        .and_then(|args| ttsq.enqueue(text, args, source, Some(session)))
                     {
                         Ok(()) => emit(&ds_ipc::Response::Done),
                         Err(e) => emit(&ds_ipc::Response::error(format!("speak: {e}"))),
@@ -241,37 +252,35 @@ pub(crate) fn spawn_ipc_server(
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::Stop { session, source } => {
-                    // None = global hard barge (drop the whole queue + cancel the
-                    // current item). Some(s) = per-window: prune only that session's
-                    // items and cancel playback only if it's that session's, so one
-                    // terminal's preempt/close never silences another's.
+                    // MCP stop is per-window: prune only that session's items and cancel
+                    // playback only if it is that session's, so one terminal never
+                    // silences another.
                     // Also clear the Grok sticky sibling (`grok-stop:<id>`): MarkActive
                     // current-clear leaves sticky intact by design, but an explicit stop
                     // must silence digests + ding co-queued under that tag.
-                    log_client(
-                        &paths,
-                        source,
-                        &format!("stop session={}", session.as_deref().unwrap_or("-")),
-                    );
-                    match session {
-                        None => ttsq.clear(),
-                        Some(s) => {
-                            let sticky = format!("grok-stop:{s}");
-                            ttsq.clear_session(Some(s));
-                            ttsq.clear_session(Some(sticky));
-                        }
-                    }
+                    log_client(&paths, source, &format!("stop session={session}"));
+                    let sticky = format!("grok-stop:{session}");
+                    ttsq.clear_session(Some(session));
+                    ttsq.clear_session(Some(sticky));
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::SessionEnd { session, source } => {
+                ds_ipc::Request::SessionEnd {
+                    session,
+                    queue_session,
+                    source,
+                } => {
                     // Window closed for good: per-window barge. The agent's voice assignment
                     // is keyed by client, not session, and deliberately survives.
-                    // None (no session id) → global hard barge.
+                    // Missing queue identity → global hard barge for legacy/sessionless hooks.
                     // Grok: also drop the updates.jsonl tail registration.
                     log_client(
                         &paths,
                         source,
-                        &format!("session_end session={}", session.as_deref().unwrap_or("-")),
+                        &format!(
+                            "session_end session={} queue_session={}",
+                            session.as_deref().unwrap_or("-"),
+                            queue_session.as_deref().unwrap_or("-")
+                        ),
                     );
                     if let Some(session) = session.as_deref() {
                         ttsq.forget_narration_session(session);
@@ -279,9 +288,10 @@ pub(crate) fn spawn_ipc_server(
                             grok_sessions.forget(session);
                         }
                     }
-                    match session {
-                        None => ttsq.clear(),
-                        Some(_) => ttsq.end_session(session),
+                    if queue_session.is_some() {
+                        ttsq.end_session(queue_session);
+                    } else {
+                        ttsq.clear();
                     }
                     emit(&ds_ipc::Response::Done);
                 }
@@ -605,7 +615,10 @@ mod tests {
             &codex_sessions,
             &grok_sessions,
             &paths,
-            Some("a".into()),
+            HookSessions {
+                logical: Some("a".into()),
+                queue: Some("a".into()),
+            },
             true,
             ClientSource::ClaudeCode,
         );
@@ -631,20 +644,28 @@ mod tests {
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-        ttsq.enqueue("hi".into(), None, ClientSource::Unknown, Some("a".into()))
-            .unwrap();
+        ttsq.enqueue(
+            "hi".into(),
+            None,
+            ClientSource::Unknown,
+            Some("window-a".into()),
+        )
+        .unwrap();
 
         handle_mark_active(
             &ttsq,
             &codex_sessions,
             &grok_sessions,
             &paths,
-            Some("a".into()),
+            HookSessions {
+                logical: Some("logical-a".into()),
+                queue: Some("window-a".into()),
+            },
             false,
             ClientSource::ClaudeCode,
         );
 
-        assert_eq!(ttsq.active_session(), Some("a".into()));
+        assert_eq!(ttsq.active_session(), Some("window-a".into()));
         assert_eq!(
             ttsq.tts_status_sample().queued,
             0,
@@ -665,7 +686,10 @@ mod tests {
             &codex_sessions,
             &grok_sessions,
             &paths,
-            Some("g1".into()),
+            HookSessions {
+                logical: Some("g1".into()),
+                queue: Some("window-g".into()),
+            },
             true,
             ClientSource::Grok,
         );
@@ -680,7 +704,10 @@ mod tests {
             &codex_sessions,
             &grok_sessions2,
             &paths,
-            Some("c1".into()),
+            HookSessions {
+                logical: Some("c1".into()),
+                queue: Some("window-c".into()),
+            },
             true,
             ClientSource::ClaudeCode,
         );

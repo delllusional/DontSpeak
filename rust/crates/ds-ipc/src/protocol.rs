@@ -7,6 +7,17 @@ use ds_client::ClientSource;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+fn deserialize_nonempty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("must not be empty"));
+    }
+    Ok(value)
+}
+
 /// Client → engine (`#[serde(tag = "cmd")]`, snake_case).
 ///
 /// ## `source` field
@@ -27,14 +38,20 @@ pub enum Request {
     },
     /// SessionStart greeting when `greet`.
     GreetSession {
+        /// Upstream logical session used for stream discovery/state.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        /// Terminal/window identity used only by the TTS queue.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_session: Option<String>,
         source: ClientSource,
     },
     /// UserPromptSubmit: mark active terminal; other sessions held.
     MarkActive {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_session: Option<String>,
         /// Issue #11 harness continuation — liveness only (no active claim / clear_on_input).
         /// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
         #[serde(default)]
@@ -46,8 +63,9 @@ pub enum Request {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tts_args: Option<Value>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<String>,
+        /// Required: MCP speech is always scoped to its stdio/window identity.
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session: String,
         source: ClientSource,
     },
     /// Mid-turn narration (barge/skip drops first); sentence-split on warm child.
@@ -66,16 +84,18 @@ pub enum Request {
         /// Required for uniform source contract (engine skips logging this variant).
         source: ClientSource,
     },
-    /// Barge-in. `Some(session)` scopes; `None` = global.
+    /// MCP barge-in, scoped to its stdio/window identity.
     Stop {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        session: Option<String>,
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session: String,
         source: ClientSource,
     },
     /// Per-window stop; agent voice assignment survives.
     SessionEnd {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queue_session: Option<String>,
         source: ClientSource,
     },
     /// Stream Listening/partials → terminal Transcript.
@@ -213,7 +233,7 @@ mod tests {
                 tts_args: Some(serde_json::json!({
                     "kokoro": { "voice": "af_sarah", "language": "en", "rate": 1.5 }
                 })),
-                session: Some("sess-1".into()),
+                session: "sess-1".into(),
                 source: ClientSource::ClaudeCode,
             },
             Request::SpeakNarration {
@@ -231,29 +251,29 @@ mod tests {
                 source: ClientSource::ClaudeCode,
             },
             Request::Stop {
-                session: None,
-                source: ClientSource::Unknown,
-            },
-            Request::Stop {
-                session: Some("sess-1".into()),
+                session: "sess-1".into(),
                 source: ClientSource::ClaudeCode,
             },
             Request::MarkActive {
                 session: Some("sess-1".into()),
+                queue_session: Some("window-1".into()),
                 synthetic: false,
                 source: ClientSource::Codex,
             },
             Request::MarkActive {
                 session: None,
+                queue_session: None,
                 synthetic: true,
                 source: ClientSource::ClaudeCode,
             },
             Request::GreetSession {
                 session: Some("sess-1".into()),
+                queue_session: Some("window-1".into()),
                 source: ClientSource::Grok,
             },
             Request::SessionEnd {
                 session: Some("sess-1".into()),
+                queue_session: Some("window-1".into()),
                 source: ClientSource::QwenCode,
             },
             Request::TestRecognitionStart,
@@ -331,6 +351,7 @@ mod tests {
                 session: Some(ref s),
                 synthetic: false,
                 source: ClientSource::ClaudeCode,
+                ..
             } if s == "sess-1"
         ));
     }
@@ -342,8 +363,8 @@ mod tests {
             r#"{"cmd":"greet_session"}"#,
             r#"{"cmd":"mark_active","session":"sess-1"}"#,
             r#"{"cmd":"session_end","session":"sess-1"}"#,
-            r#"{"cmd":"stop"}"#,
-            r#"{"cmd":"speak","text":"hi"}"#,
+            r#"{"cmd":"stop","session":"sess-1"}"#,
+            r#"{"cmd":"speak","text":"hi","session":"sess-1"}"#,
             r#"{"cmd":"speak_narration","text":"hi"}"#,
             r#"{"cmd":"earcon","event":"reply_done"}"#,
         ];
@@ -353,6 +374,36 @@ mod tests {
             assert!(
                 err.to_string().contains("source"),
                 "the error must name the missing field for {line}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_speak_and_stop_require_a_non_optional_session() {
+        for line in [
+            r#"{"cmd":"speak","text":"hi","source":"claude_code"}"#,
+            r#"{"cmd":"stop","source":"claude_code"}"#,
+        ] {
+            let err = serde_json::from_str::<Request>(line)
+                .expect_err("MCP queue operations must never decode without a scope");
+            assert!(
+                err.to_string().contains("session"),
+                "missing-session error must name the field for {line}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_speak_and_stop_reject_an_empty_session() {
+        for line in [
+            r#"{"cmd":"speak","text":"hi","session":"  ","source":"claude_code"}"#,
+            r#"{"cmd":"stop","session":"","source":"claude_code"}"#,
+        ] {
+            let err = serde_json::from_str::<Request>(line)
+                .expect_err("MCP queue operations must never decode with an empty scope");
+            assert!(
+                err.to_string().contains("must not be empty"),
+                "{line}: {err}"
             );
         }
     }

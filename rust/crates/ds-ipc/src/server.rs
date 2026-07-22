@@ -387,7 +387,7 @@ mod tests {
     /// Report names `cmd` but never payload prose (activity-log safety).
     #[test]
     fn bad_request_detail_carries_the_cmd_but_never_the_payload() {
-        let line = r#"{"cmd":"speak","text":"my private prompt text"}"#; // no `source` ⇒ rejected
+        let line = r#"{"cmd":"speak","text":"my private prompt text","session":"scope-1"}"#; // no `source` ⇒ rejected
         let err = serde_json::from_str::<Request>(line).expect_err("must not decode");
         let detail = bad_request_detail(line, &err);
         assert!(detail.contains("cmd=speak"), "got: {detail}");
