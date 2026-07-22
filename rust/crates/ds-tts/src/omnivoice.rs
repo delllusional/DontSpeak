@@ -85,6 +85,44 @@ const LAYER_PENALTY: f32 = 5.0;
 /// form to keep confidences un-rescaled.
 const GUMBEL_SCALE: f32 = 5.0;
 
+/// Voice id -> style instruct (vocabulary: upstream `docs/voice-design.md` @ 468e927;
+/// comma+space separated, one attribute per category, English-only presets). Same order
+/// as the registry's `OMNIVOICE_VOICES` — a drift guard pins the two lists. `default`
+/// carries no instruct: the ORT prompt omits the block and the MLX shim nils the voice.
+pub const OMNIVOICE_PRESETS: &[(&str, &str)] = &[
+    ("default", ""),
+    ("young_woman", "female, young adult, moderate pitch"),
+    ("young_man", "male, young adult, moderate pitch"),
+    ("mature_woman", "female, middle-aged, moderate pitch"),
+    ("mature_man", "male, middle-aged, low pitch"),
+    ("british_woman", "female, middle-aged, moderate pitch, british accent"),
+    ("british_man", "male, middle-aged, moderate pitch, british accent"),
+    ("bright_woman", "female, young adult, high pitch"),
+    ("deep_man", "male, middle-aged, very low pitch"),
+    ("whisper", "female, young adult, whisper"),
+];
+
+fn preset_instruct(voice: &str) -> Option<&'static str> {
+    OMNIVOICE_PRESETS
+        .iter()
+        .find(|(id, _)| *id == voice)
+        .map(|(_, instruct)| *instruct)
+}
+
+/// The MLX shim's voice argument: preset ids resolve to their instruct (the shim
+/// passes it into mlx-audio `generate(voice:)`); an instruct-less resolution becomes
+/// the literal `default` the shim nils out. Unknown non-empty strings pass through as
+/// raw instructs — the same permissive rule as the ORT path.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn mlx_voice_arg(voice: &str) -> &str {
+    match preset_instruct(voice) {
+        Some("") => "default",
+        Some(instruct) => instruct,
+        None if voice.is_empty() => "default",
+        None => voice,
+    }
+}
+
 pub struct OmniVoiceSynth {
     embeddings: Session,
     llm: Session,
@@ -167,13 +205,10 @@ impl OmniVoiceSynth {
             .descriptor()
             .runtime_language(language)
             .to_string();
-        // The voice string is the style instruct; "default"/empty omits the instruct
-        // block entirely (same rule as the MLX shim's nil voice).
-        let instruct = if voice.is_empty() || voice == "default" {
-            ""
-        } else {
-            voice
-        };
+        // Preset ids resolve through OMNIVOICE_PRESETS; an unknown non-empty voice is
+        // treated as a raw instruct. An empty instruct omits the block entirely (same
+        // rule as the MLX shim's nil voice).
+        let instruct = preset_instruct(voice).unwrap_or(voice);
         let mut waveform = Vec::new();
         for piece in split_for_frame_budget(text, MAX_FRAMES) {
             if cancelled() {
@@ -703,6 +738,86 @@ fn estimate_audio_frames(text: &str) -> usize {
 mod tests {
     use super::*;
     use ort::value::{Shape, SymbolicDimensions};
+
+    // ── voice presets ───────────────────────────────────────────────────────
+
+    /// Upstream `docs/voice-design.md` @ 468e927 attribute vocabulary — comma+space
+    /// separated, each item must be a published attribute. Guards the preset table
+    /// against free-text drift (the old "warm, clear female voice" pool).
+    fn instruct_is_legal(instruct: &str) -> Result<(), String> {
+        const LEGAL: &[&str] = &[
+            "male",
+            "female",
+            "child",
+            "teenager",
+            "young adult",
+            "middle-aged",
+            "elderly",
+            "very low pitch",
+            "low pitch",
+            "moderate pitch",
+            "high pitch",
+            "very high pitch",
+            "whisper",
+            "american accent",
+            "british accent",
+            "australian accent",
+            "canadian accent",
+            "indian accent",
+            "chinese accent",
+            "korean accent",
+            "japanese accent",
+            "portuguese accent",
+            "russian accent",
+        ];
+        for item in instruct.split(", ") {
+            if !LEGAL.contains(&item) {
+                return Err(format!("illegal instruct item `{item}`"));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_preset_instruct_is_legal_vocabulary() {
+        for (id, instruct) in OMNIVOICE_PRESETS {
+            if instruct.is_empty() {
+                assert_eq!(*id, "default", "only default may omit the instruct");
+                continue;
+            }
+            instruct_is_legal(instruct).unwrap_or_else(|error| panic!("{id}: {error}"));
+        }
+        // The retired free-text pool entry must fail, naming its first illegal item.
+        let error = instruct_is_legal("warm, clear female voice").unwrap_err();
+        assert!(error.contains("`warm`"), "{error}");
+    }
+
+    /// Cross-crate drift guard: the preset table and the registry's voice list are the
+    /// same ids in the same order (precedent: enumerate.rs's Kokoro registry pins).
+    #[test]
+    fn preset_ids_match_the_registry_voices_exactly() {
+        let preset_ids: Vec<&str> = OMNIVOICE_PRESETS.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            preset_ids,
+            ds_config::TtsModel::OmniVoice.descriptor().voices
+        );
+        let descriptor = ds_config::TtsModel::OmniVoice.descriptor();
+        assert_eq!(descriptor.default_voices, ["young_woman"]);
+        assert!(descriptor.voices.contains(&descriptor.warmup_voice));
+    }
+
+    #[test]
+    fn voice_resolution_maps_presets_and_passes_raw_instructs() {
+        assert_eq!(preset_instruct("young_woman"), Some("female, young adult, moderate pitch"));
+        assert_eq!(preset_instruct("default"), Some(""));
+        assert_eq!(preset_instruct("no_such_voice"), None);
+        // MLX arg: instruct-less resolutions become the literal "default" the shim
+        // nils; presets resolve; raw instructs pass through.
+        assert_eq!(mlx_voice_arg("default"), "default");
+        assert_eq!(mlx_voice_arg(""), "default");
+        assert_eq!(mlx_voice_arg("whisper"), "female, young adult, whisper");
+        assert_eq!(mlx_voice_arg("male, elderly"), "male, elderly");
+    }
 
     #[test]
     fn cuda_backbone_uses_cpu_decoder() {

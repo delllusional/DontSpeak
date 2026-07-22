@@ -432,10 +432,8 @@ mod tests {
         assert!(!is_model_voice(TtsModel::Chatterbox, "af_sarah"));
         assert!(is_model_voice(TtsModel::Qwen, "sohee"));
         assert!(!is_model_voice(TtsModel::Qwen, "default"));
-        assert!(is_model_voice(
-            TtsModel::OmniVoice,
-            "warm, clear female voice"
-        ));
+        assert!(is_model_voice(TtsModel::OmniVoice, "young_woman"));
+        assert!(is_model_voice(TtsModel::OmniVoice, "default"));
         assert!(!is_model_voice(TtsModel::OmniVoice, "sohee"));
     }
 

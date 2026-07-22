@@ -83,6 +83,13 @@ impl MlxTts {
         speed: f32,
     ) -> Result<Vec<f32>, String> {
         let text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
+        // OmniVoice preset ids resolve to their style instruct through the ONE table
+        // (crate::omnivoice::OMNIVOICE_PRESETS) before crossing the FFI.
+        let voice = if self.model == ds_config::TtsModel::OmniVoice {
+            crate::omnivoice::mlx_voice_arg(voice)
+        } else {
+            voice
+        };
         let voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
         let language = self.model.descriptor().runtime_language(language);
         let language = CString::new(language).map_err(|_| "language contains NUL".to_string())?;

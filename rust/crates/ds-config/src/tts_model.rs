@@ -175,7 +175,21 @@ const QWEN_VOICES: &[&str] = &[
 ];
 const DEFAULT_VOICE: &[&str] = &["default"];
 const QWEN_DEFAULT_VOICE: &[&str] = &["sohee"];
-const OMNIVOICE_VOICES: &[&str] = &["warm, clear female voice"];
+// Short speakable ids; ds-tts owns the id -> style-instruct table (OMNIVOICE_PRESETS)
+// and a drift guard pins that table to this list exactly.
+const OMNIVOICE_VOICES: &[&str] = &[
+    "default",
+    "young_woman",
+    "young_man",
+    "mature_woman",
+    "mature_man",
+    "british_woman",
+    "british_man",
+    "bright_woman",
+    "deep_man",
+    "whisper",
+];
+const OMNIVOICE_DEFAULT_VOICE: &[&str] = &["young_woman"];
 const MLX_CUDA_CPU_PROVIDERS: &[Provider] = &[Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu];
 // One pinned OmniVoice ONNX profile for every ORT provider: FP16 audio sub-models plus
 // the single fp32 bidirectional LLM backbone (no per-provider variants).
@@ -243,8 +257,8 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         languages: OMNIVOICE_LANGUAGES,
         model_languages: OMNIVOICE_LANGUAGES,
         voices: OMNIVOICE_VOICES,
-        default_voices: OMNIVOICE_VOICES,
-        warmup_voice: "default",
+        default_voices: OMNIVOICE_DEFAULT_VOICE,
+        warmup_voice: "young_woman",
         providers: OMNIVOICE_PROVIDERS,
         frontend: TtsFrontend::PlainText,
         supports_rate: false,

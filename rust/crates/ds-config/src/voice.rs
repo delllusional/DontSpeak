@@ -686,7 +686,7 @@ pub(crate) mod tests {
         assert_eq!(v.tts_voices.kokoro, vec!["af_sarah", "bf_emma"]);
         assert_eq!(v.tts_voices.chatterbox, vec!["default"]);
         assert_eq!(v.tts_voices.qwen, vec!["sohee"]);
-        assert_eq!(v.tts_voices.omnivoice, vec!["warm, clear female voice"]);
+        assert_eq!(v.tts_voices.omnivoice, vec!["young_woman"]);
         assert_eq!(v.tts_model, TtsModel::Kokoro);
         assert!(v.greet);
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
@@ -1419,7 +1419,7 @@ pub(crate) mod tests {
                 kokoro: vec!["am_michael".into(), "am_adam".into()],
                 chatterbox: vec!["default".into()],
                 qwen: vec!["sohee".into()],
-                omnivoice: vec!["warm, clear female voice".into()],
+                omnivoice: vec!["deep_man".into()],
             },
             tts_model: TtsModel::Kokoro,
             greet: true,

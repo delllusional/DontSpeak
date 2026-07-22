@@ -736,7 +736,7 @@ mod tests {
         let changes = args.apply(&mut cfg).unwrap();
         assert_eq!(cfg.tts_model, TtsModel::OmniVoice);
         assert_eq!(cfg.tts_voices.kokoro, ["af_heart"]);
-        assert_eq!(cfg.tts_voices.omnivoice, ["warm, clear female voice"]);
+        assert_eq!(cfg.tts_voices.omnivoice, ["young_woman"]);
         assert_eq!(changes, vec!["tts_model=omnivoice"]);
     }
 

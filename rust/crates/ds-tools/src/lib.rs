@@ -1156,7 +1156,7 @@ mod tests {
                 kokoro: Some(vec!["af_sarah".to_string()]),
                 chatterbox: Some(vec!["default".to_string()]),
                 qwen: Some(vec!["sohee".to_string()]),
-                omnivoice: Some(vec!["warm, clear female voice".to_string()]),
+                omnivoice: Some(vec!["whisper".to_string()]),
             }),
             tts_model: Some(TtsModel::Kokoro),
             tts_engine: Some(vec![TtsEngine::BuiltIn]),
