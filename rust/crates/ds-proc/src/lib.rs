@@ -2,7 +2,7 @@
 //!
 //! [`read_pid`] is the canonical pidfile codec; its consumer is `ds-config`'s
 //! engine pidfile. Unix spawns can take their own session/group via
-//! [`set_new_process_group`] and be reaped as a group; Windows has no `killpg`,
+//! `set_new_process_group` and be reaped as a group; Windows has no `killpg`,
 //! so [`kill_group`] there is a leaf `TerminateProcess`.
 
 use std::fs;
