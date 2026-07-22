@@ -242,6 +242,10 @@ struct ServeReq {
     /// both ways (no `deny_unknown_fields`).
     #[serde(default)]
     skip: usize,
+    /// Engine-resolved TTS params for the active model. Sparse map on the wire;
+    /// re-resolved here against THIS process's active model (model-switch race).
+    #[serde(default)]
+    params: ds_config::TtsParamMap,
 }
 fn default_rate() -> f32 {
     1.0
@@ -529,6 +533,8 @@ pub(crate) fn serve() -> ! {
         text: String,
         /// Already-played batches (see `ServeReq::skip`).
         skip: usize,
+        /// Raw wire params (see `ServeReq::params`).
+        params: ds_config::TtsParamMap,
     }
     struct State {
         req: Option<PlayReq>,
@@ -857,6 +863,7 @@ pub(crate) fn serve() -> ! {
                                 rate: req.rate,
                                 text,
                                 skip: req.skip,
+                                params: req.params,
                             });
                         });
                     }
@@ -1072,6 +1079,7 @@ pub(crate) fn serve() -> ! {
             rate,
             text,
             skip,
+            params,
         } = match job {
             Job::Speak(r) => r,
             Job::Listen(generation) => {
@@ -1271,6 +1279,9 @@ pub(crate) fn serve() -> ! {
         // model active at enqueue time, so a voice from the old model's catalog must not reach
         // this model's backend (which has no per-voice fallback and would drop the utterance).
         let voice = ds_tts::enumerate::supported_voice(model, &voice);
+        // And on the params axis: resolve_params keeps what validates against THIS
+        // model and falls everything else to defaults — the utterance still plays.
+        let params = model.descriptor().resolve_params(&params);
         let cancelled = || cancel.load(Ordering::SeqCst);
         let batches =
             match frontend_batches_with_cancel(model, &text, &voice, &language, &cancelled) {
@@ -1439,6 +1450,7 @@ pub(crate) fn serve() -> ! {
                 voice: &voice,
                 language: &language,
                 rate,
+                params: &params,
             },
             &cancelled,
             &mut commit,

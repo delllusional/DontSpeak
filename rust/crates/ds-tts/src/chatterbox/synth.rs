@@ -314,7 +314,12 @@ impl ChatterboxSynth {
         Ok(cond)
     }
 
-    fn run_embed(&mut self, ids: &[i64], positions: &[i64]) -> Result<TensorData<f32>, String> {
+    fn run_embed(
+        &mut self,
+        ids: &[i64],
+        positions: &[i64],
+        exaggeration: f32,
+    ) -> Result<TensorData<f32>, String> {
         let t = Tensor::from_array((vec![1i64, ids.len() as i64], ids.to_vec()))
             .map_err(|e| format!("input_ids tensor: {e}"))?;
         let outputs = self
@@ -325,7 +330,7 @@ impl ChatterboxSynth {
                     vec![1i64, positions.len() as i64],
                     positions.to_vec(),
                 )).map_err(|e| format!("position_ids tensor: {e}"))?,
-                "exaggeration" => Tensor::from_array((vec![1i64], vec![0.5f32]))
+                "exaggeration" => Tensor::from_array((vec![1i64], vec![exaggeration]))
                     .map_err(|e| format!("exaggeration tensor: {e}"))?,
             })
             .map_err(|e| format!("embed_tokens run: {e}"))?;
@@ -340,6 +345,7 @@ impl ChatterboxSynth {
         text: &str,
         voice: &str,
         language: &str,
+        params: &ds_config::ResolvedTtsParams,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
         if cancelled() {
@@ -349,6 +355,7 @@ impl ChatterboxSynth {
         if cancelled() {
             return Ok(Vec::new());
         }
+        let exaggeration = params.float(ds_config::TtsModel::Chatterbox, "exaggeration");
         let text = prepare_language(text, language, &self.cangjie);
         let ids = self.tokenizer.encode_ids(&text)?;
         if ids.is_empty() {
@@ -365,7 +372,7 @@ impl ChatterboxSynth {
                 }
             })
             .collect();
-        let text_embeds = self.run_embed(&ids, &initial_positions)?;
+        let text_embeds = self.run_embed(&ids, &initial_positions, exaggeration)?;
 
         // LM prefix: conditioning embeddings ++ text embeddings along the seq axis.
         let d = *text_embeds.shape.get(2).ok_or("inputs_embeds not 3-D")? as usize;
@@ -433,7 +440,8 @@ impl ChatterboxSynth {
             }
             drop(outputs);
             past = presents;
-            inputs_embeds = self.run_embed(&[next], &[(generated.len() - 1) as i64])?;
+            inputs_embeds =
+                self.run_embed(&[next], &[(generated.len() - 1) as i64], exaggeration)?;
         }
         if !stopped {
             log::warn!(

@@ -1261,13 +1261,14 @@ impl TtsQueue {
         let mut retries_left = 1u8;
         let mut resume_skip = item.resume_skip;
         loop {
-            let (engine, voice, rate) =
+            let (engine, voice, rate, params) =
                 match self.gate_item(item, gen0, voice_override, rate_override, Some(&language)) {
                     GateOutcome::Play {
                         engine,
                         voice,
                         rate,
-                    } => (engine, voice, rate),
+                        params,
+                    } => (engine, voice, rate, params),
                     GateOutcome::Requeue => return (SpeechOutcome::Requeue, resume_skip),
                     GateOutcome::Drop(reason) => {
                         log::warn!(target: "ttsq", "queued speak could not start: {reason}");
@@ -1276,7 +1277,8 @@ impl TtsQueue {
                 };
 
             self.set_tts_active(true);
-            let result = self.speak_one(engine, text, &voice, &language, rate, resume_skip);
+            let result =
+                self.speak_one(engine, text, &voice, &language, rate, &params, resume_skip);
             let model_supports_resume = self
                 .config
                 .lock()
@@ -1375,6 +1377,11 @@ impl TtsQueue {
                 None => base_voice,
             };
             let rate = rate_override.unwrap_or(cfg.rate);
+            // Stored per-model overrides → complete validated set for the active model.
+            let params = cfg
+                .tts_model
+                .descriptor()
+                .resolve_params(cfg.tts_params.for_model(cfg.tts_model));
 
             // Never send built-in TTS work before its model is ready. Accepted work is HELD
             // during an ordinary warm-up and remains busy; it is dropped only for an explicit
@@ -1398,6 +1405,7 @@ impl TtsQueue {
                 engine,
                 voice,
                 rate,
+                params,
             };
         }
     }
@@ -1446,6 +1454,7 @@ impl TtsQueue {
     /// batches count as played (mute consumes speech — today's semantics). System TTS
     /// has no batch granularity (`skip` ignored); mute still consumes — no spawn when
     /// already muted, kill of in-flight OS synth on live mute (`speak_system` / `set_muted`).
+    #[allow(clippy::too_many_arguments)] // one wire request's fields
     fn speak_one(
         &self,
         engine: Option<ds_config::TtsEngine>,
@@ -1453,6 +1462,7 @@ impl TtsQueue {
         voice: &str,
         language: &str,
         rate: f32,
+        params: &ds_config::ResolvedTtsParams,
         skip: usize,
     ) -> std::io::Result<()> {
         match engine {
@@ -1462,7 +1472,7 @@ impl TtsQueue {
             }
             Some(ds_config::TtsEngine::BuiltIn) => {
                 self.tts.ensure_started();
-                self.tts.speak(text, voice, language, rate, skip)
+                self.tts.speak(text, voice, language, rate, params, skip)
             }
         }
     }
@@ -1615,6 +1625,9 @@ enum GateOutcome {
         engine: Option<ds_config::TtsEngine>,
         voice: String,
         rate: f32,
+        /// Resolved for the model active at gate time; the helper re-resolves against
+        /// ITS active model (model-switch race — clamp to defaults, never refuse).
+        params: ds_config::ResolvedTtsParams,
     },
     Requeue,
     Drop(String),

@@ -14,7 +14,6 @@ use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 const GROUPS: usize = 16;
 const DECODER_FRAMES: usize = 25;
 const MAX_NEW_TOKENS: usize = 2048;
-const REPETITION_PENALTY: f32 = 1.05;
 
 #[derive(Deserialize)]
 struct Config {
@@ -193,11 +192,15 @@ impl QwenSynth {
         text: &str,
         voice: &str,
         language: &str,
+        params: &ds_config::ResolvedTtsParams,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
         if cancelled() {
             return Ok(Vec::new());
         }
+        // Declared param, default 1.05 (the reference generation_config value this port
+        // hardcoded before the parameter surface).
+        let repetition_penalty = params.float(ds_config::TtsModel::Qwen, "repetition_penalty");
         let input_ids = self.tokenize(&format!(
             "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
         ))?;
@@ -276,7 +279,7 @@ impl QwenSynth {
         if cancelled() {
             return Ok(Vec::new());
         }
-        let codes = self.generate(prefill, pad, hidden, cancelled)?;
+        let codes = self.generate(prefill, pad, hidden, repetition_penalty, cancelled)?;
         if codes.is_empty() || cancelled() {
             return Ok(Vec::new());
         }
@@ -303,6 +306,7 @@ impl QwenSynth {
         prefill: TensorData,
         trailing: &[f32],
         hidden_width: usize,
+        repetition_penalty: f32,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<i64>, String> {
         let mut cache = self
@@ -333,6 +337,7 @@ impl QwenSynth {
                 vocab,
                 self.config.talker_config.codec_eos_token_id,
                 &previous,
+                repetition_penalty,
             );
             if first == self.config.talker_config.codec_eos_token_id {
                 stopped = true;
@@ -694,7 +699,13 @@ fn append_row(target: &mut TensorData, source: Vec<f32>, width: usize) -> Result
     Ok(())
 }
 
-fn select_first_code(logits: &[f32], vocab: usize, eos: i64, previous: &[i64]) -> i64 {
+fn select_first_code(
+    logits: &[f32],
+    vocab: usize,
+    eos: i64,
+    previous: &[i64],
+    repetition_penalty: f32,
+) -> i64 {
     let mut scores = logits.to_vec();
     for (id, score) in scores
         .iter_mut()
@@ -706,7 +717,7 @@ fn select_first_code(logits: &[f32], vocab: usize, eos: i64, previous: &[i64]) -
             *score = f32::NEG_INFINITY;
         }
     }
-    apply_repetition_penalty(&mut scores, previous, REPETITION_PENALTY);
+    apply_repetition_penalty(&mut scores, previous, repetition_penalty);
     argmax(&scores) as i64
 }
 
@@ -741,16 +752,6 @@ fn argmax(values: &[f32]) -> usize {
 mod tests {
     use super::*;
 
-    /// Defaults-equal-consts: the descriptor default IS this port's hardcoded penalty,
-    /// so an absent `[tts_params]` block stays byte-identical. Removed when the const
-    /// becomes a descriptor read (parameter-surface S3).
-    #[test]
-    fn repetition_penalty_const_matches_the_declared_default() {
-        let model = ds_config::TtsModel::Qwen;
-        let resolved = model.descriptor().resolve_params(&Default::default());
-        assert_eq!(resolved.float(model, "repetition_penalty"), REPETITION_PENALTY);
-    }
-
     #[test]
     fn repetition_penalty_changes_each_seen_token_once() {
         let mut scores = vec![4.0, -2.0, 3.0];
@@ -764,7 +765,7 @@ mod tests {
         logits[100] = 5.0;
         logits[2200] = 9.0;
         logits[2150] = 7.0;
-        assert_eq!(select_first_code(&logits, 3072, 2150, &[]), 2150);
+        assert_eq!(select_first_code(&logits, 3072, 2150, &[], 1.05), 2150);
     }
 
     #[test]

@@ -85,6 +85,7 @@ impl Backend {
         voice: &str,
         language: &str,
         rate: f32,
+        params: &ds_config::ResolvedTtsParams,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<f32>, String> {
         match (self, batch) {
@@ -92,10 +93,10 @@ impl Backend {
                 synth.synthesize(batch.as_str(), voice, rate)
             }
             (Self::Chatterbox(synth), FrontendBatch::Text(chunk)) => {
-                synth.synthesize(chunk, voice, language, cancelled)
+                synth.synthesize(chunk, voice, language, params, cancelled)
             }
             (Self::Qwen(synth), FrontendBatch::Text(chunk)) => {
-                synth.synthesize(chunk, voice, language, cancelled)
+                synth.synthesize(chunk, voice, language, params, cancelled)
             }
             (Self::OmniVoice(synth), FrontendBatch::Text(chunk)) => {
                 synth.synthesize(chunk, voice, language, cancelled)
@@ -124,6 +125,7 @@ impl Backend {
                 return;
             }
         };
+        let params = model.descriptor().resolve_params(&Default::default());
         if let Err(error) = prepare_backend_audio(
             self,
             &batches,
@@ -132,6 +134,7 @@ impl Backend {
                 voice,
                 language,
                 rate: 1.0,
+                params: &params,
             },
             &|| false,
             |_| Ok(()),
@@ -269,6 +272,8 @@ pub(crate) struct SynthesisRequest<'a> {
     pub(crate) voice: &'a str,
     pub(crate) language: &'a str,
     pub(crate) rate: f32,
+    /// Complete validated params for the active model (`resolve_params` output).
+    pub(crate) params: &'a ds_config::ResolvedTtsParams,
 }
 
 pub(crate) fn prepare_backend_audio(
@@ -290,6 +295,7 @@ pub(crate) fn prepare_backend_audio(
                 request.voice,
                 request.language,
                 request.rate,
+                request.params,
                 cancelled,
             )
         },
@@ -316,6 +322,8 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
         Ok(())
     };
     let mut backend = load_backend()?;
+    // One-shot mode reads no config: descriptor defaults.
+    let params = model.descriptor().resolve_params(&Default::default());
     prepare_backend_audio(
         &mut backend,
         &batches,
@@ -324,6 +332,7 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
             voice,
             language: &language,
             rate,
+            params: &params,
         },
         &|| false,
         &mut commit,
@@ -354,6 +363,9 @@ pub(crate) fn synth_check(
     }
     let mut backend = load_backend_unwarmed(model)?;
     let mut pcm: Vec<f32> = Vec::new();
+    // Descriptor defaults, deliberately ignoring config: the check reports the model's
+    // baseline render (the same one the parity gates compare).
+    let params = model.descriptor().resolve_params(&Default::default());
     prepare_backend_audio(
         &mut backend,
         &batches,
@@ -362,6 +374,7 @@ pub(crate) fn synth_check(
             voice,
             language: &language,
             rate: 1.0,
+            params: &params,
         },
         &|| false,
         |audio| {
