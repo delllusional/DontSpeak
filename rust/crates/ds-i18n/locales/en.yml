@@ -58,7 +58,7 @@ status:
     kokoro: Kokoro
     chatterbox: Chatterbox
     qwen: Qwen3-TTS
-    omnivoice: OmniVoice (non-commercial)
+    omnivoice: OmniVoice
     claude_code: Claude Code
     parakeet: Parakeet
     system: System
