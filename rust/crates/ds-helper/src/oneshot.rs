@@ -103,11 +103,11 @@ impl Backend {
             }
             #[cfg(target_os = "macos")]
             (Self::Mlx { synth, .. }, FrontendBatch::Kokoro(batch)) => {
-                synth.synthesize(batch.as_str(), voice, language, rate)
+                synth.synthesize(batch.as_str(), voice, language, rate, params)
             }
             #[cfg(target_os = "macos")]
             (Self::Mlx { synth, .. }, FrontendBatch::Text(chunk)) => {
-                synth.synthesize(chunk, voice, language, rate)
+                synth.synthesize(chunk, voice, language, rate, params)
             }
             _ => Err("frontend/backend model mismatch".to_string()),
         }

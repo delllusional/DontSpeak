@@ -14,6 +14,8 @@ pub mod batch;
 pub mod chatterbox;
 pub mod g2p;
 mod language;
+/// MLX shim `params_json` wire form (pure; drift-tested on every host).
+pub mod mlx_params;
 pub(crate) mod numbers;
 pub mod omnivoice;
 pub(crate) mod ort_session;

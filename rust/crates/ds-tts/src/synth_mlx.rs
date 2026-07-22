@@ -6,11 +6,13 @@ use ds_model::mlx_shim::PcmCb;
 use libloading::{Library, Symbol};
 
 type InitFn = unsafe extern "C" fn(*const c_char, *const c_char) -> i32;
+// text, voice, language, speed, params_json, ctx, cb — mirrors dontspeak_mlx.h.
 type SynthFn = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
     *const c_char,
     f32,
+    *const c_char,
     *mut c_void,
     PcmCb,
 ) -> i32;
@@ -60,8 +62,9 @@ impl MlxTts {
         voice: &str,
         language: &str,
         speed: f32,
+        params: &ds_config::ResolvedTtsParams,
     ) -> Result<Vec<f32>, String> {
-        match self.synthesize_one(text, voice, language, speed) {
+        match self.synthesize_one(text, voice, language, speed, params) {
             Ok(pcm) => Ok(pcm),
             Err(error)
                 if self.model == ds_config::TtsModel::Kokoro && voice != KOKORO_FALLBACK_VOICE =>
@@ -69,7 +72,7 @@ impl MlxTts {
                 log::warn!(
                     "MLX Kokoro voice '{voice}' failed ({error}); using {KOKORO_FALLBACK_VOICE}"
                 );
-                self.synthesize_one(text, KOKORO_FALLBACK_VOICE, language, speed)
+                self.synthesize_one(text, KOKORO_FALLBACK_VOICE, language, speed, params)
             }
             Err(error) => Err(error),
         }
@@ -81,6 +84,7 @@ impl MlxTts {
         voice: &str,
         language: &str,
         speed: f32,
+        params: &ds_config::ResolvedTtsParams,
     ) -> Result<Vec<f32>, String> {
         let text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
         // OmniVoice preset ids resolve to their style instruct through the ONE table
@@ -93,6 +97,9 @@ impl MlxTts {
         let voice = CString::new(voice).map_err(|_| "voice contains NUL".to_string())?;
         let language = self.model.descriptor().runtime_language(language);
         let language = CString::new(language).map_err(|_| "language contains NUL".to_string())?;
+        let params_json = crate::mlx_params::mlx_params_json(self.model, params);
+        let params_json =
+            CString::new(params_json).map_err(|_| "params contain NUL".to_string())?;
         // SAFETY: `self.lib` remains loaded while the symbol is used and the shim exports
         // this name with the `SynthFn` ABI.
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_mlx_tts_synthesize\0") }
@@ -106,6 +113,7 @@ impl MlxTts {
                     voice.as_ptr(),
                     language.as_ptr(),
                     speed,
+                    params_json.as_ptr(),
                     ctx,
                     callback,
                 )

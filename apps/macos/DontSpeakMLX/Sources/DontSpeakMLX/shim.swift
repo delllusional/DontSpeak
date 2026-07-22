@@ -60,6 +60,44 @@ private enum TtsKind: String {
 
     var usesManagedHubCache: Bool { self == .chatterbox || self == .omnivoice }
 }
+
+/// Hand-maintained mirror of the Rust TTS param registry (ds-config `tts_model.rs`
+/// param descriptors): every declared key per model, value = whether this shim APPLIES
+/// it (true) or explicitly ignores it (false — the pinned mlx-audio-swift `generate`
+/// API exposes no sampling knobs; Kokoro speed arrives via the dedicated `speed` arg).
+/// TtsAbiTests pins these sets; ds-tts's `mlx_params` test pins the Rust side. Update
+/// registry, mirror, and both tests together.
+let ttsParamMirror: [String: [String: Bool]] = [
+    "kokoro": [:],
+    "chatterbox": ["exaggeration": false],
+    "qwen": ["repetition_penalty": false],
+    "omnivoice": ["steps": false],
+]
+
+/// Classification of one `params_json` payload against the mirror.
+struct TtsParamDecode: Equatable {
+    var applied: [String] = []
+    var ignored: [String] = []
+    var unknown: [String] = []
+}
+
+/// Pure decode-and-classify (keys sorted for determinism). nil = malformed JSON — the
+/// caller logs and synthesizes anyway: params are advisory and never fail the call.
+func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
+    guard let data = json.data(using: .utf8),
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    else { return nil }
+    let mirror = ttsParamMirror[model] ?? [:]
+    var decode = TtsParamDecode()
+    for key in object.keys.sorted() {
+        switch mirror[key] {
+        case .some(true): decode.applied.append(key)
+        case .some(false): decode.ignored.append(key)
+        case .none: decode.unknown.append(key)
+        }
+    }
+    return decode
+}
 private final class ShimState: @unchecked Sendable {
     let lock = NSLock()
     var tts: (any SpeechGenerationModel)?
@@ -141,6 +179,7 @@ public func ds_mlx_tts_synthesize(
     _ voice: UnsafePointer<CChar>?,
     _ language: UnsafePointer<CChar>?,
     _ speed: Float,
+    _ paramsJson: UnsafePointer<CChar>?,
     _ ctx: UnsafeMutableRawPointer?,
     _ cb: MlxPcmCb?
 ) -> Int32 {
@@ -153,6 +192,20 @@ public func ds_mlx_tts_synthesize(
         state.lock.unlock()
         logErr("ds_mlx_tts_synthesize: not initialized")
         return 2
+    }
+    // Params are advisory (never fail the utterance): classify against the mirror and
+    // surface only anomalies. No declared key is MLX-appliable today — Kokoro speed
+    // arrives via the dedicated `speed` argument below.
+    if let paramsJson = cString(paramsJson) {
+        if let decode = ttsParamsDecode(model: kind.rawValue, json: paramsJson) {
+            if !decode.unknown.isEmpty {
+                logErr(
+                    "ds_mlx_tts_synthesize: unknown params ignored: "
+                        + decode.unknown.joined(separator: ","))
+            }
+        } else {
+            logErr("ds_mlx_tts_synthesize: malformed params_json ignored")
+        }
     }
     if kind == .kokoro, let kokoro = model as? KokoroModel {
         kokoro.speed = speed.isFinite ? max(0.25, min(speed, 4.0)) : 1.0
