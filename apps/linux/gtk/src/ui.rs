@@ -43,6 +43,11 @@ pub struct Widgets {
     /// in place to "current → new" + badge class on the same label.
     version_subtitle: gtk::Label,
     usage_page: UsagePage,
+    stack: adw::ViewStack,
+    agents_page: adw::ViewStackPage,
+    tools_scroll: gtk::ScrolledWindow,
+    /// Last decoded `status.agents` (primed from `agents_ui_enabled`); down pushes keep it.
+    agents_gate: std::rc::Rc<std::cell::Cell<bool>>,
 }
 
 pub fn build_window(app: &adw::Application) -> Widgets {
@@ -158,13 +163,18 @@ pub fn build_window(app: &adw::Application) -> Widgets {
     caps_group.add(&caps_row);
     content.append(&caps_group);
 
-    // Five-view HIG limit; Agents is launch default (macOS/Windows parity).
+    // Five-view HIG limit; Agents is launch default while the config gate is on
+    // (macOS/Windows parity). The gate flips `ViewStackPage:visible` only —
+    // AdwViewStack has no reorder API, so the page stays added first for order.
+    let agents_gate = std::rc::Rc::new(std::cell::Cell::new(crate::ffi::agents_ui_enabled()));
     let stack = adw::ViewStack::new();
     let usage_page = UsagePage::new();
     {
         let page = usage_page.clone();
+        let gate = agents_gate.clone();
         stack.connect_visible_child_name_notify(move |s| {
-            if s.visible_child_name().as_deref() == Some("agents") {
+            // Gate check: belt-and-braces over the ds-core per-call gate.
+            if s.visible_child_name().as_deref() == Some("agents") && gate.get() {
                 page.on_tab_selected();
             } else {
                 page.cancel_visible_request();
@@ -172,12 +182,15 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         });
     }
     stack.add_titled(&usage_page.root, Some("agents"), &t("common.nav_agents"));
+    let agents_page = stack.page(&usage_page.root);
     stack.add_titled(&scrolled(&content), Some("status"), &t("common.nav_status"));
-    stack.add_titled(
-        &scrolled(&build_tools_page()),
-        Some("tools"),
-        &t("common.nav_tools"),
-    );
+    let tools_scroll = scrolled(&build_tools_page());
+    stack.add_titled(&tools_scroll, Some("tools"), &t("common.nav_tools"));
+    if !agents_gate.get() {
+        // First-added child stays the default visible child even switcher-hidden.
+        stack.set_visible_child_name("status");
+        agents_page.set_visible(false);
+    }
     let (log_scroll, log_view) = build_log_page();
     let log_filter = gtk::SearchEntry::builder().hexpand(true).build();
     let log_clear_button = gtk::Button::builder()
@@ -307,6 +320,10 @@ pub fn build_window(app: &adw::Application) -> Widgets {
         heard,
         version_subtitle,
         usage_page,
+        stack,
+        agents_page,
+        tools_scroll,
+        agents_gate,
     }
 }
 
@@ -337,6 +354,8 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         w.usage_page.set_speaking_agent(None);
         return;
     };
+
+    apply_agents_gate(w, s.agents);
 
     let speaking = if s.activity.speaking {
         s.activity.speaker.map(|c| c.as_str())
@@ -662,6 +681,25 @@ fn set_dot(dot: &gtk::Image, state: EngineState) {
         EngineState::Failed => "error",
         EngineState::Missing | EngineState::Idle => "dim-label",
     });
+}
+
+/// Flip the Agents gate from a decoded push. Vacate the page before hiding so
+/// switch-away only bumps the usage generation (no usage FFI); rebuild Tools in
+/// both directions because `ds_tools_json` is gated per call.
+fn apply_agents_gate(w: &Widgets, enabled: bool) {
+    if w.agents_gate.get() == enabled {
+        return;
+    }
+    w.agents_gate.set(enabled);
+    if enabled {
+        w.agents_page.set_visible(true);
+    } else {
+        if w.stack.visible_child_name().as_deref() == Some("agents") {
+            w.stack.set_visible_child_name("status");
+        }
+        w.agents_page.set_visible(false);
+    }
+    w.tools_scroll.set_child(Some(&build_tools_page()));
 }
 
 fn scrolled(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
