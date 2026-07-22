@@ -343,6 +343,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
             "system": cfg.system_rate(),
             "kokoro": cfg.model_rate(ds_config::TtsModel::Kokoro),
         },
+        "agents": cfg.agents,
         "state": state,
     });
     if a.detail.unwrap_or(false) {
@@ -1017,6 +1018,7 @@ mod status_output {
             "with no socket the engine reports not running"
         );
         assert_eq!(v["rates"], json!({ "system": 1.0, "kokoro": 1.0 }));
+        assert_eq!(v["agents"], json!(false));
         assert!(v.get("language").is_none());
         assert!(v.get("rate").is_none());
     }
