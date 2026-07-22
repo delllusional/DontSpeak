@@ -273,6 +273,21 @@ mod tests {
         }
     }
 
+    /// Every code the detector can emit maps to a usable OmniVoice prompt token —
+    /// `runtime_language` is the shared seam, so a detector/remap drift would silently
+    /// prompt an empty or wrong language.
+    #[test]
+    fn every_detectable_code_has_an_omnivoice_prompt_token() {
+        let descriptor = TtsModel::OmniVoice.descriptor();
+        for (_, code) in LANG_CODES {
+            let token = descriptor.runtime_language(code);
+            assert!(!token.is_empty(), "{code} maps to an empty prompt token");
+        }
+        assert_eq!(descriptor.runtime_language("ar"), "arb");
+        assert_eq!(descriptor.runtime_language("no"), "nb");
+        assert_eq!(descriptor.runtime_language("auto"), "en");
+    }
+
     #[test]
     fn codes_without_a_whatlang_variant_are_absent() {
         assert_eq!(lang_for_code("ms"), None);

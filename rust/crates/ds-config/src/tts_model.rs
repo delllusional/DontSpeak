@@ -125,23 +125,34 @@ impl TtsModelDescriptor {
         self.model == TtsModel::OmniVoice || self.supports_language(language)
     }
 
-    /// Language token expected by the model implementation.
+    /// Language token expected by the model implementation. The seam every backend
+    /// (ORT and MLX) routes through — never a synth-local map.
     pub fn runtime_language<'a>(&self, language: &'a str) -> &'a str {
-        if self.model != TtsModel::Qwen {
-            return language;
-        }
-        match language {
-            "zh" => "chinese",
-            "en" => "english",
-            "ja" => "japanese",
-            "ko" => "korean",
-            "de" => "german",
-            "fr" => "french",
-            "ru" => "russian",
-            "pt" => "portuguese",
-            "es" => "spanish",
-            "it" => "italian",
-            other => other,
+        match self.model {
+            TtsModel::Qwen => match language {
+                "zh" => "chinese",
+                "en" => "english",
+                "ja" => "japanese",
+                "ko" => "korean",
+                "de" => "german",
+                "fr" => "french",
+                "ru" => "russian",
+                "pt" => "portuguese",
+                "es" => "spanish",
+                "it" => "italian",
+                other => other,
+            },
+            // OmniVoice's prompt takes upstream lang_map tokens (mostly ISO 639-1, with
+            // 639-3 where upstream has no two-letter entry): the detector's `ar`/`no`
+            // become upstream `arb` (Standard Arabic) / `nb` (Bokmål), and the `auto`
+            // sentinel (or nothing) prompts English.
+            TtsModel::OmniVoice => match language {
+                "" | "auto" => "en",
+                "ar" => "arb",
+                "no" => "nb",
+                other => other,
+            },
+            TtsModel::Kokoro | TtsModel::Chatterbox => language,
         }
     }
 }
@@ -293,6 +304,15 @@ mod tests {
             TtsModel::Chatterbox.descriptor().runtime_language("ja"),
             "ja"
         );
+        // OmniVoice prompts upstream lang_map tokens: auto/empty → en, the two codes
+        // upstream has no two-letter entry for remap, the rest pass through.
+        let omnivoice = TtsModel::OmniVoice.descriptor();
+        assert_eq!(omnivoice.runtime_language("auto"), "en");
+        assert_eq!(omnivoice.runtime_language(""), "en");
+        assert_eq!(omnivoice.runtime_language("ar"), "arb");
+        assert_eq!(omnivoice.runtime_language("no"), "nb");
+        assert_eq!(omnivoice.runtime_language("ru"), "ru");
+        assert_eq!(omnivoice.runtime_language("zh"), "zh");
         let kokoro = TtsModel::Kokoro.descriptor();
         assert_eq!(kokoro.languages, KOKORO_LANGUAGES);
         assert_eq!(

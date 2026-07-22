@@ -62,13 +62,6 @@ impl OrtSessions {
         self.realized.unwrap_or(ds_config::RealizedProvider::Cpu)
     }
 
-    /// The realized EP, or `None` until the first [`builder`](Self::builder) call fixes it.
-    /// Callers that pick model files by provider must not read [`provider`](Self::provider),
-    /// whose pre-realization `Cpu` is indistinguishable from a realized CPU load.
-    pub(crate) fn realized(&self) -> Option<ds_config::RealizedProvider> {
-        self.realized
-    }
-
     fn requested_provider(&self) -> ds_config::RealizedProvider {
         let descriptor = self.model.descriptor();
         if descriptor.wants_cuda(&self.preference) {
@@ -148,11 +141,6 @@ mod tests {
             OrtSessions::from_preference(ds_config::TtsModel::OmniVoice, "cpu")
                 .requested_provider(),
             ds_config::RealizedProvider::Cpu
-        );
-        // Provider-keyed file choices need `realized`, which stays None until a load fixes it.
-        assert_eq!(
-            OrtSessions::from_preference(ds_config::TtsModel::OmniVoice, "cuda").realized(),
-            None
         );
     }
 }

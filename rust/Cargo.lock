@@ -1219,6 +1219,7 @@ dependencies = [
  "ds-config",
  "ds-model",
  "ds-voices",
+ "fastrand",
  "half",
  "libloading",
  "log",

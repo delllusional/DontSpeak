@@ -41,6 +41,9 @@ pulldown-cmark = { workspace = true }
 log = { workspace = true }
 # Chatterbox's HF tokenizer.json (see the workspace pin for the pure-Rust feature choice).
 tokenizers = { workspace = true }
+# Seeded Gumbel position noise for the OmniVoice unmasking decode (deterministic per
+# request — see omnivoice::stable_seed).
+fastrand = { workspace = true }
 # Shared per-utterance language detection before every backend dispatch.
 whatlang = { workspace = true }
 # 24 kHz mono f32 PCM playback. `symphonia-aiff` (added to the default decoders) lets the
