@@ -65,8 +65,10 @@ private enum TtsKind: String {
 /// param descriptors): every declared key per model, value = whether this shim APPLIES
 /// it (true) or explicitly ignores it (false — the pinned mlx-audio-swift `generate`
 /// API exposes no sampling knobs; Kokoro speed arrives via the dedicated `speed` arg).
-/// TtsAbiTests pins these sets; ds-tts's `mlx_params` test pins the Rust side. Update
-/// registry, mirror, and both tests together.
+/// No automatic cross-language check ties this to the Rust registry: TtsAbiTests pins
+/// THIS mirror literally, ds-tts's `mlx_params` test pins the registry defaults
+/// literally, and a registry edit must update registry, mirror, and both literal pins
+/// in the same change (mirror discipline, cf. Native.cs / DontSpeakCore.swift).
 let ttsParamMirror: [String: [String: Bool]] = [
     "kokoro": [:],
     "chatterbox": ["exaggeration": false],
@@ -173,8 +175,11 @@ public func ds_mlx_tts_init(
     }
 }
 
-@_cdecl("ds_mlx_tts_synthesize")
-public func ds_mlx_tts_synthesize(
+// Versioned export (see dontspeak_mlx.h): the params_json arity change renamed the
+// symbol so a version-skewed helper/dylib pair fails at lookup instead of corrupting
+// arguments.
+@_cdecl("ds_mlx_tts_synthesize2")
+public func ds_mlx_tts_synthesize2(
     _ text: UnsafePointer<CChar>?,
     _ voice: UnsafePointer<CChar>?,
     _ language: UnsafePointer<CChar>?,
@@ -190,7 +195,7 @@ public func ds_mlx_tts_synthesize(
     state.lock.lock()
     guard let model = state.tts, let kind = state.ttsKind else {
         state.lock.unlock()
-        logErr("ds_mlx_tts_synthesize: not initialized")
+        logErr("ds_mlx_tts_synthesize2: not initialized")
         return 2
     }
     // Params are advisory (never fail the utterance): classify against the mirror and
@@ -200,11 +205,11 @@ public func ds_mlx_tts_synthesize(
         if let decode = ttsParamsDecode(model: kind.rawValue, json: paramsJson) {
             if !decode.unknown.isEmpty {
                 logErr(
-                    "ds_mlx_tts_synthesize: unknown params ignored: "
+                    "ds_mlx_tts_synthesize2: unknown params ignored: "
                         + decode.unknown.joined(separator: ","))
             }
         } else {
-            logErr("ds_mlx_tts_synthesize: malformed params_json ignored")
+            logErr("ds_mlx_tts_synthesize2: malformed params_json ignored")
         }
     }
     if kind == .kokoro, let kokoro = model as? KokoroModel {
@@ -231,7 +236,7 @@ public func ds_mlx_tts_synthesize(
         }
         return 0
     case .failure(let error):
-        logErr("ds_mlx_tts_synthesize error: \(error)")
+        logErr("ds_mlx_tts_synthesize2 error: \(error)")
         return 1
     }
 }

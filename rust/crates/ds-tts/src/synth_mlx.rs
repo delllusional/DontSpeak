@@ -100,10 +100,14 @@ impl MlxTts {
         let params_json = crate::mlx_params::mlx_params_json(self.model, params);
         let params_json =
             CString::new(params_json).map_err(|_| "params contain NUL".to_string())?;
+        // Versioned symbol: the params_json slot changed the arity, and dlopen resolves
+        // by NAME only — under the old name a version-skewed helper/dylib pair would
+        // corrupt AAPCS64 arguments instead of failing. The `2` makes both skew
+        // directions fail RIGHT HERE with a clean symbol-not-found error.
         // SAFETY: `self.lib` remains loaded while the symbol is used and the shim exports
         // this name with the `SynthFn` ABI.
-        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_mlx_tts_synthesize\0") }
-            .map_err(|error| format!("ds_mlx_tts_synthesize symbol: {error}"))?;
+        let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_mlx_tts_synthesize2\0") }
+            .map_err(|error| format!("ds_mlx_tts_synthesize2 symbol: {error}"))?;
         ds_model::mlx_shim::collect_pcm(|ctx, callback| {
             // SAFETY: the CStrings outlive this synchronous call; `collect_pcm` supplies a
             // matching context/callback pair that remains valid until the call returns.
@@ -119,7 +123,7 @@ impl MlxTts {
                 )
             }
         })
-        .map_err(|rc| format!("ds_mlx_tts_synthesize failed (rc={rc})"))
+        .map_err(|rc| format!("ds_mlx_tts_synthesize2 failed (rc={rc})"))
     }
 }
 

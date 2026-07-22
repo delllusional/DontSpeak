@@ -5,13 +5,14 @@ import XCTest
 final class TtsAbiTests: XCTestCase {
     /// Success promises exactly one callback, so a missing callback must fail before model work.
     func testSynthesisRejectsNullCallback() {
-        XCTAssertEqual(ds_mlx_tts_synthesize(nil, nil, nil, 1.0, nil, nil, nil), 4)
+        XCTAssertEqual(ds_mlx_tts_synthesize2(nil, nil, nil, 1.0, nil, nil, nil), 4)
     }
 
-    /// Swift half of the cross-language params drift guard: the hand-maintained mirror
-    /// must list exactly the Rust registry's declared keys per model (ds-tts's
-    /// `mlx_params` test pins the Rust half). A Rust-side param addition that skips the
-    /// mirror fails here.
+    /// Literal pin of the hand-maintained mirror — the Swift side of the mirror
+    /// discipline. Nothing compiles the Rust registry into this test: a Rust-side
+    /// param addition is caught by ds-tts's `mlx_params` LITERAL default pins (whose
+    /// docs direct the mirror update here); this pin makes that mirror edit a
+    /// deliberate, reviewed diff rather than silent drift.
     func testTtsParamMirrorPinsDeclaredKeysPerModel() {
         XCTAssertEqual(Set(ttsParamMirror.keys), ["kokoro", "chatterbox", "qwen", "omnivoice"])
         XCTAssertEqual(ttsParamMirror["kokoro"], [:])
