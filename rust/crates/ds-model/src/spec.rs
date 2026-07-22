@@ -527,7 +527,10 @@ mod tests {
 
         let set = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::OmniVoice);
         assert_eq!(items.len(), set.files.len());
-        assert!(set.cuda_files.is_empty(), "one profile serves every provider");
+        assert!(
+            set.cuda_files.is_empty(),
+            "one profile serves every provider"
+        );
         for item in &items {
             assert!(
                 !item.url.contains("/cuda/"),
