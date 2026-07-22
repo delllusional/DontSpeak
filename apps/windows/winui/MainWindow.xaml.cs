@@ -26,10 +26,25 @@ public sealed partial class MainWindow : Window
     private static readonly FontFamily Mono = new("Cascadia Mono, Consolas");
     private static readonly bool DiarizationUiEnabled = Native.DiarizationUiEnabled();
 
+    /// <summary>Config `agents` gate — FFI probe at startup, live flips via ApplyAgentsGate.</summary>
+    private bool _agentsUiEnabled;
+
     public MainWindow()
     {
         InitializeComponent();
         UsageList.ChildrenTransitions = new TransitionCollection { new RepositionThemeTransition() };
+        // Initial selection is code-driven (not IsSelected in XAML) so the gated
+        // start tab and the gated nav list come from the same probe.
+        _agentsUiEnabled = Native.AgentsUiEnabled();
+        if (_agentsUiEnabled)
+        {
+            Nav.SelectedItem = AgentsNavItem;
+        }
+        else
+        {
+            Nav.MenuItems.Remove(AgentsNavItem);
+            Nav.SelectedItem = StatusNavItem;
+        }
         AppWindow.Resize(new Windows.Graphics.SizeInt32(380, 620));
         var icoPath = System.IO.Path.Combine(AppContext.BaseDirectory, "AppIcon.ico");
         if (System.IO.File.Exists(icoPath)) AppWindow.SetIcon(icoPath);
@@ -168,6 +183,8 @@ public sealed partial class MainWindow : Window
 
     private async System.Threading.Tasks.Task LoadUsageOnTabSelectedAsync()
     {
+        // Belt-and-braces with the ds-core per-call gate.
+        if (!_agentsUiEnabled) return;
         int generation = ++_usageGeneration;
 
         UsageDeckDto? deck = null;
@@ -755,8 +772,35 @@ public sealed partial class MainWindow : Window
     {
         // Tray-resident: utterances land while hidden, and the Agents tab needs them later.
         NoteSpokenAgent(s.Activity.Speaker);
+        // Gate before the visibility bail so a config flip while hidden isn't stale on show.
+        // Null = undecodable snapshot / engine down: keep the last known gate.
+        if (s.AgentsEnabled is bool agents) ApplyAgentsGate(agents);
         if (!AppWindow.IsVisible) return;
         try { ApplyStatus(s); } catch { /* one bad frame must not kill the push */ }
+    }
+
+    /// <summary>Config `agents` flipped at runtime (rides model_status pushes).</summary>
+    private void ApplyAgentsGate(bool enabled)
+    {
+        if (enabled == _agentsUiEnabled) return;
+        _agentsUiEnabled = enabled;
+        if (enabled)
+        {
+            // Reinsert as the first tab; leave the user's current selection alone.
+            if (!Nav.MenuItems.Contains(AgentsNavItem))
+                Nav.MenuItems.Insert(0, AgentsNavItem);
+        }
+        else
+        {
+            // Select Status FIRST: its pane switch never touches usage FFI, and it
+            // vacates the Agents tab before that tab disappears.
+            Nav.SelectedItem = StatusNavItem;
+            Nav.MenuItems.Remove(AgentsNavItem);
+            UsageTab.Visibility = Visibility.Collapsed;
+        }
+        // The flag also gates ds_tools_json — rebuild the Tools pane live.
+        ToolsList.Children.Clear();
+        LoadTools();
     }
 
     /// <summary>Speaker is null unless speaking (Native), so this only latches utterances.</summary>

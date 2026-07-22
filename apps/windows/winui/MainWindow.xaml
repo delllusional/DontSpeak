@@ -34,8 +34,9 @@
             <x:Double x:Key="TopNavigationViewPaneCustomContentMinWidth">0</x:Double>
         </NavigationView.Resources>
         <NavigationView.MenuItems>
-            <NavigationViewItem Content="{loc:Loc Key=common.nav_agents}" Tag="agents" IsSelected="True" />
-            <NavigationViewItem Content="{loc:Loc Key=common.nav_status}" Tag="status" />
+            <!-- No IsSelected here: the constructor picks Agents or Status per the `agents` config gate. -->
+            <NavigationViewItem x:Name="AgentsNavItem" Content="{loc:Loc Key=common.nav_agents}" Tag="agents" />
+            <NavigationViewItem x:Name="StatusNavItem" Content="{loc:Loc Key=common.nav_status}" Tag="status" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_tools}" Tag="tools" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_log}" Tag="log" />
             <NavigationViewItem Content="{loc:Loc Key=common.nav_credits}" Tag="credits" />
@@ -47,7 +48,8 @@
                  (2) the engine rows (TTS / STT, each expands to its stats),
                  (3) Caps-Lock dictation. The macOS Permissions section is
                  omitted — it drives the native macOS privacy panes, which Windows lacks. -->
-            <!-- Default hidden: first tab is Agents (IsSelected above). SelectionChanged keeps this in sync. -->
+            <!-- Default hidden: initial tab is selected in the constructor (agents gate).
+                 SelectionChanged keeps this in sync. -->
             <ScrollViewer x:Name="StatusScroll" Visibility="Collapsed" VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
                 <!-- Top-aligned so the panel sizes to its CONTENT (not the scroll viewport) — the
                      window-height cap (CapHeightToStatusContent) reads this panel's ActualHeight. -->
