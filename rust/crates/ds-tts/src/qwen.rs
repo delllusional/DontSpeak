@@ -10,6 +10,15 @@ use serde::Deserialize;
 use tokenizers::AddedToken;
 use tokenizers::models::bpe::BPE;
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+use tokenizers::pre_tokenizers::sequence::Sequence;
+use tokenizers::pre_tokenizers::split::{Split, SplitPattern};
+use tokenizers::pre_tokenizers::PreTokenizerWrapper;
+use tokenizers::SplitDelimiterBehavior;
+
+/// Qwen2 pre-tokenizer regex (`transformers.models.qwen2.tokenization_qwen2.PRETOKENIZE_REGEX`).
+/// Unlike GPT-2's ByteLevel default, an optional leading non-letter/non-digit stays with the
+/// following letters (`-seven`, `'S`, `.com`, `(hello`…), so BPE sees the in-distribution spans.
+const QWEN2_PRETOKENIZE_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 const GROUPS: usize = 16;
 const DECODER_FRAMES: usize = 25;
@@ -495,8 +504,19 @@ fn load_tokenizer(dir: &Path) -> Result<tokenizers::Tokenizer, String> {
     .build()
     .map_err(|error| format!("qwen BPE load: {error}"))?;
     let mut tokenizer = tokenizers::Tokenizer::new(model);
-    let byte_level = ByteLevel::new(false, false, true);
-    tokenizer.with_pre_tokenizer(Some(byte_level));
+    // Qwen2: Split(regex, Isolated) then ByteLevel(use_regex=false). GPT-2 ByteLevel(use_regex=true)
+    // alone yields OOD ids on hyphenated numbers, contractions, domains, and open-paren words.
+    let byte_level = ByteLevel::new(false, false, false);
+    let split = Split::new(
+        SplitPattern::Regex(QWEN2_PRETOKENIZE_REGEX.to_owned()),
+        SplitDelimiterBehavior::Isolated,
+        false,
+    )
+    .map_err(|error| format!("qwen pre-tokenizer: {error}"))?;
+    tokenizer.with_pre_tokenizer(Some(Sequence::new(vec![
+        PreTokenizerWrapper::from(split),
+        PreTokenizerWrapper::from(byte_level),
+    ])));
     tokenizer.with_decoder(Some(byte_level));
     let config: TokenizerConfig = serde_json::from_slice(
         &std::fs::read(dir.join("tokenizer_config.json"))
@@ -751,12 +771,160 @@ fn argmax(values: &[f32]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use tokenizers::tokenizer::{OffsetReferential, OffsetType, PreTokenizedString};
+    use tokenizers::PreTokenizer;
 
     #[test]
     fn repetition_penalty_changes_each_seen_token_once() {
         let mut scores = vec![4.0, -2.0, 3.0];
         apply_repetition_penalty(&mut scores, &[0, 0, 1], 2.0);
         assert_eq!(scores, vec![2.0, -4.0, 3.0]);
+    }
+
+    /// Qwen2 keeps an optional leading non-letter with the following letters; GPT-2's regex
+    /// peels it off. These are the spans that went OOD on the real model (issue #163).
+    #[test]
+    fn qwen2_pretokenizer_regex_matches_upstream_splits() {
+        let split = Split::new(
+            SplitPattern::Regex(QWEN2_PRETOKENIZE_REGEX.to_owned()),
+            SplitDelimiterBehavior::Isolated,
+            false,
+        )
+        .unwrap();
+        let cases = [
+            ("fifty-seven", &["fifty", "-seven"][..]),
+            ("IT'S", &["IT", "'S"][..]),
+            ("example.com", &["example", ".com"][..]),
+            ("(hello", &["(hello"][..]),
+        ];
+        for (text, expected) in cases {
+            let mut pretok = PreTokenizedString::from(text);
+            split.pre_tokenize(&mut pretok).unwrap();
+            let parts: Vec<String> = pretok
+                .get_splits(OffsetReferential::Original, OffsetType::Byte)
+                .into_iter()
+                .map(|(s, _, _)| s.to_string())
+                .collect();
+            assert_eq!(parts, expected, "split of {text:?}");
+        }
+    }
+
+    /// Hermetic id parity: tiny BPE where merges only form multi-char tokens inside a single
+    /// pretoken. With the Qwen2 pre-tokenizer, the divergent cases encode to the composite
+    /// ids; GPT-2-style ByteLevel(use_regex=true) would leave them unmerged.
+    #[test]
+    fn qwen_tokenizer_encodes_hyphen_contraction_domain_paren_as_upstream() {
+        let dir = tempfile::tempdir().unwrap();
+        // Character seeds + composites that BPE only reaches when the pretoken is joined.
+        let mut vocab = BTreeMap::new();
+        // Every single-char token that appears in merges.txt must be present or BPE::from_file fails.
+        for (i, ch) in [
+            'f', 'i', 't', 'y', '-', 's', 'e', 'v', 'n', 'I', 'T', '\'', 'S', 'x', 'a', 'm', 'p',
+            'l', 'c', 'o', '.', '(', 'h',
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            vocab.insert(ch.to_string(), i as u32);
+        }
+        let composites: &[(&str, u32)] = &[
+            ("fi", 100),
+            ("fif", 101),
+            ("fift", 102),
+            ("fifty", 103),
+            ("se", 104),
+            ("sev", 105),
+            ("seve", 106),
+            ("seven", 107),
+            ("-seven", 108),
+            ("IT", 109),
+            ("'S", 110),
+            ("ex", 111),
+            ("exa", 112),
+            ("exam", 113),
+            ("examp", 114),
+            ("exampl", 115),
+            ("example", 116),
+            (".c", 117),
+            (".co", 118),
+            (".com", 119),
+            ("(h", 120),
+            ("(he", 121),
+            ("(hel", 122),
+            ("(hell", 123),
+            ("(hello", 124),
+            ("he", 125),
+            ("hel", 126),
+            ("hell", 127),
+            ("hello", 128),
+        ];
+        for &(tok, id) in composites {
+            vocab.insert(tok.to_string(), id);
+        }
+        std::fs::write(
+            dir.path().join("vocab.json"),
+            serde_json::to_string(&vocab).unwrap(),
+        )
+        .unwrap();
+        // Ranked merges that build the composites left-to-right from single chars.
+        let merges = "\
+#version: 0.2
+f i
+fi f
+fif t
+fift y
+s e
+se v
+sev e
+seve n
+- seven
+I T
+' S
+e x
+ex a
+exa m
+exam p
+examp l
+exampl e
+. c
+.c o
+.co m
+( h
+(h e
+(he l
+(hel l
+(hell o
+h e
+he l
+hel l
+hell o
+";
+        std::fs::write(dir.path().join("merges.txt"), merges).unwrap();
+        std::fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"added_tokens_decoder":{}}"#,
+        )
+        .unwrap();
+
+        let tokenizer = load_tokenizer(dir.path()).unwrap();
+        let cases: &[(&str, &[(u32, &str)])] = &[
+            ("fifty-seven", &[(103, "fifty"), (108, "-seven")]),
+            ("IT'S", &[(109, "IT"), (110, "'S")]),
+            ("example.com", &[(116, "example"), (119, ".com")]),
+            ("(hello", &[(124, "(hello")]),
+        ];
+        for &(text, expected) in cases {
+            let encoding = tokenizer.encode(text, false).unwrap();
+            let ids = encoding.get_ids();
+            let tokens = encoding.get_tokens();
+            let got: Vec<(u32, &str)> = ids
+                .iter()
+                .zip(tokens.iter())
+                .map(|(&id, tok)| (id, tok.as_str()))
+                .collect();
+            assert_eq!(got, expected, "encode of {text:?}");
+        }
     }
 
     #[test]
