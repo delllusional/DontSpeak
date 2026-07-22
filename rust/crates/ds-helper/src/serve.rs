@@ -409,6 +409,39 @@ fn push_duplex_pcm(
     true
 }
 
+/// De-click ramp shape for a user-facing stop (~60 ms total).
+const STOPFADE_STEPS: u32 = 12;
+const STOPFADE_STEP: Duration = Duration::from_millis(60 / STOPFADE_STEPS as u64);
+
+/// User-facing stop: flag the barge, stamp it for the PROGRESS cap, and drain the duplex
+/// render ring INLINE — ordered with the reader's op stream, like `stop`. Deferring the
+/// drain to the ramp thread let a stale barge flush the NEXT utterance's ring.
+fn begin_fade_barge(
+    cancel: &std::sync::atomic::AtomicBool,
+    cancel_stamp: &std::sync::Mutex<Option<Instant>>,
+    duplex_barge: Option<&std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering;
+    cancel.store(true, Ordering::SeqCst);
+    // Stamp at fade start (later boundaries aren't "played"); first barge wins.
+    cancel_stamp
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Instant::now);
+    if let Some(f) = duplex_barge {
+        f.store(true, Ordering::SeqCst);
+    }
+}
+
+/// 60 ms de-click ramp to silence in `STOPFADE_STEPS`; effects injected so tests drive it
+/// without a real player.
+fn ramp_out(start: f32, mut set_volume: impl FnMut(f32), mut sleep: impl FnMut()) {
+    for i in 1..=STOPFADE_STEPS {
+        set_volume((start * (1.0 - i as f32 / STOPFADE_STEPS as f32)).max(0.0));
+        sleep();
+    }
+}
+
 /// Drain committed batches until sender closes (keeps consuming after cancel for fast join).
 fn run_duplex_feeder(rx: std::sync::mpsc::Receiver<Vec<f32>>, mut push_batch: impl FnMut(&[f32])) {
     for pcm in rx {
@@ -709,12 +742,7 @@ pub(crate) fn serve() -> ! {
                 // User-facing stops: ~60 ms volume ramp (de-click, limit mic bleed).
                 // Internal block preempt uses instant cancel_current (no gap). Full-duplex → VPIO drain.
                 let cancel_current_fade = || {
-                    cancel.store(true, Ordering::SeqCst);
-                    // Stamp at fade start (later boundaries aren't "played").
-                    cancel_stamp
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_insert_with(Instant::now);
+                    begin_fade_barge(&cancel, &cancel_stamp, duplex_barge.as_deref());
                     cue_playback.cancel();
                     // Clone Arc so ramp doesn't hold cur_player (playback loop also locks).
                     let player = cur_player
@@ -722,26 +750,20 @@ pub(crate) fn serve() -> ! {
                         .unwrap_or_else(|e| e.into_inner())
                         .as_ref()
                         .cloned();
-                    let duplex_barge = duplex_barge.clone();
-                    let _ = std::thread::Builder::new()
-                        .name("ds-stopfade".into())
-                        .spawn(move || {
-                            if let Some(p) = player {
-                                const STEPS: u32 = 12;
-                                let start = p.volume();
-                                let step = std::time::Duration::from_millis(60) / STEPS;
-                                for i in 1..=STEPS {
-                                    p.set_volume(
-                                        (start * (1.0 - i as f32 / STEPS as f32)).max(0.0),
-                                    );
-                                    std::thread::sleep(step);
-                                }
+                    // Only the ramp is deferred: it acts on a per-request player clone and
+                    // cannot touch a later utterance.
+                    if let Some(p) = player {
+                        let _ = std::thread::Builder::new()
+                            .name("ds-stopfade".into())
+                            .spawn(move || {
+                                ramp_out(
+                                    p.volume(),
+                                    |v| p.set_volume(v),
+                                    || std::thread::sleep(STOPFADE_STEP),
+                                );
                                 p.stop();
-                            }
-                            if let Some(f) = &duplex_barge {
-                                f.store(true, Ordering::SeqCst);
-                            }
-                        });
+                            });
+                    }
                 };
                 match req.op {
                     proto::HelperOp::Stop => {
@@ -1848,5 +1870,73 @@ mod mic_gate_tests {
         assert!(!wait_for_mic_free(&listening, &cancel));
         assert!(t0.elapsed() < Duration::from_secs(2));
         flipper.join().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod stopfade_tests {
+    use super::{STOPFADE_STEPS, begin_fade_barge, ramp_out};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
+
+    /// The ring drain must complete before `begin_fade_barge` returns: ops are serialized on
+    /// the one reader thread, so a later `speak` can't have its leading ring flushed by this
+    /// barge. Deferring the store to the ramp thread is what made it unordered.
+    #[test]
+    fn fade_barge_drains_the_duplex_ring_inline() {
+        let cancel = AtomicBool::new(false);
+        let stamp = Mutex::new(None);
+        let ring = AtomicBool::new(false);
+
+        begin_fade_barge(&cancel, &stamp, Some(&ring));
+
+        assert!(cancel.load(Ordering::SeqCst));
+        assert!(stamp.lock().unwrap().is_some());
+        assert!(ring.load(Ordering::SeqCst), "the ring is drained inline");
+    }
+
+    /// The PROGRESS cap is `min(now, stamp)`: a second barge must not move the instant
+    /// forward, or already-unheard batch boundaries would count as played.
+    #[test]
+    fn fade_barge_keeps_the_first_stamp() {
+        let cancel = AtomicBool::new(false);
+        let stamp = Mutex::new(None);
+
+        begin_fade_barge(&cancel, &stamp, None);
+        let first = stamp.lock().unwrap().expect("stamped");
+        while Instant::now() == first {
+            std::hint::spin_loop();
+        }
+        begin_fade_barge(&cancel, &stamp, None);
+
+        assert_eq!(stamp.lock().unwrap().expect("stamped"), first);
+    }
+
+    #[test]
+    fn fade_barge_without_a_duplex_unit_is_a_plain_cancel() {
+        let cancel = AtomicBool::new(false);
+        let stamp = Mutex::new(None);
+
+        begin_fade_barge(&cancel, &stamp, None);
+
+        assert!(cancel.load(Ordering::SeqCst));
+        assert!(stamp.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn ramp_out_fades_to_silence_in_bounded_steps() {
+        let mut volumes = Vec::new();
+        let mut sleeps = 0u32;
+        ramp_out(0.8, |v| volumes.push(v), || sleeps += 1);
+
+        assert_eq!(volumes.len(), STOPFADE_STEPS as usize);
+        assert_eq!(sleeps, STOPFADE_STEPS);
+        assert!(volumes.iter().all(|v| *v >= 0.0), "never negative");
+        assert!(
+            volumes.windows(2).all(|w| w[1] <= w[0]),
+            "monotonically non-increasing"
+        );
+        assert_eq!(*volumes.last().unwrap(), 0.0, "ends in silence");
     }
 }
