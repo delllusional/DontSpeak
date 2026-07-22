@@ -74,7 +74,7 @@ Always-listening does not use Caps Lock.
 ## Models & runtimes
 
 - **TTS** — Kokoro-82M, Chatterbox Multilingual, Qwen3-TTS, or OmniVoice
-  (`tts_model`), or OS voice
+  (`tts_model`; OmniVoice's weights are CC-BY-NC — non-commercial), or OS voice
 - **STT** — Parakeet TDT 0.6b v3 (25 European languages, detected by the model) everywhere:
   ONNX on Windows/Linux, MLX Audio on Apple Silicon, plus System Speech on macOS; Claude Code
   dictation. See [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md)

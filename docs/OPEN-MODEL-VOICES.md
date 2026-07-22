@@ -14,7 +14,7 @@ No host-only picker, no hand-editing `config.toml` as the supported way to choos
 | Model | Registry `voices` | Runtime behavior today |
 | --- | --- | --- |
 | **Chatterbox** | `["default"]` only | ORT `ensure_voice` hard-rejects anything else; loads pinned `default_voice.wav`. MLX forces `voice: nil`, `refAudio: nil`. |
-| **OmniVoice** | `["warm, clear female voice"]` only | ORT `synthesize(text, _language, …)` **drops the voice string entirely** (auto-only). MLX passes non-`default` voice into `generate(... voice:)`, still `refAudio: nil`. |
+| **OmniVoice** | 10 preset ids (`default`, `young_woman`, …) | Both paths resolve the id to a style instruct through the ONE `ds-tts` `OMNIVOICE_PRESETS` table: ORT builds the `<\|instruct_start\|>` prompt block; MLX resolves before the FFI call, `refAudio: nil`. `default` = automatic voice design. |
 | **Qwen / Kokoro** | real catalogs | Allowlist matches the model. |
 
 `set_config` validates non-Kokoro pools with `descriptor.voices.contains(...)`, so free-form Omni prompts and alternate Chatterbox refs are rejected before they reach the synth.
@@ -62,7 +62,7 @@ Do **not** promise “type any description and keep that voice for the session�
 | --- | --- | --- | --- | --- |
 | Multiple named refs | Cache ready; only `"default"` admitted | Voice forced nil | N/A | N/A |
 | User ref wav | Hard-coded `default_voice.wav` | `refAudio: nil` | Not wired | `refAudio: nil` |
-| Design / instruct | N/A | N/A | Auto only | Voice string may map to mlx-audio `voice` (validate) |
+| Design / instruct | N/A | N/A | Preset ids → instruct prompt block (`OMNIVOICE_PRESETS`) | Preset ids → instruct into `generate(... voice:)` (on-device check: #169) |
 | Persist conditioning | In-process only | Default | None | None |
 
 Expanding the config allowlist alone does nothing for OmniVoice ORT and little for MLX Chatterbox. Backend wiring is the real cost.

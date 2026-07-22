@@ -35,10 +35,10 @@ Two fields each, resolved by `resolved_stt` / `resolved_tts`:
 macOS-only today, so Parakeet leads on Windows/Linux.
 
 **TTS engines:** `built_in` or `system`. The built-in model registry contains Kokoro,
-Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU and MLX;
-Kokoro, Chatterbox, and Qwen also support CUDA; Kokoro alone has Core ML, rate control,
-and full-duplex. Model capabilities drive voice, rate, full-duplex, download, and
-provider selection. Speech language is detected per utterance in the shared text pipeline.
+Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU, ORT CUDA,
+and MLX; Kokoro alone has Core ML, rate control, and full-duplex. Model capabilities
+drive voice, rate, full-duplex, download, and provider selection. Speech language is
+detected per utterance in the shared text pipeline.
 
 ## Caps Lock
 

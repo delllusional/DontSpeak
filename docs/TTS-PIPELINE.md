@@ -81,8 +81,9 @@ commit per batch. Provider acceleration is enabled only where the registry decla
 
 **Apple MLX:** the shared `DontSpeakMLX` ABI loads only DontSpeak-populated model
 directories. Kokoro receives IPA; Chatterbox uses its pinned default conditioning; Qwen
-receives plain multilingual text and a speaker ID; OmniVoice uses automatic voice design.
-All return 24 kHz PCM through the synchronous borrowed-buffer callback.
+receives plain multilingual text and a speaker ID; OmniVoice receives a style instruct
+resolved from its preset id in Rust (`OMNIVOICE_PRESETS`) — `default` stays automatic
+voice design. All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 
 ### Built-in model registry
 
@@ -91,11 +92,19 @@ All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 | Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
 | Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
 | Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
-| OmniVoice | auto (any detected language) | default voice | ORT CPU/CUDA, MLX | no / no |
+| OmniVoice | auto (any detected language) | 10 design presets | ORT CPU/CUDA, MLX | no / no |
 
 Chatterbox caches transient reference-voice conditioning and uses named/model-derived KV
-caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice performs
-32-step confidence-weighted unmasking before Higgs decoding. All long loops poll cancel.
+caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice runs
+16-step classifier-free-guided per-cell unmasking against the bidirectional fp32
+backbone before Higgs decoding. All long loops poll cancel.
+
+OmniVoice stays **non-default on CPU**: the CPU EP misses the first-chunk latency bar
+(measured RTF 9.3 at 32 steps, 4.6 at the shipped 16 — bar ≤ 2.0), while CUDA meets its
+bar (RTF 0.6). Under a CUDA backbone the Higgs decoder runs on the **CPU EP** — the
+pinned FP16 decoder graph emits NaN under CUDA — until
+[#165](https://github.com/delllusional/DontSpeak/issues/165) closes; status and
+synth-check report the backbone's provider.
 
 ### Voice selection
 
