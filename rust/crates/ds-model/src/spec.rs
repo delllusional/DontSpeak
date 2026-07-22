@@ -301,8 +301,7 @@ pub fn prefetch_items(target: DownloadTarget) -> Vec<PrefetchItem> {
         // never the whole multi-GB set. The ORT dylib is `DownloadTarget::Onnxruntime`'s
         // concern, not a condition here. (`spec_item` can't be reused: it resolves through
         // the flat `model_path`, wrong for the per-model subdirectory sets.)
-        // Staged manifests are the SHARED set only — the installer runs before any host
-        // CUDA probe, and `ds-helper --install-prefetched` asks for the same set.
+        // Installers stage the shared set before host CUDA probing.
         DownloadTarget::KokoroModel
         | DownloadTarget::ChatterboxModel
         | DownloadTarget::QwenModel
@@ -504,9 +503,6 @@ mod tests {
         }
     }
 
-    /// The installer stages the shared profile only — which is now the WHOLE profile:
-    /// the single fp32 LLM serves every provider, so nothing CUDA-only may sneak into
-    /// the staged manifest.
     #[test]
     fn omnivoice_prefetch_manifest_stages_no_cuda_asset() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());

@@ -57,9 +57,7 @@ pub struct UsageCard {
     pub account: Option<String>,
     /// Session → week → month. Empty until loaded / unavailable.
     pub rows: Vec<UsageRow>,
-    /// A macOS keychain client's item needs user-approved access
-    /// (`requires_macos_keychain`); [`authorize_card`] retries interactively.
-    /// Skip-when-false on wire; never cached (`UsageCache::store`).
+    /// Guarded macOS keychain access; interactive authorize retries it. Never cached.
     #[serde(default, skip_serializing_if = "is_false")]
     pub needs_auth: bool,
 }
@@ -68,9 +66,7 @@ fn is_false(flag: &bool) -> bool {
     !*flag
 }
 
-/// Clients that keep credentials in the macOS keychain — the only cards whose
-/// guarded reads set `needs_auth` / offer authorize. Claude Code is the sole
-/// member so far.
+/// Only keychain-backed clients may offer authorize.
 fn requires_macos_keychain(agent: ClientSource) -> bool {
     agent == ClientSource::ClaudeCode
 }
@@ -301,7 +297,6 @@ fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
         .collect()
 }
 
-/// Only `requires_macos_keychain` clients honor `interactive`; other providers ignore it.
 fn fetch_rows(
     paths: &ds_config::Paths,
     agent: ClientSource,
@@ -818,7 +813,6 @@ mod tests {
 
     #[test]
     fn only_guarded_keychain_client_credentials_offer_authorize() {
-        // Pins membership: Claude Code is the only macOS keychain client so far.
         let keychain_clients: Vec<_> = ClientSource::CLIENTS
             .iter()
             .copied()

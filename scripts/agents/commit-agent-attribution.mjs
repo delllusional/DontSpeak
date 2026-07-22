@@ -45,8 +45,7 @@ if (active?.conflict) {
 }
 
 if (!record) {
-  // Some tool surfaces skip PreToolUse capture. Every client resolver gets one
-  // chance to prove exact attribution from its active session store.
+  // Missing capture gets one fail-closed live-session resolution attempt.
   if (active?.client) {
     const resolved = resolveAttribution(
       active.client,

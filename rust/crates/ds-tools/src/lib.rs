@@ -34,7 +34,6 @@ enum PType {
     EnumArray(&'static [&'static str]),
     /// Nested per-engine/model string-array voice pools.
     VoicePools,
-    /// Nested per-model TTS parameter objects (registry-driven keys/ranges).
     ParamPools,
     /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
     Gain,
@@ -431,8 +430,7 @@ fn voice_pools_valid(value: &Value) -> bool {
     })
 }
 
-/// Runtime mirror of the generated `tts_params` schema: engine/model keys, each an
-/// object of declared settings whose values validate against the descriptor.
+/// Validate `tts_params` against the same descriptors that generate its schema.
 fn tts_param_pools_valid(value: &Value) -> bool {
     let Some(pools) = value.as_object().filter(|pools| !pools.is_empty()) else {
         return false;
@@ -516,8 +514,6 @@ fn voice_pool_properties() -> Value {
     Value::Object(properties)
 }
 
-/// JSON-Schema constraints for one declared TTS parameter, straight from the registry
-/// (kinds/ranges cannot drift from what apply validates).
 fn tts_param_schema(param: &ds_config::TtsParamDescriptor) -> Value {
     match param.kind {
         ds_config::TtsParamKind::Float { min, max } => {
@@ -532,7 +528,6 @@ fn tts_param_schema(param: &ds_config::TtsParamDescriptor) -> Value {
     }
 }
 
-/// One setting object per engine/model target.
 fn tts_param_pool_properties() -> Value {
     let mut properties = Map::new();
     let setting_object = |params: &[ds_config::TtsParamDescriptor]| {
@@ -650,7 +645,6 @@ fn output_schema_for(output: Output) -> Value {
                                     .collect::<Vec<_>>()
                             },
                             "account": { "type": "string" },
-                            // true only when a macOS keychain client's access is guarded (Claude Code today).
                             "needs_auth": { "type": "boolean" },
                             "rows": {
                                 "type": "array",
@@ -1330,8 +1324,6 @@ mod tests {
             toks(CancelSpeechScope::ALL, CancelSpeechScope::as_str)
         );
 
-        // tts_params is registry-driven twice over: model-token property names, and per
-        // model exactly the declared descriptor keys.
         let pools = props["tts_params"]["properties"]
             .as_object()
             .expect("tts_params should be an object schema");
@@ -1351,7 +1343,6 @@ mod tests {
             ["rate"]
         );
         for descriptor in &ds_config::TTS_MODELS {
-            // serde_json's Map sorts keys; compare as sets.
             let mut declared: Vec<&str> = descriptor.config_params.iter().map(|p| p.key).collect();
             declared.sort_unstable();
             let advertised: Vec<&str> = pools[descriptor.id]["properties"]

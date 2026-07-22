@@ -35,27 +35,24 @@ pub struct EngineStatus {
     pub error: Option<String>,
 }
 
-/// One active model download. Clients derive average rate and ETA from the raw transfer
-/// counters, avoiding duplicated values on the wire.
+/// Raw counters let clients derive rate and ETA without duplicating wire values.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DownloadStatus {
     pub target: String,
     pub done_bytes: u64,
     pub total_bytes: u64,
-    /// Byte count at the first timed progress sample.
+    /// Bytes already complete at the first timed sample.
     pub start_bytes: u64,
-    /// Whole seconds since that sample; zero until one second has elapsed.
+    /// Whole seconds since that sample.
     pub elapsed_seconds: u64,
 }
 
-/// Diagnostic attached when a language-specific voice does not own the detected language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UtteranceWarning {
     VoiceLanguageMismatch,
 }
 
-/// Voice resolution for an utterance that reached playback.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UtteranceStatus {
     pub voice: String,
@@ -112,11 +109,11 @@ pub struct Activity {
     /// Wireable client for the in-flight TTS utterance. `null` when idle or the producer
     /// is not a Usage agent (greet / unknown / DontSpeak).
     pub speaker: Option<ds_client::ClientSource>,
-    /// Resolved voice for the in-flight utterance; `null` while idle.
+    /// `null` while idle.
     pub voice: Option<String>,
-    /// Detected language for the in-flight utterance; `null` while idle.
+    /// `null` while idle.
     pub language: Option<String>,
-    /// Per-utterance quality diagnostic; `null` while idle or when no mismatch is known.
+    /// `null` while idle or when no mismatch is known.
     pub warning: Option<UtteranceWarning>,
     pub muted: bool,
 }

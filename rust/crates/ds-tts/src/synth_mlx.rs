@@ -87,8 +87,7 @@ impl MlxTts {
         params: &ds_config::ResolvedTtsParams,
     ) -> Result<Vec<f32>, String> {
         let text = CString::new(text).map_err(|_| "text contains NUL".to_string())?;
-        // OmniVoice preset ids resolve to their style instruct through the ONE table
-        // (crate::omnivoice::OMNIVOICE_PRESETS) before crossing the FFI.
+        // Resolve OmniVoice presets before crossing the FFI.
         let voice = if self.model == ds_config::TtsModel::OmniVoice {
             crate::omnivoice::mlx_voice_arg(voice)
         } else {
@@ -100,10 +99,7 @@ impl MlxTts {
         let params_json = crate::mlx_params::mlx_params_json(self.model, params);
         let params_json =
             CString::new(params_json).map_err(|_| "params contain NUL".to_string())?;
-        // Versioned symbol: the params_json slot changed the arity, and dlopen resolves
-        // by NAME only — under the old name a version-skewed helper/dylib pair would
-        // corrupt AAPCS64 arguments instead of failing. The `2` makes both skew
-        // directions fail RIGHT HERE with a clean symbol-not-found error.
+        // Versioned call ABI: skew must fail lookup before arguments are passed.
         // SAFETY: `self.lib` remains loaded while the symbol is used and the shim exports
         // this name with the `SynthFn` ABI.
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_mlx_tts_synthesize2\0") }

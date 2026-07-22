@@ -525,8 +525,7 @@ impl TtsManager {
                 RealizedProvider::Cpu
             };
         }
-        // One predicate with the asset-presence paths: a CUDA-realized child must find the
-        // CUDA-only files already downloaded.
+        // Share the effective-provider predicate with asset presence checks.
         if ds_model::tts_wants_cuda_assets_with(model, which, cuda_available) {
             return RealizedProvider::Cuda;
         }
@@ -1156,14 +1155,8 @@ impl TtsManager {
         self.speak_slot.0.lock().unwrap().progress
     }
 
-    /// Speak through the OS System engine and block until completion or barge-in.
-    /// [`ds_tts::system::speech_command`] owns prose cleanup, empty-input handling,
-    /// voice selection, rate mapping, and platform command construction.
-    ///
-    /// Global mute is checked before command construction and again while installing
-    /// the child: muted speech is consumed without spawning. Mid-utterance mute kills
-    /// the OS synthesizer via [`set_muted`](Self::set_muted) — system TTS cannot
-    /// volume-drain like the helper path.
+    /// Block on OS speech. Muted requests are consumed without spawning; live mute kills
+    /// the synthesizer because System TTS cannot volume-drain.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn speak_system(
         &self,
@@ -1172,14 +1165,14 @@ impl TtsManager {
         _language: &str,
         rate: f32,
     ) -> std::io::Result<()> {
-        // Before speech_command / stop(): mute must not cancel built-in via HelperOp::Stop.
+        // Check before stop(), which also cancels built-in speech.
         if self.is_muted() {
             return Ok(());
         }
         let Some(mut cmd) = ds_tts::system::speech_command(Some(voice), rate, text) else {
             return Ok(());
         };
-        // Mute may have landed during command construction; do not cancel built-in speech.
+        // Mute may land during command construction.
         if self.is_muted() {
             return Ok(());
         }
@@ -1190,9 +1183,7 @@ impl TtsManager {
         self.wait_for_system_child()
     }
 
-    /// Install a System TTS child only while holding the slot used by live mute. The
-    /// final mute check closes the check/spawn race: after `set_muted(true)` returns,
-    /// no concurrent `speak_system` can install a new synthesizer.
+    /// Hold the live-mute slot across the final check and spawn to close the race.
     #[cfg(any(test, target_os = "macos", target_os = "windows"))]
     fn spawn_say_child_if_unmuted(&self, cmd: &mut Command) -> std::io::Result<bool> {
         let mut child = self.say_child.lock().unwrap();
@@ -1238,9 +1229,7 @@ impl TtsManager {
         }
     }
 
-    /// Linux has no warm System-TTS path yet (issue #74). Return `Unsupported` so callers
-    /// can fall back or record the error. When muted, consume without error so the queue
-    /// still mute-drains (same contract as the macOS/Windows arm).
+    /// Linux returns Unsupported (issue #74), except muted requests still drain silently.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub fn speak_system(
         &self,
@@ -1496,8 +1485,7 @@ impl TtsManager {
         }
     }
 
-    /// Kill + reap any in-flight System TTS child. Kill-only — does not send
-    /// `HelperOp::Stop` (built-in cancel is a separate path on `stop` / `stop_fade`).
+    /// Kill and reap System TTS without cancelling built-in speech.
     fn kill_say_child(&self) {
         if let Some(mut c) = self.say_child.lock().unwrap().take() {
             let _ = c.kill();
@@ -1523,16 +1511,13 @@ impl TtsManager {
         self.muted.load(Ordering::Relaxed)
     }
 
-    /// Set global mute. Records it and pushes the `mute` op to the warm child so built-in
-    /// speech drains silently and an active or later cue is stopped/suppressed.
+    /// Set global mute. Built-in speech drains silently; cues are suppressed.
     /// Idempotent. macOS full-duplex mutes at RENDER time: the VPIO callback keeps
     /// consuming the ring at wall rate but zero-fills the output (the ring holds real
     /// audio), so mute lands within one audio quantum, unmute resumes at the playhead
     /// instantly, and audio elapsed while muted is still skipped — the same
     /// mute-consumes-speech semantics as the rodio volume path.
-    ///
-    /// System TTS is off the helper graph: mute skips new `speak_system` spawns and
-    /// kills any in-flight OS synthesizer (no fade/resume). Does not send `HelperOp::Stop`.
+    /// System TTS skips new spawns and kills in-flight speech without fade or resume.
     pub fn set_muted(&self, on: bool) {
         let changed = self.muted.swap(on, Ordering::Relaxed) != on;
         let _ = self.write_request(
@@ -2719,7 +2704,6 @@ mod system_mute_tests {
     use super::*;
     use std::process::{Command, Stdio};
 
-    /// Manager with no helper binary (never spawned). Safe for mute / say_child tests.
     fn mk() -> TtsManager {
         let dir = tempfile::tempdir().unwrap();
         TtsManager::new(
@@ -2733,7 +2717,7 @@ mod system_mute_tests {
         )
     }
 
-    /// Long-lived non-network command for inject-only say_child tests (not OS TTS).
+    /// Long-lived local process injected in place of System TTS.
     fn long_lived_fake_command() -> Command {
         #[cfg(unix)]
         {
@@ -2765,8 +2749,6 @@ mod system_mute_tests {
 
     #[test]
     fn speak_system_when_muted_returns_ok_without_stop_or_spawn() {
-        // Mute first, then inject a fake child: muted speak_system must not call stop()
-        // (would clear say_child) and must not spawn real OS TTS.
         let tts = mk();
         tts.set_muted(true);
         assert!(tts.is_muted());
@@ -2803,15 +2785,12 @@ mod system_mute_tests {
             tts.say_child.lock().unwrap().is_none(),
             "mute must clear the system-speech slot"
         );
-        // Second mute on empty is a no-op (idempotent kill).
         tts.set_muted(true);
         assert!(tts.say_child.lock().unwrap().is_none());
     }
 
     #[test]
     fn system_child_install_rechecks_mute_before_spawn() {
-        // Simulate mute landing after speak_system's initial guard but before it
-        // acquires the child slot for the final check.
         let tts = mk();
         tts.set_muted(true);
         let mut cmd = long_lived_fake_command();

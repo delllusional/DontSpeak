@@ -61,14 +61,8 @@ private enum TtsKind: String {
     var usesManagedHubCache: Bool { self == .chatterbox || self == .omnivoice }
 }
 
-/// Hand-maintained mirror of the Rust TTS param registry (ds-config `tts_model.rs`
-/// param descriptors): every declared key per model, value = whether this shim APPLIES
-/// it (true) or explicitly ignores it (false — the pinned mlx-audio-swift `generate`
-/// API exposes no sampling knobs; Kokoro speed arrives via the dedicated `speed` arg).
-/// No automatic cross-language check ties this to the Rust registry: TtsAbiTests pins
-/// THIS mirror literally, ds-tts's `mlx_params` test pins the registry defaults
-/// literally, and a registry edit must update registry, mirror, and both literal pins
-/// in the same change (mirror discipline, cf. Native.cs / DontSpeakCore.swift).
+/// Rust TTS-param registry mirror; values say whether the pinned MLX API applies a key.
+/// Registry edits must update this map and the Rust/Swift literal drift tests together.
 let ttsParamMirror: [String: [String: Bool]] = [
     "kokoro": [:],
     "chatterbox": ["exaggeration": false],
@@ -76,15 +70,13 @@ let ttsParamMirror: [String: [String: Bool]] = [
     "omnivoice": ["steps": false, "seed": false],
 ]
 
-/// Classification of one `params_json` payload against the mirror.
 struct TtsParamDecode: Equatable {
     var applied: [String] = []
     var ignored: [String] = []
     var unknown: [String] = []
 }
 
-/// Pure decode-and-classify (keys sorted for determinism). nil = malformed JSON — the
-/// caller logs and synthesizes anyway: params are advisory and never fail the call.
+/// Sorted classification; malformed JSON returns nil without failing synthesis.
 func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
     guard let data = json.data(using: .utf8),
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -175,9 +167,7 @@ public func ds_mlx_tts_init(
     }
 }
 
-// Versioned export (see dontspeak_mlx.h): the params_json arity change renamed the
-// symbol so a version-skewed helper/dylib pair fails at lookup instead of corrupting
-// arguments.
+// Versioned call ABI: skew must fail symbol lookup before arguments are passed.
 @_cdecl("ds_mlx_tts_synthesize2")
 public func ds_mlx_tts_synthesize2(
     _ text: UnsafePointer<CChar>?,
@@ -198,9 +188,7 @@ public func ds_mlx_tts_synthesize2(
         logErr("ds_mlx_tts_synthesize2: not initialized")
         return 2
     }
-    // Params are advisory (never fail the utterance): classify against the mirror and
-    // surface only anomalies. No declared key is MLX-appliable today — Kokoro speed
-    // arrives via the dedicated `speed` argument below.
+    // Settings are advisory; only unknown or malformed input is logged.
     if let paramsJson = cString(paramsJson) {
         if let decode = ttsParamsDecode(model: kind.rawValue, json: paramsJson) {
             if !decode.unknown.isEmpty {

@@ -8,11 +8,7 @@ final class TtsAbiTests: XCTestCase {
         XCTAssertEqual(ds_mlx_tts_synthesize2(nil, nil, nil, 1.0, nil, nil, nil), 4)
     }
 
-    /// Literal pin of the hand-maintained mirror — the Swift side of the mirror
-    /// discipline. Nothing compiles the Rust registry into this test: a Rust-side
-    /// param addition is caught by ds-tts's `mlx_params` LITERAL default pins (whose
-    /// docs direct the mirror update here); this pin makes that mirror edit a
-    /// deliberate, reviewed diff rather than silent drift.
+    /// Literal pin for the hand-maintained Rust-registry mirror.
     func testTtsParamMirrorPinsDeclaredKeysPerModel() {
         XCTAssertEqual(Set(ttsParamMirror.keys), ["kokoro", "chatterbox", "qwen", "omnivoice"])
         XCTAssertEqual(ttsParamMirror["kokoro"], [:])
@@ -21,9 +17,6 @@ final class TtsAbiTests: XCTestCase {
         XCTAssertEqual(ttsParamMirror["omnivoice"], ["steps": false, "seed": false])
     }
 
-    /// Pins the shim's decode behavior for params_json payloads: declared keys classify
-    /// per the mirror, undeclared keys surface as unknown, malformed JSON is nil (the
-    /// entry point logs and synthesizes anyway — params never fail the utterance).
     func testParamsDecodeClassifiesDeclaredUnknownAndMalformed() {
         XCTAssertEqual(
             ttsParamsDecode(model: "chatterbox", json: #"{"exaggeration":0.7,"bogus":1}"#),

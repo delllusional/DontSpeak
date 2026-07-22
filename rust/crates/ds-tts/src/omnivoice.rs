@@ -1,15 +1,12 @@
-//! OmniVoice ONNX inference: classifier-free-guided iterative unmasking against the
-//! bidirectional `llm_backbone_fp32.onnx` export (plain SDPA forward, 4-D bool mask, no
-//! KV cache). The decode is a port of upstream k2-fsa/OmniVoice `_generate_iterative`
-//! (`omnivoice/models/omnivoice.py` @ 468e927ba3716cd8dd86421148dfb3046e9f9d7b);
-//! upstream expressions are cited next to each transcribed constant.
+//! Classifier-free-guided iterative unmasking for OmniVoice's bidirectional ONNX export.
+//! Ported from `_generate_iterative` at k2-fsa/OmniVoice 468e927; transcribed formulas
+//! cite their upstream locations.
 
 use half::f16;
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
-/// Extract a float output as f32, accepting either f32 or f16 — the FP16 audio
-/// sub-models (embeddings/heads/decoder) emit float16, the FP32 LLM float32.
+/// Extract f32 or f16 model output as f32.
 fn extract_floats(value: &ort::value::DynValue, label: &str) -> Result<Vec<f32>, String> {
     if let Ok((_, data)) = value.try_extract_tensor::<f32>() {
         return Ok(data.to_vec());
@@ -20,8 +17,7 @@ fn extract_floats(value: &ort::value::DynValue, label: &str) -> Result<Vec<f32>,
     Ok(data.iter().map(|half| half.to_f32()).collect())
 }
 
-/// Build a float model input from f32 host data, narrowed to float16 when the graph
-/// declares that input as f16.
+/// Match the graph's declared f32/f16 input type.
 fn float_input(
     session: &Session,
     name: &str,
@@ -53,36 +49,23 @@ fn float_input(
 const CODEBOOKS: usize = 8;
 const CODEBOOK_SIZE: usize = 1024;
 const MASK_TOKEN: i64 = 1024;
-/// Head logits carry the MASK class after the 1024 code entries.
+// Head logits append the MASK class after the code entries.
 const VOCAB: usize = CODEBOOK_SIZE + 1;
-/// Generation frame budget per model run; text is pre-split to fit it
-/// (`split_for_frame_budget`) because clamping the estimate truncates audio. 200 (not
-/// the export's 600 ceiling) bounds time-to-first-audio: every piece costs
-/// `2 * steps` LLM forwards whose cost grows with sequence length, so smaller pieces
-/// start playback sooner on both EPs.
+// Smaller pieces bound time-to-first-audio: each costs `2 * steps` LLM forwards whose
+// cost grows with sequence length. Pre-splitting prevents truncation at this limit.
 const MAX_FRAMES: usize = 200;
-/// Upstream `guidance_scale: float = 2.0` (omnivoice/models/omnivoice.py:178 @ 468e927),
-/// applied as the `w` in `c + w*(c - u)` — see [`guided_logits`].
+// Upstream guidance_scale (omnivoice.py:178), used as `w` in `c + w*(c - u)`.
 const GUIDANCE_SCALE: f32 = 2.0;
-/// Upstream `t_shift: float = 0.1` (omnivoice/models/omnivoice.py:179 @ 468e927).
+// Upstream t_shift (omnivoice.py:179).
 const T_SHIFT: f64 = 0.1;
-/// Upstream `layer_penalty_factor: float = 5.0` (omnivoice/models/omnivoice.py:180
-/// @ 468e927): `scores = scores - (layer_ids * gen_config.layer_penalty_factor)`
-/// (omnivoice.py:1407).
+// Upstream layer_penalty_factor (omnivoice.py:180, 1407).
 const LAYER_PENALTY: f32 = 5.0;
-/// Position-noise scale. Upstream `position_temperature: float = 5.0`
-/// (omnivoice/models/omnivoice.py:181 @ 468e927) is applied once per step, CONSTANT —
-/// never annealed — via `_gumbel_sample` (omnivoice.py:1632-1636):
-/// `scaled_logits = logits / temperature; return scaled_logits + gumbel_noise`
-/// invoked at omnivoice.py:1409-1410. Dividing scores by a positive constant preserves
-/// top-k order, so `score + temperature*gumbel` selects the same cells; we use that
-/// form to keep confidences un-rescaled.
+// Upstream position_temperature (omnivoice.py:181, 1409, 1632). Scaling Gumbel noise
+// instead of scores preserves selection order and leaves confidence units unchanged.
 const GUMBEL_SCALE: f32 = 5.0;
 
-/// Voice id -> style instruct (vocabulary: upstream `docs/voice-design.md` @ 468e927;
-/// comma+space separated, one attribute per category, English-only presets). Same order
-/// as the registry's `OMNIVOICE_VOICES` — a drift guard pins the two lists. `default`
-/// carries no instruct: the ORT prompt omits the block and the MLX shim nils the voice.
+/// Presets use the upstream voice-design vocabulary; a test pins registry order.
+/// `default` omits the ORT instruct block and maps to nil in MLX.
 pub const OMNIVOICE_PRESETS: &[(&str, &str)] = &[
     ("default", ""),
     ("young_woman", "female, young adult, moderate pitch"),
@@ -109,10 +92,7 @@ fn preset_instruct(voice: &str) -> Option<&'static str> {
         .map(|(_, instruct)| *instruct)
 }
 
-/// The MLX shim's voice argument: preset ids resolve to their instruct (the shim
-/// passes it into mlx-audio `generate(voice:)`); an instruct-less resolution becomes
-/// the literal `default` the shim nils out. Unknown non-empty strings pass through as
-/// raw instructs — the same permissive rule as the ORT path.
+/// Resolve presets for MLX; default becomes nil in the shim and raw instructs pass through.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn mlx_voice_arg(voice: &str) -> &str {
     match preset_instruct(voice) {
@@ -130,9 +110,7 @@ pub struct OmniVoiceSynth {
     decoder: Session,
     tokenizer: tokenizers::Tokenizer,
     hidden_output: usize,
-    /// The BACKBONE's realized EP — what [`Self::provider`], status, and the
-    /// synth-check `provider=` line report, even when [`decoder_provider`] splits the
-    /// Higgs decoder off to CPU.
+    /// Realized backbone EP, even when the Higgs decoder runs on CPU.
     provider: ds_config::RealizedProvider,
 }
 
@@ -168,8 +146,7 @@ impl OmniVoiceSynth {
         let outputs: Vec<&str> = llm.outputs().iter().map(|output| output.name()).collect();
         check_llm_contract(&inputs, &outputs)?;
         let heads = sessions.load_file(&dir.join("audio_heads_decoder.onnx"))?;
-        // Realized by the three loads above. The decoder goes through a from_realized
-        // session (errors on EP drift) at [`decoder_provider`]'s pick.
+        // The decoder's explicit EP must not drift during fallback.
         let provider = sessions.provider();
         let mut decoder_sessions = crate::ort_session::OrtSessions::from_realized(
             ds_config::TtsModel::OmniVoice,
@@ -204,14 +181,10 @@ impl OmniVoiceSynth {
     ) -> Result<Vec<f32>, String> {
         let model = ds_config::TtsModel::OmniVoice;
         let language = model.descriptor().runtime_language(language).to_string();
-        // Declared params (defaults + ranges live on the registry descriptors).
         let steps = params.int(model, "steps") as usize;
-        // Seed override: >= 0 replaces the derived seed for EVERY piece; the -1
-        // default keeps the per-piece derivation in synthesize_piece.
+        // Non-negative values override each piece's derived seed.
         let seed_override = u64::try_from(params.int(model, "seed")).ok();
-        // Preset ids resolve through OMNIVOICE_PRESETS; an unknown non-empty voice is
-        // treated as a raw instruct. An empty instruct omits the block entirely (same
-        // rule as the MLX shim's nil voice).
+        // Unknown non-empty values remain raw instructs; empty omits the block.
         let instruct = preset_instruct(voice).unwrap_or(voice);
         let mut waveform = Vec::new();
         for piece in split_for_frame_budget(text, MAX_FRAMES) {
@@ -241,7 +214,6 @@ impl OmniVoiceSynth {
     ) -> Result<Vec<f32>, String> {
         let estimate = estimate_audio_frames(text);
         if estimate > MAX_FRAMES {
-            // Backstop only: split_for_frame_budget should make this unreachable.
             log::warn!(
                 target: "tts",
                 "omnivoice frame estimate {estimate} exceeds {MAX_FRAMES} after splitting; audio will truncate"
@@ -265,16 +237,12 @@ impl OmniVoiceSynth {
         let cond_len = prompt.cond_len;
         let total = CODEBOOKS * frames;
 
-        // Deliberate divergence from upstream's nondeterministic sampling: the Gumbel
-        // position noise is seeded from the request so identical requests reproduce
-        // identical audio (reproducible bug reports). A seed param override replaces
-        // the derivation wholesale (same value for every piece).
+        // Deterministic Gumbel noise makes identical requests reproducible.
         let seed = seed_override.unwrap_or_else(|| stable_seed(language, instruct, text));
 
         let mut cond_ids = prompt.ids.clone();
-        // Unconditional pass input: the target region alone with audio_mask all true —
-        // upstream builds it as the last `target_len` positions of the conditional input
-        // (omnivoice.py:1342-1344 @ 468e927).
+        // Upstream unconditional pass: target region only, with audio_mask true
+        // (omnivoice.py:1342-1344).
         let uncond_mask = vec![true; frames];
         let mut remaining_mask = vec![true; total];
         let mut remaining = total;
@@ -298,8 +266,7 @@ impl OmniVoiceSynth {
             }
             let uncond_logits = self.run_pass(&uncond_ids, &uncond_mask, frames)?;
 
-            // Guided rows for the still-masked cells. Explicit flat-index mapping — the
-            // two passes have DIFFERENT sequence lengths:
+            // The conditional and unconditional passes have different sequence lengths:
             //   cond index (c, f)   = ((c*cond_seq) + cond_len + f) * VOCAB
             //   uncond index (c, f) = ((c*frames) + f) * VOCAB
             let mut guided = vec![f32::NEG_INFINITY; total * VOCAB];
@@ -331,8 +298,7 @@ impl OmniVoiceSynth {
             }
         }
 
-        // Every cell of every codebook must be unmasked before decoding: MASK_TOKEN
-        // (1024) is out of range for the decoder's 1024-entry codebooks.
+        // MASK_TOKEN is outside the decoder codebook range.
         let mut codes = Vec::with_capacity(total);
         for codebook in 0..CODEBOOKS {
             let start = codebook * seq + cond_len;
@@ -364,8 +330,6 @@ impl OmniVoiceSynth {
         Ok(crate::trim::trim_silence(&waveform))
     }
 
-    /// One embeddings → LLM → heads forward over a codebook-major id grid of length
-    /// `CODEBOOKS * sequence`, returning flat logits of `CODEBOOKS * sequence * VOCAB`.
     fn run_pass(
         &mut self,
         ids: &[i64],
@@ -387,7 +351,7 @@ impl OmniVoiceSynth {
             vec![1, sequence as i64, 1024],
             embedded,
         )?;
-        // Bidirectional: 4-D bool mask, all-true over the whole sequence (True = attend).
+        // Bidirectional export: rank-4 bool mask, true means attend.
         let attention = Tensor::from_array((
             vec![1, 1, sequence as i64, sequence as i64],
             vec![true; sequence * sequence],
@@ -413,8 +377,7 @@ impl OmniVoiceSynth {
             .run(vec![("hidden_states".to_string(), hidden)])
             .map_err(|error| format!("omnivoice heads run: {error}"))?;
         let logits = extract_floats(&logits[0], "omnivoice logits")?;
-        // The unmasking loop slices by fixed offsets computed from THIS pass's own
-        // sequence length; a shape drift must fail here, not panic there.
+        // Fail shape drift here before fixed-offset slicing in the unmasking loop.
         let expected = CODEBOOKS * sequence * VOCAB;
         if logits.len() != expected {
             return Err(format!(
@@ -426,10 +389,8 @@ impl OmniVoiceSynth {
     }
 }
 
-/// The LLM export this decode is written against: `inputs_embeds` (rank-3 float) plus a
-/// rank-4 bool `attention_mask`, NO KV cache, and a `hidden_states` output. Anything
-/// else is a different export (the retired causal-LM one), which would run but produce
-/// garbage — fail closed at load instead.
+/// Fail closed unless the export has embeddings, a rank-4 bool mask, no KV cache,
+/// and hidden-state output; other shapes can run but produce invalid audio.
 fn check_llm_contract(inputs: &[(&str, ValueType)], outputs: &[&str]) -> Result<(), String> {
     let expected = "the pinned llm_backbone_fp32.onnx export declares \
                     inputs_embeds float[1,L,1024] + attention_mask bool[1,1,L,L] only";
@@ -485,10 +446,8 @@ fn check_llm_contract(inputs: &[(&str, ValueType)], outputs: &[&str]) -> Result<
     Ok(())
 }
 
-/// One prompt grid: prompt tokens broadcast across the 8 codebook rows, then `frames`
-/// MASK positions; `audio_mask` true over the target region only.
+/// Prompt tokens broadcast across codebooks, followed by masked target frames.
 struct Prompt {
-    /// Codebook-major `[CODEBOOKS * seq()]`.
     ids: Vec<i64>,
     audio_mask: Vec<bool>,
     cond_len: usize,
@@ -501,11 +460,8 @@ impl Prompt {
     }
 }
 
-/// Build the conditional prompt, mirroring upstream `_prepare_inference_inputs`
-/// (omnivoice/models/omnivoice.py:1220-1258 @ 468e927): the style segment
-/// `<|lang_start|>{lang}<|lang_end|><|instruct_start|>{instruct}<|instruct_end|>` and
-/// the text segment `<|text_start|>{text}<|text_end|>` are tokenized SEPARATELY, then
-/// concatenated. Empty `instruct` omits the instruct block entirely.
+/// Mirror `_prepare_inference_inputs` (omnivoice.py:1220-1258): tokenize style and
+/// text separately, then concatenate. Empty instruct omits its block.
 fn build_prompt(
     encode: impl Fn(&str) -> Result<Vec<u32>, String>,
     language: &str,
@@ -539,11 +495,8 @@ fn build_prompt(
     })
 }
 
-/// Per-step unmask counts over the shifted time grid, transcribed from upstream
-/// (omnivoice/models/omnivoice.py:1356-1378 @ 468e927 and `_get_time_steps`,
-/// omnivoice.py:1639-1648): `ts = t_shift*t / (1 + (t_shift-1)*t)` over
-/// `linspace(0, 1, steps+1)`, `k = min(ceil(total * (ts[s+1]-ts[s])), remaining)`,
-/// and the LAST step takes the remainder.
+/// Shifted upstream schedule (omnivoice.py:1356-1378, 1639-1648); the final step
+/// consumes the remainder.
 fn schedule_counts(total: usize, steps: usize) -> Vec<usize> {
     let shifted = |index: usize| -> f64 {
         let t = index as f64 / steps as f64;
@@ -564,7 +517,6 @@ fn schedule_counts(total: usize, steps: usize) -> Vec<usize> {
     counts
 }
 
-/// Numerically stable log-softmax (subtract the row max before exponentiating).
 fn log_softmax(row: &[f32]) -> Vec<f32> {
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let log_sum = max
@@ -576,12 +528,8 @@ fn log_softmax(row: &[f32]) -> Vec<f32> {
     row.iter().map(|value| value - log_sum).collect()
 }
 
-/// Classifier-free guidance over one vocabulary row, transcribed from upstream
-/// `_predict_tokens_with_scoring` (omnivoice/models/omnivoice.py:1430-1440 @ 468e927):
-/// `log_probs = torch.log_softmax(c_log_probs + guidance_scale*(c_log_probs -
-/// u_log_probs))` with `c_log_probs = F.log_softmax(c_logits)` and `u_log_probs =
-/// F.log_softmax(u_logits)` — the `w = 2` under `c + w*(c-u)` convention — followed by
-/// `log_probs[..., audio_mask_id] = -inf` (omnivoice.py:1440), in that order.
+/// Upstream classifier-free guidance (omnivoice.py:1430-1440), followed by masking
+/// the audio-mask token.
 fn guided_logits(cond: &[f32], uncond: &[f32]) -> Vec<f32> {
     let c_lp = log_softmax(cond);
     let u_lp = log_softmax(uncond);
@@ -595,19 +543,14 @@ fn guided_logits(cond: &[f32], uncond: &[f32]) -> Vec<f32> {
     guided
 }
 
-/// A standard Gumbel(0, 1) draw: `-ln(-ln(u))` with `u` kept inside the open unit
-/// interval (upstream adds 1e-10 inside both logs, omnivoice.py:1632-1636 @ 468e927).
+/// Gumbel(0, 1), clamped to the open unit interval (omnivoice.py:1632-1636).
 fn gumbel(rng: &mut fastrand::Rng) -> f32 {
     let u = rng.f64().clamp(1e-10, 1.0 - 1e-10);
     (-(-u.ln()).ln()) as f32
 }
 
-/// Pick `count` still-masked cells for this step. Per upstream scoring:
-/// confidence = `max_over_vocab(guided)` (omnivoice.py:1450), minus the layer penalty
-/// `5.0 * codebook_id` (omnivoice.py:1407), plus constant-scale Gumbel position noise
-/// (see [`GUMBEL_SCALE`]); token = `argmax(guided)` (omnivoice.py:1448,
-/// class_temperature = 0). Returns `(cell, token)` pairs, `cell = codebook*frames +
-/// frame`; MASK can never win because [`guided_logits`] pinned it to `-inf`.
+/// Rank masked cells by upstream confidence, codebook penalty, and Gumbel noise
+/// (omnivoice.py:1407, 1448-1450). MASK is pinned to negative infinity.
 fn select_cells(
     guided: &[f32],
     remaining_mask: &[bool],
@@ -620,7 +563,7 @@ fn select_cells(
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut scored: Vec<(f32, usize, i64)> = Vec::new();
     for (cell, remaining) in remaining_mask.iter().copied().enumerate() {
-        // Draw for EVERY cell so the noise stream does not shift as cells unmask.
+        // Draw for all cells so the deterministic noise stream does not shift.
         let noise = gumbel(&mut rng);
         if !remaining {
             continue;
@@ -646,9 +589,7 @@ fn select_cells(
         .collect()
 }
 
-/// Unique code count per codebook over a decoded codebook-major grid — the diversity
-/// observability for a decode that runs but degenerates. Healthy English speech lands
-/// around 50-70 unique codes over 72 frames; the broken causal decode produced 1-9.
+/// Unique code counts for collapse telemetry.
 fn codebook_diversity(codes: &[i64], frames: usize) -> Vec<usize> {
     codes
         .chunks(frames.max(1))
@@ -661,13 +602,12 @@ fn codebook_diversity(codes: &[i64], frames: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Hard-error condition: EVERY codebook single-valued. Low diversity alone only logs —
-/// short utterances legitimately repeat codes.
+/// Only total single-code collapse is fatal; short utterances may have low diversity.
 fn is_total_collapse(diversity: &[usize]) -> bool {
     !diversity.is_empty() && diversity.iter().all(|&unique| unique <= 1)
 }
 
-/// FNV-1a over the request fields (NUL-separated so field boundaries hash distinctly).
+/// FNV-1a with NUL-separated fields.
 fn stable_seed(language: &str, instruct: &str, text: &str) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for chunk in [
@@ -705,8 +645,7 @@ fn argmax(values: &[f32]) -> usize {
     best_index
 }
 
-/// Recursive char-boundary split (whitespace nearest the midpoint preferred) until
-/// every piece's [`estimate_audio_frames`] fits `budget`.
+/// Recursively split on the nearest midpoint whitespace until each piece fits.
 fn split_for_frame_budget(text: &str, budget: usize) -> Vec<String> {
     let text = text.trim();
     if text.is_empty() {
@@ -755,11 +694,7 @@ mod tests {
     use super::*;
     use ort::value::{Shape, SymbolicDimensions};
 
-    // ── voice presets ───────────────────────────────────────────────────────
-
-    /// Upstream `docs/voice-design.md` @ 468e927 attribute vocabulary — comma+space
-    /// separated, each item must be a published attribute. Guards the preset table
-    /// against free-text drift (the old "warm, clear female voice" pool).
+    /// Published attribute vocabulary from upstream `docs/voice-design.md`.
     fn instruct_is_legal(instruct: &str) -> Result<(), String> {
         const LEGAL: &[&str] = &[
             "male",
@@ -803,13 +738,10 @@ mod tests {
             }
             instruct_is_legal(instruct).unwrap_or_else(|error| panic!("{id}: {error}"));
         }
-        // The retired free-text pool entry must fail, naming its first illegal item.
         let error = instruct_is_legal("warm, clear female voice").unwrap_err();
         assert!(error.contains("`warm`"), "{error}");
     }
 
-    /// Cross-crate drift guard: the preset table and the registry's voice list are the
-    /// same ids in the same order (precedent: enumerate.rs's Kokoro registry pins).
     #[test]
     fn preset_ids_match_the_registry_voices_exactly() {
         let preset_ids: Vec<&str> = OMNIVOICE_PRESETS.iter().map(|(id, _)| *id).collect();
@@ -830,8 +762,6 @@ mod tests {
         );
         assert_eq!(preset_instruct("default"), Some(""));
         assert_eq!(preset_instruct("no_such_voice"), None);
-        // MLX arg: instruct-less resolutions become the literal "default" the shim
-        // nils; presets resolve; raw instructs pass through.
         assert_eq!(mlx_voice_arg("default"), "default");
         assert_eq!(mlx_voice_arg(""), "default");
         assert_eq!(mlx_voice_arg("whisper"), "female, young adult, whisper");
@@ -853,23 +783,17 @@ mod tests {
         assert_eq!(argmax(&[f32::NEG_INFINITY, -1.0]), 1);
     }
 
-    /// The decode's step count comes from the registry (default 16). The seed default
-    /// is the -1 "derive per request" sentinel — its resolved value must NOT convert to
-    /// an override, or every utterance would share one noise stream.
     #[test]
     fn declared_params_resolve_to_the_decode_defaults() {
         let model = ds_config::TtsModel::OmniVoice;
         let resolved = model.descriptor().resolve_params(&Default::default());
         assert_eq!(resolved.int(model, "steps"), 16);
         assert_eq!(u64::try_from(resolved.int(model, "seed")).ok(), None);
-        // An explicit non-negative seed becomes the override.
         let mut stored = ds_config::TtsParamMap::new();
         stored.insert("seed".into(), ds_config::TtsParamValue::Int(42));
         let resolved = model.descriptor().resolve_params(&stored);
         assert_eq!(u64::try_from(resolved.int(model, "seed")).ok(), Some(42));
     }
-
-    // ── schedule_counts ─────────────────────────────────────────────────────
 
     #[test]
     fn schedule_counts_sum_exactly_and_never_go_negative() {
@@ -892,9 +816,6 @@ mod tests {
         assert_eq!(schedule_counts(0, 1), vec![0]);
     }
 
-    // ── guided_logits ───────────────────────────────────────────────────────
-
-    /// A row with a negligible MASK logit, so post-mask probabilities still sum to ~1.
     fn test_row(rest: impl Fn(usize) -> f32) -> Vec<f32> {
         (0..VOCAB)
             .map(|index| {
@@ -950,13 +871,9 @@ mod tests {
             }
             assert!(!value.is_nan(), "NaN at {index}");
         }
-        // The conditional winner must survive guidance.
         assert_eq!(argmax(&guided), 0);
     }
 
-    // ── select_cells ────────────────────────────────────────────────────────
-
-    /// `cells` rows of VOCAB where each row peaks at `peaks[cell]` with equal confidence.
     fn uniform_guided(cells: usize, peaks: &[usize]) -> Vec<f32> {
         let mut guided = vec![-20.0f32; cells * VOCAB];
         for (cell, &peak) in peaks.iter().enumerate() {
@@ -968,7 +885,6 @@ mod tests {
 
     #[test]
     fn select_cells_never_pick_the_mask_token() {
-        // MASK carries -inf (as guided_logits guarantees); the argmax token must be real.
         let cells = CODEBOOKS;
         let guided = uniform_guided(cells, &[5; CODEBOOKS]);
         let picked = select_cells(&guided, &[true; CODEBOOKS], cells, 42);
@@ -981,8 +897,6 @@ mod tests {
 
     #[test]
     fn layer_penalty_orders_codebook_zero_ahead_at_equal_confidence() {
-        // One frame, eight codebooks, identical confidence: the 5.0/codebook penalty
-        // dominates the noise for this seed, so the single pick is codebook 0.
         let guided = uniform_guided(CODEBOOKS, &[9; CODEBOOKS]);
         let picked = select_cells(&guided, &[true; CODEBOOKS], 1, 7);
         assert_eq!(picked.len(), 1);
@@ -1013,10 +927,7 @@ mod tests {
         assert!(picked_cells.contains(&2) && picked_cells.contains(&5));
     }
 
-    // ── prompt ──────────────────────────────────────────────────────────────
-
-    /// Fake encoder: one token per byte, plus a distinct sentinel first token per
-    /// segment so tests can see segment order and boundaries.
+    // Distinct sentinels expose segment order and boundaries.
     fn fake_encode(segment: &str) -> Result<Vec<u32>, String> {
         let sentinel = if segment.starts_with("<|lang_start|>") {
             900_000
@@ -1035,12 +946,9 @@ mod tests {
         assert_eq!(seq, prompt.cond_len + 12);
         assert_eq!(prompt.ids.len(), CODEBOOKS * seq);
         let row0 = &prompt.ids[..seq];
-        // Style sentinel first, text sentinel later: segments tokenized separately,
-        // concatenated in style→text order.
         assert_eq!(row0[0], 900_000);
         let text_sentinel = row0.iter().position(|&id| id == 800_000).unwrap();
         assert!(text_sentinel > 0 && text_sentinel < prompt.cond_len);
-        // Every codebook row is the same broadcast prompt + MASK fill.
         for codebook in 1..CODEBOOKS {
             assert_eq!(&prompt.ids[codebook * seq..(codebook + 1) * seq], row0);
         }
@@ -1061,7 +969,6 @@ mod tests {
         let with = build_prompt(fake_encode, "en", "female voice", "Hi.", 10).unwrap();
         let without = build_prompt(fake_encode, "en", "", "Hi.", 10).unwrap();
         assert!(without.cond_len < with.cond_len);
-        // The omitted block leaves no instruct delimiter bytes in the style segment.
         let style_len_without = without.cond_len - "<|text_start|>Hi.<|text_end|>".len() - 1;
         assert_eq!(
             style_len_without,
@@ -1069,8 +976,6 @@ mod tests {
             "style segment must be the bare lang block"
         );
     }
-
-    // ── LLM contract ────────────────────────────────────────────────────────
 
     fn tensor(ty: TensorElementType, dims: &[i64]) -> ValueType {
         ValueType::Tensor {
@@ -1135,11 +1040,8 @@ mod tests {
         assert!(error.contains("hidden_states"), "{error}");
     }
 
-    // ── diversity ───────────────────────────────────────────────────────────
-
     #[test]
     fn diversity_counts_unique_codes_per_codebook() {
-        // 2 codebooks × 4 frames: 3 unique then 1 unique.
         let codes = [1, 2, 2, 3, 7, 7, 7, 7];
         assert_eq!(codebook_diversity(&codes, 4), vec![3, 1]);
     }
@@ -1147,23 +1049,17 @@ mod tests {
     #[test]
     fn only_total_collapse_is_fatal() {
         assert!(is_total_collapse(&[1, 1, 1, 1, 1, 1, 1, 1]));
-        // One live codebook is degraded, not collapsed — log, don't error.
         assert!(!is_total_collapse(&[1, 1, 1, 1, 1, 1, 1, 2]));
         assert!(!is_total_collapse(&[55, 60, 48, 62, 51, 58, 49, 63]));
         assert!(!is_total_collapse(&[]));
     }
 
-    // ── seed ────────────────────────────────────────────────────────────────
-
     #[test]
     fn stable_seed_separates_fields_and_is_deterministic() {
         assert_eq!(stable_seed("en", "", "Hi."), stable_seed("en", "", "Hi."));
         assert_ne!(stable_seed("en", "", "Hi."), stable_seed("en", "", "Hi!"));
-        // Field boundaries matter: ("ab","c") must not collide with ("a","bc").
         assert_ne!(stable_seed("ab", "c", "x"), stable_seed("a", "bc", "x"));
     }
-
-    // ── framing (unchanged behavior) ────────────────────────────────────────
 
     #[test]
     fn duration_estimate_scales_and_is_bounded_by_the_caller() {
@@ -1180,7 +1076,6 @@ mod tests {
 
     #[test]
     fn cjk_text_splits_to_fit_the_frame_budget() {
-        // Over-budget CJK must split (no silent clamp).
         let text = "你".repeat(300);
         assert!(estimate_audio_frames(&text) > MAX_FRAMES);
         let pieces = split_for_frame_budget(&text, MAX_FRAMES);

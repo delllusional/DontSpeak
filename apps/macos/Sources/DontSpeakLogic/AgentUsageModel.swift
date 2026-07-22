@@ -52,8 +52,7 @@ public struct UsageRow: Decodable, Equatable, Sendable, Identifiable {
     }
 }
 
-/// One card (Rust UsageCard). `needsAuth` is true only when a macOS keychain
-/// client's item needs user-approved access (Claude Code today).
+/// `needsAuth` marks guarded macOS keychain access.
 public struct UsageCard: Decodable, Equatable, Sendable, Identifiable {
     public var id: String { agent }
     public let agent: String

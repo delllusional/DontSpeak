@@ -242,8 +242,7 @@ struct ServeReq {
     /// both ways (no `deny_unknown_fields`).
     #[serde(default)]
     skip: usize,
-    /// Engine-resolved TTS params for the active model. Sparse map on the wire;
-    /// re-resolved here against THIS process's active model (model-switch race).
+    /// Re-resolved against this process's active model after crossing the wire.
     #[serde(default)]
     params: ds_config::TtsParamMap,
 }
@@ -533,7 +532,6 @@ pub(crate) fn serve() -> ! {
         text: String,
         /// Already-played batches (see `ServeReq::skip`).
         skip: usize,
-        /// Raw wire params (see `ServeReq::params`).
         params: ds_config::TtsParamMap,
     }
     struct State {
@@ -1279,8 +1277,7 @@ pub(crate) fn serve() -> ! {
         // model active at enqueue time, so a voice from the old model's catalog must not reach
         // this model's backend (which has no per-voice fallback and would drop the utterance).
         let voice = ds_tts::enumerate::supported_voice(model, &voice);
-        // And on the params axis: resolve_params keeps what validates against THIS
-        // model and falls everything else to defaults — the utterance still plays.
+        // Model switches fall stale settings back to the new descriptor's defaults.
         let params = model.descriptor().resolve_params(&params);
         let cancelled = || cancel.load(Ordering::SeqCst);
         let batches =

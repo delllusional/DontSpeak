@@ -53,8 +53,7 @@ pub(crate) enum TargetState {
 pub(crate) struct DownloadState {
     /// Per-target lifecycle (Active XOR Failed XOR Done). See [`TargetState`].
     pub targets: HashMap<DownloadTarget, TargetState>,
-    /// First live progress sample `(time, done)`, excluding already-present bytes from the
-    /// transfer-rate estimate. Kept separate so byte progress stays a plain value.
+    /// First timed sample, excluding already-present bytes from rate estimates.
     pub transfer_start: HashMap<DownloadTarget, (Instant, u64)>,
     /// Warm-child self-heal hook (wired once at boot via [`wire`]). On success,
     /// [`start_download`] restarts the child iff it hosts the new model
@@ -194,9 +193,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 }
             }
         };
-        // `which` carries no provider, so the effective one is read from config here. It MUST
-        // match `compute_needs`: a narrower set leaves presence unsatisfied and the boot
-        // autofetch re-queues this target forever.
+        // Match compute_needs or boot will requeue an incompletely fetched target forever.
         let cuda_assets = |model: ds_config::TtsModel| {
             paths.as_ref().is_some_and(|paths| {
                 ds_model::tts_wants_cuda_assets(
@@ -429,7 +426,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))
     } else {
         let target = DownloadTarget::portable_for_tts(cfg.tts_model);
-        // Same effective-provider predicate `start_download` fetches with, or the pair loops.
+        // Must match start_download's effective-provider predicate.
         let cuda_assets = ds_model::tts_wants_cuda_assets(cfg.tts_model, cfg.tts_provider_token());
         (!(ds_model::tts_model_files_present(cfg.tts_model, cuda_assets)
             && exists(ds_model::onnxruntime_dylib_path())))

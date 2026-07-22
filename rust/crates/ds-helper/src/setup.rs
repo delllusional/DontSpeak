@@ -30,8 +30,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Some(DownloadTarget::Onnxruntime) => {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
-        // Shared set only, matching the staged `prefetch_items` manifest: the installer has no
-        // host CUDA probe, and asking for an unstaged asset would hit the network mid-install.
+        // Match the staged shared set; installers have no host CUDA probe.
         Some(DownloadTarget::KokoroModel) => {
             ds_model::run_setup_tts_model_with_progress(ds_config::TtsModel::Kokoro, false, &p)
                 .map(|_| ())

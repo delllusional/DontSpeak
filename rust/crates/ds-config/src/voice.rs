@@ -82,10 +82,8 @@ impl TtsVoicePools {
     }
 }
 
-/// Per-engine/model TTS setting overrides (`[tts_params.<target>]`). Sparse: only set
-/// keys are stored; descriptor defaults fill at resolve time
-/// ([`TtsModelDescriptor::resolve_params`]). Each block survives a model switch
-/// (mirrors `tts_voices`).
+/// Sparse `[tts_params.<target>]` overrides. Descriptor defaults fill on resolution;
+/// blocks survive model switches.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct TtsParamPools {
     #[serde(skip_serializing_if = "TtsParamMap::is_empty")]
@@ -165,9 +163,7 @@ impl TtsParamPools {
 }
 
 impl<'de> serde::Deserialize<'de> for TtsParamPools {
-    /// Fail-open per ENTRY, not per block: a typo'd key or out-of-range value drops
-    /// (named by [`VoiceConfig::load`]'s warn pass — deliberately stronger than the
-    /// silent `de_*` precedent) while the valid siblings survive.
+    /// Drop invalid entries independently so valid siblings survive.
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(d).unwrap_or_default();
         Ok(Self::from_value(&value))
@@ -510,12 +506,10 @@ impl VoiceConfig {
             .unwrap_or(default)
     }
 
-    /// Persisted System playback rate (default 1.0).
     pub fn system_rate(&self) -> f32 {
         Self::stored_rate("system", SYSTEM_TTS_PARAMS, &self.tts_params.system)
     }
 
-    /// Persisted playback rate for a built-in model. Models without rate control return 1.0.
     pub fn model_rate(&self, model: TtsModel) -> f32 {
         let descriptor = model.descriptor();
         Self::stored_rate(
@@ -571,9 +565,7 @@ impl VoiceConfig {
     }
 }
 
-/// Name every `[tts_params]` entry the fail-open deserializer will drop. Runs on the
-/// raw table because the deserializer has no `Paths` and its output no longer shows
-/// what was dropped.
+/// Warn from the raw table before fail-open deserialization discards invalid entries.
 fn warn_dropped_tts_params(table: &toml::Table, paths: &Paths) {
     let warn = |message: &str| log(&paths.log_file, LogLevel::Warn, "config", message);
     let Some(params) = table.get("tts_params") else {
@@ -931,13 +923,9 @@ pub(crate) mod tests {
 
     #[test]
     fn tts_params_parse_per_entry_fail_open() {
-        // Absent ⇒ empty pools (descriptor defaults at resolve time).
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
         assert!(v.tts_params.is_empty());
         assert!(VoiceConfig::known_keys().contains("tts_params"));
-        // Valid entries stay; an out-of-range value, an undeclared key, a stale
-        // other-model key, and an unknown model block all drop WITHOUT disturbing the
-        // valid siblings (fail-open per entry, not per block).
         let v: VoiceConfig = serde_json::from_str(
             r#"{"tts_params":{
                 "system":{"rate":1.25,"language":"en"},
@@ -961,7 +949,6 @@ pub(crate) mod tests {
         assert!(v.tts_params.qwen.is_empty(), "out-of-range drops");
         assert_eq!(v.tts_params.omnivoice["steps"], TtsParamValue::Int(8));
         assert!(!v.tts_params.omnivoice.contains_key("exaggeration"));
-        // Wrong-shape values fail open to empty pools, never an error.
         for raw in [r#"{"tts_params":7}"#, r#"{"tts_params":{"qwen":"fast"}}"#] {
             let v: VoiceConfig = serde_json::from_str(raw).unwrap();
             assert!(v.tts_params.is_empty(), "{raw}");
@@ -970,8 +957,6 @@ pub(crate) mod tests {
 
     #[test]
     fn tts_params_round_trip_through_write_and_load() {
-        // Set blocks survive write→load; the empty default serializes ABSENT (no
-        // spurious [tts_params] table, no unknown-key warn on old files). Tempdir only.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         let mut cfg = VoiceConfig::default();
@@ -993,7 +978,6 @@ pub(crate) mod tests {
         write_settings(&paths, &cfg).unwrap();
         let loaded = VoiceConfig::load(&paths);
         assert_eq!(loaded.tts_params, cfg.tts_params);
-        // The resolved view merges the override with defaults.
         let resolved = TtsModel::OmniVoice
             .descriptor()
             .resolve_params(loaded.tts_params.for_model(TtsModel::OmniVoice));
@@ -1724,7 +1708,6 @@ pub(crate) mod tests {
     fn changes_since_flags_only_what_changed() {
         let base = VoiceConfig::default();
 
-        // A voice/rate setting change flags nothing warm.
         let only_voice = VoiceConfig {
             tts_voices: TtsVoicePools {
                 kokoro: vec!["am_michael".into()],

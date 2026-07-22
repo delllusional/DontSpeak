@@ -76,12 +76,8 @@ fn mlx_project_obj(r: &crate::mlx_repo::MlxRepo) -> Value {
     })
 }
 
-/// A TTS set's catalog entries: the model project plus one entry per attribution
-/// partition ([`crate::tts_assets::DerivedAttribution`]). Every pinned file (CUDA-only
-/// assets included) appears exactly once — in its partition's entry when partitioned,
-/// else in the model entry — so no downloaded asset shows up licence-less or
-/// double-attributed. Partitions affect THIS shaping only; download/presence paths keep
-/// reading `files`/`files_for`.
+/// Shape the model and attribution partitions so each pinned file appears once.
+/// Partitions affect catalog attribution only, not download or presence checks.
 fn tts_project_objs(set: &crate::tts_assets::TtsOrtAssetSet) -> Vec<Value> {
     let partitioned: Vec<&str> = set
         .attribution_partitions
@@ -261,9 +257,7 @@ mod tests {
                 "project `{}` has no files",
                 p["name"]
             );
-            // Everything under upstream `audio_tokenizer/` derives from Boson's Higgs
-            // Audio 2 — an Apache-2.0 claim over such a file is the misattribution the
-            // OmniVoice partition exists to prevent.
+            // Boson's `audio_tokenizer/` files must not inherit OmniVoice's code license.
             if p["license"].as_str() == Some("Apache-2.0") {
                 for f in p["files"].as_array().unwrap() {
                     assert!(
@@ -277,9 +271,6 @@ mod tests {
         }
     }
 
-    /// Every pinned TTS file appears in the catalog exactly once: partitioned files under
-    /// their derived project, the rest under the model entry — the exactly-once guarantee
-    /// `tts_project_objs` provides.
     #[test]
     fn tts_attribution_partitions_cover_every_file_exactly_once() {
         let cat = catalog();
@@ -295,8 +286,6 @@ mod tests {
                 .map(|f| f["url"].as_str().unwrap().to_string())
                 .collect()
         };
-        // Kokoro is cataloged from `urls::KOKORO` + `urls::KOKORO_G2P` (see the collector),
-        // so the shaping under test only covers the non-Kokoro sets.
         for set in crate::tts_assets::TTS_ORT_ASSETS
             .iter()
             .filter(|set| set.model != ds_config::TtsModel::Kokoro)

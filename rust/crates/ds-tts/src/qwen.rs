@@ -15,9 +15,7 @@ use tokenizers::pre_tokenizers::split::{Split, SplitPattern};
 use tokenizers::pre_tokenizers::PreTokenizerWrapper;
 use tokenizers::SplitDelimiterBehavior;
 
-/// Qwen2 pre-tokenizer regex (`transformers.models.qwen2.tokenization_qwen2.PRETOKENIZE_REGEX`).
-/// Unlike GPT-2's ByteLevel default, an optional leading non-letter/non-digit stays with the
-/// following letters (`-seven`, `'S`, `.com`, `(hello`…), so BPE sees the in-distribution spans.
+/// Qwen2 regex; leading punctuation stays with letters so BPE sees trained spans.
 const QWEN2_PRETOKENIZE_REGEX: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 const GROUPS: usize = 16;
@@ -207,8 +205,6 @@ impl QwenSynth {
         if cancelled() {
             return Ok(Vec::new());
         }
-        // Declared param, default 1.05 (the reference generation_config value this port
-        // hardcoded before the parameter surface).
         let repetition_penalty = params.float(ds_config::TtsModel::Qwen, "repetition_penalty");
         let input_ids = self.tokenize(&format!(
             "<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n"
@@ -504,8 +500,7 @@ fn load_tokenizer(dir: &Path) -> Result<tokenizers::Tokenizer, String> {
     .build()
     .map_err(|error| format!("qwen BPE load: {error}"))?;
     let mut tokenizer = tokenizers::Tokenizer::new(model);
-    // Qwen2: Split(regex, Isolated) then ByteLevel(use_regex=false). GPT-2 ByteLevel(use_regex=true)
-    // alone yields OOD ids on hyphenated numbers, contractions, domains, and open-paren words.
+    // GPT-2 ByteLevel splitting yields out-of-distribution ids for Qwen2 punctuation spans.
     let byte_level = ByteLevel::new(false, false, false);
     let split = Split::new(
         SplitPattern::Regex(QWEN2_PRETOKENIZE_REGEX.to_owned()),
@@ -782,8 +777,6 @@ mod tests {
         assert_eq!(scores, vec![2.0, -4.0, 3.0]);
     }
 
-    /// Qwen2 keeps an optional leading non-letter with the following letters; GPT-2's regex
-    /// peels it off. These are the spans that went OOD on the real model (issue #163).
     #[test]
     fn qwen2_pretokenizer_regex_matches_upstream_splits() {
         let split = Split::new(
@@ -810,15 +803,10 @@ mod tests {
         }
     }
 
-    /// Hermetic id parity: tiny BPE where merges only form multi-char tokens inside a single
-    /// pretoken. With the Qwen2 pre-tokenizer, the divergent cases encode to the composite
-    /// ids; GPT-2-style ByteLevel(use_regex=true) would leave them unmerged.
     #[test]
     fn qwen_tokenizer_encodes_hyphen_contraction_domain_paren_as_upstream() {
         let dir = tempfile::tempdir().unwrap();
-        // Character seeds + composites that BPE only reaches when the pretoken is joined.
         let mut vocab = BTreeMap::new();
-        // Every single-char token that appears in merges.txt must be present or BPE::from_file fails.
         for (i, ch) in [
             'f', 'i', 't', 'y', '-', 's', 'e', 'v', 'n', 'I', 'T', '\'', 'S', 'x', 'a', 'm', 'p',
             'l', 'c', 'o', '.', '(', 'h',
@@ -867,7 +855,6 @@ mod tests {
             serde_json::to_string(&vocab).unwrap(),
         )
         .unwrap();
-        // Ranked merges that build the composites left-to-right from single chars.
         let merges = "\
 #version: 0.2
 f i

@@ -31,7 +31,6 @@ struct PlayingClaim {
     session: Option<String>,
     /// Speech, not a cue — the in-flight half of the depth the status reports.
     speech: bool,
-    /// Filled after the play gate resolves the live model, voice, and language.
     utterance: Option<ds_status::UtteranceStatus>,
 }
 
@@ -211,7 +210,6 @@ struct Item {
     resume_skip: usize,
 }
 
-/// Lock-light queue snapshot consumed by `model_status`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TtsStatusSample {
     pub speaking: bool,
@@ -977,10 +975,7 @@ impl TtsQueue {
         self.tts_active.load(Ordering::SeqCst)
     }
 
-    /// Queue activity for `model_status`. Queued counts utterances still outstanding:
-    /// those waiting plus the one being spoken.
-    /// Reads only atomics + the short-lived `playing` lock: status must never wait on
-    /// `items`, which cancel paths hold across helper-child I/O.
+    /// Status snapshot that never waits on `items`, which spans helper I/O.
     pub fn tts_status_sample(&self) -> TtsStatusSample {
         let active = self.is_tts_active();
         let pending = self.queue_depth.load(Ordering::SeqCst);
@@ -991,9 +986,7 @@ impl TtsQueue {
             .as_ref()
             .map(|claim| claim.source)
             .filter(|source| source.is_client());
-        // The utterance being spoken is outstanding work, so it counts. No extra publish:
-        // `set_tts_active` already bumps the gate on both edges of playback, which is
-        // exactly when this addend appears and disappears.
+        // Playback edges already publish changes to this in-flight addend.
         let speaking_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
         TtsStatusSample {
             speaking: active,
@@ -1045,8 +1038,7 @@ impl TtsQueue {
         }
     }
 
-    /// Publish resolution before `tts_active` flips so the same status-gate wake exposes
-    /// the voice and language atomically with `activity.speaking = true`.
+    /// Publish resolution before the speaking transition so one wake exposes both.
     fn publish_resolved_utterance(&self, utterance: ds_status::UtteranceStatus) {
         if let Some(claim) = self.playing.lock().unwrap().as_mut()
             && claim.speech
@@ -1426,7 +1418,6 @@ impl TtsQueue {
                 None => base_voice,
             };
             let rate = playback_rate(&cfg, engine, rate_override);
-            // Stored per-model overrides → complete validated set for the active model.
             let params = cfg
                 .tts_model
                 .descriptor()
@@ -1491,18 +1482,8 @@ impl TtsQueue {
         self.tts.cue(&path).map_err(|e| e.to_string())
     }
 
-    /// Play one queued block on the warm child using the resolved `engine` (config or a
-    /// session override) and `voice`. `None` = TTS off — never speak (defensive; items
-    /// shouldn't be enqueued when off).
-    ///
-    /// RESUME SAFETY: `skip` is the item's [`Item::resume_skip`] — a requeued item is
-    /// the SAME item (same text), and the helper's frontend is deterministic, so batch
-    /// indices are stable across the runs of one item. The helper clamps `skip`, so a
-    /// residual voice/rate change between runs (shifting batch counts) degrades to an
-    /// empty remainder — never a panic, at worst a dropped tail. Muted-but-draining
-    /// batches count as played (mute consumes speech — today's semantics). System TTS
-    /// has no batch granularity (`skip` ignored); mute still consumes — no spawn when
-    /// already muted, kill of in-flight OS synth on live mute (`speak_system` / `set_muted`).
+    /// Resume uses deterministic helper batch indices; stale `skip` values clamp safely.
+    /// System TTS ignores `skip`. Mute consumes speech in either path.
     #[allow(clippy::too_many_arguments)] // one wire request's fields
     fn speak_one(
         &self,
@@ -1674,8 +1655,7 @@ enum GateOutcome {
         engine: Option<ds_config::TtsEngine>,
         voice: String,
         rate: f32,
-        /// Resolved for the model active at gate time; the helper re-resolves against
-        /// ITS active model (model-switch race — clamp to defaults, never refuse).
+        /// Helper re-resolution handles model-switch races by falling back to defaults.
         params: ds_config::ResolvedTtsParams,
     },
     Requeue,

@@ -267,7 +267,6 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
     Ok(out)
 }
 
-/// One declared TTS parameter for the `voices` output (key/kind/default/range/visible).
 fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
     let mut out = json!({ "key": param.key, "visible": param.user_visible });
     match param.kind {
@@ -294,8 +293,6 @@ fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
     out
 }
 
-/// Configured engine/voices/rates + live playback. `detail` adds model lifecycle/stats.
-/// Read-only — never spawns the engine.
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
     let a: StatusArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid status arguments: {e}"))?;
@@ -303,8 +300,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         return Err("status: `timeout_ms` requires `since`".into());
     }
     let cfg = VoiceConfig::load(paths);
-    // One round-trip feeds both the concise `state` block and `detail`; `since` selects
-    // the engine's existing change-gated long poll instead of client-side spinning.
+    // Share one probe between concise and detailed output; `since` selects engine long-poll.
     let probe = probe_engine(sock, a.since, a.timeout_ms.unwrap_or(30_000));
     // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
     // (previously silently dropped the configured engine name).
@@ -362,13 +358,9 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     Ok(out)
 }
 
-/// Outcome of the `status` tool's single `ModelStatus` probe. Read-only: an absent or
-/// unreachable engine reports `running: false`, never an error.
 enum EngineProbe {
-    /// No socket path resolved.
     Unresolved,
     Unreachable,
-    /// Engine answered, but not with a `model_status` object.
     Invalid,
     Live(Box<ds_status::ModelStatus>),
 }

@@ -598,11 +598,7 @@ pub const SEPFORMER_PROJECT: Project = Project {
     files: &[SEPFORMER],
 };
 
-/// Higgs Audio 2 tokenizer decoder redistributed inside the OmniVoice ONNX export
-/// (upstream `audio_tokenizer/` tree). Boson's community license, not the CC-BY-NC
-/// weights license and not upstream's Apache-2.0 (which covers code only). Files come
-/// from the OmniVoice set's attribution partition
-/// (`crate::tts_assets::TtsOrtAssetSet::attribution_partitions`), not from here.
+/// Boson-licensed Higgs tokenizer files attributed through OmniVoice's partition.
 pub const OMNIVOICE_HIGGS_TOKENIZER: Project = Project {
     name: "Higgs Audio 2 tokenizer",
     usage: "Audio-token waveform decoder for OmniVoice",
@@ -613,9 +609,7 @@ pub const OMNIVOICE_HIGGS_TOKENIZER: Project = Project {
     files: &[],
 };
 
-/// The OmniVoice LLM backbone re-export THIS PROJECT publishes (the one derived work
-/// DontSpeak redistributes — see NOTICE.md). Same CC-BY-NC terms as the upstream
-/// weights it derives from; files come from the OmniVoice set's attribution partition.
+/// DontSpeak's CC-BY-NC OmniVoice backbone re-export, attributed through its partition.
 pub const OMNIVOICE_BIDI_EXPORT: Project = Project {
     name: "OmniVoice bidirectional ONNX export",
     usage: "Bidirectional ONNX re-export of the OmniVoice diffusion backbone (plain SDPA forward, 4-D bool mask, no KV cache, embed_tokens dropped)",

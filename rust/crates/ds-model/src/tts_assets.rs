@@ -291,10 +291,8 @@ hf_asset!(
     "38e69afe9c9aa531fa59f23337d7fecbe84b7b04dc9c3ce0b871249a1c659ad4",
     16_795_584
 );
-// The single fp32 LLM profile for every provider (verified on the CPU and CUDA EPs;
-// fp16 does not exist and int8 was rejected for 11% relative hidden-state error). The
-// on-disk name MUST stay the basename the graph's external-data references embed
-// (`llm_backbone_fp32.onnx.data`), or the weights fail to resolve at load.
+// One fp32 profile serves every EP. Keep the on-disk basename embedded by the graph or
+// its external weights will not resolve.
 hf_asset!(
     OMNI_LLM,
     "llm_backbone_fp32.onnx",
@@ -413,10 +411,8 @@ static OMNIVOICE_FILES: [Download; 11] = [
     OMNI_WAVE_DECODER,
     OMNI_WAVE_DECODER_DATA,
 ];
-/// Files inside one pinned set whose upstream license differs from the set's own.
-/// Consumed ONLY by the Libraries attribution (`crate::libraries`): presence and
-/// download paths keep reading `files`/`files_for`, so a partitioned file still
-/// downloads with its set — moving it into the [`urls::Project`] would stop that.
+/// Attribution-only partitions for files with a different upstream license. Downloads
+/// and presence checks still use the parent set.
 #[derive(Debug)]
 pub struct DerivedAttribution {
     pub project: &'static urls::Project,
@@ -440,9 +436,9 @@ static OMNIVOICE_ATTRIBUTION_PARTITIONS: [DerivedAttribution; 2] = [
 pub struct TtsOrtAssetSet {
     pub model: TtsModel,
     pub dir_name: Option<&'static str>,
-    /// Files every provider needs. CUDA additionally needs [`Self::cuda_files`].
+    /// Files every provider needs.
     pub files: &'static [Download],
-    /// Assets only a CUDA-realized load reads (empty when the model ships one profile).
+    /// Additional assets for CUDA-realized loads.
     pub cuda_files: &'static [Download],
     pub display_name: &'static str,
     /// Explicit project page for the Libraries-tab attribution — never derived from a
@@ -450,7 +446,6 @@ pub struct TtsOrtAssetSet {
     pub homepage: &'static str,
     pub license: &'static str,
     pub license_url: &'static str,
-    /// Attribution-only license partitions ([`DerivedAttribution`]).
     pub attribution_partitions: &'static [DerivedAttribution],
 }
 
@@ -495,8 +490,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
         cuda_files: &[],
         display_name: "OmniVoice",
         homepage: "https://huggingface.co/onnx-community/OmniVoice-Onnx",
-        // Upstream's Apache-2.0 covers the OmniVoice CODE only; the published weights are
-        // CC-BY-NC 4.0, and the Higgs decoder pair carries Boson's license (partition).
+        // Apache-2.0 covers code, not these weights; Higgs files use a partition.
         license: "CC-BY-NC-4.0",
         license_url: "https://creativecommons.org/licenses/by-nc/4.0/",
         attribution_partitions: &OMNIVOICE_ATTRIBUTION_PARTITIONS,
@@ -504,9 +498,7 @@ pub static TTS_ORT_ASSETS: [TtsOrtAssetSet; 4] = [
 ];
 
 impl TtsOrtAssetSet {
-    /// Every file a load needs under the given effective provider. ONE iterator for the byte
-    /// total and the step list: split, the progress ring would hit 100 % with the CUDA
-    /// weights still pending.
+    /// Single source for byte totals and steps so progress cannot finish before CUDA extras.
     pub fn files_for(&self, cuda_assets: bool) -> impl Iterator<Item = &'static Download> {
         let extra: &'static [Download] = if cuda_assets { self.cuda_files } else { &[] };
         self.files.iter().chain(extra)
@@ -517,8 +509,7 @@ pub fn tts_ort_asset_set(model: TtsModel) -> &'static TtsOrtAssetSet {
     &TTS_ORT_ASSETS[model as usize]
 }
 
-/// Whether the CUDA runtime this build can load is installed. Always false where no CUDA
-/// runtime is published for the target.
+/// False on targets without a published CUDA runtime.
 pub fn cuda_runtime_available() -> bool {
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
@@ -536,17 +527,12 @@ pub fn cuda_runtime_available() -> bool {
     }
 }
 
-/// The EFFECTIVE provider question every presence/download path must ask: does this model
-/// pin CUDA-only assets, does config prefer a GPU, AND is the CUDA runtime actually here?
-/// The configured preference alone is not enough — `auto` prefers CUDA on every
-/// Windows/Linux box, which would fetch weights those hosts can never load.
+/// Select CUDA assets only when both preference and an installed runtime allow CUDA.
 pub fn tts_wants_cuda_assets(model: TtsModel, preference: &str) -> bool {
     tts_wants_cuda_assets_with(model, preference, cuda_runtime_available())
 }
 
-/// Pure form of [`tts_wants_cuda_assets`] with the runtime probe injected. Shared with
-/// `TtsManager::resolve_provider_with_availability` so asset presence and the realized
-/// provider cannot drift apart.
+/// Injected-runtime form shared with provider realization to prevent drift.
 pub fn tts_wants_cuda_assets_with(model: TtsModel, preference: &str, cuda_available: bool) -> bool {
     model.descriptor().wants_cuda(preference) && cuda_available
 }
@@ -563,9 +549,7 @@ pub fn tts_model_file_path(model: TtsModel, file_name: &str) -> Option<PathBuf> 
     Some(tts_model_dir(model)?.join(file_name))
 }
 
-/// `cuda_assets` is the EFFECTIVE provider ([`tts_wants_cuda_assets`]), never the configured
-/// preference. Pass `false` to ask only for the shared set — the CUDA extras are optional at
-/// load time, since a missing pair falls back to CPU rather than failing.
+/// `cuda_assets` is the effective-provider decision, not the raw preference.
 pub fn tts_model_files_present(model: TtsModel, cuda_assets: bool) -> bool {
     let Some(dir) = tts_model_dir(model) else {
         return false;
@@ -575,7 +559,6 @@ pub fn tts_model_files_present(model: TtsModel, cuda_assets: bool) -> bool {
         .all(|file| dir.join(file.file_name).is_file())
 }
 
-/// Checksum-verified counterpart of [`tts_model_files_present`]; same `cuda_assets` contract.
 pub fn is_tts_model_present(model: TtsModel, cuda_assets: bool) -> bool {
     let Some(dir) = tts_model_dir(model) else {
         return false;
@@ -594,9 +577,7 @@ fn spec(file: &Download) -> ModelSpec {
     }
 }
 
-/// Fetch the set for `model`. `cuda_assets` is the EFFECTIVE provider
-/// ([`tts_wants_cuda_assets`]); the total and the steps must come from the same
-/// [`TtsOrtAssetSet::files_for`] call.
+/// Fetch one effective-provider set, using the same iterator for totals and steps.
 pub fn run_setup_tts_model_with_progress(
     model: TtsModel,
     cuda_assets: bool,
@@ -669,7 +650,6 @@ mod tests {
         );
 
         let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);
-        // The LLM is the single fp32 bidirectional export — never an int4/CUDA variant.
         assert!(
             omnivoice
                 .files
@@ -686,8 +666,6 @@ mod tests {
         }));
     }
 
-    /// One fp32 LLM profile serves every provider, so no model pins CUDA-only bytes and
-    /// the shared set never smuggles a `cuda/` asset in.
     #[test]
     fn no_model_pins_cuda_only_assets() {
         assert!(tts_ort_asset_set(TtsModel::OmniVoice).cuda_files.is_empty());
@@ -700,8 +678,6 @@ mod tests {
         }
     }
 
-    /// Presence, byte totals, and download steps all read `files_for`, so the CUDA extras are
-    /// listed only for a CUDA-effective load — and never for a model with one pinned profile.
     #[test]
     fn cuda_extras_are_listed_only_for_a_cuda_effective_load() {
         for model in TtsModel::ALL.iter().copied() {
@@ -716,9 +692,6 @@ mod tests {
         assert!(tts_ort_asset_set(TtsModel::Qwen).cuda_files.is_empty());
     }
 
-    /// The configured preference is not the effective provider: `auto` prefers CUDA on every
-    /// Windows/Linux box, so gating downloads on it alone would fetch GPU weights hosts
-    /// without a CUDA runtime can never load.
     #[test]
     fn cuda_assets_need_the_runtime_not_just_the_preference() {
         for preference in ["auto", "cuda"] {
@@ -745,9 +718,6 @@ mod tests {
         ));
     }
 
-    /// Attribution partitions cover only files the set actually pins, exactly once. The
-    /// Libraries catalog moves these files into their derived project entry; a stray or
-    /// duplicated URL there would double- or mis-attribute a download.
     #[test]
     fn attribution_partitions_reference_set_files_exactly_once() {
         for model in TtsModel::ALL.iter().copied() {
@@ -774,9 +744,6 @@ mod tests {
         }
     }
 
-    /// Licensing regression: the OmniVoice WEIGHTS are CC-BY-NC 4.0 (upstream's
-    /// Apache-2.0 covers code only), and everything under upstream `audio_tokenizer/`
-    /// derives from Boson's Higgs Audio 2 — the exact misattributions that shipped once.
     #[test]
     fn omnivoice_licensing_is_never_apache() {
         let omnivoice = tts_ort_asset_set(TtsModel::OmniVoice);

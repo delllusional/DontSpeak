@@ -35,9 +35,7 @@ pub(crate) fn fetch(
     rows
 }
 
-/// Post-401 keychain fallback: a readable copy retries, a guarded item surfaces
-/// authorize (the ACL prompt is exactly what recovers it), an absent or
-/// unreadable one keeps the original refusal.
+/// After a 401, retry readable keychain data, surface guarded access, or keep refusal.
 fn keychain_retry(probe: KeychainProbe) -> Result<Option<Value>, FetchError> {
     match probe {
         KeychainProbe::Data(bytes) => Ok(credentials_from_bytes(bytes).ok()),
@@ -117,7 +115,6 @@ fn resolve_credentials(
     now_ms: i64,
     probe: impl FnOnce() -> KeychainProbe,
 ) -> Result<(Value, CredentialSource), FetchError> {
-    // No keychain to fall back on: preserve whether the file token is lapsed or absent.
     let no_keychain = match file {
         Ok(credentials) if !is_expired(&credentials, now_ms) => {
             return Ok((credentials, CredentialSource::File));
@@ -426,10 +423,6 @@ mod tests {
         assert_eq!(token_of(&resolved), Some("file"));
     }
 
-    // keychain_retry table — the post-401 fallback (synthetic probes).
-
-    /// Revoked file token + ACL-guarded keychain copy: the one state where the
-    /// authorize prompt genuinely recovers live stats — it must stay Guarded.
     #[test]
     fn refused_file_token_with_a_guarded_keychain_offers_authorize() {
         assert!(matches!(

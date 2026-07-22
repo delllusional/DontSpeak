@@ -61,9 +61,7 @@ impl TtsVoiceUpdates {
     }
 }
 
-/// Partial update for the nested `tts_params` config object. A provided map REPLACES
-/// that engine/model's stored overrides (`{}` = reset to defaults); apply validates
-/// every entry strictly via its descriptor.
+/// Provided maps replace stored overrides; `{}` resets defaults. Entries validate strictly.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TtsParamUpdates {
@@ -197,8 +195,7 @@ impl SetConfigArgs {
         } = self;
 
         let mut changes = Vec::new();
-        // The call's FINAL engine: an explicit `tts_engine` arg wins, else config resolution.
-        // The full-duplex capability gate below applies only to built-in TTS.
+        // The full-duplex gate uses the post-call engine and applies only to built-in TTS.
         let final_engine = match &tts_engine {
             Some(pref) => pref.first().copied(),
             None => cfg.resolved_tts(),
@@ -807,8 +804,6 @@ mod tests {
         assert_eq!(changes, vec!["tts_model=omnivoice"]);
     }
 
-    /// Mirror of `model_change_preserves_per_model_pools` for the params axis: a model
-    /// switch must not clear another model's stored overrides.
     #[test]
     fn model_change_preserves_per_model_param_pools() {
         use ds_config::TtsParamValue;
@@ -863,8 +858,6 @@ mod tests {
             changes.contains(&"tts_params.omnivoice=defaults".to_string()),
             "{changes:?}"
         );
-        // An integral number coerces to the declared Float kind (parity with the
-        // config-file path).
         let args: SetConfigArgs = serde_json::from_value(serde_json::json!({
             "tts_params": { "chatterbox": { "exaggeration": 1 } }
         }))
@@ -878,7 +871,6 @@ mod tests {
 
     #[test]
     fn tts_params_apply_rejects_undeclared_and_out_of_range() {
-        // Strict rejection — and the failed call must not partially mutate the config.
         let mut cfg = VoiceConfig::default();
         let reject = |json: serde_json::Value| {
             serde_json::from_value::<SetConfigArgs>(json)
@@ -904,7 +896,6 @@ mod tests {
         assert!(err.contains("0.25 to 2"), "{err}");
         let err = reject(serde_json::json!({ "tts_params": {} }));
         assert!(err.contains("at least one engine or model"), "{err}");
-        // Unknown model key is a parse error (deny_unknown_fields).
         assert!(
             serde_json::from_value::<SetConfigArgs>(
                 serde_json::json!({ "tts_params": { "wavenet": { "steps": 8 } } })
@@ -919,8 +910,6 @@ mod tests {
         assert!(cfg.tts_params.omnivoice.is_empty(), "no partial mutation");
     }
 
-    /// Forced `built_in` in the same call: model-descriptor gates apply before the
-    /// later engine-usability check.
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn full_duplex_rejects_for_built_in_chatterbox() {

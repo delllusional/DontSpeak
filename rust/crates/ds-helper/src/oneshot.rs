@@ -34,8 +34,7 @@ fn load_kokoro() -> Result<KokoroSynth, String> {
 }
 
 fn ensure_ort(model: ds_config::TtsModel) -> Result<(), String> {
-    // Shared set only: absent CUDA-only assets must not block the load, which falls back to
-    // the CPU profile (`ort_session::load_with_fallback`).
+    // Shared assets suffice because missing CUDA extras fall back to CPU.
     if !ds_model::is_tts_model_present(model, false) {
         return Err(format!("{} model not downloaded", model.as_str()));
     }
@@ -272,7 +271,6 @@ pub(crate) struct SynthesisRequest<'a> {
     pub(crate) voice: &'a str,
     pub(crate) language: &'a str,
     pub(crate) rate: f32,
-    /// Complete validated params for the active model (`resolve_params` output).
     pub(crate) params: &'a ds_config::ResolvedTtsParams,
 }
 
@@ -322,7 +320,6 @@ pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
         Ok(())
     };
     let mut backend = load_backend()?;
-    // One-shot mode reads no config: descriptor defaults.
     let params = model.descriptor().resolve_params(&Default::default());
     prepare_backend_audio(
         &mut backend,
@@ -363,8 +360,7 @@ pub(crate) fn synth_check(
     }
     let mut backend = load_backend_unwarmed(model)?;
     let mut pcm: Vec<f32> = Vec::new();
-    // Descriptor defaults, deliberately ignoring config: the check reports the model's
-    // baseline render (the same one the parity gates compare).
+    // Synth checks use descriptor defaults, independent of user config.
     let params = model.descriptor().resolve_params(&Default::default());
     prepare_backend_audio(
         &mut backend,
@@ -397,8 +393,7 @@ pub(crate) fn synth_check(
     health_verdict(&health)
 }
 
-/// Amplitude profile of one rendered utterance. `crest` is rms/peak (the INVERSE crest
-/// factor): speech is peaky (low ratio), stationary noise/tones are not.
+/// `crest` is RMS/peak: speech is peaky; stationary noise and tones are not.
 struct AudioHealth {
     samples: usize,
     non_finite: usize,
@@ -436,20 +431,7 @@ fn audio_health(pcm: &[f32]) -> AudioHealth {
     }
 }
 
-/// Ceilings measured on this workstation (release builds, one sentence each) before
-/// pinning; speech sits well under both, degenerate renders well over:
-///
-/// | model     | provider | peak   | rms    | rms/peak |
-/// |-----------|----------|--------|--------|----------|
-/// | kokoro    | CPU      | 0.6775 | 0.0937 | 0.138    |
-/// | kokoro    | CUDA     | 0.6702 | 0.0936 | 0.140    |
-/// | omnivoice | CPU      | 0.8950 | 0.1190 | 0.133    |
-/// | omnivoice | CUDA*    | 0.8950 | 0.1190 | 0.133    |
-///
-/// (*backbone on CUDA, Higgs decoder on CPU — #165.) Chatterbox/Qwen were not on this
-/// disk; their bands are extrapolated from the same 24 kHz speech family and the
-/// degenerate references (broken OmniVoice decode rendered rms 0.49 noise at ratio
-/// ~0.58; a pure tone sits at 0.707). No ZCR gate: margins are wide (>3x) without it.
+// Measured speech stays below 0.14 RMS/peak; stationary noise and tones exceed 0.58.
 const RMS_CEILING: f32 = 0.35;
 const RMS_PEAK_RATIO_CEILING: f32 = 0.45;
 
@@ -566,7 +548,7 @@ mod tests {
         }
     }
 
-    /// Deterministic pseudo-noise in [-1, 1] (LCG; no rand dep, no seed drift).
+    // Fixed LCG avoids a rand dependency.
     fn white_noise(len: usize) -> Vec<f32> {
         let mut state: u32 = 0x1234_5678;
         (0..len)
@@ -579,7 +561,6 @@ mod tests {
 
     #[test]
     fn white_noise_fails_the_amplitude_verdict() {
-        // Uniform noise has rms/peak ~0.58 — over both ceilings.
         let health = audio_health(&white_noise(24_000));
         assert!(health.crest > 0.5, "measured {:.3}", health.crest);
         assert!(health_verdict(&health).is_err());
@@ -587,7 +568,6 @@ mod tests {
 
     #[test]
     fn a_pure_tone_fails_the_ratio_gate_even_at_speech_loudness() {
-        // sin has rms/peak = 0.707 regardless of amplitude; a quiet tone must still fail.
         let tone: Vec<f32> = (0..24_000).map(|i| 0.2 * (i as f32 * 0.05).sin()).collect();
         let health = audio_health(&tone);
         assert!(health.rms < RMS_CEILING, "quiet tone passes the rms gate");
@@ -597,7 +577,6 @@ mod tests {
 
     #[test]
     fn a_silence_padded_burst_passes_like_speech() {
-        // Peaky content over mostly-silence — the amplitude shape speech has.
         let mut pcm = vec![0.0f32; 24_000];
         for (i, sample) in pcm[8_000..9_000].iter_mut().enumerate() {
             *sample = 0.7 * (i as f32 * 0.3).sin();
@@ -617,15 +596,12 @@ mod tests {
         assert_eq!(empty.samples, 0);
         assert!(health_verdict(&empty).unwrap_err().contains("no samples"));
 
-        // Finite but inaudible.
         let silent = audio_health(&vec![0.0002f32; 480]);
         assert!(health_verdict(&silent).unwrap_err().contains("inaudible"));
     }
 
     #[test]
     fn measured_speech_bands_pass_with_margin() {
-        // The pinned table's worst row (omnivoice rms 0.119, ratio 0.133) modeled as a
-        // synthetic profile: verdict must accept everything in the measured band.
         let health = AudioHealth {
             samples: 61_440,
             non_finite: 0,
@@ -634,7 +610,6 @@ mod tests {
             crest: 0.133,
         };
         assert_eq!(health_verdict(&health), Ok(()));
-        // Degenerate reference: the broken decode's rms-0.49 noise fails both gates.
         let degenerate = AudioHealth {
             samples: 61_440,
             non_finite: 0,

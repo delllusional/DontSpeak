@@ -31,17 +31,11 @@ typedef void (*ds_mlx_str_cb)(void *ctx, const char *text);
 int32_t ds_mlx_tts_init(const char *model, const char *model_dir);
 
 // Synthesize model-ready text to mono fp32 PCM. Kokoro text is IPA; Qwen text is plain text.
-// `speed` is honored for Kokoro only; other models ignore it. `params_json` is a JSON
-// object of the active model's resolved TTS params (Rust registry keys only; see
-// ds-config's TTS param descriptors). Params are advisory: the shim applies what the
-// pinned MLX Audio API exposes (currently nothing beyond `speed`) and ignores the
-// rest; a malformed or NULL payload never fails the call.
+// `speed` is Kokoro-only. `params_json` carries resolved Rust-registry settings;
+// unsupported keys and malformed or NULL payloads never fail synthesis.
 //
-// The `2` versions the symbol for the params_json arity change: the loader resolves by
-// NAME only, so a version-skewed helper/dylib pair must fail at symbol lookup — never
-// call the old-arity export with new-arity arguments (or vice versa), which would
-// corrupt the AAPCS64 register/stack mapping. Bump the suffix on any future
-// signature change.
+// The suffix versions the call ABI because the loader resolves by name only. Bump it
+// on signature changes so version skew fails lookup instead of corrupting arguments.
 int32_t ds_mlx_tts_synthesize2(const char *text, const char *voice, const char *language,
                             float speed, const char *params_json, void *ctx, ds_mlx_pcm_cb cb);
 

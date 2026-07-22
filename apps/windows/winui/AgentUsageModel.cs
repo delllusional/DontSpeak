@@ -51,7 +51,7 @@ internal sealed record UsageCardDto(
     [property: JsonPropertyName("agent")] string Agent,
     [property: JsonPropertyName("rows")] List<UsageRowDto> Rows,
     [property: JsonPropertyName("account")] string? Account = null,
-    // Skip-when-false; true = a macOS keychain client's access is guarded (Claude Code today).
+    // True only for guarded macOS keychain access.
     [property: JsonPropertyName("needs_auth")] bool NeedsAuth = false);
 
 internal sealed record UsageRowDto(

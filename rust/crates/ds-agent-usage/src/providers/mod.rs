@@ -15,14 +15,10 @@ pub(crate) mod kimi;
 pub(crate) mod qwen;
 mod rpc;
 
-/// Internal; only a macOS keychain client's Guarded read surfaces as
-/// `UsageCard.needs_auth` (`requires_macos_keychain`).
 #[derive(Debug)]
 pub(crate) enum FetchError {
-    /// Silent macOS keychain read blocked.
     Guarded,
-    /// Provider rejected a stale or revoked token; a keychain client may retry
-    /// its keychain copy.
+    /// Provider rejected a stale or revoked token.
     Unauthorized,
     // Tests assert kinds; production branches on the credential variants only.
     Io(#[allow(dead_code)] std::io::Error),
@@ -30,8 +26,7 @@ pub(crate) enum FetchError {
 
 impl From<std::io::Error> for FetchError {
     fn from(error: std::io::Error) -> Self {
-        // Preserve refused-credential semantics for keychain clients' file-to-keychain
-        // retry. Other providers fall back to their last-good card without an auth action.
+        // Keychain clients distinguish refusal from other provider failures.
         if error.kind() == std::io::ErrorKind::PermissionDenied {
             return Self::Unauthorized;
         }
@@ -65,7 +60,7 @@ fn request(method: ds_http::Method, url: &str) -> std::io::Result<ds_http::Reque
     ))
 }
 
-/// Preserve 401/403 as a credential error without exposing response bodies.
+/// Preserve 401/403 without exposing response bodies.
 fn send_json<B: ds_http::body::Body>(
     builder: ds_http::RequestBuilder<B>,
 ) -> std::io::Result<Value> {
