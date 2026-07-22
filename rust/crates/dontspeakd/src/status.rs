@@ -394,6 +394,7 @@ pub(crate) fn model_status_json(
         },
         tray: cfg.tray.iter().copied().map(status_tray_kind).collect(),
         downloads: download_statuses,
+        agents: cfg.agents,
     };
     serde_json::to_value(status).unwrap_or(serde_json::Value::Null)
 }

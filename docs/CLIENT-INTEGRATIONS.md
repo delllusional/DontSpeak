@@ -139,9 +139,13 @@ Pins record last check, not minimum version.
 ## Usage statistics (Agents tab)
 
 Desktop **Agents** tab (nav order: Agents → Status → Tools → Log → Credits;
-cold-start default). Independent of the speech engine: works with the engine
-stopped and does not extend `model_status`. Domain crate `ds-agent-usage`; hosts
-call `ds-core` FFI only.
+cold-start default while enabled). Opt-in via config `agents` (off by default —
+usage probing may touch the macOS keychain): the tab appears/disappears live via
+the `model_status` push (root `agents` field; initial / engine-down probe is
+`ds_agents_ui_enabled`, fail-closed 0). While off, the default nav page is
+Status. Usage data itself is independent of the speech engine: works with the
+engine stopped and does not extend `model_status`. Domain crate
+`ds-agent-usage`; hosts call `ds-core` FFI only.
 
 ### Model
 
@@ -246,7 +250,10 @@ known install roots. Qwen Coding Plan keys: process env, `$QWEN_HOME/.env`,
 
 - Credential reads are read-only, size-bounded, documented paths only.
 - Implicit reads (tab paint, MCP `usage`, skeleton/card FFI) never prompt. Sole
-  prompter: `ds_agent_usage_card_authorize_json` (click-only). On macOS, clients
+  prompter: `ds_agent_usage_card_authorize_json` (click-only). While config
+  `agents` is off, `ds-core` additionally guards every usage export per call:
+  skeleton returns an empty deck and card/authorize return empty cards before
+  any provider (keychain) work. On macOS, clients
   that keep credentials in the keychain (Claude Code is the only one so far)
   probe silently with keychain UI disallowed
   (`SecKeychainSetUserInteractionAllowed`); a guarded item fails with

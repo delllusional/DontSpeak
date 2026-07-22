@@ -38,7 +38,7 @@ pub(crate) fn validate_tools_call(msg: &Value) -> Result<(), String> {
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .ok_or_else(|| "params.name must be a non-empty string".to_string())?;
-    if !ds_tools::tool_names().any(|candidate| candidate == name) {
+    if !ds_tools::tool_names(crate::mcp::agents_enabled()).any(|candidate| candidate == name) {
         return Err(format!("unknown tool: {name}"));
     }
     if params
@@ -62,7 +62,9 @@ pub(crate) fn tools_call_validated(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    if let Err(reason) = ds_tools::validate_arguments(name, &arguments) {
+    if let Err(reason) =
+        ds_tools::validate_arguments(name, &arguments, crate::mcp::agents_enabled())
+    {
         return ok(
             id,
             tool_result(format!("invalid {name} arguments: {reason}"), true),
@@ -696,7 +698,7 @@ mod drift {
     #[test]
     fn router_handles_every_catalog_tool() {
         let bogus = json!({ "__not_a_real_field__": true });
-        for name in ds_tools::tool_names() {
+        for name in ds_tools::tool_names(true) {
             let msg = json!({ "params": { "name": name, "arguments": bogus.clone() } });
             let resp = tools_call(None, &msg, None, ClientSource::Unknown);
             let text = resp["result"]["content"][0]["text"]
@@ -756,7 +758,7 @@ mod drift {
     }
 
     fn assert_tool_matches(tool: &str, populated: Value) {
-        let cat = ds_tools::catalog();
+        let cat = ds_tools::catalog(true);
         let entry = cat
             .as_array()
             .unwrap()
@@ -953,7 +955,8 @@ mod status_output {
             "downloads": [{
                 "target": "kokoro_model", "done_bytes": 25, "total_bytes": 100,
                 "start_bytes": 5, "elapsed_seconds": 2
-            }]
+            }],
+            "agents": false
         })
     }
 

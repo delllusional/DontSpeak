@@ -1,8 +1,10 @@
 # MCP tools
 
-Eight tools by default: `speak`, `listen`, `stop`, `mute`, `status`,
+Eight primary tools: `speak`, `listen`, `stop`, `mute`, `status`,
 `usage`, `voices`, `set_config` — Tools window order. Source: `ds-tools`;
-parity test pins names/descriptions.
+parity test pins names/descriptions. `usage` is gated by config `agents`
+(off by default): while the gate is off it is hidden from the catalog and
+calls are rejected as unknown.
 
 Client wiring is not an MCP tool — engine converges to `exclude_clients` at boot.
 Manual: `dontspeak wire <client>` / `wire --reconcile`.
@@ -93,6 +95,8 @@ Coding-agent subscription usage shown in the Agents tab.
 |---|---|---|---|
 | `refresh` | boolean | no | Bypass the 60-second cache and query providers. Default false. |
 
+Gated by config `agents` (off by default; `set_config agents=true` enables it live).
+
 ## voices
 
 List selectable models, languages, and voices.
@@ -179,3 +183,9 @@ Atomically update and reload persistent settings.
 | Param | Type | Description |
 |---|---|---|
 | `tray` | array of `stt`, `tts`, `stt_animated`, `tts_animated` | Tray icon speech states. Default ["stt","tts_animated"]; [] off. |
+
+**Agents**
+
+| Param | Type | Description |
+|---|---|---|
+| `agents` | boolean | Show the Agents tab and enable the usage tool. Off by default. Applies live. |

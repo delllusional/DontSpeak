@@ -575,8 +575,16 @@ fn digests_narration_on() -> bool {
     ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests)
 }
 
+/// Config `agents` gate, read fresh per request. Missing paths/config → false (fail closed).
+pub(crate) fn agents_enabled() -> bool {
+    let Some(paths) = ds_config::Paths::resolve() else {
+        return false;
+    };
+    ds_config::VoiceConfig::load(&paths).agents
+}
+
 fn tools() -> Value {
-    ds_tools::catalog()
+    ds_tools::catalog(agents_enabled())
 }
 
 pub(crate) fn ok(id: Option<Value>, result: Value) -> Value {

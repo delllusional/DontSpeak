@@ -85,6 +85,9 @@ struct HealthSnapshot: Sendable, Equatable {
     var dictation = Dictation()
     var stats = EngineStats()
     var perms = Perms()
+    /// Config `agents` gate; nil when the snapshot is undecodable / engine down
+    /// (host keeps last known instead of hiding the tab on a blip).
+    var agentsEnabled: Bool?
 }
 
 /// Read-only health bridge. Main-actor mutations; blocking FFI off-thread → Sendable snapshot.
@@ -352,6 +355,7 @@ final class Core {
         s.dictation.state = dto.dictation.state
         s.dictation.text = dto.dictation.text
         s.dictation.hasTarget = dto.dictation.canPaste
+        s.agentsEnabled = dto.agents
         return (s, dto.seq)
     }
 
@@ -499,6 +503,7 @@ struct ModelStatusDTO: Decodable {
     var stats: StatsDTO
     var tray: [String]
     var downloads: [DownloadStatusDTO]
+    var agents: Bool
 
     enum CodingKeys: String, CodingKey {
         case seq
@@ -508,5 +513,6 @@ struct ModelStatusDTO: Decodable {
         case stats
         case tray
         case downloads
+        case agents
     }
 }

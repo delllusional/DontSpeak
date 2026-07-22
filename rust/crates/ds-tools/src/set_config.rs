@@ -140,6 +140,7 @@ pub struct SetConfigArgs {
     pub pause_bg: Option<bool>,
     pub earcon_reply: Option<String>,
     pub earcon_input: Option<String>,
+    pub agents: Option<bool>,
 }
 
 impl SetConfigArgs {
@@ -192,6 +193,7 @@ impl SetConfigArgs {
             pause_bg,
             earcon_reply,
             earcon_input,
+            agents,
         } = self;
 
         let mut changes = Vec::new();
@@ -443,6 +445,10 @@ impl SetConfigArgs {
             changes.push(format!("earcon_input={s}"));
             cfg.earcon_input = s;
         }
+        if let Some(b) = agents {
+            cfg.agents = b;
+            changes.push(format!("agents={b}"));
+        }
         Ok(changes)
     }
 }
@@ -477,6 +483,22 @@ mod tests {
         assert!(changes.contains(&"greet=false".to_string()));
         assert!(changes.contains(&"narrate=[digests,shorts]".to_string()));
         assert!(changes.contains(&"tts_params.system=[rate=1.5]".to_string()));
+    }
+
+    #[test]
+    fn set_config_agents_applies_and_reports_change() {
+        let mut cfg = VoiceConfig::default();
+        let on: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "agents": true })).unwrap();
+        assert_eq!(on.apply(&mut cfg).unwrap(), vec!["agents=true".to_string()]);
+        assert!(cfg.agents);
+        let off: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "agents": false })).unwrap();
+        assert_eq!(
+            off.apply(&mut cfg).unwrap(),
+            vec!["agents=false".to_string()]
+        );
+        assert!(!cfg.agents);
     }
 
     #[test]

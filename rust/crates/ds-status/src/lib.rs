@@ -197,6 +197,8 @@ pub struct ModelStatus {
     pub tray: Vec<StatusTrayKind>,
     /// Active transfers only, sorted by stable target token.
     pub downloads: Vec<DownloadStatus>,
+    /// Agents feature gate from config `agents`; hosts show/hide the Agents tab live.
+    pub agents: bool,
 }
 
 #[cfg(test)]
@@ -258,6 +260,7 @@ mod tests {
             },
             tray: vec![StatusTrayKind::Stt, StatusTrayKind::Tts],
             downloads: vec![],
+            agents: false,
         }
     }
 
@@ -267,7 +270,7 @@ mod tests {
         let v = serde_json::to_value(sample()).unwrap();
 
         let root = v.as_object().unwrap();
-        assert_eq!(root.len(), 9, "no duplicated root-level engine fields");
+        assert_eq!(root.len(), 10, "no duplicated root-level engine fields");
         for key in [
             "seq",
             "activity",
@@ -278,6 +281,7 @@ mod tests {
             "stats",
             "tray",
             "downloads",
+            "agents",
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
@@ -313,6 +317,7 @@ mod tests {
         assert!(v["tts"]["last_utterance"].is_null());
         assert!(v["downloads"].as_array().unwrap().is_empty());
         assert_eq!(v["tray"], serde_json::json!(["stt", "tts"]));
+        assert_eq!(v["agents"], false);
         assert!(v["seq"].is_u64());
         assert!(v["stats"]["tts"]["rtf_avg"].is_f64());
         assert!(v["stats"]["stt"]["transcriptions"].is_u64());
@@ -603,6 +608,7 @@ mod tests {
             stats in stats_strategy(),
             tray in prop::collection::vec(tray_kind_strategy(), 0..4),
             downloads in prop::collection::vec(download_status_strategy(), 0..4),
+            agents in any::<bool>(),
         ) -> ModelStatus {
             ModelStatus {
                 seq,
@@ -614,6 +620,7 @@ mod tests {
                 stats,
                 tray,
                 downloads,
+                agents,
             }
         }
     }

@@ -304,6 +304,7 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TRAY,
             ),
+            p("agents", PType::Bool, false, SET_CONFIG_AGENTS),
         ],
         min_one: true,
         annotations: annotations(false, true, true),
@@ -311,7 +312,11 @@ static TOOLS: &[Tool] = &[
     },
 ];
 
-fn is_visible(t: &Tool) -> bool {
+/// `agents` = config `agents` gate: hides `usage` when off (diarization gating unchanged).
+fn is_visible(t: &Tool, agents: bool) -> bool {
+    if t.name == "usage" {
+        return agents;
+    }
     DIARIZATION_ENABLED || !HIDDEN_TOOLS.contains(&t.name)
 }
 
@@ -323,15 +328,18 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
 }
 
 /// Visible primary catalog names. MCP dispatch pins via `router_handles_every_catalog_tool`.
-pub fn tool_names() -> impl Iterator<Item = &'static str> {
-    TOOLS.iter().filter(|t| is_visible(t)).map(|t| t.name)
+pub fn tool_names(agents: bool) -> impl Iterator<Item = &'static str> {
+    TOOLS
+        .iter()
+        .filter(move |t| is_visible(t, agents))
+        .map(|t| t.name)
 }
 
 /// Validate against advertised `inputSchema`. Unknown/hidden → unavailable.
-pub fn validate_arguments(name: &str, arguments: &Value) -> Result<(), String> {
+pub fn validate_arguments(name: &str, arguments: &Value, agents: bool) -> Result<(), String> {
     let tool = TOOLS
         .iter()
-        .find(|tool| tool.name == name && is_visible(tool))
+        .find(|tool| tool.name == name && is_visible(tool, agents))
         .ok_or_else(|| format!("unknown tool: {name}"))?;
     let object = arguments
         .as_object()
@@ -464,11 +472,11 @@ fn tts_param_pools_valid(value: &Value) -> bool {
 }
 
 /// Visible primary tool definitions for MCP `tools/list`.
-pub fn catalog() -> Value {
+pub fn catalog(agents: bool) -> Value {
     Value::Array(
         TOOLS
             .iter()
-            .filter(|t| is_visible(t))
+            .filter(|t| is_visible(t, agents))
             .map(|t| tool_schema(t, t.name))
             .collect(),
     )
@@ -618,6 +626,7 @@ fn output_schema_for(output: Output) -> Value {
                     "required": ["system", "kokoro"],
                     "additionalProperties": false
                 },
+                "agents": { "type": "boolean" },
                 "state": {
                     "type": "object",
                     "properties": {
@@ -798,9 +807,10 @@ fn output_schema_for(output: Output) -> Value {
 }
 
 pub fn output_schema(name: &str) -> Option<Value> {
+    // Catalog metadata, not a dispatch gate — full visibility (`usage` keeps its schema).
     TOOLS
         .iter()
-        .find(|tool| tool.name == name && is_visible(tool))
+        .find(|tool| tool.name == name && is_visible(tool, true))
         .and_then(|tool| tool.output)
         .map(output_schema_for)
 }
@@ -811,11 +821,11 @@ pub fn raw_input_schema(name: &str) -> Option<Value> {
 }
 
 /// App/UI catalog: ordered `params` array (not JSON-Schema property key order).
-pub fn catalog_ui() -> Value {
+pub fn catalog_ui(agents: bool) -> Value {
     Value::Array(
         TOOLS
             .iter()
-            .filter(|t| is_visible(t))
+            .filter(|t| is_visible(t, agents))
             .map(|t| {
                 json!({
                     "name": t.name,
@@ -1067,13 +1077,41 @@ mod tests {
 
         for (tool, arguments, valid) in cases {
             assert_eq!(
-                validate_arguments(tool, &arguments).is_ok(),
+                validate_arguments(tool, &arguments, true).is_ok(),
                 valid,
                 "{tool} {arguments}"
             );
         }
-        assert!(validate_arguments("status", &json!([])).is_err());
-        assert!(validate_arguments("unknown", &json!({})).is_err());
+        assert!(validate_arguments("status", &json!([]), true).is_err());
+        assert!(validate_arguments("unknown", &json!({}), true).is_err());
+    }
+
+    /// Config `agents` gate: `usage` invisible + unavailable when off; catalogs shrink by one.
+    #[test]
+    fn agents_gate_hides_usage_everywhere() {
+        assert!(tool_names(true).any(|name| name == "usage"));
+        assert!(!tool_names(false).any(|name| name == "usage"));
+        assert_eq!(tool_names(true).count(), tool_names(false).count() + 1);
+
+        let err = validate_arguments("usage", &json!({}), false).unwrap_err();
+        assert!(err.contains("unknown tool"), "got: {err}");
+        assert!(validate_arguments("usage", &json!({}), true).is_ok());
+        // Other tools are unaffected by the gate.
+        assert!(validate_arguments("stop", &json!({}), false).is_ok());
+
+        for cat in [catalog(false), catalog_ui(false)] {
+            assert!(
+                cat.as_array().unwrap().iter().all(|t| t["name"] != "usage"),
+                "usage must be hidden while agents is off"
+            );
+        }
+        assert!(
+            catalog(true)
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "usage")
+        );
     }
 
     /// DRIFT GUARD: hand-written `docs/MCP-TOOLS.md` must track catalog names + descriptions.
@@ -1242,12 +1280,14 @@ mod tests {
             &format!("Default {}", serde_json::to_string(&v.tray).unwrap()),
             "tray",
         );
+        assert!(!v.agents);
+        mentions(SET_CONFIG_AGENTS, "Off by default", "agents");
         assert_eq!(v.clear_on_input, vec![CancelSpeechScope::Current]);
     }
 
     #[test]
     fn catalog_is_a_nonempty_array_of_named_tools() {
-        let c = catalog();
+        let c = catalog(true);
         let arr = c.as_array().expect("catalog is a JSON array");
         let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
         assert_eq!(arr.len(), expected, "expected {expected} catalog entries");
@@ -1282,7 +1322,7 @@ mod tests {
 
     #[test]
     fn structured_tools_advertise_their_output_schemas() {
-        let catalog = catalog();
+        let catalog = catalog(true);
         let tools = catalog.as_array().unwrap();
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
@@ -1302,7 +1342,7 @@ mod tests {
     /// UI params are ordered (MCP `properties` can't convey order).
     #[test]
     fn catalog_ui_params_are_ordered() {
-        let ui = catalog_ui();
+        let ui = catalog_ui(true);
         let arr = ui.as_array().expect("ui catalog is an array");
         let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
         assert_eq!(arr.len(), expected, "UI lists primary tools only");
@@ -1326,7 +1366,7 @@ mod tests {
 
     #[test]
     fn speak_tts_args_schema_matches_every_target_descriptor() {
-        let catalog = catalog();
+        let catalog = catalog(true);
         let speak = catalog
             .as_array()
             .unwrap()
@@ -1385,7 +1425,7 @@ mod tests {
             all.iter().map(|&v| as_str(v).to_string()).collect()
         }
 
-        let cat = catalog();
+        let cat = catalog(true);
         let set_config = cat
             .as_array()
             .unwrap()
@@ -1431,6 +1471,7 @@ mod tests {
             schema_item_enum("provider"),
             toks(Provider::ALL, Provider::as_str)
         );
+        assert_eq!(props["agents"]["type"], "boolean");
         // `diarizer` is one of the hidden diarization params (see
         // `HIDDEN_SET_CONFIG_PARAMS`) — pin that it's actually absent from the wire
         // schema while the gate is off, rather than just skipping the assertion.
@@ -1551,11 +1592,12 @@ mod tests {
             pause_bg: Some(true),
             earcon_reply: Some("Tink".to_string()),
             earcon_input: Some("Funk".to_string()),
+            agents: Some(true),
         };
         let args = serde_json::to_value(&populated).expect("SetConfigArgs serializes");
         let fields = args.as_object().expect("serializes to an object");
 
-        let cat = catalog();
+        let cat = catalog(true);
         let set_config = cat
             .as_array()
             .unwrap()

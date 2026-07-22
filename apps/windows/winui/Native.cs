@@ -37,6 +37,7 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_stats_count(ulong count, double audioSecs);
     [DllImport(Dll)] private static extern IntPtr ds_human_size(ulong bytes);
     [DllImport(Dll)] private static extern byte ds_diarization_ui_enabled();
+    [DllImport(Dll)] private static extern byte ds_agents_ui_enabled();
     [DllImport(Dll)] private static extern void ds_string_free(IntPtr s);
     [DllImport(Dll)] private static extern byte ds_set_muted(byte on);
     [DllImport(Dll)] private static extern byte ds_open_voice_settings();
@@ -61,6 +62,9 @@ internal static class Native
 
     /// <summary><c>ds_diarization_ui_enabled</c> — single source; do not re-mirror.</summary>
     public static bool DiarizationUiEnabled() => ds_diarization_ui_enabled() != 0;
+
+    /// <summary><c>ds_agents_ui_enabled</c> — initial/engine-down probe; live updates ride model_status.</summary>
+    public static bool AgentsUiEnabled() => ds_agents_ui_enabled() != 0;
 
     /// <summary>Cached for process life.</summary>
     public static string Version() => _version ??= TakeString(ds_version());
@@ -251,6 +255,10 @@ internal sealed class HealthSnapshot
     // Echo as `since` to ModelStatusWait to block until next change.
     public ulong StatusSeq;
 
+    // Config `agents` gate; null when the snapshot is undecodable / engine down
+    // (host keeps last known instead of hiding the tab on a blip).
+    public bool? AgentsEnabled;
+
     public static HealthSnapshot Probe() => FromJson(Native.ModelStatusJson());
 
     // Case-insensitive property names; a grown schema may add object members.
@@ -274,6 +282,7 @@ internal sealed class HealthSnapshot
             // Well-formed non-empty JSON ⇒ engine up; malformed → catch → empty.
             s.Activity.EngineRunning = true;
             s.StatusSeq = dto.Seq;
+            s.AgentsEnabled = dto.Agents;
 
             if (dto.Activity is { } activity)
             {
@@ -379,6 +388,7 @@ internal sealed record ModelStatusDto
     [JsonPropertyName("stats")] public StatsDto? Stats { get; init; }
     [JsonPropertyName("tray")] public string?[]? TrayIndicator { get; init; }
     [JsonPropertyName("downloads")] public DownloadStatusDto[]? Downloads { get; init; }
+    [JsonPropertyName("agents")] public bool Agents { get; init; }
 }
 
 internal sealed record EngineStatusDto

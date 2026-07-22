@@ -324,6 +324,11 @@ pub struct VoiceConfig {
         deserialize_with = "de_exclude_clients"
     )]
     pub exclude_clients: Option<Vec<ClientSource>>,
+
+    /// Agents feature gate: Agents tab + `usage` tool. Opt-in because usage
+    /// probing may touch the macOS keychain.
+    #[serde(default)]
+    pub agents: bool,
 }
 
 /// Warm-subsystem delta for surgical set_config.
@@ -476,6 +481,7 @@ impl Default for VoiceConfig {
             extra_terminals: Vec::new(),
             extra_editors: Vec::new(),
             exclude_clients: None,
+            agents: false,
         }
     }
 }
@@ -911,6 +917,7 @@ pub(crate) mod tests {
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_editors.is_empty());
         assert!(v.exclude_clients.is_none());
+        assert!(!v.agents);
     }
 
     #[test]
@@ -1036,6 +1043,28 @@ pub(crate) mod tests {
         assert!(toml.contains("grok_stream"));
         let back: VoiceConfig = toml::from_str(&toml).unwrap();
         assert!(!back.grok_stream);
+    }
+
+    #[test]
+    fn agents_defaults_off_and_round_trips() {
+        // Default OFF (opt-in: usage probing may touch the macOS keychain).
+        let v: VoiceConfig = serde_json::from_str("{}").unwrap();
+        assert!(!v.agents);
+        let v: VoiceConfig = serde_json::from_str(r#"{"agents":true}"#).unwrap();
+        assert!(v.agents);
+        assert!(
+            VoiceConfig::known_keys().contains("agents"),
+            "agents must be a known config key"
+        );
+        // Round-trips through write_settings + load (tempdir only).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let cfg = VoiceConfig {
+            agents: true,
+            ..VoiceConfig::default()
+        };
+        write_settings(&paths, &cfg).unwrap();
+        assert!(VoiceConfig::load(&paths).agents);
     }
 
     #[test]
@@ -1701,6 +1730,7 @@ pub(crate) mod tests {
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])
             exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)
+            agents: true,        // non-default (default is false)
         }
     }
 

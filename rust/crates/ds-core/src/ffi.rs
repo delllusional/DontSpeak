@@ -130,34 +130,78 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
     })
 }
 
-/// Usage skeleton (`ds_agent_usage::skeleton`). No network. Owned `char*`. HANDLE-FREE.
+const USAGE_DECK_EMPTY: &str = r#"{"cards":[]}"#;
+const USAGE_CARD_EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
+
+/// Config `agents` gate for the Agents tab / usage surfaces. Paths unresolvable → false
+/// (fail closed).
+fn agents_enabled() -> bool {
+    let Some(paths) = ds_config::Paths::resolve() else {
+        return false;
+    };
+    ds_config::VoiceConfig::load(&paths).agents
+}
+
+/// Usage skeleton (`ds_agent_usage::skeleton`). No network. Empty deck while the config
+/// `agents` gate is off. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_skeleton_json() -> *mut c_char {
-    const EMPTY: &str = r#"{"cards":[]}"#;
-    guard_str(EMPTY, || to_cstring(ds_agent_usage::skeleton().to_json()))
+    guard_str(USAGE_DECK_EMPTY, || {
+        agent_usage_skeleton_json_gated(agents_enabled())
+    })
+}
+
+fn agent_usage_skeleton_json_gated(agents: bool) -> *mut c_char {
+    if !agents {
+        return to_cstring(USAGE_DECK_EMPTY);
+    }
+    to_cstring(ds_agent_usage::skeleton().to_json())
 }
 
 /// Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
+/// Empty card while the config `agents` gate is off (keychain guard: no provider probe).
 /// Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, refresh: u8) -> *mut c_char {
-    const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
-    guard_str(EMPTY, || {
-        let token = cstr_or_empty(agent);
-        let source = ds_agent_usage::parse_agent(&token);
-        to_cstring(ds_agent_usage::refresh_card(source, refresh != 0).to_json())
+    guard_str(USAGE_CARD_EMPTY, || {
+        agent_usage_card_json_gated(&cstr_or_empty(agent), refresh != 0, agents_enabled)
     })
 }
 
-/// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Owned `char*`. HANDLE-FREE.
+fn agent_usage_card_json_gated(
+    token: &str,
+    refresh: bool,
+    agents: impl FnOnce() -> bool,
+) -> *mut c_char {
+    let source = ds_agent_usage::parse_agent(token);
+    // Non-client exits before the gate: `agents` resolves Paths + reads config, and a
+    // non-client call must touch nothing (contract pinned by the tests below).
+    if source.is_client() && !agents() {
+        return to_cstring(USAGE_CARD_EMPTY);
+    }
+    to_cstring(ds_agent_usage::refresh_card(source, refresh).to_json())
+}
+
+/// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Empty card
+/// while the config `agents` gate is off (keychain guard: no auth prompt). Owned `char*`.
+/// HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *mut c_char {
-    const EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
-    guard_str(EMPTY, || {
-        let token = cstr_or_empty(agent);
-        let source = ds_agent_usage::parse_agent(&token);
-        to_cstring(ds_agent_usage::authorize_card(source).to_json())
+    guard_str(USAGE_CARD_EMPTY, || {
+        agent_usage_card_authorize_json_gated(&cstr_or_empty(agent), agents_enabled)
     })
+}
+
+fn agent_usage_card_authorize_json_gated(
+    token: &str,
+    agents: impl FnOnce() -> bool,
+) -> *mut c_char {
+    let source = ds_agent_usage::parse_agent(token);
+    // Same non-client-before-gate ordering as `agent_usage_card_json_gated`.
+    if source.is_client() && !agents() {
+        return to_cstring(USAGE_CARD_EMPTY);
+    }
+    to_cstring(ds_agent_usage::authorize_card(source).to_json())
 }
 
 /// Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
@@ -165,23 +209,25 @@ pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *m
 /// [`crate::status_fmt::tool_param_detail`]. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tools_json() -> *mut c_char {
-    guard_str("[]", || {
-        let mut catalog = ds_tools::catalog_ui();
-        if let Some(tools) = catalog.as_array_mut() {
-            for tool in tools {
-                let Some(params) = tool.get_mut("params").and_then(|p| p.as_array_mut()) else {
-                    continue;
-                };
-                for param in params {
-                    let detail = crate::status_fmt::tool_param_detail(param);
-                    if let Some(obj) = param.as_object_mut() {
-                        obj.insert("detail".into(), serde_json::Value::String(detail));
-                    }
+    guard_str("[]", || tools_json_gated(agents_enabled()))
+}
+
+fn tools_json_gated(agents: bool) -> *mut c_char {
+    let mut catalog = ds_tools::catalog_ui(agents);
+    if let Some(tools) = catalog.as_array_mut() {
+        for tool in tools {
+            let Some(params) = tool.get_mut("params").and_then(|p| p.as_array_mut()) else {
+                continue;
+            };
+            for param in params {
+                let detail = crate::status_fmt::tool_param_detail(param);
+                if let Some(obj) = param.as_object_mut() {
+                    obj.insert("detail".into(), serde_json::Value::String(detail));
                 }
             }
         }
-        to_cstring(catalog.to_string())
-    })
+    }
+    to_cstring(catalog.to_string())
 }
 
 /// Libraries/credits catalog from the same download registry every platform fetches
@@ -425,6 +471,14 @@ pub extern "C" fn ds_diarization_ui_enabled() -> u8 {
     guard_val(0, || ds_tools::DIARIZATION_ENABLED as u8)
 }
 
+/// Config `agents` gate: 1 = show the Agents tab. Initial / engine-down probe only —
+/// live updates arrive via the model_status push (`agents` root field). Paths
+/// unresolvable → 0 (fail closed). HANDLE-FREE.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_agents_ui_enabled() -> u8 {
+    guard_val(0, || agents_enabled() as u8)
+}
+
 /// Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
 /// Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if
 /// delivered; new provider/stats via `ds_model_status_json`.
@@ -511,8 +565,7 @@ mod tests {
 
     #[test]
     fn agent_usage_card_json_unknown_agent_has_no_rows() {
-        let c = CString::new("not_a_client").unwrap();
-        let json = take_string(ds_agent_usage_card_json(c.as_ptr(), 1));
+        let json = take_string(agent_usage_card_json_gated("not_a_client", true, || true));
         let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
         assert!(card.rows.is_empty());
     }
@@ -520,11 +573,44 @@ mod tests {
     // Non-client exits before Paths::resolve (no dirs, no prompt).
     #[test]
     fn agent_usage_card_authorize_json_unknown_agent_is_empty_without_auth() {
-        let c = CString::new("not_a_client").unwrap();
-        let json = take_string(ds_agent_usage_card_authorize_json(c.as_ptr()));
+        let json = take_string(agent_usage_card_authorize_json_gated(
+            "not_a_client",
+            || true,
+        ));
         let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
         assert!(card.rows.is_empty());
         assert!(!card.needs_auth);
+    }
+
+    /// Agents gate OFF: usage exports return their EMPTY consts before any provider
+    /// work (keychain guard) — a KNOWN client token proves the gate short-circuits.
+    #[test]
+    fn agent_usage_exports_return_empty_while_agents_gate_is_off() {
+        assert_eq!(
+            take_string(agent_usage_skeleton_json_gated(false)),
+            USAGE_DECK_EMPTY
+        );
+        assert_eq!(
+            take_string(agent_usage_card_json_gated("claude_code", true, || false)),
+            USAGE_CARD_EMPTY
+        );
+        assert_eq!(
+            take_string(agent_usage_card_authorize_json_gated("claude_code", || {
+                false
+            })),
+            USAGE_CARD_EMPTY
+        );
+    }
+
+    /// Non-client exits BEFORE the gate: the gate resolves Paths + reads config, and a
+    /// non-client call must touch neither.
+    #[test]
+    fn agent_usage_gate_is_never_evaluated_for_a_non_client() {
+        let gate = || -> bool { panic!("gate must not be evaluated for a non-client") };
+        let json = take_string(agent_usage_card_json_gated("not_a_client", false, gate));
+        assert!(json.contains("\"rows\":[]"));
+        let json = take_string(agent_usage_card_authorize_json_gated("not_a_client", gate));
+        assert!(json.contains("\"rows\":[]"));
     }
 
     #[test]
@@ -627,15 +713,10 @@ mod tests {
     }
 
     /// FFI enrichment: every param has `detail`; enum params get "one of: …".
+    /// Inner fn with `agents: true` — the export reads the developer's real config.
     #[test]
     fn ds_tools_json_enriches_every_param_with_detail() {
-        let ptr = ds_tools_json();
-        // SAFETY: non-null CString from guard_str/to_cstring; free after read.
-        let json = unsafe { std::ffi::CStr::from_ptr(ptr) }
-            .to_str()
-            .unwrap()
-            .to_owned();
-        ds_string_free(ptr);
+        let json = take_string(tools_json_gated(true));
 
         let catalog: serde_json::Value = serde_json::from_str(&json).unwrap();
         let tools = catalog.as_array().expect("catalog is an array");
@@ -662,5 +743,21 @@ mod tests {
             }
         }
         assert!(saw_enum, "catalog has at least one enum param to qualify");
+        assert!(
+            tools.iter().any(|tool| tool["name"] == "usage"),
+            "gate on: usage present"
+        );
+
+        // Companion: gate off hides `usage` from the Tools window too.
+        let json = take_string(tools_json_gated(false));
+        let catalog: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            catalog
+                .as_array()
+                .expect("catalog is an array")
+                .iter()
+                .all(|tool| tool["name"] != "usage"),
+            "gate off: usage hidden"
+        );
     }
 }

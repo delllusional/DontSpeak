@@ -75,6 +75,18 @@ public class HealthSnapshotTests
     }
 
     [Fact]
+    public void AgentsGateMapsAndStaysNullWhenUndecodable()
+    {
+        // Decodable snapshots carry the gate (absent key = false, matching the wire default).
+        Assert.True(Parse("""{"seq":1,"agents":true}""").AgentsEnabled);
+        Assert.False(Parse("""{"seq":1,"agents":false}""").AgentsEnabled);
+        Assert.False(Parse("""{"seq":1}""").AgentsEnabled);
+        // Engine down / undecodable → null so the host keeps the last known value.
+        Assert.Null(Parse("{}").AgentsEnabled);
+        Assert.Null(Parse("not json at all").AgentsEnabled);
+    }
+
+    [Fact]
     public void TrayIndicatorReplacesTheDefault()
     {
         Assert.Equal(DefaultIndicator, Parse("""{"seq":1}""").Activity.TrayIndicator);

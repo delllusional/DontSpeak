@@ -57,6 +57,10 @@ pub fn set_muted(on: bool) -> bool {
 pub fn model_status_wait(since: u64, timeout_ms: u32) -> String {
     take(sys::ds_model_status_wait(since, timeout_ms))
 }
+/// Config `agents` gate (initial / engine-down probe; live updates ride model_status).
+pub fn agents_ui_enabled() -> bool {
+    sys::ds_agents_ui_enabled() != 0
+}
 /// Instant deck: installed agents + last-good cache (local only).
 pub fn agent_usage_skeleton() -> Option<UsageDeck> {
     serde_json::from_str(&take(sys::ds_agent_usage_skeleton_json())).ok()

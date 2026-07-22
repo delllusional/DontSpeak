@@ -88,3 +88,5 @@ pub const SET_CONFIG_FULL_DUPLEX: &str = "Mic open during replies (platform AEC)
     built-in STT+TTS only.";
 pub const SET_CONFIG_TRAY: &str = "Tray icon speech states. Default [\"stt\",\"tts_animated\"]; \
     [] off.";
+pub const SET_CONFIG_AGENTS: &str = "Show the Agents tab and enable the usage tool. \
+    Off by default. Applies live.";

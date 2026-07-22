@@ -79,14 +79,18 @@ char *ds_model_status_json(void);
 // (`since = 0` first). Owned `char*`; `"{}"` if down.
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
-// Usage skeleton (`ds_agent_usage::skeleton`). No network. Owned `char*`. HANDLE-FREE.
+// Usage skeleton (`ds_agent_usage::skeleton`). No network. Empty deck while the config
+// `agents` gate is off. Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_skeleton_json(void);
 
 // Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
+// Empty card while the config `agents` gate is off (keychain guard: no provider probe).
 // Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_card_json(const char *agent, uint8_t refresh);
 
-// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Owned `char*`. HANDLE-FREE.
+// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Empty card
+// while the config `agents` gate is off (keychain guard: no auth prompt). Owned `char*`.
+// HANDLE-FREE.
 char *ds_agent_usage_card_authorize_json(const char *agent);
 
 // Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
@@ -182,6 +186,11 @@ char *ds_tray_icon_kind(uint8_t stt_active, uint8_t tts_active, const char *tray
 // `ds_tools::DIARIZATION_ENABLED` — single flip for every host. 1 shown / 0 hidden.
 // HANDLE-FREE.
 uint8_t ds_diarization_ui_enabled(void);
+
+// Config `agents` gate: 1 = show the Agents tab. Initial / engine-down probe only —
+// live updates arrive via the model_status push (`agents` root field). Paths
+// unresolvable → 0 (fail closed). HANDLE-FREE.
+uint8_t ds_agents_ui_enabled(void);
 
 // Session TTS provider: "cpu"|"cuda"|"coreml"|"mlx"|"auto" (NULL/unknown → "auto").
 // Restarts the warm helper + resets TTS stats only if the realized provider changes. 1 if

@@ -618,6 +618,14 @@ impl<P: Platform + 'static> Engine<P> {
         if let Some(q) = &self.ttsq {
             q.set_config(cfg.clone());
         }
+        // Agents gate: bump the status push on a REAL transition only so a blocked
+        // WaitModelStatus (the app's Agents tab) sees it immediately — mirrors the
+        // caps pattern in `set_caps_gate`.
+        if cfg.agents != self.cfg.agents
+            && let Some(gate) = &self.status_gate
+        {
+            gate.bump();
+        }
         self.cfg = cfg.clone();
         // `press` is physical-key latch — leave across reload.
         log::info!(
@@ -2660,6 +2668,43 @@ mod tests {
         };
         d.reload(&off_cfg);
         assert!(!d.caps, "caps loop turned off");
+        assert_ne!(
+            gate.seq(),
+            seq_after_on,
+            "a real ON->OFF transition bumps the gate again"
+        );
+    }
+
+    #[test]
+    fn reload_agents_toggle_bumps_status_gate_only_on_real_transition() {
+        // Same live-push contract as caps: a REAL `agents` flip must wake a blocked
+        // WaitModelStatus so the app's Agents tab appears/disappears immediately;
+        // a no-op reload must not bump (reload diffs against the recorded config).
+        let mut d = mk(600);
+        let gate = StatusGate::new();
+        d.status_gate = Some(gate.clone());
+        assert!(!d.cfg.agents, "known baseline: agents off by default");
+
+        let on_cfg = VoiceConfig {
+            agents: true,
+            ..Default::default()
+        };
+        d.reload(&on_cfg);
+        assert!(d.cfg.agents, "agents gate turned on");
+        let seq_after_on = gate.seq();
+        assert_ne!(seq_after_on, 0, "a real OFF->ON transition bumps the gate");
+
+        // A second reload with the SAME agents value must not bump again.
+        d.reload(&on_cfg);
+        assert_eq!(
+            gate.seq(),
+            seq_after_on,
+            "an unchanged agents value must not bump the gate again"
+        );
+
+        // ON->OFF is a real transition too.
+        d.reload(&VoiceConfig::default());
+        assert!(!d.cfg.agents, "agents gate turned off");
         assert_ne!(
             gate.seq(),
             seq_after_on,
