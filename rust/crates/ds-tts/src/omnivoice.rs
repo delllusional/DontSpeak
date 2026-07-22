@@ -92,7 +92,20 @@ pub struct OmniVoiceSynth {
     decoder: Session,
     tokenizer: tokenizers::Tokenizer,
     hidden_output: usize,
+    /// The BACKBONE's realized EP — what [`Self::provider`], status, and the
+    /// synth-check `provider=` line report, even when [`decoder_provider`] splits the
+    /// Higgs decoder off to CPU.
     provider: ds_config::RealizedProvider,
+}
+
+/// #165: the FP16 higgs_decoder NaNs under the CUDA EP; decode it on CPU until #165
+/// closes. Every other backbone EP decodes in place.
+fn decoder_provider(backbone: ds_config::RealizedProvider) -> ds_config::RealizedProvider {
+    if backbone == ds_config::RealizedProvider::Cuda {
+        ds_config::RealizedProvider::Cpu
+    } else {
+        backbone
+    }
 }
 
 impl OmniVoiceSynth {
@@ -117,8 +130,14 @@ impl OmniVoiceSynth {
         let outputs: Vec<&str> = llm.outputs().iter().map(|output| output.name()).collect();
         check_llm_contract(&inputs, &outputs)?;
         let heads = sessions.load_file(&dir.join("audio_heads_decoder.onnx"))?;
-        let decoder = sessions.load_file(&dir.join("higgs_decoder.onnx"))?;
+        // Realized by the three loads above. The decoder goes through a from_realized
+        // session (errors on EP drift) at [`decoder_provider`]'s pick.
         let provider = sessions.provider();
+        let mut decoder_sessions = crate::ort_session::OrtSessions::from_realized(
+            ds_config::TtsModel::OmniVoice,
+            decoder_provider(provider),
+        );
+        let decoder = decoder_sessions.load_file(&dir.join("higgs_decoder.onnx"))?;
         let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
             .map_err(|error| format!("omnivoice tokenizer load: {error}"))?;
         let hidden_output = output_index(&llm, "hidden_states")?;
@@ -684,6 +703,15 @@ fn estimate_audio_frames(text: &str) -> usize {
 mod tests {
     use super::*;
     use ort::value::{Shape, SymbolicDimensions};
+
+    #[test]
+    fn cuda_backbone_uses_cpu_decoder() {
+        use ds_config::RealizedProvider::*;
+        assert_eq!(decoder_provider(Cuda), Cpu);
+        for passthrough in [Cpu, CoreMl, Mlx, System] {
+            assert_eq!(decoder_provider(passthrough), passthrough);
+        }
+    }
 
     #[test]
     fn argmax_is_deterministic_and_breaks_ties_low() {
