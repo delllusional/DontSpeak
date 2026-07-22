@@ -183,10 +183,15 @@ fn now_unix_millis() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
-/// Only interactive data search may prompt (ACL dialog). Silent + attributes: no UI.
+/// The silent search runs with keychain UI disallowed
+/// (`SecKeychainSetUserInteractionAllowed`): `kSecUseAuthenticationUISkip` is a
+/// no-op for file-keychain passwords (FB11153260). A guarded read fails with
+/// `errSecInteractionNotAllowed` and falls through to the attributes probe;
+/// only the interactive authorize search may prompt (ACL dialog).
 #[cfg(target_os = "macos")]
 fn keychain_probe(interactive: bool) -> KeychainProbe {
     use security_framework::item::{ItemClass, ItemSearchOptions, SearchResult};
+    use security_framework::os::macos::keychain::SecKeychain;
 
     fn first_data(results: Vec<SearchResult>) -> Option<Vec<u8>> {
         results.into_iter().find_map(|result| match result {
@@ -195,25 +200,33 @@ fn keychain_probe(interactive: bool) -> KeychainProbe {
         })
     }
 
-    if let Ok(results) = ItemSearchOptions::new()
-        .class(ItemClass::generic_password())
-        .service(KEYCHAIN_SERVICE)
-        .load_data(true)
-        .skip_authenticated_items(true)
-        .search()
-        && let Some(bytes) = first_data(results)
-    {
-        return KeychainProbe::Data(bytes);
-    }
-
-    if interactive
-        && let Ok(results) = ItemSearchOptions::new()
+    fn data_search() -> Option<Vec<u8>> {
+        ItemSearchOptions::new()
             .class(ItemClass::generic_password())
             .service(KEYCHAIN_SERVICE)
             .load_data(true)
             .search()
-        && let Some(bytes) = first_data(results)
-    {
+            .ok()
+            .and_then(first_data)
+    }
+
+    // The user-interaction flag is process-global: serialize probes so a silent
+    // poll can't disable UI under a mid-prompt authorize (or race another poll).
+    static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _probe = PROBE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    // Fail closed: no silent search unless UI is provably disallowed. `_no_ui`
+    // (RAII guard) must span the search and drop before the interactive branch.
+    let silent = SecKeychain::disable_user_interaction()
+        .ok()
+        .and_then(|_no_ui| data_search());
+    if let Some(bytes) = silent {
+        return KeychainProbe::Data(bytes);
+    }
+
+    if interactive && let Some(bytes) = data_search() {
         return KeychainProbe::Data(bytes);
     }
 

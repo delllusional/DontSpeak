@@ -248,8 +248,10 @@ known install roots. Qwen Coding Plan keys: process env, `$QWEN_HOME/.env`,
 - Implicit reads (tab paint, MCP `usage`, skeleton/card FFI) never prompt. Sole
   prompter: `ds_agent_usage_card_authorize_json` (click-only). On macOS, clients
   that keep credentials in the keychain (Claude Code is the only one so far)
-  skip ACL items in silent search; only that guarded state produces
-  `needs_auth: true` (stale rows kept).
+  probe silently with keychain UI disallowed
+  (`SecKeychainSetUserInteractionAllowed`); a guarded item fails with
+  `errSecInteractionNotAllowed` instead of prompting, and only that guarded
+  state produces `needs_auth: true` (stale rows kept).
 - “Always Allow” persists via OS keychain ACL (no config flag — Claude may
   recreate the item). Production HTTPS only for live probes; tests use fixtures /
   loopback. Secrets and raw payloads never appear in FFI JSON or logs.
