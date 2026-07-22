@@ -370,27 +370,100 @@ pub(crate) fn synth_check(
         },
     )?;
 
-    let non_finite = pcm.iter().filter(|s| !s.is_finite()).count();
-    let peak = pcm
-        .iter()
-        .copied()
-        .filter(|s| s.is_finite())
-        .fold(0.0f32, |m, s| m.max(s.abs()));
+    let health = audio_health(&pcm);
     println!(
-        "OK model={} lang={language} voice={voice} samples={} peak={peak:.4} non_finite={non_finite}",
+        "OK model={} provider={} lang={language} voice={voice} samples={} peak={:.4} rms={:.4} ratio={:.3} non_finite={}",
         model.as_str(),
-        pcm.len()
+        backend.provider().as_str(),
+        health.samples,
+        health.peak,
+        health.rms,
+        health.crest,
+        health.non_finite
     );
-    if pcm.is_empty() {
+    health_verdict(&health)
+}
+
+/// Amplitude profile of one rendered utterance. `crest` is rms/peak (the INVERSE crest
+/// factor): speech is peaky (low ratio), stationary noise/tones are not.
+struct AudioHealth {
+    samples: usize,
+    non_finite: usize,
+    peak: f32,
+    rms: f32,
+    crest: f32,
+}
+
+fn audio_health(pcm: &[f32]) -> AudioHealth {
+    let samples = pcm.len();
+    let mut non_finite = 0usize;
+    let mut peak = 0.0f32;
+    let mut sum_squares = 0.0f64;
+    for &sample in pcm {
+        if !sample.is_finite() {
+            non_finite += 1;
+            continue;
+        }
+        peak = peak.max(sample.abs());
+        sum_squares += f64::from(sample) * f64::from(sample);
+    }
+    let finite = samples - non_finite;
+    let rms = if finite > 0 {
+        (sum_squares / finite as f64).sqrt() as f32
+    } else {
+        0.0
+    };
+    let crest = if peak > 0.0 { rms / peak } else { 0.0 };
+    AudioHealth {
+        samples,
+        non_finite,
+        peak,
+        rms,
+        crest,
+    }
+}
+
+/// Ceilings measured on this workstation (release builds, one sentence each) before
+/// pinning; speech sits well under both, degenerate renders well over:
+///
+/// | model     | provider | peak   | rms    | rms/peak |
+/// |-----------|----------|--------|--------|----------|
+/// | kokoro    | CPU      | 0.6775 | 0.0937 | 0.138    |
+/// | kokoro    | CUDA     | 0.6702 | 0.0936 | 0.140    |
+/// | omnivoice | CPU      | 0.8950 | 0.1190 | 0.133    |
+/// | omnivoice | CUDA*    | 0.8950 | 0.1190 | 0.133    |
+///
+/// (*backbone on CUDA, Higgs decoder on CPU — #165.) Chatterbox/Qwen were not on this
+/// disk; their bands are extrapolated from the same 24 kHz speech family and the
+/// degenerate references (broken OmniVoice decode rendered rms 0.49 noise at ratio
+/// ~0.58; a pure tone sits at 0.707). No ZCR gate: margins are wide (>3x) without it.
+const RMS_CEILING: f32 = 0.35;
+const RMS_PEAK_RATIO_CEILING: f32 = 0.45;
+
+fn health_verdict(health: &AudioHealth) -> Result<(), String> {
+    if health.samples == 0 {
         return Err("no samples".to_string());
     }
-    if non_finite > 0 {
+    if health.non_finite > 0 {
         return Err(format!(
-            "{non_finite} non-finite samples — the render is silent"
+            "{} non-finite samples — the render is silent",
+            health.non_finite
         ));
     }
-    if peak < 0.001 {
-        return Err(format!("peak {peak:.6} is inaudible"));
+    if health.peak < 0.001 {
+        return Err(format!("peak {:.6} is inaudible", health.peak));
+    }
+    if health.rms > RMS_CEILING {
+        return Err(format!(
+            "rms {:.3} exceeds {RMS_CEILING} — the render is noise, not speech",
+            health.rms
+        ));
+    }
+    if health.crest > RMS_PEAK_RATIO_CEILING {
+        return Err(format!(
+            "rms/peak {:.3} exceeds {RMS_PEAK_RATIO_CEILING} — stationary noise/tone, not speech",
+            health.crest
+        ));
     }
     Ok(())
 }
@@ -478,6 +551,87 @@ mod tests {
             };
             assert_eq!(first.chars().count(), ds_tts::batch::STREAM_FIRST_BUDGET);
         }
+    }
+
+    /// Deterministic pseudo-noise in [-1, 1] (LCG; no rand dep, no seed drift).
+    fn white_noise(len: usize) -> Vec<f32> {
+        let mut state: u32 = 0x1234_5678;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state as f32 / u32::MAX as f32) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn white_noise_fails_the_amplitude_verdict() {
+        // Uniform noise has rms/peak ~0.58 — over both ceilings.
+        let health = audio_health(&white_noise(24_000));
+        assert!(health.crest > 0.5, "measured {:.3}", health.crest);
+        assert!(health_verdict(&health).is_err());
+    }
+
+    #[test]
+    fn a_pure_tone_fails_the_ratio_gate_even_at_speech_loudness() {
+        // sin has rms/peak = 0.707 regardless of amplitude; a quiet tone must still fail.
+        let tone: Vec<f32> = (0..24_000)
+            .map(|i| 0.2 * (i as f32 * 0.05).sin())
+            .collect();
+        let health = audio_health(&tone);
+        assert!(health.rms < RMS_CEILING, "quiet tone passes the rms gate");
+        let error = health_verdict(&health).unwrap_err();
+        assert!(error.contains("rms/peak"), "{error}");
+    }
+
+    #[test]
+    fn a_silence_padded_burst_passes_like_speech() {
+        // Peaky content over mostly-silence — the amplitude shape speech has.
+        let mut pcm = vec![0.0f32; 24_000];
+        for (i, sample) in pcm[8_000..9_000].iter_mut().enumerate() {
+            *sample = 0.7 * (i as f32 * 0.3).sin();
+        }
+        let health = audio_health(&pcm);
+        assert_eq!(health_verdict(&health), Ok(()));
+        assert!(health.crest < RMS_PEAK_RATIO_CEILING);
+    }
+
+    #[test]
+    fn non_finite_and_empty_renders_fail() {
+        let nan = audio_health(&vec![f32::NAN; 480]);
+        assert_eq!(nan.non_finite, 480);
+        assert!(health_verdict(&nan).unwrap_err().contains("non-finite"));
+
+        let empty = audio_health(&[]);
+        assert_eq!(empty.samples, 0);
+        assert!(health_verdict(&empty).unwrap_err().contains("no samples"));
+
+        // Finite but inaudible.
+        let silent = audio_health(&vec![0.0002f32; 480]);
+        assert!(health_verdict(&silent).unwrap_err().contains("inaudible"));
+    }
+
+    #[test]
+    fn measured_speech_bands_pass_with_margin() {
+        // The pinned table's worst row (omnivoice rms 0.119, ratio 0.133) modeled as a
+        // synthetic profile: verdict must accept everything in the measured band.
+        let health = AudioHealth {
+            samples: 61_440,
+            non_finite: 0,
+            peak: 0.8950,
+            rms: 0.1190,
+            crest: 0.133,
+        };
+        assert_eq!(health_verdict(&health), Ok(()));
+        // Degenerate reference: the broken decode's rms-0.49 noise fails both gates.
+        let degenerate = AudioHealth {
+            samples: 61_440,
+            non_finite: 0,
+            peak: 0.85,
+            rms: 0.49,
+            crest: 0.58,
+        };
+        assert!(health_verdict(&degenerate).is_err());
     }
 
     #[test]
