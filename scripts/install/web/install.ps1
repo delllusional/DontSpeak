@@ -1,12 +1,12 @@
 #Requires -Version 5
 <#
-  DontSpeak one-command installer — Windows.
+  DontSpeak one-command installer -- Windows.
 
       irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex
 
   Downloads the self-contained portable zip for this arch from the latest GitHub Release,
   verifies its SHA-256, extracts it to %LOCALAPPDATA%\Programs\DontSpeak (no elevation, no
-  runtime install — .NET + the Windows App SDK are bundled), wires the MCP server + voice
+  runtime install -- .NET + the Windows App SDK are bundled), wires the MCP server + voice
   hooks into every client (`dontspeak wire --reconcile`), adds a Start-menu shortcut, and launches
   the app so the voice models download themselves on first boot. No compiler required.
 
@@ -23,7 +23,7 @@
     DONTSPEAK_INSTALL_LOCK_WAIT  seconds to wait for a concurrent installer before failing
                               (default 600)
 #>
-# `irm | iex` runs this text in the CALLER's scope — the preference/StrictMode changes
+# `irm | iex` runs this text in the CALLER's scope -- the preference/StrictMode changes
 # below would leak into the user's interactive session. The & { } wrapper scopes them
 # (and everything else) to the install.
 & {
@@ -56,13 +56,13 @@ public static extern System.IntPtr SendMessageTimeout(
 }
 
 # --- BEGIN destination lock ---
-# Serializes the destructive finalization (recheck → stop → replace → wire) of the install
+# Serializes the destructive finalization (recheck -> stop -> replace -> wire) of the install
 # destination across processes; download/extract stay outside it. Issue #198.
 # The HANDLE is the lock: FileShare::None is enforced by the OS and released when the process
 # dies, so an abandoned installer cannot wedge future installs and none of the POSIX installers'
 # liveness/age rules are needed here.
 # The lock FILE stays on disk after release: removing it would let a third process open a fresh
-# file while a waiter still holds the old one (same reason ds-model keeps its .lock files —
+# file while a waiter still holds the old one (same reason ds-model keeps its .lock files --
 # rust/crates/ds-model/src/download.rs). uninstall.ps1 removes it.
 function Enter-DestinationLock {
   param(
@@ -77,7 +77,7 @@ function Enter-DestinationLock {
       return [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate,
         [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     } catch [System.IO.IOException] {
-      # Wait ONLY on a sharing/lock violation (32/33) — another installer holds the handle.
+      # Wait ONLY on a sharing/lock violation (32/33) -- another installer holds the handle.
       # Every other IOException subclass (DirectoryNotFoundException, PathTooLongException,
       # disk failures) is permanent here, so rethrow instead of retrying for the whole timeout
       # and then reporting it as a concurrent installer. An ACL denial arrives as
@@ -85,7 +85,7 @@ function Enter-DestinationLock {
       #
       # GetBaseException(), NOT $_.Exception: an exception thrown out of a .NET METHOD CALL
       # reaches the catch wrapped in a MethodInvocationException, whose own HResult is
-      # 0x80131501 — it would never match 32/33, so every wait would abort immediately. The
+      # 0x80131501 -- it would never match 32/33, so every wait would abort immediately. The
       # typed `catch [System.IO.IOException]` still selects this handler because PowerShell
       # walks inner exceptions when matching, which makes the wrapper invisible until you read
       # a property off it.
@@ -101,7 +101,7 @@ function Enter-DestinationLock {
 }
 # --- END destination lock ---
 
-# Release-asset arch token is uname-style everywhere: ARM64 → aarch64, AMD64 → x86_64.
+# Release-asset arch token is uname-style everywhere: ARM64 -> aarch64, AMD64 -> x86_64.
 # Detect the MACHINE, not this process: an x64-emulated shell on Windows-on-ARM reports
 # PROCESSOR_ARCHITECTURE=AMD64 (which would install the x86_64 build on an aarch64
 # machine); PROCESSOR_ARCHITEW6432 carries the real one for emulated processes.
@@ -109,14 +109,14 @@ $machineArch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } 
 $arch = if ($machineArch -eq 'ARM64') { 'aarch64' } else { 'x86_64' }
 $zipPattern = "^dontspeak-.+-windows-$arch\.zip$"   # dontspeak-<ver>-windows-<arch>.zip
 
-# ONE API call for a release install — both assets (the zip and checksums.txt) resolve
+# ONE API call for a release install -- both assets (the zip and checksums.txt) resolve
 # from this response. A local development archive needs no network or GitHub release.
 $release = if ($archive) { $null } else {
   Invoke-RestMethod -Headers @{ 'User-Agent' = 'dontspeak-install' } -Uri $api
 }
 
 # Resolve an asset URL off the fetched release: by regex pattern (the versioned zip) or
-# literal name (checksums.txt — the only fixed-name asset, and the only thing the
+# literal name (checksums.txt -- the only fixed-name asset, and the only thing the
 # DONTSPEAK_DOWNLOAD_BASE override can serve; a static mirror can't know versioned
 # names, so those always resolve via the release above).
 function Resolve-Asset ($nameOrPattern, [switch]$Pattern) {
@@ -169,7 +169,7 @@ try {
     Say "verified $zipName (sha256 ok)"
   }
 
-  # Extract into the temp dir FIRST, swap after — a failed/partial extraction (corrupt
+  # Extract into the temp dir FIRST, swap after -- a failed/partial extraction (corrupt
   # zip, disk full) must not leave the machine with the old install already deleted.
   $stagedApp = Join-Path $tmp 'app'
   Expand-Archive -Path $zip -DestinationPath $stagedApp -Force
@@ -245,7 +245,7 @@ try {
   if (Test-Path $cli) {
     Say "wiring clients (MCP + hooks)"
     # Windows PowerShell 5.1 (the stock `irm | iex` host) raises NativeCommandError when a
-    # native command writes to a redirected stderr under ErrorActionPreference=Stop — a mere
+    # native command writes to a redirected stderr under ErrorActionPreference=Stop -- a mere
     # wire warning would abort the install after extraction. Contain it and warn instead
     # (parity with install.sh's `|| warn`).
     try {
@@ -255,7 +255,7 @@ try {
       if ($wp.ExitCode -ne 0) { Warn "wire --reconcile reported an issue (exit $($wp.ExitCode))" }
     } catch { Warn "wire --reconcile reported an issue: $($_.Exception.Message)" }
   }
-  else { Warn "dontspeak.exe not found under $dest — the zip layout may have changed" }
+  else { Warn "dontspeak.exe not found under $dest -- the zip layout may have changed" }
 
   # Start-menu shortcut so DontSpeak is launchable like any app.
   $ui = Join-Path $dest 'ds-winui.exe'
@@ -267,7 +267,7 @@ try {
     $s.Save()
 
     # Start-at-login: bring DontSpeak up minimized to the tray on sign-in (the resident-host
-    # model — same as the retired Inno installer's Finished-page checkbox). The value NAME and
+    # model -- same as the retired Inno installer's Finished-page checkbox). The value NAME and
     # the `--hidden` argument match the app's own tray toggle (winui TrayIcon.cs: RunValue
     # "DontSpeak"), so the tray's "Start at login" checkmark stays in sync and toggling it there
     # cleanly removes this. Opt out of the install-time enable with DONTSPEAK_NO_AUTOSTART=1.
@@ -281,10 +281,10 @@ try {
     Start-Process $ui
   }
 
-  # ── Windows uninstall entry (Settings > Apps / Control Panel > Programs) ──────────────
+  # -- Windows uninstall entry (Settings > Apps / Control Panel > Programs) --------------
   # The portable zip has no installer framework, so nothing would otherwise register DontSpeak
   # in the standard uninstall UI (the retired Inno build did, via unins000.exe). Register a
-  # PER-USER key (HKCU — the install is per-user, no admin) for the uninstall.ps1 payload
+  # PER-USER key (HKCU -- the install is per-user, no admin) for the uninstall.ps1 payload
   # shipped beside the app. Its UninstallString runs the SAME teardown the retired installer did: unwire
   # every client (dontspeak wire --all --remove), then remove the app, shortcut, autostart entry,
   # downloaded models/config, and the uninstall key itself.

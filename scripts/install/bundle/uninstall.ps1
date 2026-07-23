@@ -1,4 +1,4 @@
-# uninstall.ps1 — THE DontSpeak uninstaller (Windows): the single source of truth.
+# uninstall.ps1 -- THE DontSpeak uninstaller (Windows): the single source of truth.
 # build-portable.ps1 ships this file in the archive; scripts/install/web/install.ps1 registers that
 # payload as the Settings > Apps UninstallString. packaging_sync.rs pins the route.
 # Removes everything the one-command installer created. Missing resources are clean
@@ -22,7 +22,7 @@ public static extern System.IntPtr SendMessageTimeout(
   [void][DontSpeak.EnvironmentChangeNativeMethods]::SendMessageTimeout(
     [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result)
 }
-# Only the PLACED copy sits next to dontspeak.exe — any other copy (repo checkout,
+# Only the PLACED copy sits next to dontspeak.exe -- any other copy (repo checkout,
 # standalone download) must target the standard install dir, NOT its own folder:
 # $PSScriptRoot alone once resolved to a repo's scripts/ dir and step 7 deleted it.
 $dest = if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'dontspeak.exe'))) { $PSScriptRoot } else { Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak' }
@@ -32,7 +32,7 @@ Invoke-CleanupStep 'stop running processes' {
   if ($running) { $running | Stop-Process -Force -ErrorAction Stop }
 }
 Start-Sleep -Milliseconds 500
-# 2. Unwire every client (MCP server + voice hooks) via the app's own remover — waited.
+# 2. Unwire every client (MCP server + voice hooks) via the app's own remover -- waited.
 $cli = Join-Path $dest 'dontspeak.exe'
 Invoke-CleanupStep 'remove client integrations' {
   if (Test-Path -LiteralPath $cli) {
@@ -93,7 +93,7 @@ Invoke-CleanupStep 'remove uninstall registration' {
 $lockFile = Join-Path (Split-Path -Parent $dest) ('.' + (Split-Path -Leaf $dest) + '.ds-install.lock')
 Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
 
-# 7. Delete the install dir LAST — from a detached cmd after a short delay, so this running
+# 7. Delete the install dir LAST -- from a detached cmd after a short delay, so this running
 #    script's own folder is free to remove once powershell exits.
 Invoke-CleanupStep 'schedule install-directory removal' {
   if (Test-Path -LiteralPath $dest) {
