@@ -1969,7 +1969,71 @@ pub(crate) mod wedge_recovery_tests {
             "fixture not built at {} — run `cargo build --workspace` (or -p dontspeakd) first",
             bin.display()
         );
+        // `cargo test --lib` builds THIS binary but not the sibling `[[bin]]`, so a fixture
+        // left over from older sources keeps answering the protocol it was built with. That
+        // reads as a bug in the code under test rather than a build gap (#217).
+        if let Some(built) = modified_at(&bin)
+            && let Some(source) = newest_source_mtime()
+            && source > built
+        {
+            panic!(
+                "fixture at {} predates its sources — `cargo test --lib` does not rebuild it; \
+                 run `cargo test -p dontspeakd --no-run` (or `cargo build -p dontspeakd \
+                 --bins`) and retry",
+                bin.display()
+            );
+        }
         bin
+    }
+
+    /// Everything `dontspeakd-fake-helper` is compiled from: its own source and the shared
+    /// protocol tokens it answers with.
+    fn fixture_sources() -> [std::path::PathBuf; 2] {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        [
+            crate_dir.join("src").join("bin").join("fake_ds_helper.rs"),
+            crate_dir.join("..").join("ds-helper-proto").join("src"),
+        ]
+    }
+
+    fn modified_at(path: &std::path::Path) -> Option<std::time::SystemTime> {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+    }
+
+    /// `None` when no source resolves — a relocated crate must degrade to the old
+    /// existence-only check, never fail every test that spawns the fixture.
+    /// `fixture_sources_resolve` is what keeps that from going unnoticed.
+    fn newest_source_mtime() -> Option<std::time::SystemTime> {
+        fn newest(path: &std::path::Path) -> Option<std::time::SystemTime> {
+            if path.is_dir() {
+                return std::fs::read_dir(path)
+                    .ok()?
+                    .filter_map(|entry| newest(&entry.ok()?.path()))
+                    .max();
+            }
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                return None;
+            }
+            modified_at(path)
+        }
+        fixture_sources().iter().filter_map(|p| newest(p)).max()
+    }
+
+    /// The staleness guard is only as good as its input paths, and both are reached by a
+    /// hardcoded relative path that a crate move would silently break.
+    #[test]
+    fn fixture_sources_resolve() {
+        for source in fixture_sources() {
+            assert!(
+                source.exists(),
+                "fixture source {} no longer exists — the #217 staleness guard now passes \
+                 vacuously",
+                source.display()
+            );
+        }
+        assert!(newest_source_mtime().is_some());
     }
 
     /// One shared constructor for this module's managers (mirrors `ttsq.rs`'s `mk_queue`):
