@@ -365,7 +365,7 @@ pub(crate) fn model_status_json(
                 .then(|| status_tts_model(cfg.tts_model)),
             language: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
                 .then(|| "auto".to_string()),
-            provider: tts_provider_token(resolved_tts, tts.provider().as_str()),
+            provider: tts_provider_token(resolved_tts, tts.provider().as_deref()),
             status: tts_status,
             last_utterance: tts_sample.last_utterance,
         },
@@ -456,14 +456,16 @@ fn stt_provider_token(
     }
 }
 
-/// Realized TTS provider token (local engines only; child reports honest backend).
+/// Realized TTS provider token (built_in only; child reports honest backend). `None` when
+/// the engine isn't built-in OR when no backend has been realized yet (download/warming/
+/// no-preload) — a reported-but-unknown token still fails closed to `"cpu"`.
 fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
-    child_provider: &str,
+    child_provider: Option<&str>,
 ) -> Option<String> {
-    match resolved_tts {
-        Some(ds_config::TtsEngine::BuiltIn) => {
-            Some(realized_provider_token(child_provider).as_str().to_string())
+    match (resolved_tts, child_provider) {
+        (Some(ds_config::TtsEngine::BuiltIn), Some(p)) => {
+            Some(realized_provider_token(p).as_str().to_string())
         }
         _ => None,
     }
@@ -1054,7 +1056,7 @@ mod tests {
         let b = Some(SttEngine::BuiltIn);
         for realized in ["CUDA", "CPU", "MLX", "System", "CoreML", "surprise"] {
             assert_eq!(
-                tts_provider_token(k, realized),
+                tts_provider_token(k, Some(realized)),
                 stt_provider_token(b, Some(realized)),
                 "TTS and STT must map realized `{realized}` to the SAME token"
             );
@@ -1066,7 +1068,7 @@ mod tests {
         // The token is the REALIZED EP the child reports, not a preference — CPU fallback included.
         let k = Some(TtsEngine::BuiltIn);
         let b = Some(SttEngine::BuiltIn);
-        assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
+        assert_eq!(tts_provider_token(k, Some("CUDA")).as_deref(), Some("cuda"));
         assert_eq!(stt_provider_token(b, Some("CUDA")).as_deref(), Some("cuda"));
         assert_eq!(stt_provider_token(b, Some("CPU")).as_deref(), Some("cpu"));
         assert_eq!(stt_provider_token(b, Some("MLX")).as_deref(), Some("mlx"));
@@ -1080,6 +1082,12 @@ mod tests {
             None,
             "no child has realized a backend (e.g. the Parakeet download) ⇒ null, not a \
              fabricated \"cpu\""
+        );
+        assert_eq!(
+            tts_provider_token(k, None),
+            None,
+            "a built-in TTS with no realized backend yet (download/warming/no-preload) ⇒ \
+             null, not a fabricated \"cpu\""
         );
         // ds-status is deliberately independent of ds-config, so the two model-token
         // vocabularies are unguarded duplicates anywhere but here, where both are in
@@ -1098,8 +1106,8 @@ mod tests {
             None
         );
         assert_eq!(stt_provider_token(None, Some("CUDA")), None);
-        assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
-        assert_eq!(tts_provider_token(None, "CUDA"), None);
+        assert_eq!(tts_provider_token(Some(TtsEngine::System), Some("CUDA")), None);
+        assert_eq!(tts_provider_token(None, Some("CUDA")), None);
     }
 
     #[test]

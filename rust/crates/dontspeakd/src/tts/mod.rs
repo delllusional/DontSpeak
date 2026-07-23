@@ -144,7 +144,9 @@ pub struct TtsManager {
     stats: Arc<crate::stats::TtsStats>,
     stt_stats: Arc<crate::stats::SttStats>,
     lifetime: Arc<crate::stats::LifetimeSeconds>,
-    provider: Mutex<String>,
+    /// The backend a child ACTUALLY realized for TTS, from its `PROVIDER` line.
+    /// `None` = none realized (no child, or a child started without TTS preload) — never a guess.
+    tts_realized: Arc<Mutex<Option<String>>>,
     /// The backend a child ACTUALLY realized for STT, from its `STT_PROVIDER` line.
     /// `None` = none realized (no child, or a child that loaded no STT) — never a guess.
     stt_realized: Arc<Mutex<Option<String>>>,
@@ -247,7 +249,7 @@ impl TtsManager {
             stats,
             stt_stats,
             lifetime,
-            provider: Mutex::new("CPU".to_string()),
+            tts_realized: Arc::new(Mutex::new(None)),
             stt_realized: Arc::new(Mutex::new(None)),
             spawn_prefs: Mutex::new(SpawnPrefs {
                 provider: "auto".to_string(),
@@ -322,10 +324,10 @@ impl TtsManager {
         self.tts_model
             .clear_error(self.gate.get().map(|g| g.as_ref()));
     }
-    /// The warm child's active ONNX execution provider ("CPU" until a child reports
-    /// otherwise via its PROVIDER line).
-    pub fn provider(&self) -> String {
-        self.provider.lock().unwrap().clone()
+    /// The warm child's REALIZED TTS execution provider, from its `PROVIDER` line.
+    /// `None` until a child reports a realized backend.
+    pub fn provider(&self) -> Option<String> {
+        self.tts_realized.lock().unwrap().clone()
     }
 
     /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"MLX"/"System"), from
@@ -356,7 +358,9 @@ impl TtsManager {
         if !provider_restart_needed(
             tts_preload,
             resolved,
-            ds_config::RealizedProvider::parse(&self.provider()),
+            self.provider()
+                .as_deref()
+                .map(ds_config::RealizedProvider::parse),
         ) {
             return false; // same provider, or no ready TTS model is resident
         }
@@ -785,11 +789,11 @@ impl TtsManager {
                         continue;
                     }
                     if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
-                        store_realized_stt(&self.stt_realized, realized_stt_token(p), gate);
+                        store_realized(&self.stt_realized, realized_backend_token(p), gate);
                         continue;
                     }
                     if let Some(p) = l.strip_prefix(proto::PROVIDER_PREFIX) {
-                        *self.provider.lock().unwrap() = p.trim().to_string();
+                        store_realized(&self.tts_realized, realized_backend_token(p), gate);
                         continue;
                     }
                     if let Some(msg) = l.strip_prefix(proto::ERR) {
@@ -892,6 +896,10 @@ impl TtsManager {
             // pre-READY wait loop. Clone the realized-provider slot in so the reader can capture it;
             // without this the STT status row stays "CPU" while STT actually ran on the GPU.
             let stt_realized = self.stt_realized.clone();
+            // Cloned in NOT to set (the helper never emits `PROVIDER` post-READY) but so the
+            // reader's unexpected-EOF branch can CLEAR the realized TTS token with the child —
+            // else a crash leaves the dead process's backend showing in the status row.
+            let tts_realized = self.tts_realized.clone();
             // The status push-gate, so a post-READY STTLOADED pushes LIVE instead of waiting
             // for the next poll.
             let gate = self.gate.get().cloned();
@@ -914,6 +922,7 @@ impl TtsManager {
                         tts_model,
                         stt_model,
                         stt_realized,
+                        tts_realized,
                         gate,
                         child: child_slot,
                     },
@@ -959,15 +968,16 @@ impl TtsManager {
     /// transition immediately instead of at some unrelated later status change (the
     /// caps-dot bug class; see `set_caps_gate` in engine.rs) — without the old manual
     /// "only bump if at least one was loaded" bookkeeping this used to need. Also drops
-    /// the realized STT token, which goes with the process. Shared by `stop_child` and
-    /// `mark_dead_locked`.
+    /// the realized STT and TTS tokens, which go with the process. Shared by `stop_child`
+    /// and `mark_dead_locked`.
     fn clear_loaded_flags(&self) {
         let gate = self.gate.get().map(|g| g.as_ref());
         // Clear BEFORE the transitions: a waiter woken by a transition bump must not
-        // still read the dead child's token. Its own bump is change-gated because
+        // still read the dead child's token. Each clear is change-gated because
         // `stop_child` can reach here with both models already Idle, where the
         // transitions bump nothing.
-        store_realized_stt(&self.stt_realized, None, gate);
+        store_realized(&self.stt_realized, None, gate);
+        store_realized(&self.tts_realized, None, gate);
         self.tts_model.transition(ModelState::Idle, gate);
         self.stt_model.transition(ModelState::Idle, gate);
     }
@@ -1877,21 +1887,20 @@ impl TtsManager {
     }
 }
 
-/// `STT_PROVIDER` payload → realized backend token. A blank payload carries no
-/// observation, so it reads as "nothing realized" rather than fail-closed "CPU":
-/// claiming nothing is strictly safer than claiming a backend. An unrecognized
-/// non-blank token is still an observation — `RealizedProvider::parse` fails it
-/// closed to CPU downstream.
-fn realized_stt_token(payload: &str) -> Option<String> {
+/// A realized-backend line's payload (`PROVIDER` for TTS, `STT_PROVIDER` for STT) →
+/// realized backend token. A blank payload carries no observation, so it reads as
+/// "nothing realized" rather than fail-closed "CPU": claiming nothing is strictly safer
+/// than claiming a backend. An unrecognized non-blank token is still an observation —
+/// `RealizedProvider::parse` fails it closed to CPU downstream.
+fn realized_backend_token(payload: &str) -> Option<String> {
     let trimmed = payload.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-/// Change-gated write of the realized-STT slot, mirroring [`ModelSlot::transition`]:
-/// bumps (and returns `true`) only on a real change. `STT_PROVIDER` itself never
-/// bumped, so a client woken by the paired `STTLOADED` could read the row BETWEEN
-/// the two lines and latch `provider: null` with no later bump to correct it.
-fn store_realized_stt(
+/// Change-gated write of a realized-backend slot (TTS or STT), mirroring
+/// [`ModelSlot::transition`]: bumps (and returns `true`) only on a real change. The bump
+/// is load-bearing — see the paired-line race note at the STT provider call sites.
+fn store_realized(
     slot: &Mutex<Option<String>>,
     token: Option<String>,
     gate: Option<&StatusGate>,
@@ -1911,9 +1920,12 @@ fn store_realized_stt(
 fn provider_restart_needed(
     tts_preload: bool,
     desired: ds_config::RealizedProvider,
-    active: ds_config::RealizedProvider,
+    active: Option<ds_config::RealizedProvider>,
 ) -> bool {
-    tts_preload && desired != active
+    match active {
+        Some(active) => tts_preload && desired != active,
+        None => false, // nothing realized yet ⇒ no live backend to switch away from
+    }
 }
 
 /// Restart only to GAIN preload. The asymmetry is intentional: on true→false the child
@@ -2331,40 +2343,53 @@ mod status_gate_tests {
     }
 
     #[test]
-    fn realized_stt_token_parses_only_a_real_observation() {
-        assert_eq!(realized_stt_token("MLX").as_deref(), Some("MLX"));
-        assert_eq!(realized_stt_token("MLX ").as_deref(), Some("MLX"));
-        assert_eq!(realized_stt_token(""), None);
-        assert_eq!(realized_stt_token("   "), None);
+    fn realized_backend_token_parses_only_a_real_observation() {
+        assert_eq!(realized_backend_token("MLX").as_deref(), Some("MLX"));
+        assert_eq!(realized_backend_token("MLX ").as_deref(), Some("MLX"));
+        assert_eq!(realized_backend_token(""), None);
+        assert_eq!(realized_backend_token("   "), None);
         // Unknown-but-reported is still an observation; the fail-closed mapping to "cpu"
         // belongs to `RealizedProvider::parse`.
-        assert_eq!(realized_stt_token("surprise").as_deref(), Some("surprise"));
+        assert_eq!(
+            realized_backend_token("surprise").as_deref(),
+            Some("surprise")
+        );
     }
 
     #[test]
-    fn store_realized_stt_bumps_only_on_a_real_change() {
-        // This bump is what stops a waiter woken by STTLOADED from latching a null it
-        // never gets corrected out of — STT_PROVIDER is the only line carrying the token.
+    fn store_realized_bumps_only_on_a_real_change() {
+        // This bump is what stops a waiter woken by the paired `*LOADED` line from latching
+        // a null it never gets corrected out of — only the `*_PROVIDER` line carries the token.
         let slot = Mutex::new(None);
         let gate = StatusGate::new();
-        assert!(store_realized_stt(
-            &slot,
-            Some("MLX".to_string()),
-            Some(&gate)
-        ));
+        assert!(store_realized(&slot, Some("MLX".to_string()), Some(&gate)));
         let seq1 = gate.seq();
         assert_ne!(seq1, 0, "a fresh realized backend bumps the gate");
-        assert!(!store_realized_stt(
-            &slot,
-            Some("MLX".to_string()),
-            Some(&gate)
-        ));
+        assert!(!store_realized(&slot, Some("MLX".to_string()), Some(&gate)));
         assert_eq!(gate.seq(), seq1, "an identical repeat must not bump");
-        assert!(store_realized_stt(&slot, None, Some(&gate)));
+        assert!(store_realized(&slot, None, Some(&gate)));
         let seq2 = gate.seq();
         assert_ne!(seq2, seq1, "clearing a live token bumps");
-        assert!(!store_realized_stt(&slot, None, Some(&gate)));
+        assert!(!store_realized(&slot, None, Some(&gate)));
         assert_eq!(gate.seq(), seq2, "a repeat clear must not bump");
+    }
+
+    #[test]
+    fn teardown_clears_the_realized_tts_provider() {
+        // `clear_loaded_flags` is the single teardown site for BOTH `stop_child` and
+        // `mark_dead_locked`, so a reaped/crashed child can't leave its realized TTS token
+        // (e.g. "CUDA") to be read with no process behind it. The clear is change-gated and
+        // must be an observable bump for a blocked `WaitModelStatus` waiter.
+        let (tts, gate) = mk();
+        *tts.tts_realized.lock().unwrap() = Some("CUDA".to_string());
+        let before = gate.seq();
+        tts.clear_loaded_flags();
+        assert_eq!(tts.provider(), None);
+        assert_ne!(
+            gate.seq(),
+            before,
+            "clearing a live TTS token must bump the gate"
+        );
     }
 
     #[test]
@@ -2615,9 +2640,12 @@ mod status_gate_tests {
     fn absent_tts_assets_never_restart_the_shared_helper() {
         use ds_config::RealizedProvider::{Cpu, Cuda};
 
-        assert!(!provider_restart_needed(false, Cpu, Cuda));
-        assert!(provider_restart_needed(true, Cpu, Cuda));
-        assert!(!provider_restart_needed(true, Cpu, Cpu));
+        assert!(!provider_restart_needed(false, Cpu, Some(Cuda)));
+        assert!(provider_restart_needed(true, Cpu, Some(Cuda)));
+        assert!(!provider_restart_needed(true, Cpu, Some(Cpu)));
+        // Nothing realized yet ⇒ no live backend to switch away from, at either preload.
+        assert!(!provider_restart_needed(true, Cuda, None));
+        assert!(!provider_restart_needed(false, Cuda, None));
         assert!(!tts_preload_restart_needed(false, true));
         assert!(tts_preload_restart_needed(true, false));
     }

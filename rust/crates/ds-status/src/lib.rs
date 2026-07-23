@@ -68,7 +68,8 @@ pub struct TtsStatus {
     pub model: Option<StatusTtsModel>,
     /// Resolved built-in model language; `null` for system/off.
     pub language: Option<String>,
-    /// `null` for system (`say`) / off engines.
+    /// `null` for system (`say`) / off engines, and for built_in until a child reports a
+    /// realized backend.
     pub provider: Option<String>,
     /// `null` when speech is off.
     pub status: Option<EngineStatus>,
