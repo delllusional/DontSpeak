@@ -8,6 +8,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use ds_helper_proto as proto;
 
+use super::{realized_stt_token, store_realized_stt};
 use crate::child_slot::ChildSlot;
 use crate::model_slot::{ModelSlot, ModelState};
 use crate::status::StatusGate;
@@ -114,7 +115,7 @@ pub(super) struct ReaderStats {
 pub(super) struct ReaderModelState {
     pub(super) tts_model: Arc<ModelSlot>,
     pub(super) stt_model: Arc<ModelSlot>,
-    pub(super) stt_realized: Arc<Mutex<String>>,
+    pub(super) stt_realized: Arc<Mutex<Option<String>>>,
     pub(super) gate: Option<Arc<StatusGate>>,
     pub(super) child: Arc<ChildSlot>,
 }
@@ -222,6 +223,12 @@ pub(super) fn reader_loop(
                     // successful `start_locked`. Each call is independently change-gated,
                     // so this replaces the old unconditional gate bump below it too — a
                     // real transition on either model already wakes a blocked waiter.
+                    //
+                    // The dead child's realized backend is no longer a measurement — and the
+                    // two transitions below BUMP, so a waiter woken by them must not still
+                    // read "CUDA" for a process that no longer exists. Same ordering trap as
+                    // the set direction.
+                    store_realized_stt(&stt_realized, None, gate.as_deref());
                     tts_model.transition(ModelState::Idle, gate.as_deref());
                     stt_model.transition(ModelState::Idle, gate.as_deref());
                     // Debug aid: try_wait() the real exit status/signal at the MOMENT
@@ -330,8 +337,10 @@ pub(super) fn reader_loop(
                 } else if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
                     // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
                     // the COMMON path — the parallel preload usually reports after READY — so
-                    // this is what keeps the STT status row honest on a GPU box.
-                    *stt_realized.lock().unwrap() = p.trim().to_string();
+                    // this is what keeps the STT status row honest on a GPU box. The write is
+                    // change-gated and BUMPS: `STTLOADED` alone would otherwise publish a row
+                    // read between the child's paired lines, with no later bump to correct it.
+                    store_realized_stt(&stt_realized, realized_stt_token(p), gate.as_deref());
                 // ── diarize events ───────────────────────────────────────────
                 } else if let Some(rest) = l.strip_prefix(proto::DIAR_PREFIX) {
                     diarize_slot.0.lock().unwrap().result = Some(Ok(rest.to_string()));
@@ -422,7 +431,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: tts_model.clone(),
                 stt_model: stt_model.clone(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: None,
                 child: canned_slot(expected_eof),
             },
@@ -468,7 +477,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: loaded_slot(),
                 stt_model: loaded_slot(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: Some(gate.clone()),
                 child: canned_slot(true),
             },
@@ -495,6 +504,89 @@ mod reader_eof_tests {
             reader_gate_bumps(b"STATS synth_ms=11.0 audio_ms=0.0\nSTTSTATS audio_ms=0.0\nSTATS junk\nPROGRESS 3\n"),
             0,
             "lines that record no audio must not bump"
+        );
+    }
+
+    #[test]
+    fn stt_provider_line_bumps_the_status_gate() {
+        // The helper prints STTLOADED then STT_PROVIDER. Only the provider line carries the
+        // realized backend, so it must bump on its own — otherwise a client woken by
+        // STTLOADED reads the row BETWEEN the two lines and latches `provider: null`.
+        assert_eq!(
+            reader_gate_bumps(b"STTLOADED\n"),
+            0,
+            "an already-Loaded slot is change-gated to a no-op"
+        );
+        assert_eq!(
+            reader_gate_bumps(b"STTLOADED\nSTT_PROVIDER MLX\n"),
+            1,
+            "the single bump is the provider line"
+        );
+        assert_eq!(
+            reader_gate_bumps(b"STT_PROVIDER MLX\nSTT_PROVIDER MLX\n"),
+            1,
+            "an identical repeat must not bump"
+        );
+    }
+
+    /// Drive `reader_loop` with a REAL gate and both model slots left `Idle`, and
+    /// return `(realized_stt_token, seq_delta)`. Idle slots are deliberate: the
+    /// unexpected-EOF branch's two `transition(Idle)` calls are then change-gated
+    /// no-ops, so every observed bump is attributable to the realized-STT write or
+    /// clear — which is the property under test.
+    fn reader_realized_stt(stdout: &[u8], expected_eof: bool) -> (Option<String>, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = crate::status::StatusGate::new();
+        let before = gate.seq();
+        let stt_realized = Arc::new(Mutex::new(None));
+        reader_loop(
+            stdout,
+            ReaderSlots {
+                speak: Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new())),
+                cue: Arc::new((Mutex::new(CueSlot::default()), Condvar::new())),
+                listen: Arc::new((Mutex::new(ListenSlot::default()), Condvar::new())),
+                diarize: Arc::new((Mutex::new(DiarizeSlot::default()), Condvar::new())),
+                enroll: Arc::new((Mutex::new(EnrollSlot::default()), Condvar::new())),
+            },
+            ReaderStats {
+                tts: Arc::new(crate::stats::TtsStats::new()),
+                stt: Arc::new(crate::stats::SttStats::new()),
+                lifetime: Arc::new(crate::stats::LifetimeSeconds::load(
+                    dir.path().join("ds-stats-reader-realized-test.json"),
+                )),
+            },
+            ReaderModelState {
+                tts_model: Arc::new(ModelSlot::new()),
+                stt_model: Arc::new(ModelSlot::new()),
+                stt_realized: stt_realized.clone(),
+                gate: Some(gate.clone()),
+                child: canned_slot(expected_eof),
+            },
+        );
+        let realized = stt_realized.lock().unwrap().clone();
+        (realized, gate.seq().wrapping_sub(before))
+    }
+
+    #[test]
+    fn unexpected_eof_drops_the_realized_stt_token() {
+        // Without the clear the reader idles both models and bumps while `stt.provider`
+        // still reads the dead child's "cuda" — which macOS's Runtime row would show
+        // indefinitely, since `mark_dead` may not run for minutes (or ever).
+        assert_eq!(
+            reader_realized_stt(b"STT_PROVIDER MLX\n", false),
+            (None, 2),
+            "one bump for the realize, one for the crash clear — the clear must be \
+             observable to a WaitModelStatus waiter"
+        );
+    }
+
+    #[test]
+    fn deliberate_stop_eof_leaves_the_realized_stt_token_to_the_stopper() {
+        // A `stop_child`/`mark_dead` EOF is owned by `clear_loaded_flags`, mirroring the
+        // same split for the loaded flags.
+        assert_eq!(
+            reader_realized_stt(b"STT_PROVIDER MLX\n", true),
+            (Some("MLX".to_string()), 1),
         );
     }
 
@@ -538,7 +630,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: loaded_slot(),
                 stt_model: loaded_slot(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: None,
                 child: child_slot.clone(),
             },
@@ -611,7 +703,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: tts_model.clone(),
                 stt_model: stt_model.clone(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: None,
                 child: canned_slot(true),
             },
@@ -664,7 +756,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: tts_model.clone(),
                 stt_model: stt_model.clone(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: None,
                 child: canned_slot(true),
             },
@@ -782,7 +874,7 @@ mod reader_eof_tests {
                 ReaderModelState {
                     tts_model: reader_tts,
                     stt_model: reader_stt,
-                    stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                    stt_realized: Arc::new(Mutex::new(None)),
                     gate: None,
                     child: canned_slot(true),
                 },
@@ -854,7 +946,7 @@ mod reader_eof_tests {
                 ReaderModelState {
                     tts_model: loaded_slot(),
                     stt_model: loaded_slot(),
-                    stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                    stt_realized: Arc::new(Mutex::new(None)),
                     gate: None,
                     child: canned_slot(true),
                 },
@@ -920,7 +1012,7 @@ mod reader_eof_tests {
             ReaderModelState {
                 tts_model: loaded_slot(),
                 stt_model: loaded_slot(),
-                stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+                stt_realized: Arc::new(Mutex::new(None)),
                 gate: None,
                 child: canned_slot(true),
             },

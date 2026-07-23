@@ -371,7 +371,7 @@ pub(crate) fn model_status_json(
         },
         stt: SttStatus {
             engine: status_stt_engine(resolved_stt),
-            provider: stt_provider_token(resolved_stt, &tts.stt_realized_provider()),
+            provider: stt_provider_token(resolved_stt, tts.stt_realized_provider().as_deref()),
             status: stt_status,
             voice_key: claude_code_key,
         },
@@ -441,14 +441,16 @@ fn realized_provider_token(child_provider: &str) -> ds_config::Provider {
     ds_config::RealizedProvider::parse(child_provider).to_provider()
 }
 
-/// Realized STT EP token (built_in only); child reports honest backend.
+/// Realized STT EP token (built_in only); child reports honest backend. `None` when the
+/// engine isn't built-in OR when no backend has been realized yet (download/warming/
+/// no-preload) — a reported-but-unknown token still fails closed to `"cpu"`.
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
-    child_provider: &str,
+    child_provider: Option<&str>,
 ) -> Option<String> {
-    match resolved_stt {
-        Some(ds_config::SttEngine::BuiltIn) => {
-            Some(realized_provider_token(child_provider).as_str().to_string())
+    match (resolved_stt, child_provider) {
+        (Some(ds_config::SttEngine::BuiltIn), Some(p)) => {
+            Some(realized_provider_token(p).as_str().to_string())
         }
         _ => None,
     }
@@ -1053,7 +1055,7 @@ mod tests {
         for realized in ["CUDA", "CPU", "MLX", "System", "CoreML", "surprise"] {
             assert_eq!(
                 tts_provider_token(k, realized),
-                stt_provider_token(b, realized),
+                stt_provider_token(b, Some(realized)),
                 "TTS and STT must map realized `{realized}` to the SAME token"
             );
         }
@@ -1065,11 +1067,20 @@ mod tests {
         let k = Some(TtsEngine::BuiltIn);
         let b = Some(SttEngine::BuiltIn);
         assert_eq!(tts_provider_token(k, "CUDA").as_deref(), Some("cuda"));
-        assert_eq!(stt_provider_token(b, "CUDA").as_deref(), Some("cuda"));
-        assert_eq!(stt_provider_token(b, "CPU").as_deref(), Some("cpu"));
-        assert_eq!(stt_provider_token(b, "MLX").as_deref(), Some("mlx"));
+        assert_eq!(stt_provider_token(b, Some("CUDA")).as_deref(), Some("cuda"));
+        assert_eq!(stt_provider_token(b, Some("CPU")).as_deref(), Some("cpu"));
+        assert_eq!(stt_provider_token(b, Some("MLX")).as_deref(), Some("mlx"));
         // Anything unrecognized (or "System") is CPU, never a wrong GPU claim.
-        assert_eq!(stt_provider_token(b, "System").as_deref(), Some("cpu"));
+        assert_eq!(
+            stt_provider_token(b, Some("System")).as_deref(),
+            Some("cpu")
+        );
+        assert_eq!(
+            stt_provider_token(b, None),
+            None,
+            "no child has realized a backend (e.g. the Parakeet download) ⇒ null, not a \
+             fabricated \"cpu\""
+        );
         // ds-status is deliberately independent of ds-config, so the two model-token
         // vocabularies are unguarded duplicates anywhere but here, where both are in
         // scope: a rename on one side alone would split the config and status wires.
@@ -1083,10 +1094,10 @@ mod tests {
         assert_eq!(realized_provider_token("nonsense"), Provider::OrtCpu);
         // No local runtime token for the delegate/OS engines or when the engine is off.
         assert_eq!(
-            stt_provider_token(Some(SttEngine::ClaudeCode), "CUDA"),
+            stt_provider_token(Some(SttEngine::ClaudeCode), Some("CUDA")),
             None
         );
-        assert_eq!(stt_provider_token(None, "CUDA"), None);
+        assert_eq!(stt_provider_token(None, Some("CUDA")), None);
         assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
         assert_eq!(tts_provider_token(None, "CUDA"), None);
     }

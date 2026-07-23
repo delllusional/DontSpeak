@@ -145,8 +145,9 @@ pub struct TtsManager {
     stt_stats: Arc<crate::stats::SttStats>,
     lifetime: Arc<crate::stats::LifetimeSeconds>,
     provider: Mutex<String>,
-    /// Realized STT EP; starts "CPU".
-    stt_realized: Arc<Mutex<String>>,
+    /// The backend a child ACTUALLY realized for STT, from its `STT_PROVIDER` line.
+    /// `None` = none realized (no child, or a child that loaded no STT) — never a guess.
+    stt_realized: Arc<Mutex<Option<String>>>,
     spawn_prefs: Mutex<SpawnPrefs>,
     full_duplex_active: Mutex<bool>,
     stt_provider_active: Mutex<String>,
@@ -247,7 +248,7 @@ impl TtsManager {
             stt_stats,
             lifetime,
             provider: Mutex::new("CPU".to_string()),
-            stt_realized: Arc::new(Mutex::new("CPU".to_string())),
+            stt_realized: Arc::new(Mutex::new(None)),
             spawn_prefs: Mutex::new(SpawnPrefs {
                 provider: "auto".to_string(),
                 tts_model: ds_config::TtsModel::Kokoro,
@@ -329,8 +330,8 @@ impl TtsManager {
 
     /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"MLX"/"System"), from
     /// its `STT_PROVIDER` line — what the STT sessions ACTUALLY loaded on, the STT counterpart to
-    /// [`provider`](Self::provider). "CPU" until a child reports otherwise.
-    pub fn stt_realized_provider(&self) -> String {
+    /// [`provider`](Self::provider). `None` until a child reports a realized backend.
+    pub fn stt_realized_provider(&self) -> Option<String> {
         self.stt_realized.lock().unwrap().clone()
     }
 
@@ -775,7 +776,7 @@ impl TtsManager {
                         continue;
                     }
                     if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
-                        *self.stt_realized.lock().unwrap() = p.trim().to_string();
+                        store_realized_stt(&self.stt_realized, realized_stt_token(p), gate);
                         continue;
                     }
                     if let Some(p) = l.strip_prefix(proto::PROVIDER_PREFIX) {
@@ -939,10 +940,16 @@ impl TtsManager {
     /// model was already `Idle`), so a blocked `WaitModelStatus` still sees a real
     /// transition immediately instead of at some unrelated later status change (the
     /// caps-dot bug class; see `set_caps_gate` in engine.rs) — without the old manual
-    /// "only bump if at least one was loaded" bookkeeping this used to need. Shared by
-    /// `stop_child` and `mark_dead_locked`.
+    /// "only bump if at least one was loaded" bookkeeping this used to need. Also drops
+    /// the realized STT token, which goes with the process. Shared by `stop_child` and
+    /// `mark_dead_locked`.
     fn clear_loaded_flags(&self) {
         let gate = self.gate.get().map(|g| g.as_ref());
+        // Clear BEFORE the transitions: a waiter woken by a transition bump must not
+        // still read the dead child's token. Its own bump is change-gated because
+        // `stop_child` can reach here with both models already Idle, where the
+        // transitions bump nothing.
+        store_realized_stt(&self.stt_realized, None, gate);
         self.tts_model.transition(ModelState::Idle, gate);
         self.stt_model.transition(ModelState::Idle, gate);
     }
@@ -960,11 +967,6 @@ impl TtsManager {
         // pair still only flashes once: `mark_loaded` bumps again when the fresh child is
         // READY.
         self.clear_loaded_flags();
-        // The realized STT provider goes with the dead child. Reset it so a restart whose STT
-        // preload FAILS (emits no `STT_PROVIDER`) can't leave a stale token — e.g. the old child's
-        // "CUDA" — to be read before the new child reports. (The status row is gated on
-        // `stt_loaded` too, but keep the slot strictly fresh.)
-        *self.stt_realized.lock().unwrap() = "CPU".to_string();
         // `reap` has already released the slot's lock when it returns, so the
         // kill/wait below run OUTSIDE any lock.
         if let Some(mut child) = self.child.reap() {
@@ -1857,6 +1859,37 @@ impl TtsManager {
     }
 }
 
+/// `STT_PROVIDER` payload → realized backend token. A blank payload carries no
+/// observation, so it reads as "nothing realized" rather than fail-closed "CPU":
+/// claiming nothing is strictly safer than claiming a backend. An unrecognized
+/// non-blank token is still an observation — `RealizedProvider::parse` fails it
+/// closed to CPU downstream.
+fn realized_stt_token(payload: &str) -> Option<String> {
+    let trimmed = payload.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Change-gated write of the realized-STT slot, mirroring [`ModelSlot::transition`]:
+/// bumps (and returns `true`) only on a real change. `STT_PROVIDER` itself never
+/// bumped, so a client woken by the paired `STTLOADED` could read the row BETWEEN
+/// the two lines and latch `provider: null` with no later bump to correct it.
+fn store_realized_stt(
+    slot: &Mutex<Option<String>>,
+    token: Option<String>,
+    gate: Option<&StatusGate>,
+) -> bool {
+    let mut guard = slot.lock().unwrap();
+    if *guard != token {
+        *guard = token;
+        drop(guard);
+        if let Some(g) = gate {
+            g.bump();
+        }
+        return true;
+    }
+    false
+}
+
 fn provider_restart_needed(
     tts_preload: bool,
     desired: ds_config::RealizedProvider,
@@ -2224,6 +2257,43 @@ mod status_gate_tests {
         let gate = StatusGate::new();
         tts.set_status_gate(gate.clone());
         (tts, gate)
+    }
+
+    #[test]
+    fn realized_stt_token_parses_only_a_real_observation() {
+        assert_eq!(realized_stt_token("MLX").as_deref(), Some("MLX"));
+        assert_eq!(realized_stt_token("MLX ").as_deref(), Some("MLX"));
+        assert_eq!(realized_stt_token(""), None);
+        assert_eq!(realized_stt_token("   "), None);
+        // Unknown-but-reported is still an observation; the fail-closed mapping to "cpu"
+        // belongs to `RealizedProvider::parse`.
+        assert_eq!(realized_stt_token("surprise").as_deref(), Some("surprise"));
+    }
+
+    #[test]
+    fn store_realized_stt_bumps_only_on_a_real_change() {
+        // This bump is what stops a waiter woken by STTLOADED from latching a null it
+        // never gets corrected out of — STT_PROVIDER is the only line carrying the token.
+        let slot = Mutex::new(None);
+        let gate = StatusGate::new();
+        assert!(store_realized_stt(
+            &slot,
+            Some("MLX".to_string()),
+            Some(&gate)
+        ));
+        let seq1 = gate.seq();
+        assert_ne!(seq1, 0, "a fresh realized backend bumps the gate");
+        assert!(!store_realized_stt(
+            &slot,
+            Some("MLX".to_string()),
+            Some(&gate)
+        ));
+        assert_eq!(gate.seq(), seq1, "an identical repeat must not bump");
+        assert!(store_realized_stt(&slot, None, Some(&gate)));
+        let seq2 = gate.seq();
+        assert_ne!(seq2, seq1, "clearing a live token bumps");
+        assert!(!store_realized_stt(&slot, None, Some(&gate)));
+        assert_eq!(gate.seq(), seq2, "a repeat clear must not bump");
     }
 
     #[test]
