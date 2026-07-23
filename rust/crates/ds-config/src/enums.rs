@@ -158,8 +158,11 @@ impl DiarizerProvider {
         }
     }
 
-    /// Platform usable? (`mlx` = Apple-Silicon macOS only.)
-    pub(crate) fn is_diarizer_usable(self) -> bool {
+    /// Platform usable? (`mlx` = Apple-Silicon macOS only.) The ONE spelling of the
+    /// diarizer's platform gate: `ds_stt::diarize::ensure_mlx_backend` defers to it rather
+    /// than keeping a second `cfg!`, so the rung config calls usable is exactly the rung
+    /// that maps to a backend.
+    pub fn is_diarizer_usable(self) -> bool {
         match self {
             DiarizerProvider::Mlx => cfg!(all(target_os = "macos", target_arch = "aarch64")),
         }

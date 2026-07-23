@@ -477,7 +477,7 @@ fn tts_provider_token(
 /// engine measures what that load path needs: the config ladder, shim + MLX asset set
 /// (`backend_present`, mirroring [`parakeet_available`]), and `ensure_mlx_backend`, the
 /// sole provider→backend mapping — without which `resolved_diarizer`'s `Mlx` fallback
-/// would claim a backend off macOS. Speaker lock and SepFormer gate the row's `running`,
+/// would claim a backend off Apple-Silicon macOS. Speaker lock and SepFormer gate the row's `running`,
 /// not the backend: `diarize`/`enroll` serve without either.
 fn diarization_provider_token(
     diarizer: ds_config::DiarizerProvider,
@@ -1121,13 +1121,15 @@ mod tests {
                 "no loadable backend with enabled={enabled} present={present}"
             );
         }
-        // Wiring is macOS-only (`ds_stt::diarize::ensure_mlx_backend`), so elsewhere even a
-        // downloaded, enabled diarizer names nothing.
+        // Wiring is Apple-Silicon-macOS-only (`ds_stt::diarize::ensure_mlx_backend`, which
+        // defers to `is_diarizer_usable`), so elsewhere even a downloaded, enabled diarizer
+        // names nothing.
         let usable = diarization_provider_token(mlx, true, true);
-        #[cfg(target_os = "macos")]
-        assert_eq!(usable.as_deref(), Some("mlx"));
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(usable, None);
+        if mlx.is_diarizer_usable() {
+            assert_eq!(usable.as_deref(), Some("mlx"));
+        } else {
+            assert_eq!(usable, None);
+        }
     }
 
     #[test]

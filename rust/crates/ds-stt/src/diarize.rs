@@ -118,13 +118,15 @@ pub trait Diarizer {
     }
 }
 
-/// Map resolved diarizer rung → backend. Only MLX is wired (macOS); else user-facing `Err`.
+/// Map resolved diarizer rung → backend. Only MLX is wired; else user-facing `Err`.
+/// The platform half of the gate is
+/// [`DiarizerProvider::is_diarizer_usable`](ds_config::DiarizerProvider::is_diarizer_usable)
+/// (Apple-Silicon macOS for `mlx`) — a local `cfg!` here would drift from what config
+/// resolves and hand callers a backend that only fails later at dylib load.
 pub fn ensure_mlx_backend(provider: DiarizerProvider) -> Result<(), String> {
     match provider {
-        #[cfg(target_os = "macos")]
-        DiarizerProvider::Mlx => Ok(()),
-        // Reject unwired providers (and every provider off macOS) so config is honored.
-        #[allow(unreachable_patterns)]
+        DiarizerProvider::Mlx if provider.is_diarizer_usable() => Ok(()),
+        // Reject unwired providers (and every provider off its platform) so config is honored.
         other => Err(format!(
             "diarizer={} is not available on this platform (only MLX is wired)",
             other.as_str()
@@ -317,18 +319,19 @@ mod tests {
 
     #[test]
     fn ensure_mlx_backend_gates_provider_per_platform() {
-        // Mlx is the one provider rung today: Ok (MLX is the backend) on macOS,
-        // Err on every other OS. The Err message is the exact user-facing string the warm
-        // helper's diarize/enroll ops emit — keep it byte-stable.
+        // Mlx is the one provider rung today, so the gate must answer exactly what config
+        // calls usable — asserted against `is_diarizer_usable` rather than a second `cfg!`,
+        // which is the drift #211 caught (x86_64 macOS got Ok). The Err message is the exact
+        // user-facing string the warm helper's diarize/enroll ops emit — keep it byte-stable.
         let res = ensure_mlx_backend(DiarizerProvider::Mlx);
-        #[cfg(target_os = "macos")]
-        assert_eq!(res, Ok(()));
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(
-            res.unwrap_err(),
-            "diarizer=mlx is not available on this platform \
-             (only MLX is wired)"
-        );
+        assert_eq!(res.is_ok(), DiarizerProvider::Mlx.is_diarizer_usable());
+        if let Err(msg) = res {
+            assert_eq!(
+                msg,
+                "diarizer=mlx is not available on this platform \
+                 (only MLX is wired)"
+            );
+        }
     }
 
     #[test]
