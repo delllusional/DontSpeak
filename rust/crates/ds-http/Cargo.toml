@@ -11,8 +11,20 @@ description = "Shared blocking HTTP transport policy for DontSpeak."
 
 [dependencies]
 attohttpc = { workspace = true }
+# OS trust store. Alone it is not enough: a freshly installed Windows ships ~20 roots and
+# pulls the rest on demand through CryptoAPI's Automatic Root Update, which rustls never
+# triggers because it builds chains itself. huggingface.co chains to Amazon Root CA 1 —
+# absent on a fresh machine, so every model download failed with `UnknownIssuer`.
 rustls-native-certs = "0.8"
+# Mozilla roots in DER, unioned with the OS store so downloads work on a fresh machine.
+# The `-root-certs` crate (not `webpki-roots`) because attohttpc only accepts whole
+# certificates; `webpki-roots` ships pre-parsed anchors that cannot be re-encoded.
+# Enabling attohttpc's own `tls-rustls-webpki-roots` feature is NOT the fix: it pulls
+# `rustls/default` -> aws-lc-rs, which does not cross-compile to win-arm64.
+webpki-root-certs = "1"
 rustls-pki-types = "1"
+# Root-store health goes to the ds_log sink, same as ds-model's EP diagnostics.
+log = { workspace = true }
 
 [dev-dependencies]
 httpmock = { workspace = true }

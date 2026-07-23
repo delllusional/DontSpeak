@@ -13,31 +13,41 @@ const MAX_ROOTS_DIAGNOSTIC_LEN: usize = 256;
 /// How many load-error contexts to include in a partial/empty diagnostic.
 const MAX_ROOTS_ERROR_CONTEXTS: usize = 3;
 
-struct OsRoots {
+struct Roots {
+    /// OS store first, then the bundled Mozilla set. Duplicates are harmless — path
+    /// building matches on subject/SPKI, not on store position.
     certs: Vec<rustls_pki_types::CertificateDer<'static>>,
-    /// Empty/partial load note (#114); process-local until logging is wired.
+    /// Empty/partial OS load note (#114).
     diagnostic: Option<String>,
 }
 
-/// OS trust store once (workspace rustls leaves attohttpc roots empty). Fail-closed
-/// if empty; partial init preserved for callers.
-fn os_roots() -> &'static OsRoots {
-    static ROOTS: OnceLock<OsRoots> = OnceLock::new();
+/// Trust anchors once (workspace rustls leaves attohttpc's own root store empty).
+/// OS store UNIONED with bundled Mozilla roots: the OS store alone is incomplete on a
+/// fresh install, and the bundle alone would ignore enterprise/private CAs.
+fn roots() -> &'static Roots {
+    static ROOTS: OnceLock<Roots> = OnceLock::new();
     ROOTS.get_or_init(|| {
         let loaded = rustls_native_certs::load_native_certs();
         // `Error::context` is path-free static phrase.
         let contexts: Vec<&str> = loaded.errors.iter().map(|e| e.context).collect();
         let diagnostic = describe_native_roots_init(loaded.certs.len(), &contexts);
-        OsRoots {
-            certs: loaded.certs,
-            diagnostic,
+        let mut certs = loaded.certs;
+        let native_count = certs.len();
+        certs.extend(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
+        if let Some(note) = diagnostic.as_deref() {
+            log::warn!("tls {note}; bundled roots still available");
         }
+        log::debug!(
+            "tls trust anchors: {native_count} from OS store + {} bundled",
+            certs.len() - native_count
+        );
+        Roots { certs, diagnostic }
     })
 }
 
 /// Empty/partial native roots note; `None` if healthy. Independent of log init.
 pub fn native_roots_diagnostic() -> Option<&'static str> {
-    os_roots().diagnostic.as_deref()
+    roots().diagnostic.as_deref()
 }
 
 /// Pure empty/partial cert-load diagnose (#114). Path-free `error_contexts`.
@@ -109,7 +119,7 @@ pub fn request(
     if let Some(total) = total_timeout {
         builder = builder.timeout(total);
     }
-    for cert in &os_roots().certs {
+    for cert in &roots().certs {
         builder = builder.add_root_certificate(cert.clone());
     }
     builder
@@ -249,6 +259,28 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "total timeout must fire before the mock delay completes: {elapsed:?}"
         );
+    }
+
+    // The bundled Mozilla set must be in the anchors regardless of what the OS
+    // store holds — a fresh Windows ships ~20 roots and lacks Amazon Root CA 1, which
+    // every huggingface.co download chains to.
+    #[test]
+    fn trust_anchors_include_bundled_roots() {
+        let bundled = webpki_root_certs::TLS_SERVER_ROOT_CERTS;
+        assert!(!bundled.is_empty(), "bundled root set must not be empty");
+        let anchors = &roots().certs;
+        assert!(
+            anchors.len() >= bundled.len(),
+            "anchors ({}) must include the {} bundled roots",
+            anchors.len(),
+            bundled.len()
+        );
+        for cert in bundled {
+            assert!(
+                anchors.contains(cert),
+                "bundled root missing from the trust anchors"
+            );
+        }
     }
 
     // #114: pure helper — empty store without load errors.
