@@ -871,9 +871,13 @@ mod tests {
     fn payload_marks_the_active_model_and_the_shared_assets() {
         let root = tempfile::tempdir().unwrap();
         seed(root.path());
+        // STT off explicitly: the default ladder resolves to `system` on macOS but falls
+        // through to `built_in` on Linux/Windows, which would make `parakeet` the active
+        // STT and flip the `removable` row below by host.
         let cfg = VoiceConfig {
             tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
             tts_model: TtsModel::Chatterbox,
+            stt_engine: Some(Vec::new()),
             ..VoiceConfig::default()
         };
         let payload = inventory_json(root.path(), &cfg, &[DownloadTarget::QwenModel], None);
