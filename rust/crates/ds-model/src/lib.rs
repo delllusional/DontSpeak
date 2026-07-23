@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 mod archive;
 pub mod download;
 pub mod hash;
+pub mod inventory;
 mod kokoro_frontend;
 pub mod libraries;
 pub mod mlx_repo;
@@ -58,6 +59,9 @@ pub use download::{
     url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
+pub use inventory::{
+    Asset, AssetKind, Variant, asset_in_use, inventory_json, removal_targets, remove_at, scan_at,
+};
 pub use kokoro_frontend::{
     ensure_espeak_loader_with_progress, espeak_library_path, espeak_root_dir,
     is_espeak_loader_present,

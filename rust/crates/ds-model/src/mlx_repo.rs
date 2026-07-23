@@ -30,6 +30,10 @@ pub struct MlxRepo {
     pub repo: &'static str,
     pub revision: &'static str,
     pub files: &'static [MlxFile],
+    /// Directory name under [`ds_config::mlx_dir`]. `target` is the ambient resolution of
+    /// exactly this name — `repo_targets_are_their_dir_name_under_the_mlx_root` pins the pair
+    /// so [`repo_dir_under`] can resolve a repo against any root.
+    pub dir_name: &'static str,
     pub target: fn() -> Option<PathBuf>,
     /// Library-catalog metadata (the macOS-only Apple-Silicon model sets shown in the
     /// Libraries tab). The license lives WITH the files here — same can't-drift principle
@@ -80,11 +84,18 @@ pub fn tts_mlx_dir(model: ds_config::TtsModel) -> Option<PathBuf> {
     }
 }
 
+/// Root-relative form of a repo's `target`, for callers that own their model root.
+pub fn repo_dir_under(root: &Path, repo: &MlxRepo) -> PathBuf {
+    ds_config::mlx_dir_under(root).join(repo.dir_name)
+}
+
+pub const PARAKEET_MLX_DIR_NAME: &str = "parakeet";
+
 /// Exact local directory passed to `ParakeetModel.fromDirectory`. Version-less like every
 /// other MLX target, so a pin bump re-fetches in place (the ready marker carries the
 /// revision) instead of stranding the previous model's tree.
 fn parakeet_target() -> Option<PathBuf> {
-    Some(ds_config::mlx_dir()?.join("parakeet"))
+    Some(ds_config::mlx_dir()?.join(PARAKEET_MLX_DIR_NAME))
 }
 
 pub fn parakeet_mlx_dir() -> Option<PathBuf> {
@@ -592,6 +603,7 @@ pub static KOKORO_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/Kokoro-82M-bf16",
     revision: "a71e4d38b236d968966a2002c4c895dbd12b1c3c",
     files: KOKORO_MLX_FILES,
+    dir_name: KOKORO_MLX_DIR_NAME,
     target: kokoro_main_target,
     display_name: "Kokoro (MLX)",
     usage: "Apple-Silicon text-to-speech model and voice embeddings for MLX Audio",
@@ -605,6 +617,7 @@ pub static CHATTERBOX_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/chatterbox-8bit",
     revision: "9617d61b596a03d1bed766a28c341680e993a1b9",
     files: CHATTERBOX_MLX_FILES,
+    dir_name: CHATTERBOX_MLX_DIR_NAME,
     target: chatterbox_tts_target,
     display_name: "Chatterbox Multilingual (MLX)",
     usage: "Apple-Silicon multilingual text-to-speech model and default voice conditioning",
@@ -618,6 +631,7 @@ pub static CHATTERBOX_S3_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/S3TokenizerV2",
     revision: "e0c9886f0e1c35ae85b1f27277416fb19fc72bec",
     files: CHATTERBOX_S3_MLX_FILES,
+    dir_name: CHATTERBOX_S3_MLX_DIR_NAME,
     target: chatterbox_s3_target,
     display_name: "S3TokenizerV2 (MLX)",
     usage: "Apple-Silicon speech tokenizer required by Chatterbox MLX",
@@ -631,6 +645,7 @@ pub static QWEN_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
     revision: "049ef77fe8816b536193c0c25f9a214d17921282",
     files: QWEN_MLX_FILES,
+    dir_name: QWEN_MLX_DIR_NAME,
     target: qwen_tts_target,
     display_name: "Qwen3-TTS (MLX)",
     usage: "Apple-Silicon multilingual text-to-speech model for MLX Audio",
@@ -644,6 +659,7 @@ pub static OMNIVOICE_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/OmniVoice-bf16",
     revision: "8fb0b754cad788aaefec690cd55c207e8a628f85",
     files: OMNIVOICE_MLX_FILES,
+    dir_name: OMNIVOICE_MLX_DIR_NAME,
     target: omnivoice_tts_target,
     display_name: "OmniVoice (MLX)",
     usage: "Apple-Silicon omnilingual text-to-speech model and Higgs Audio 2 tokenizer",
@@ -658,6 +674,7 @@ pub static PARAKEET_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/parakeet-tdt-0.6b-v3",
     revision: "ed2b7e8c15f9aaa0b5772e2efb986255eaef7e15",
     files: PARAKEET_MLX_FILES,
+    dir_name: PARAKEET_MLX_DIR_NAME,
     target: parakeet_target,
     display_name: "Parakeet (MLX)",
     usage: "Apple-Silicon multilingual speech-to-text model (NVIDIA NeMo; MLX conversion)",
@@ -672,6 +689,7 @@ pub static DIARIZATION_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/diar_streaming_sortformer_4spk-v2.1-fp16",
     revision: "e23e6404bd9859e93edbf94a740eb1c7fc58f12e",
     files: DIARIZATION_MLX_FILES,
+    dir_name: DIARIZATION_MLX_DIR_NAME,
     target: diarization_target,
     display_name: "Sortformer diarization (MLX)",
     usage: "Apple-Silicon speaker diarization (NVIDIA Sortformer; MLX conversion)",
@@ -685,6 +703,7 @@ pub static SPEAKER_EMBEDDING_MLX: MlxRepo = MlxRepo {
     repo: "mlx-community/wespeaker-voxceleb-resnet34-LM",
     revision: "038a61d379b8729c72d64d7c209e0cee80b11d0f",
     files: SPEAKER_EMBEDDING_MLX_FILES,
+    dir_name: SPEAKER_EMBEDDING_DIR_NAME,
     target: speaker_embedding_target,
     display_name: "WeSpeaker embedding (MLX)",
     usage: "Apple-Silicon speaker enrollment and identity matching",
@@ -803,9 +822,26 @@ pub(crate) fn ensure_mlx_repos_at(
         return Ok(());
     }
 
+    // One directory flight per planned repo dir for the whole run — the granularity a
+    // `models remove` deletes at, so the two exclude each other instead of interleaving
+    // per file. The pre-check above still runs outside the flight: a removal landing in
+    // that window makes a concurrent cross-process `ds-helper --prefetch` skip a repo it
+    // believed present, which the engine's next `compute_needs` probe re-fetches.
+    let dirs: Vec<PathBuf> = plan.iter().map(|(_, target)| target.clone()).collect();
+    crate::download::with_destination_flights(&dirs, || {
+        ensure_mlx_repos_locked(host, &plan, total_bytes, progress)
+    })
+}
+
+fn ensure_mlx_repos_locked(
+    host: &str,
+    plan: &[(&MlxRepo, PathBuf)],
+    total_bytes: u64,
+    progress: &dyn Fn(u64, u64),
+) -> std::io::Result<()> {
     let mut pre_credit: u64 = 0;
     let mut jobs: Vec<crate::parallel::DownloadJob> = Vec::new();
-    for (repo, target) in &plan {
+    for (repo, target) in plan {
         for file in repo.files {
             let relative = Path::new(file.path);
             if relative
@@ -847,7 +883,7 @@ pub(crate) fn ensure_mlx_repos_at(
     // independent of sibling repos in the same set. A failed sibling no longer discards a completed
     // repo's marker, so the next retry skips the finished repo. A repo with any invalid file gets
     // no marker and self-repairs on the next run.
-    for (repo, target) in &plan {
+    for (repo, target) in plan {
         if let Some(missing) = repo
             .files
             .iter()
@@ -867,6 +903,13 @@ pub(crate) fn ensure_mlx_repos_at(
     }
 
     pool_result
+}
+
+/// Completion marker in `dir` carries `repo`'s pinned revision. Existence-only half of
+/// [`is_mlx_repo_present`], for the root-parameterized inventory probe.
+pub(crate) fn ready_marker_matches(dir: &Path, repo: &MlxRepo) -> bool {
+    std::fs::read_to_string(dir.join(READY_MARKER))
+        .is_ok_and(|marker| marker.trim() == repo.revision)
 }
 
 /// LOCAL presence (no network): marker revision matches and every source-pinned file verifies.
@@ -933,6 +976,8 @@ mod tests {
             repo,
             revision,
             files,
+            // Fixtures resolve through the injected `target`, never through a model root.
+            dir_name: name,
             target,
             display_name: "",
             usage: "",
@@ -950,6 +995,22 @@ mod tests {
         assert_eq!(DIARIZATION_MLX_SET.len(), 2);
         assert!(DIARIZATION_MLX.repo.contains("sortformer"));
         assert!(SPEAKER_EMBEDDING_MLX.repo.contains("wespeaker"));
+    }
+
+    /// Pure path math (no FS): every production repo's ambient `target` must be exactly its
+    /// `dir_name` under the MLX root, or [`repo_dir_under`] resolves a different directory
+    /// than the downloader writes.
+    #[test]
+    fn repo_targets_are_their_dir_name_under_the_mlx_root() {
+        for repo in all_mlx_repos() {
+            assert_eq!(
+                (repo.target)(),
+                ds_config::mlx_dir().map(|dir| dir.join(repo.dir_name)),
+                "{}",
+                repo.name
+            );
+            assert!(!repo.dir_name.is_empty(), "{}", repo.name);
+        }
     }
 
     #[test]

@@ -99,8 +99,8 @@ pub(crate) fn tools_call_cancellable(
         .unwrap_or_else(|| json!({}));
 
     use ds_tools::descriptions::{
-        DIARIZE_NAME, LISTEN_NAME, MANAGE_SPEAKERS_NAME, MUTE_NAME, SET_CONFIG_NAME, SPEAK_NAME,
-        STATUS_NAME, STOP_NAME, USAGE_NAME, VOICES_NAME,
+        DIARIZE_NAME, LISTEN_NAME, MANAGE_SPEAKERS_NAME, MODELS_NAME, MUTE_NAME, SET_CONFIG_NAME,
+        SPEAK_NAME, STATUS_NAME, STOP_NAME, USAGE_NAME, VOICES_NAME,
     };
     let result: Result<ToolSuccess, String> = match name {
         // Config-direct; no engine.
@@ -125,7 +125,8 @@ pub(crate) fn tools_call_cancellable(
             || n == MUTE_NAME
             || n == LISTEN_NAME
             || n == DIARIZE_NAME
-            || n == MANAGE_SPEAKERS_NAME =>
+            || n == MANAGE_SPEAKERS_NAME
+            || n == MODELS_NAME =>
         {
             let Some(sock) = sock else {
                 return ok(
@@ -144,6 +145,7 @@ pub(crate) fn tools_call_cancellable(
                 n if n == MUTE_NAME => call_mute(sock, &args).map(ToolSuccess::Text),
                 n if n == DIARIZE_NAME => call_diarize(sock, &args).map(ToolSuccess::Text),
                 n if n == MANAGE_SPEAKERS_NAME => call_speakers(sock, &args).map(ToolSuccess::Text),
+                n if n == MODELS_NAME => call_models(sock, &args).map(ToolSuccess::Structured),
                 _ => call_listen(sock, &args, cancelled).map(ToolSuccess::Text),
             }
         }
@@ -196,6 +198,12 @@ struct VoicesArgs {
     tts_engine: Option<TtsEngine>,
     tts_model: Option<TtsModel>,
     language: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ModelsArgs {
+    remove: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -271,49 +279,31 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
             json!({ "language": subtag, "voices": voices })
         })
         .collect();
+    // The per-model capability catalog lives in `models` now — one array of model ids, not two.
     let out = json!({
         "engine": engine.as_str(),
         "model": (engine == ds_config::TtsEngine::BuiltIn).then(|| model.as_str()),
         "language": language,
         "languages": languages,
-        "models": ds_config::TTS_MODELS.iter().map(|descriptor| json!({
-            "id": descriptor.id,
-            "name": descriptor.display_name,
-            "default_language": descriptor.default_language,
-            "languages": descriptor.languages,
-            "providers": descriptor.providers.iter().map(|provider| provider.as_str()).collect::<Vec<_>>(),
-            "supports_rate": descriptor.supports_rate,
-            "supports_full_duplex": descriptor.supports_full_duplex,
-            "params": descriptor.config_params.iter().map(tts_param_json).collect::<Vec<_>>(),
-        })).collect::<Vec<_>>(),
     });
     Ok(out)
 }
 
-fn tts_param_json(param: &ds_config::TtsParamDescriptor) -> Value {
-    let mut out = json!({ "key": param.key, "visible": param.user_visible });
-    match param.kind {
-        ds_config::TtsParamKind::Float { min, max } => {
-            out["kind"] = json!("float");
-            out["min"] = json!(min);
-            out["max"] = json!(max);
-        }
-        ds_config::TtsParamKind::Int { min, max } => {
-            out["kind"] = json!("int");
-            out["min"] = json!(min);
-            out["max"] = json!(max);
-        }
-        ds_config::TtsParamKind::Choice(choices) => {
-            out["kind"] = json!("choice");
-            out["choices"] = json!(choices);
-        }
-    }
-    out["default"] = match param.default {
-        ds_config::TtsParamDefault::Float(value) => json!(value),
-        ds_config::TtsParamDefault::Int(value) => json!(value),
-        ds_config::TtsParamDefault::Choice(value) => json!(value),
+/// Engine-backed on-disk inventory. The scan and the removal both run in the engine: it is
+/// the process that downloads, so its process-local flight map serializes them.
+fn call_models(sock: &Path, args: &Value) -> Result<Value, String> {
+    let a: ModelsArgs = serde_json::from_value(args.clone())
+        .map_err(|e| format!("invalid models arguments: {e}"))?;
+    let request = match a.remove {
+        Some(id) => Request::RemoveModel { id },
+        None => Request::ListModels,
     };
-    out
+    match ds_ipc::request(sock, &request) {
+        Ok(Response::Models { models }) => Ok(models),
+        Ok(Response::Error { message }) => Err(message),
+        Ok(_) => Err("models failed: unexpected engine response".into()),
+        Err(e) => Err(format!("engine unavailable: {e}")),
+    }
 }
 
 fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Value, String> {
@@ -840,6 +830,13 @@ mod drift {
                 tts_engine: Some(TtsEngine::BuiltIn),
                 tts_model: Some(TtsModel::Kokoro),
                 language: Some("en".into()),
+            })
+            .unwrap(),
+        );
+        assert_tool_matches(
+            "models",
+            serde_json::to_value(ModelsArgs {
+                remove: Some("kokoro".into()),
             })
             .unwrap(),
         );
@@ -1506,5 +1503,94 @@ mod voices_tests {
             pool.len(),
             "every pool voice must appear (and be marked active) in the catalog"
         );
+    }
+
+    /// The per-model capability catalog moved to `models`; `voices` must not carry a second
+    /// array of the same four model ids.
+    #[test]
+    fn voices_no_longer_lists_models() {
+        let (_dir, paths) = rooted_paths();
+        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" })).unwrap();
+        assert!(out.get("models").is_none());
+    }
+}
+
+#[cfg(test)]
+mod models_tool {
+    //! The bridge is a pass-through: request shape in, engine payload out.
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn serve_once(
+        response: Response,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        std::sync::mpsc::Receiver<Request>,
+        std::thread::JoinHandle<()>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("models.sock");
+        let listener = ds_ipc::transport::bind(&sock).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            tx.send(serde_json::from_str(&line).unwrap()).unwrap();
+            let mut reply = serde_json::to_string(&response).unwrap();
+            reply.push('\n');
+            stream.write_all(reply.as_bytes()).unwrap();
+        });
+        (dir, sock, rx, thread)
+    }
+
+    #[test]
+    fn a_bare_call_lists_and_passes_the_payload_through() {
+        let payload = json!({ "model_dir": "/models", "total_bytes": 7, "assets": [] });
+        let (_dir, sock, requests, server) = serve_once(Response::Models {
+            models: payload.clone(),
+        });
+        let out = call_models(&sock, &json!({})).unwrap();
+        assert!(matches!(requests.recv().unwrap(), Request::ListModels));
+        server.join().unwrap();
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn a_remove_argument_becomes_a_remove_request() {
+        let (_dir, sock, requests, server) = serve_once(Response::Models {
+            models: json!({ "removed": { "id": "qwen", "bytes": 3 } }),
+        });
+        let out = call_models(&sock, &json!({ "remove": "qwen" })).unwrap();
+        match requests.recv().unwrap() {
+            Request::RemoveModel { id } => assert_eq!(id, "qwen"),
+            other => panic!("expected RemoveModel, got {other:?}"),
+        }
+        server.join().unwrap();
+        assert_eq!(out["removed"]["bytes"], 3);
+    }
+
+    #[test]
+    fn an_engine_refusal_surfaces_verbatim() {
+        let (_dir, sock, _requests, server) =
+            serve_once(Response::error("models: `kokoro` is the active TTS model"));
+        let err = call_models(&sock, &json!({ "remove": "kokoro" })).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(err, "models: `kokoro` is the active TTS model");
+    }
+
+    #[test]
+    fn a_wrong_reply_and_a_dead_socket_both_fail_closed() {
+        let (_dir, sock, _requests, server) = serve_once(Response::Pong);
+        let err = call_models(&sock, &json!({})).unwrap_err();
+        server.join().unwrap();
+        assert_eq!(err, "models failed: unexpected engine response");
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = call_models(&dir.path().join("absent.sock"), &json!({})).unwrap_err();
+        assert!(err.starts_with("engine unavailable: "), "got: {err}");
     }
 }

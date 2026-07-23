@@ -143,6 +143,15 @@ pub enum Request {
         name: String,
     },
     ListSpeakers,
+    /// On-disk model inventory (sizes + removability). Distinct from [`Request::ModelStatus`],
+    /// which reports the RUNNING engine's lifecycle.
+    ListModels,
+    /// Delete every on-disk variant of one model id. Refused for the selected TTS/STT model,
+    /// a model with a download in flight, and the shared assets. Replies with the
+    /// post-removal inventory.
+    RemoveModel {
+        id: String,
+    },
     /// Presence/removability; engine is authority. File IO in app.
     ModelStatus,
     /// Coding-agent quota deck. Runs in the host app so macOS keychain ACL grants apply.
@@ -202,6 +211,10 @@ pub enum Response {
     ModelStatus {
         status: Value,
     },
+    /// On-disk inventory; carries `removed` after a successful [`Request::RemoveModel`].
+    Models {
+        models: Value,
+    },
     AgentUsage {
         deck: Value,
     },
@@ -233,6 +246,7 @@ impl Response {
                 | Response::Enrolled { .. }
                 | Response::Speakers { .. }
                 | Response::ModelStatus { .. }
+                | Response::Models { .. }
                 | Response::AgentUsage { .. }
                 | Response::Error { .. }
                 | Response::Unknown
@@ -265,6 +279,10 @@ mod tests {
                 name: "Alex".into(),
             },
             Request::ListSpeakers,
+            Request::ListModels,
+            Request::RemoveModel {
+                id: "chatterbox".into(),
+            },
             Request::Speak {
                 text: "hello".into(),
                 tts_args: Some(serde_json::json!({
@@ -376,6 +394,12 @@ mod tests {
         assert!(
             Response::AgentUsage {
                 deck: serde_json::json!({ "cards": [] })
+            }
+            .is_terminal()
+        );
+        assert!(
+            Response::Models {
+                models: serde_json::json!({ "assets": [] })
             }
             .is_terminal()
         );

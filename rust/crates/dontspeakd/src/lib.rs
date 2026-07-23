@@ -7,8 +7,8 @@
 //! STT from `ds-engines`. Reload (mtime + C ABI / Reload RPC) aborts in-flight hold
 //! before engine swap. Platform: `ds-platform` traits.
 //!
-//! Modules: `boot`, `engine`, `ipc`, `status`, `downloads`, `config_gate`, `barge`,
-//! `codex_stream`, `grok_stream`, `listen`/`listener`.
+//! Modules: `boot`, `engine`, `ipc`, `status`, `downloads`, `models`, `config_gate`,
+//! `barge`, `codex_stream`, `grok_stream`, `listen`/`listener`.
 
 // `listen` pure/tested; `listener` runtime. allow: test-only inspectors.
 mod child_slot;
@@ -31,6 +31,7 @@ mod downloads;
 mod engine;
 mod grok_stream;
 mod ipc;
+mod models;
 mod status;
 #[cfg(test)]
 mod test_env;

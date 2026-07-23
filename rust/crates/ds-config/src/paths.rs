@@ -319,9 +319,18 @@ fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
+/// Sub-directory of the model root holding every MLX repository.
+pub const MLX_DIR_NAME: &str = "mlx";
+
+/// Root-relative form of [`mlx_dir`], for callers that own their model root (inventory
+/// scans, tests) instead of resolving the ambient one.
+pub fn mlx_dir_under(root: &Path) -> PathBuf {
+    root.join(MLX_DIR_NAME)
+}
+
 /// MLX model cache under [`model_dir`]/mlx — explicit so downloads stay together.
 pub fn mlx_dir() -> Option<PathBuf> {
-    Some(model_dir()?.join("mlx"))
+    Some(mlx_dir_under(&model_dir()?))
 }
 
 /// Our local machine STATE/runtime root — `stats.toml`, pidfiles, the IPC socket, and

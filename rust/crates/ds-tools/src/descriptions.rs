@@ -11,6 +11,7 @@ pub const MUTE_NAME: &str = "mute";
 pub const STATUS_NAME: &str = "status";
 pub const USAGE_NAME: &str = "usage";
 pub const VOICES_NAME: &str = "voices";
+pub const MODELS_NAME: &str = "models";
 pub const DIARIZE_NAME: &str = "diarize";
 pub const MANAGE_SPEAKERS_NAME: &str = "manage_speakers";
 pub const SET_CONFIG_NAME: &str = "set_config";
@@ -28,6 +29,7 @@ pub const REFRESH: &str = "refresh";
 pub const TTS_ENGINE: &str = "tts_engine";
 pub const TTS_MODEL: &str = "tts_model";
 pub const LANGUAGE: &str = "language";
+pub const REMOVE: &str = "remove";
 pub const ACTION: &str = "action";
 pub const NAME: &str = "name";
 pub const TTS_VOICES: &str = "tts_voices";
@@ -60,7 +62,8 @@ pub const STOP: &str = "Stop this MCP connection's speech.";
 pub const MUTE: &str = "Global mute until changed or engine restart.";
 pub const STATUS: &str = "Speech config and runtime state.";
 pub const USAGE: &str = "Coding-agent subscription usage.";
-pub const VOICES: &str = "List models, languages, and voices.";
+pub const VOICES: &str = "List languages and voices.";
+pub const MODELS: &str = "Built-in models: capabilities, disk usage, and removal.";
 pub const DIARIZE: &str = "Record and label speakers. macOS only.";
 pub const MANAGE_SPEAKERS: &str = "List, enroll, or forget diarize voiceprints. macOS only.";
 pub const SET_CONFIG: &str = "Update and reload settings.";
@@ -68,13 +71,17 @@ pub const SET_CONFIG: &str = "Update and reload settings.";
 // ── param descriptions ──────────────────────────────────────────────────────
 
 pub const SPEAK_TEXT: &str = "Text to speak.";
-pub const SPEAK_TTS_ARGS: &str = "Per-target voice/language/params for this utterance. See voices.";
+pub const SPEAK_TTS_ARGS: &str =
+    "Per-target voice/language/params for this utterance. See voices and models.";
 
 pub const MUTE_ON: &str = "True to mute, false to unmute.";
 
 pub const VOICES_ENGINE: &str = "Engine to inspect.";
 pub const VOICES_MODEL: &str = "Built-in model to inspect.";
 pub const VOICES_LANGUAGE: &str = "Language to inspect.";
+
+pub const MODELS_REMOVE: &str =
+    "Model to delete from the cache. The active TTS/STT model is refused.";
 
 pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 

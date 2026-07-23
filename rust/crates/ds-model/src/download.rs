@@ -143,6 +143,28 @@ pub(crate) fn with_destination_flight<T>(
     operation(parent)
 }
 
+/// [`with_destination_flight`] over several destinations at once (a multi-directory asset,
+/// or a set installer covering every directory it writes). Sorted + deduped so two processes
+/// locking overlapping sets always acquire in the same order and cannot deadlock.
+pub(crate) fn with_destination_flights<T>(
+    paths: &[PathBuf],
+    operation: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let mut ordered: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    ordered.sort_unstable();
+    ordered.dedup();
+    fn recurse<T>(
+        rest: &[&Path],
+        operation: impl FnOnce() -> std::io::Result<T>,
+    ) -> std::io::Result<T> {
+        match rest.split_first() {
+            None => operation(),
+            Some((first, tail)) => with_destination_flight(first, |_| recurse(tail, operation)),
+        }
+    }
+    recurse(&ordered, operation)
+}
+
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
     if local.metadata()?.len() > MAX_DOWNLOAD_BYTES {
         return Err(std::io::Error::new(
@@ -371,7 +393,9 @@ fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<P
 
 /// Single resolution of a destination's sweep root, so the flight that registers on the
 /// gate and the sweep that claims it can never disagree about which root that is.
-fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
+/// `pub(crate)` so flight-entering tests in other modules can assert their fixture is not
+/// shadowed by an ambient `DONTSPEAK_MODEL_DIR` (#204).
+pub(crate) fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
     orphan_sweep_root(final_path, ds_config::model_dir())
 }
 

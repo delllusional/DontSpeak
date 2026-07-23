@@ -15,6 +15,8 @@ use descriptions::*;
 pub use set_config::{SetConfigArgs, TtsParamUpdates, TtsVoiceUpdates};
 
 /// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
+/// Turning it on must also add the diarization row to `ds_model::inventory`, which omits it
+/// for the same reason.
 pub const DIARIZATION_ENABLED: bool = false;
 
 const HIDDEN_TOOLS: &[&str] = &[DIARIZE_NAME, MANAGE_SPEAKERS_NAME];
@@ -67,6 +69,7 @@ enum Output {
     Status,
     Usage,
     Voices,
+    Models,
 }
 
 const fn annotations(read_only: bool, destructive: bool, idempotent: bool) -> Annotations {
@@ -170,6 +173,19 @@ static TOOLS: &[Tool] = &[
         min_one: false,
         annotations: annotations(true, false, true),
         output: Some(Output::Voices),
+    },
+    Tool {
+        name: MODELS_NAME,
+        description: MODELS,
+        params: &[p(
+            REMOVE,
+            PType::Enum(ds_config::MODEL_ASSET_TOKENS),
+            false,
+            MODELS_REMOVE,
+        )],
+        min_one: false,
+        annotations: annotations(false, true, true),
+        output: Some(Output::Models),
     },
     // Hidden when DIARIZATION_ENABLED is false (visibility only).
     Tool {
@@ -394,12 +410,12 @@ fn validate_param(param: &Param, value: &Value) -> Result<(), String> {
         ),
         PType::ParamPools if tts_param_pools_valid(value) => Ok(()),
         PType::ParamPools => Err(
-            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice parameter objects; see voices"
+            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice parameter objects; see models"
                 .into(),
         ),
         PType::TtsArgs if ds_config::TtsArgPools::parse(value).is_ok() => Ok(()),
         PType::TtsArgs => Err(
-            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice utterance arguments; see voices"
+            "must be a non-empty object of system, kokoro, chatterbox, qwen, or omnivoice utterance arguments; see models"
                 .into(),
         ),
         PType::Gain if value.as_str() == Some("auto") || number_in(value, 0.5, 20.0) => Ok(()),
@@ -590,6 +606,47 @@ fn tts_arg_pool_properties() -> Value {
     Value::Object(properties)
 }
 
+/// The per-model capability block the `models` rows carry (moved out of `voices`). Split
+/// from its parent literal only because one `json!` cannot expand this deep.
+fn model_capabilities_schema() -> Value {
+    json!({
+        "type": ["object", "null"],
+        "properties": {
+            "name": { "type": "string" },
+            "default_language": { "type": "string" },
+            "languages": { "type": "array", "items": { "type": "string" } },
+            "providers": {
+                "type": "array",
+                "items": { "type": "string", "enum": ["mlx", "cuda", "coreml", "cpu"] }
+            },
+            "supports_rate": { "type": "boolean" },
+            "supports_full_duplex": { "type": "boolean" },
+            "params": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["float", "int", "choice"] },
+                        "default": { "type": ["number", "string"] },
+                        "min": { "type": "number" },
+                        "max": { "type": "number" },
+                        "choices": { "type": "array", "items": { "type": "string" } },
+                        "visible": { "type": "boolean" }
+                    },
+                    "required": ["key", "kind", "default", "visible"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": [
+            "name", "default_language", "languages", "providers",
+            "supports_rate", "supports_full_duplex", "params"
+        ],
+        "additionalProperties": false
+    })
+}
+
 fn output_schema_for(output: Output) -> Value {
     match output {
         Output::Status => json!({
@@ -745,43 +802,58 @@ fn output_schema_for(output: Output) -> Value {
                         "required": ["language", "voices"],
                         "additionalProperties": false
                     }
-                },
-                "models": {
+                }
+            },
+            "required": ["engine", "model", "language", "languages"],
+            "additionalProperties": false
+        }),
+        Output::Models => json!({
+            "type": "object",
+            "properties": {
+                "model_dir": { "type": "string" },
+                "total_bytes": { "type": "integer", "minimum": 0 },
+                "assets": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "id": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
-                            "name": { "type": "string" },
-                            "default_language": { "type": "string" },
-                            "languages": { "type": "array", "items": { "type": "string" } },
-                            "providers": { "type": "array", "items": { "type": "string", "enum": ["mlx", "cuda", "coreml", "cpu"] } },
-                            "supports_rate": { "type": "boolean" },
-                            "supports_full_duplex": { "type": "boolean" },
-                            "params": {
+                            "id": { "type": "string" },
+                            "kind": { "type": "string", "enum": ["tts", "stt", "frontend", "runtime"] },
+                            "installed": { "type": "boolean" },
+                            "bytes": { "type": "integer", "minimum": 0 },
+                            "active": { "type": "boolean" },
+                            "removable": { "type": "boolean" },
+                            "reason": { "type": ["string", "null"], "enum": ["active", "shared", null] },
+                            "variants": {
                                 "type": "array",
                                 "items": {
                                     "type": "object",
                                     "properties": {
-                                        "key": { "type": "string" },
-                                        "kind": { "type": "string", "enum": ["float", "int", "choice"] },
-                                        "default": { "type": ["number", "string"] },
-                                        "min": { "type": "number" },
-                                        "max": { "type": "number" },
-                                        "choices": { "type": "array", "items": { "type": "string" } },
-                                        "visible": { "type": "boolean" }
+                                        "id": { "type": "string" },
+                                        "installed": { "type": "boolean" },
+                                        "bytes": { "type": "integer", "minimum": 0 }
                                     },
-                                    "required": ["key", "kind", "default", "visible"],
+                                    "required": ["id", "installed", "bytes"],
                                     "additionalProperties": false
                                 }
-                            }
+                            },
+                            "capabilities": model_capabilities_schema()
                         },
-                        "required": ["id", "name", "default_language", "languages", "providers", "supports_rate", "supports_full_duplex", "params"],
+                        "required": ["id", "kind", "installed", "bytes", "active", "removable", "reason", "variants", "capabilities"],
                         "additionalProperties": false
                     }
+                },
+                "removed": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "enum": ds_config::MODEL_ASSET_TOKENS },
+                        "bytes": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["id", "bytes"],
+                    "additionalProperties": false
                 }
             },
-            "required": ["engine", "model", "language", "languages", "models"],
+            "required": ["model_dir", "total_bytes", "assets"],
             "additionalProperties": false
         }),
     }
@@ -977,6 +1049,11 @@ mod tests {
             ("mute", json!({"on": "true"}), false),
             ("voices", json!({"tts_engine": "built_in"}), true),
             ("voices", json!({"tts_engine": "bogus"}), false),
+            ("models", json!({}), true),
+            ("models", json!({"remove": "kokoro"}), true),
+            ("models", json!({"remove": "parakeet"}), true),
+            ("models", json!({"remove": "onnxruntime"}), false),
+            ("models", json!({"extra": true}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
             (
@@ -1199,6 +1276,7 @@ mod tests {
                     (LANGUAGE, VOICES_LANGUAGE),
                 ],
             ),
+            (MODELS_NAME, MODELS, &[(REMOVE, MODELS_REMOVE)]),
             (DIARIZE_NAME, DIARIZE, &[(SECONDS, DIARIZE_SECONDS)]),
             (
                 MANAGE_SPEAKERS_NAME,
@@ -1436,7 +1514,7 @@ mod tests {
     fn catalog_is_a_nonempty_array_of_named_tools() {
         let c = catalog(true);
         let arr = c.as_array().expect("catalog is a JSON array");
-        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
+        let expected = if DIARIZATION_ENABLED { 11 } else { 9 };
         assert_eq!(arr.len(), expected, "expected {expected} catalog entries");
         for t in arr {
             assert!(
@@ -1473,7 +1551,7 @@ mod tests {
         let tools = catalog.as_array().unwrap();
         for tool in tools {
             let name = tool["name"].as_str().unwrap();
-            if matches!(name, "status" | "usage" | "voices") {
+            if matches!(name, "status" | "usage" | "voices" | "models") {
                 assert_eq!(tool["outputSchema"]["type"], "object");
                 assert_eq!(output_schema(name), Some(tool["outputSchema"].clone()));
             } else {
@@ -1488,7 +1566,7 @@ mod tests {
 
     #[test]
     fn tools_that_launch_the_host_are_not_annotated_read_only() {
-        for name in ["listen", "diarize"] {
+        for name in ["listen", "diarize", "models"] {
             let tool = TOOLS
                 .iter()
                 .find(|tool| tool.name == name)
@@ -1510,7 +1588,7 @@ mod tests {
     fn catalog_ui_params_are_ordered() {
         let ui = catalog_ui(true);
         let arr = ui.as_array().expect("ui catalog is an array");
-        let expected = if DIARIZATION_ENABLED { 10 } else { 8 };
+        let expected = if DIARIZATION_ENABLED { 11 } else { 9 };
         assert_eq!(arr.len(), expected, "UI lists primary tools only");
 
         let speak = arr

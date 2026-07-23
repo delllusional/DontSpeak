@@ -41,6 +41,17 @@ fn speak_tts_args(value: Option<serde_json::Value>) -> Result<Option<TtsArgPools
         .map_err(|error| format!("invalid tts_args: {error}"))
 }
 
+fn models_response(
+    paths: &Paths,
+    downloads: &crate::downloads::DownloadProg,
+    remove: Option<&str>,
+) -> ds_ipc::Response {
+    match ds_config::model_dir() {
+        Some(root) => crate::models::respond(paths, downloads, &root, remove),
+        None => ds_ipc::Response::error("models: cannot resolve the model directory"),
+    }
+}
+
 fn agent_usage_response(refresh: bool) -> ds_ipc::Response {
     agent_usage_response_with(refresh, ds_agent_usage::snapshot)
 }
@@ -437,6 +448,14 @@ pub(crate) fn spawn_ipc_server(
                     emit(&ds_ipc::Response::Speakers {
                         names: store.names(),
                     });
+                }
+                // The model root is resolved ONCE here; `ds_model::inventory` is entirely
+                // root-parameterized so no test can reach the real cache through it.
+                ds_ipc::Request::ListModels => {
+                    emit(&models_response(&paths, &shared.downloads, None));
+                }
+                ds_ipc::Request::RemoveModel { id } => {
+                    emit(&models_response(&paths, &shared.downloads, Some(&id)));
                 }
             }
         };

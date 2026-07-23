@@ -45,6 +45,15 @@ impl TtsModel {
 serialize_as_str!(TtsModel);
 strict_de!(TtsModel, "kokoro|chatterbox|qwen|omnivoice");
 
+/// Wire token of the built-in STT model's on-disk asset. Not a [`TtsModel`]; it is the
+/// STT half of [`MODEL_ASSET_TOKENS`].
+pub const STT_MODEL_TOKEN: &str = "parakeet";
+
+/// Every removable on-disk model asset, by id — the `models` tool's `remove` enum.
+/// Hand-written like [`TtsModel::TOKENS`] because MCP schema enums are const contexts;
+/// `model_asset_tokens_are_the_tts_models_then_the_stt_model` pins the composition.
+pub const MODEL_ASSET_TOKENS: &[&str] = &["kokoro", "chatterbox", "qwen", "omnivoice", "parakeet"];
+
 pub(crate) fn de_tts_model<'de, D>(deserializer: D) -> Result<TtsModel, D::Error>
 where
     D: Deserializer<'de>,
@@ -747,6 +756,21 @@ mod tests {
         assert_eq!(TtsModel::parse("Qwen"), Some(TtsModel::Qwen));
         assert_eq!(TtsModel::parse(" KOKORO "), Some(TtsModel::Kokoro));
         assert_eq!(TtsModel::parse("bogus"), None);
+    }
+
+    /// The `models` tool's remove enum is the four TTS tokens then the STT token; a new
+    /// built-in model must extend both lists or the tool advertises an id it cannot map.
+    #[test]
+    fn model_asset_tokens_are_the_tts_models_then_the_stt_model() {
+        assert_eq!(
+            &MODEL_ASSET_TOKENS[..TtsModel::TOKENS.len()],
+            TtsModel::TOKENS
+        );
+        assert_eq!(
+            &MODEL_ASSET_TOKENS[TtsModel::TOKENS.len()..],
+            [STT_MODEL_TOKEN]
+        );
+        assert!(!TtsModel::TOKENS.contains(&STT_MODEL_TOKEN));
     }
 
     #[test]

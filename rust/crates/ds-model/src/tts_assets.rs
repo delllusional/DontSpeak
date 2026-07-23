@@ -1,10 +1,10 @@
 //! Pinned ONNX assets for every built-in TTS model.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ds_config::TtsModel;
 
-use crate::download::ensure_in_dir;
+use crate::download::{ensure_in_dir, with_destination_flight};
 use crate::hash::verify_sha256_cached;
 use crate::setup::{DownloadStep, run_download_set};
 use crate::spec::ModelSpec;
@@ -537,12 +537,17 @@ pub fn tts_wants_cuda_assets_with(model: TtsModel, preference: &str, cuda_availa
     model.descriptor().wants_cuda(preference) && cuda_available
 }
 
+/// Root-relative form of [`tts_model_dir`]. Kokoro is flat (its files live in the root
+/// itself); every other set owns a subdirectory.
+pub fn tts_model_dir_under(root: &Path, model: TtsModel) -> PathBuf {
+    match tts_ort_asset_set(model).dir_name {
+        Some(dir) => root.join(dir),
+        None => root.to_path_buf(),
+    }
+}
+
 pub fn tts_model_dir(model: TtsModel) -> Option<PathBuf> {
-    let base = ds_config::model_dir()?;
-    Some(match tts_ort_asset_set(model).dir_name {
-        Some(dir) => base.join(dir),
-        None => base,
-    })
+    Some(tts_model_dir_under(&ds_config::model_dir()?, model))
 }
 
 pub fn tts_model_file_path(model: TtsModel, file_name: &str) -> Option<PathBuf> {
@@ -603,7 +608,15 @@ pub fn run_setup_tts_model_with_progress(
     steps.push(Box::new(|p| {
         crate::ort::ensure_onnxruntime_with_progress(p).map(|_| ())
     }));
-    run_download_set(progress, total, steps)?;
+    // A directory set takes its own directory flight for the whole run, so a concurrent
+    // `models remove` of the same model is excluded at the granularity it deletes at
+    // (per-file flights alone would let a removal unlink between two files). Kokoro's
+    // "directory" is the model root, which removal never locks as a unit — its per-file
+    // flights already line up.
+    match set.dir_name {
+        Some(_) => with_destination_flight(&dir, |_| run_download_set(progress, total, steps))?,
+        None => run_download_set(progress, total, steps)?,
+    }
     Ok(dir)
 }
 

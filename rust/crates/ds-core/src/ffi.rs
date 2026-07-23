@@ -546,6 +546,107 @@ mod tests {
         assert!(!libraries.as_array().unwrap().is_empty());
     }
 
+    /// DRIFT GUARD: `ds-core` is the only crate that sees both the hand-written `models`
+    /// output schema (`ds-tools`) and the payload the engine builds (`ds-model`) — neither
+    /// alone can catch the split. Built for a NON-EXISTENT root: `scan_at` creates nothing,
+    /// so this stays a pure comparison with no cache anywhere near it.
+    #[test]
+    fn models_payload_matches_its_advertised_output_schema() {
+        use serde_json::Value;
+
+        fn json_type_of(value: &Value) -> &'static str {
+            match value {
+                Value::Bool(_) => "boolean",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Object(_) => "object",
+                Value::Number(n) => {
+                    if n.is_f64() {
+                        "number"
+                    } else {
+                        "integer"
+                    }
+                }
+                Value::Null => "null",
+            }
+        }
+
+        fn assert_object_matches(label: &str, value: &Value, schema: &Value) {
+            let properties = schema["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{label}: schema declares properties"));
+            let object = value
+                .as_object()
+                .unwrap_or_else(|| panic!("{label}: payload is an object"));
+            for (key, field) in object {
+                let property = properties
+                    .get(key)
+                    .unwrap_or_else(|| panic!("{label}: schema has no `{key}`"));
+                let actual = json_type_of(field);
+                match &property["type"] {
+                    Value::String(declared) => {
+                        assert_eq!(declared, actual, "{label}.{key}")
+                    }
+                    Value::Array(declared) => assert!(
+                        declared.iter().any(|token| token == actual),
+                        "{label}.{key}: {declared:?} does not admit {actual}"
+                    ),
+                    other => panic!("{label}.{key}: unusable schema type {other:?}"),
+                }
+            }
+            for required in schema["required"].as_array().into_iter().flatten() {
+                let key = required.as_str().unwrap();
+                assert!(
+                    object.contains_key(key),
+                    "{label}: missing required `{key}`"
+                );
+            }
+        }
+
+        let schema = ds_tools::output_schema("models").expect("models advertises an output schema");
+        // A root that does not exist and is never created — the payload is pure data.
+        let root = std::path::Path::new("__ds_core_models_schema_guard__/no-such-model-root");
+        assert!(!root.exists());
+        let payload = ds_model::inventory_json(
+            root,
+            &ds_config::VoiceConfig::default(),
+            &[],
+            Some(("kokoro", 0)),
+        );
+        assert!(
+            !root.exists(),
+            "building the payload must not create the root"
+        );
+
+        assert_object_matches("models", &payload, &schema);
+        assert_object_matches(
+            "models.removed",
+            &payload["removed"],
+            &schema["properties"]["removed"],
+        );
+        let asset_schema = &schema["properties"]["assets"]["items"];
+        let assets = payload["assets"].as_array().unwrap();
+        assert!(!assets.is_empty(), "every host lists at least one row");
+        for asset in assets {
+            let id = asset["id"].as_str().unwrap();
+            assert_object_matches(&format!("models.assets[{id}]"), asset, asset_schema);
+            for variant in asset["variants"].as_array().unwrap() {
+                assert_object_matches(
+                    &format!("models.assets[{id}].variants"),
+                    variant,
+                    &asset_schema["properties"]["variants"]["items"],
+                );
+            }
+            if !asset["capabilities"].is_null() {
+                assert_object_matches(
+                    &format!("models.assets[{id}].capabilities"),
+                    &asset["capabilities"],
+                    &asset_schema["properties"]["capabilities"],
+                );
+            }
+        }
+    }
+
     #[test]
     fn agent_usage_card_json_unknown_agent_has_no_rows() {
         let json = take_string(agent_usage_card_json_gated("not_a_client", true, || true));

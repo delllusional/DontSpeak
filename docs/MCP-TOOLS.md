@@ -1,7 +1,7 @@
 # MCP tools
 
-Eight primary tools: `speak`, `listen`, `stop`, `mute`, `status`,
-`usage`, `voices`, `set_config` — Tools window order. Source: `ds-tools`;
+Nine primary tools: `speak`, `listen`, `stop`, `mute`, `status`,
+`usage`, `voices`, `models`, `set_config` — Tools window order. Source: `ds-tools`;
 parity test pins names/descriptions. `usage` is gated by config `agents`
 (off by default): while the gate is off it is hidden from the catalog and
 calls are rejected as unknown.
@@ -13,10 +13,11 @@ Manual: `dontspeak wire <client>` / `wire --reconcile`.
 but hidden (issue #77, `DIARIZATION_ENABLED`).
 
 Annotations. Read-only: `status`, `usage`, `voices`. Idempotent: `stop`, `mute`,
-`status`, `usage`, `voices`, `set_config`. Open-world: `usage`. Only that one reaches
-provider APIs; the rest are local only. `status`, `usage`, and `voices`:
-`structuredContent` + same JSON in text. Stdio: 1 JSON-RPC line ≤1 MiB; max 8
-concurrent; cancel stops `listen`.
+`status`, `usage`, `voices`, `models`, `set_config`. Open-world: `usage`. Only that one
+reaches provider APIs; the rest are local only. `status`, `usage`, `voices`, and
+`models`: `structuredContent` + same JSON in text. Unlike `status` and `usage`,
+`models` reaches the engine and starts the host app if it is not running. Stdio: 1
+JSON-RPC line ≤1 MiB; max 8 concurrent; cancel stops `listen`.
 
 ## speak
 
@@ -25,7 +26,7 @@ Queue text for spoken playback.
 | Param | Type | Required | Description |
 |---|---|---|---|
 | `text` | string | yes | Text to speak. |
-| `tts_args` | object | no | Per-target voice/language/params for this utterance. See voices. |
+| `tts_args` | object | no | Per-target voice/language/params for this utterance. See voices and models. |
 
 Only the target active at playback is applied. Flat `voice`/`language`/`rate` args are not accepted.
 
@@ -88,7 +89,7 @@ cache/provider fallback.
 
 ## voices
 
-List models, languages, and voices.
+List languages and voices.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
@@ -97,6 +98,49 @@ List models, languages, and voices.
 | `language` | string | no | Language to inspect. |
 
 `language` filters this query only; synthesis language is detected per utterance.
+Per-model capabilities (languages, providers, params) live in `models`.
+
+## models
+
+Built-in models: capabilities, disk usage, and removal.
+
+| Param | Type | Required | Description |
+|---|---|---|---|
+| `remove` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice`, `parakeet` | no | Model to delete from the cache. The active TTS/STT model is refused. |
+
+Without `remove` this only reads. Output: `model_dir`, `total_bytes`, and one `assets` row
+per model id — `kind` (`tts`/`stt`/`frontend`/`runtime`), `installed`, `bytes`, `active`,
+`removable`, `reason` (`active` \| `shared` \| null), `variants[]` (one per
+`DownloadTarget` this host supports, e.g. `kokoro_model` + `kokoro_mlx`), and
+`capabilities` (languages/providers/params for TTS models, null otherwise). A successful
+`remove` also returns `removed: { id, bytes }`.
+
+`installed` = the files are present; the engine additionally verifies checksums when it
+loads. Sizes are logical bytes (like `du --apparent-size`), symlinks are not followed, and
+`total_bytes` covers the whole cache — subtracting the rows shows unattributed leftovers.
+
+Removal takes every on-disk variant of one model (ONNX and MLX). It is refused when:
+
+- the model is the active TTS model —
+  ``models: `kokoro` is the active TTS model — switch with set_config tts_model first``
+- the model is the active STT model —
+  ``models: `parakeet` is the active STT model — switch with set_config stt_engine first``
+- one of its downloads is in flight —
+  ``models: `chatterbox` is downloading right now — try again when it finishes``
+- the id is a shared asset (`onnxruntime`, `kokoro_frontend`, `cuda`) —
+  ``models: `onnxruntime` is shared by every model and cannot be removed``
+
+Shared assets are listed with their sizes but never removed; `removable` is also false
+while a download is in flight, where `reason` stays null (live download state belongs to
+`status`). Removing a model that was never downloaded succeeds and reclaims 0 bytes; it
+may create empty cache directories and lock sidecars. Removal never changes the selection
+and never triggers a re-download.
+
+Partial failure is surfaced, not repaired: the response is an MCP error
+(``models: could not remove `<id>`: <io error>``) with no `removed` block, the row then
+reads `installed:false` with non-zero `bytes`, and re-running `models remove <id>` is the
+recovery. On Windows a model whose files the running engine still has open can fail to
+remove — stop speaking/listening or restart the app, then retry.
 
 ## diarize
 

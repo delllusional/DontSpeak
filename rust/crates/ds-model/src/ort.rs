@@ -372,6 +372,15 @@ fn version_marker_path(dylib_path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// The MANAGED onnxruntime copy under `root` plus its version sidecar. Deliberately not
+/// [`onnxruntime_dylib_path`], which can resolve to a bundled / `ORT_DYLIB_PATH` / Homebrew
+/// dylib outside the cache — the inventory only ever reports and removes what it downloaded.
+pub(crate) fn onnxruntime_paths_under(root: &Path) -> Vec<PathBuf> {
+    let dylib = root.join(onnxruntime_dylib_file());
+    let marker = version_marker_path(&dylib);
+    vec![dylib, marker]
+}
+
 /// Managed extract + matching [`version_marker_path`] pin (fixture-friendly; no model_dir).
 fn is_managed_download_up_to_date(path: &Path) -> bool {
     path.is_file()

@@ -6,8 +6,8 @@ use crate::archive::extract_wheel_subtree;
 use crate::download::ensure_in_dir;
 use crate::spec::ModelSpec;
 
-const COMPLETE_MARKER: &str = ".complete";
-const ESPEAK_DIR_NAME: &str = "espeakng-loader-0.2.4";
+pub(crate) const COMPLETE_MARKER: &str = ".complete";
+pub(crate) const ESPEAK_DIR_NAME: &str = "espeakng-loader-0.2.4";
 
 #[derive(Clone, Copy)]
 pub(crate) struct FrontendDist {
@@ -48,6 +48,11 @@ pub(crate) fn espeak_dist() -> Option<FrontendDist> {
 
 fn frontend_dir(name: &str) -> Option<PathBuf> {
     Some(ds_config::model_dir()?.join(name))
+}
+
+/// Root-relative form of [`espeak_root_dir`], for callers that own their model root.
+pub(crate) fn espeak_dir_under(root: &Path) -> PathBuf {
+    root.join(ESPEAK_DIR_NAME)
 }
 
 pub fn espeak_root_dir() -> Option<PathBuf> {
