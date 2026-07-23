@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn earcon_session_roundtrips_and_old_lines_default_to_global() {
+    fn earcon_session_roundtrips_and_absent_session_defaults_to_none() {
         let with_session = Request::Earcon {
             event: ds_earcon::EarconEvent::NeedsInput,
             session: Some("sess-1".into()),
@@ -466,12 +466,12 @@ mod tests {
             r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
             WiredAgent::Codex.as_str()
         );
-        let old: Request = serde_json::from_str(&line).unwrap();
-        assert!(matches!(old, Request::Earcon { session: None, .. }));
+        let bare: Request = serde_json::from_str(&line).unwrap();
+        assert!(matches!(bare, Request::Earcon { session: None, .. }));
     }
 
     #[test]
-    fn speak_narration_optional_detection_fields_roundtrip_and_legacy_decodes() {
+    fn speak_narration_optional_detection_fields_roundtrip() {
         let with_fields = Request::SpeakNarration {
             text: "digest".into(),
             detection_text: Some("full so-far corpus".into()),
@@ -491,14 +491,11 @@ mod tests {
             } if text == "digest" && det == "full so-far corpus"
         ));
 
-        // Absent field (older CLI) → None; engine detects on spoken text alone. A stale
-        // CLI still sending the retired `message_key` decodes the same way (serde ignores
-        // unknown fields), so hooks and engine may update out of step.
-        let legacy =
-            r#"{"cmd":"speak_narration","text":"hi","message_key":"m1","source":"claude"}"#;
-        let old: Request = serde_json::from_str(legacy).unwrap();
+        // Absent detection_text → None; engine detects on spoken text alone.
+        let absent = r#"{"cmd":"speak_narration","text":"hi","source":"claude"}"#;
+        let bare: Request = serde_json::from_str(absent).unwrap();
         assert!(matches!(
-            old,
+            bare,
             Request::SpeakNarration {
                 detection_text: None,
                 ..

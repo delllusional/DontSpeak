@@ -939,7 +939,7 @@ mod usage_output {
         )
         .expect("usage serializes");
 
-        // needs_auth skip-when-false (legacy decks omit the key).
+        // needs_auth skip-when-false (omitted key defaults false).
         assert!(
             !value["cards"][0]
                 .as_object()

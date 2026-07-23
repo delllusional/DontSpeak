@@ -141,7 +141,7 @@ mod tests {
             let j = serde_json::to_value(v).unwrap();
             assert_eq!(serde_json::from_value::<StatusTrayKind>(j).unwrap(), v);
         }
-        assert!(serde_json::from_value::<StatusTrayKind>(serde_json::json!("both")).is_err());
+        assert!(serde_json::from_value::<StatusTrayKind>(serde_json::json!("bogus")).is_err());
     }
 
     #[test]

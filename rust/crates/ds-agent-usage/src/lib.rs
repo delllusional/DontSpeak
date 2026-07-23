@@ -738,9 +738,9 @@ mod tests {
 
     #[test]
     fn needs_auth_serde_defaults_false_and_serializes_only_true() {
-        // Legacy JSON without the key still parses.
-        let legacy: UsageCard = serde_json::from_str(r#"{"agent":"claude","rows":[]}"#).unwrap();
-        assert!(!legacy.needs_auth);
+        // Omitted when false (skip_serializing_if) — default on decode.
+        let plain: UsageCard = serde_json::from_str(r#"{"agent":"claude","rows":[]}"#).unwrap();
+        assert!(!plain.needs_auth);
 
         let guarded: UsageCard =
             serde_json::from_str(r#"{"agent":"claude","rows":[],"needs_auth":true}"#).unwrap();

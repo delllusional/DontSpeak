@@ -56,9 +56,9 @@ public class AgentUsageModelTests
     [Fact]
     public void DecodesNeedsAuthDefaultingFalse()
     {
-        var legacy = AgentUsageModel.DecodeCard("""{"agent":"claude","rows":[]}""");
-        Assert.NotNull(legacy);
-        Assert.False(legacy.NeedsAuth);
+        var plain = AgentUsageModel.DecodeCard("""{"agent":"claude","rows":[]}""");
+        Assert.NotNull(plain);
+        Assert.False(plain.NeedsAuth);
 
         var guarded = AgentUsageModel.DecodeCard(
             """{"agent":"claude","rows":[],"needs_auth":true}""");

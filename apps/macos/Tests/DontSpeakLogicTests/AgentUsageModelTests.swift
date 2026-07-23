@@ -61,8 +61,8 @@ final class AgentUsageModelTests: XCTestCase {
 
     /// needs_auth defaults false; present only when true.
     func testDecodesNeedsAuthDefaultingFalse() throws {
-        let legacy = #"{"agent":"claude","rows":[]}"#
-        let card = try XCTUnwrap(UsageDeck.decodeCard(Data(legacy.utf8)))
+        let plain = #"{"agent":"claude","rows":[]}"#
+        let card = try XCTUnwrap(UsageDeck.decodeCard(Data(plain.utf8)))
         XCTAssertFalse(card.needsAuth)
 
         let guarded = #"{"agent":"claude","rows":[],"needs_auth":true}"#

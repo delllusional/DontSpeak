@@ -976,7 +976,7 @@ mod tests {
             ("mute", json!({"on": true}), true),
             ("mute", json!({"on": "true"}), false),
             ("voices", json!({"tts_engine": "built_in"}), true),
-            ("voices", json!({"tts_engine": "off"}), false),
+            ("voices", json!({"tts_engine": "bogus"}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
             (

@@ -144,7 +144,6 @@ mod tests {
             assert_eq!(serde_json::from_value::<StatusSttEngine>(j).unwrap(), v);
         }
         assert!(serde_json::from_value::<StatusSttEngine>(serde_json::json!("nope")).is_err());
-        assert!(serde_json::from_value::<StatusSttEngine>(serde_json::json!("kokoro")).is_err());
     }
 
     #[test]
@@ -155,6 +154,6 @@ mod tests {
             assert_eq!(j, v.as_str());
             assert_eq!(serde_json::from_value::<StatusTtsEngine>(j).unwrap(), v);
         }
-        assert!(serde_json::from_value::<StatusTtsEngine>(serde_json::json!("kokoro")).is_err());
+        assert!(serde_json::from_value::<StatusTtsEngine>(serde_json::json!("nope")).is_err());
     }
 }

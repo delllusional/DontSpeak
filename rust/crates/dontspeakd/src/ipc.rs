@@ -273,7 +273,7 @@ pub(crate) fn spawn_ipc_server(
                 } => {
                     // Window closed for good: per-window barge. The agent's voice assignment
                     // is keyed by client, not session, and deliberately survives.
-                    // Missing queue identity → global hard barge for legacy/sessionless hooks.
+                    // Missing queue identity → global hard barge for sessionless hooks.
                     // Grok: also drop the updates.jsonl tail registration.
                     log_client(
                         &paths,
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn sessionless_legacy_earcon_inherits_active_session() {
+    fn sessionless_earcon_inherits_active_session() {
         let ttsq = TtsQueue::test_stub();
         ttsq.set_active_session(Some("active".into()));
 
