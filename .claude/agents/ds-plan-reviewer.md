@@ -25,3 +25,7 @@ Check and report concrete findings:
 
 Verdict per item pass/fail. Final line: **Approve** or **Revise** (exact required
 changes). Don't soften invariant fails.
+
+**Revise** returns to `ds-planner` for another round, so write each required change
+as something a planner can action without re-deriving your reasoning: name the file,
+the symbol, and what breaks. Two revision rounds, then it goes to a human.

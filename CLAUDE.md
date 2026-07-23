@@ -22,14 +22,19 @@ Bigger than a one-file mechanical edit — catch invariant breaks *before* code:
 
 1. **Plan** — `ds-planner`: concrete plan + `Risk: yes/no`.
 2. **Review plan** — `ds-plan-reviewer` vs repo reality → **Approve** or **Revise**.
-   Don't implement past Revise.
+   Never implement past a Revise — it returns to `ds-planner` with the findings for
+   another round, bounded at two. A revision addresses findings; narrowing the fix
+   until a finding stops applying doesn't, and a finding believed wrong gets refuted
+   in the plan rather than dropped. Still Revise after two rounds → human.
 3. **Implement** — `ds-implementer` on the approved plan (or one slice). Shared
    engine/`ds-platform` across three hosts: one implementer per OS in parallel.
 4. **Audit if Risk: yes** — `ds-risk-auditor` for FFI, `ds-ipc`, model pinning, OS
    permissions, licensing, release/signing. Otherwise use `code-review`.
-5. **Land** — `ds-lander` lands the worktree branch on `main` (FF or cherry-pick),
-   pushes, deletes the branch/worktree, and closes related issues/PRs after
-   re-running per-commit gates — see [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md);
-   stops on conflict.
+5. **Land** — the default ending, not an extra request: `ds-lander` lands the
+   worktree branch on `main` (FF or cherry-pick), pushes, deletes the
+   branch/worktree, and closes related issues/PRs after re-running per-commit gates
+   — see [docs/TASK-BASELINE.md](docs/TASK-BASELINE.md); stops on conflict. Skip it
+   only when the user explicitly asked to keep the work on its branch, or when the
+   step-4 audit returned a finding.
 
 Workflow: `.claude/workflows/plan-review-implement.js` (or invoke stages by hand).

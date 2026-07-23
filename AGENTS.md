@@ -32,8 +32,10 @@ publishes installer assets the site references.
 | `Agent:` commit trailer | [docs/COMMIT-ATTRIBUTION.md](docs/COMMIT-ATTRIBUTION.md) |
 
 **Always in force:** start every task from freshly pulled `main` unless the task
-names another target. Commit and push work on its feature branch. Land selected
-commits on `main` only when the user explicitly asks, using cherry-pick. After the
+names another target. Commit and push work on its feature branch. Land the verified
+commits on `main` once that exact head is green, using cherry-pick — landing is the
+default ending, not a separate request. Keep work on its branch only when the user
+explicitly asks or a risk audit returned a finding. After the
 `main` push succeeds, remove the clean feature worktree and delete its local and
 remote branch. Close related issues only after their fixes reach `main` —
 [TASK-BASELINE.md](docs/TASK-BASELINE.md) has the steps and exceptions. Read-only

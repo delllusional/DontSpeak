@@ -1,7 +1,7 @@
 export const meta = {
   name: 'plan-review-implement',
-  description: 'Plan a DontSpeak change, adversarially review the plan, implement it in an isolated worktree, and — only if risk was flagged — run a dedicated risk audit.',
-  whenToUse: 'A nontrivial DontSpeak change that spans crates, apps, an FFI boundary, or multiple operating-system hosts. Pass the task description as args; pass { task, land: true } only when the user explicitly requested landing.',
+  description: 'Plan a DontSpeak change, adversarially review the plan, implement it in an isolated worktree, run a dedicated risk audit if risk was flagged, and land it on main.',
+  whenToUse: 'A nontrivial DontSpeak change that spans crates, apps, an FFI boundary, or multiple operating-system hosts. Pass the task description as args; landing on main is the default, so pass { task, land: false } only when the user explicitly asked to keep the work on its branch.',
   phases: [
     { title: 'Plan' },
     { title: 'Review' },
@@ -283,13 +283,26 @@ const logFiled = (stage, result) => {
 }
 
 const task = typeof args === 'string' ? args : args && typeof args === 'object' ? args.task : null
-const landRequested = Boolean(args && typeof args === 'object' && args.land === true)
+// Landing is the default. Opting out takes an explicit `land: false` (or
+// `keepOnBranch: true`) — anything else, including a bare task string, lands.
+const keepOnBranch = Boolean(args && typeof args === 'object' && (args.land === false || args.keepOnBranch === true))
 if (!task || typeof task !== 'string' || !task.trim()) {
   throw new Error('plan-review-implement needs the task description passed as args, e.g. Workflow({ name: "plan-review-implement", args: "add X to Y" })')
 }
 
+// The reviewer's findings are the point of the stage, so a 'revise' verdict feeds
+// back into the planner instead of ending the run. Bounded: a plan that can't
+// satisfy the reviewer in this many rounds needs a human, not another round.
+const REVISION_LIMIT = 2
+
+const reviewPrompt = (p) =>
+  `${REVIEWER_PERSONA}\n\n---\n\nReview this plan for DontSpeak before any code is written:\n\n${p.plan}\n\nPlanner's own risk call: ${p.risk ? 'yes' : 'no'}${p.riskAreas ? ' (' + p.riskAreas.join(', ') + ')' : ''}.`
+
+const revisionPrompt = (prev, review, round) =>
+  `${PLANNER_PERSONA}\n\n---\n\nRevise this DontSpeak plan. A plan reviewer checked it against the actual repo and returned "revise" (revision round ${round} of ${REVISION_LIMIT}).\n\nAddress every required change. Keep the parts the reviewer passed intact — this is a revision, not a rewrite — and do not narrow or weaken a fix just to make a finding go away. If you believe a finding is wrong, say so explicitly in the plan with the evidence that refutes it; don't silently ignore it.\n\nLanding is a separate later stage of this workflow. The plan must end at a committed feature branch in an isolated worktree, and must not instruct the implementer to push to or merge into main.\n\nOriginal task:\n\n${task}\n\nThe plan under revision:\n\n${prev.plan}\n\nReviewer findings that must be addressed:\n\n${review.notes}`
+
 phase('Plan')
-const planned = await agent(
+let planned = await agent(
   `${PLANNER_PERSONA}\n\n---\n\nPlan this DontSpeak change:\n\n${task}`,
   { agentType: 'Plan', phase: 'Plan', schema: PLAN_SCHEMA }
 )
@@ -297,15 +310,34 @@ log(`Plan ready (risk: ${planned.risk ? 'yes — ' + (planned.riskAreas || []).j
 logFiled('Plan', planned)
 
 phase('Review')
-const reviewed = await agent(
-  `${REVIEWER_PERSONA}\n\n---\n\nReview this plan for DontSpeak before any code is written:\n\n${planned.plan}\n\nPlanner's own risk call: ${planned.risk ? 'yes' : 'no'}${planned.riskAreas ? ' (' + planned.riskAreas.join(', ') + ')' : ''}.`,
+let reviewed = await agent(
+  reviewPrompt(planned),
   { agentType: 'Plan', phase: 'Review', schema: REVIEW_SCHEMA }
 )
 
 logFiled('Review', reviewed)
 
+for (let round = 1; reviewed.verdict === 'revise' && round <= REVISION_LIMIT; round++) {
+  log(`Plan-reviewer requested revisions — re-planning (round ${round} of ${REVISION_LIMIT}).`)
+
+  phase('Plan')
+  planned = await agent(
+    revisionPrompt(planned, reviewed, round),
+    { agentType: 'Plan', phase: 'Plan', label: `plan:revision-${round}`, schema: PLAN_SCHEMA }
+  )
+  log(`Revised plan ready (risk: ${planned.risk ? 'yes — ' + (planned.riskAreas || []).join(', ') : 'no'})`)
+  logFiled(`Plan revision ${round}`, planned)
+
+  phase('Review')
+  reviewed = await agent(
+    reviewPrompt(planned),
+    { agentType: 'Plan', phase: 'Review', label: `review:round-${round + 1}`, schema: REVIEW_SCHEMA }
+  )
+  logFiled(`Review round ${round + 1}`, reviewed)
+}
+
 if (reviewed.verdict === 'revise') {
-  log('Plan-reviewer requested revisions — stopping before implementation.')
+  log(`Plan-reviewer still requesting revisions after ${REVISION_LIMIT} rounds — stopping before implementation.`)
   return { plan: planned.plan, review: reviewed, implementation: null, audit: null, land: null }
 }
 
@@ -337,7 +369,7 @@ if (risk) {
 const clean = !risk || (audit && audit.findings.every((f) => f.verdict !== 'finding'))
 
 let land = null
-if (clean && landRequested) {
+if (clean && !keepOnBranch) {
   phase('Land')
   log('Clean — landing the worktree on main and pushing.')
   land = await agent(
@@ -348,7 +380,7 @@ if (clean && landRequested) {
 } else if (!clean) {
   log('Audit findings need a fix before landing — worktree left in place for a follow-up.')
 } else {
-  log('Implementation verified — landing was not explicitly requested, so the feature worktree remains in place.')
+  log('Implementation verified — landing was explicitly declined, so the feature worktree remains in place.')
 }
 
 return { plan: planned.plan, review: reviewed, implementation, audit, land }

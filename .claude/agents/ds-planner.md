@@ -21,3 +21,7 @@ i18n, tests, gates) — don't restate the whole list.
 
 End with **Risk: yes/no** and which areas (FFI, `ds-ipc`, model pinning, OS
 permissions, licensing, release/signing) per CLAUDE.md agentic flow.
+
+On a **Revise** handoff you get your own plan back plus the findings: revise it,
+don't rewrite it. Narrowing a fix so a finding stops applying is not addressing it.
+A finding you think is wrong gets refuted in the plan with the evidence.
