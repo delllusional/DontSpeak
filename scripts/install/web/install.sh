@@ -18,7 +18,7 @@
 #   DONTSPEAK_DRY_RUN=1    resolve + print the plan, download nothing
 #   DONTSPEAK_NO_AUTOSTART=1  Linux: skip enabling start-at-login (macOS N/A — the app
 #                             manages its own login item)
-#   DONTSPEAK_INSTALL_DIR  Linux: bin dir for the CLI bins + placed uninstaller (default
+#   DONTSPEAK_INSTALL_DIR  bin dir for CLI launchers + placed uninstaller (default
 #                          ~/.local/bin; macOS app always installs to ~/Applications)
 set -eu
 
@@ -181,7 +181,12 @@ case "$OS" in
     STAGED=""
 
     cli="$APP/Contents/Helpers/dontspeak"
-    if [ -x "$cli" ]; then say "wiring clients (MCP + hooks)"; "$cli" wire --reconcile || warn "wire --reconcile reported an issue"
+    if [ -x "$cli" ]; then
+      mkdir -p "$BIN"
+      ln -s "$cli" "$BIN/dontspeak"
+      say "launcher placed: $BIN/dontspeak"
+      say "wiring clients (MCP + hooks)"
+      "$cli" wire --reconcile || warn "wire --reconcile reported an issue"
     else warn "no bundled dontspeak CLI in the app — start it; clients are wired automatically at launch"; fi
     place_uninstaller "$APP/Contents/Resources/uninstall.sh"
     say "launching DontSpeak (first boot downloads the voice models)"

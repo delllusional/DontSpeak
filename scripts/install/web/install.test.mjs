@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readlink,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,3 +149,114 @@ exec sh "$(cygpath -u "$1")"
   assert.equal(result.status, 0, `installer failed:\n${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, new RegExp(`verified ${assetName} \\(sha256 ok\\)`));
 });
+
+test(
+  "macOS web installer replaces a stale CLI with the bundled launcher",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dontspeak-macos-installer-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+
+    const assetName = "dontspeak-0.3.8-dev-macos-aarch64.app.zip";
+    const archive = join(root, assetName);
+    const checksums = join(root, "checksums.txt");
+    const fakeBin = join(root, "bin");
+    const home = join(root, "home");
+    const installDir = join(root, "install");
+    const helper = join(root, "dontspeak");
+    const uninstaller = join(root, "uninstall.sh");
+    const wireLog = join(root, "wire.log");
+    await mkdir(fakeBin);
+    await mkdir(join(home, "Applications", "DontSpeak.app"), { recursive: true });
+    await mkdir(installDir);
+    await writeFile(archive, "fixture archive");
+    await executable(
+      helper,
+      `#!/bin/sh
+printf '%s\\n' "$*" >> "$TEST_WIRE_LOG"
+`,
+    );
+    await executable(uninstaller, "#!/bin/sh\nexit 0\n");
+    await executable(join(installDir, "dontspeak"), "#!/bin/sh\nexit 99\n");
+
+    const archiveBytes = await readFile(archive);
+    const sha256 = createHash("sha256").update(archiveBytes).digest("hex");
+    await writeFile(checksums, `${sha256}  ${assetName}\n`);
+
+    await executable(
+      join(fakeBin, "uname"),
+      `#!/bin/sh
+case "$1" in
+  -s) printf 'Darwin\\n' ;;
+  -m) printf 'arm64\\n' ;;
+  *) exit 2 ;;
+esac
+`,
+    );
+    await executable(
+      join(fakeBin, "curl"),
+      `#!/bin/sh
+set -eu
+[ "$1" = "-fsSL" ]
+shift
+if [ "\${1:-}" = "-o" ]; then
+  cp "$TEST_ARCHIVE" "$2"
+  exit 0
+fi
+case "$1" in
+  */releases/latest)
+    printf '%s\\n' \\
+      '{"browser_download_url":"https://example.test/${assetName}"}' \\
+      '{"browser_download_url":"https://example.test/checksums.txt"}'
+    ;;
+  */checksums.txt) exec cat "$TEST_CHECKSUMS" ;;
+  *) exit 22 ;;
+esac
+`,
+    );
+    await executable(
+      join(fakeBin, "ditto"),
+      `#!/bin/sh
+set -eu
+[ "$1" = "-x" ] && [ "$2" = "-k" ]
+out="$4/DontSpeak.app"
+mkdir -p "$out/Contents/Helpers" "$out/Contents/Resources"
+cp "$TEST_HELPER" "$out/Contents/Helpers/dontspeak"
+cp "$TEST_UNINSTALLER" "$out/Contents/Resources/uninstall.sh"
+chmod +x "$out/Contents/Helpers/dontspeak" "$out/Contents/Resources/uninstall.sh"
+`,
+    );
+    for (const command of ["open", "osascript", "pkill"]) {
+      await executable(join(fakeBin, command), "#!/bin/sh\nexit 0\n");
+    }
+
+    const result = spawnSync("sh", [installer], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: home,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        TEST_ARCHIVE: archive,
+        TEST_CHECKSUMS: checksums,
+        TEST_HELPER: helper,
+        TEST_UNINSTALLER: uninstaller,
+        TEST_WIRE_LOG: wireLog,
+        DONTSPEAK_INSTALL_DIR: installDir,
+      },
+    });
+
+    assert.equal(result.status, 0, `installer failed:\n${result.stdout}\n${result.stderr}`);
+    const launcher = join(installDir, "dontspeak");
+    assert.equal((await lstat(launcher)).isSymbolicLink(), true);
+    assert.equal(
+      await readlink(launcher),
+      join(home, "Applications", "DontSpeak.app", "Contents", "Helpers", "dontspeak"),
+    );
+    execFileSync(launcher, ["--version"], {
+      env: { ...process.env, TEST_WIRE_LOG: wireLog },
+    });
+    assert.equal(await readFile(wireLog, "utf8"), "wire --reconcile\n--version\n");
+    assert.match(result.stdout, new RegExp(`launcher placed: ${launcher}`));
+  },
+);
