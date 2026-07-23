@@ -6,6 +6,7 @@
 use ds_client::WiredAgent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 
 fn deserialize_nonempty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
@@ -14,6 +15,17 @@ where
     let value = String::deserialize(deserializer)?;
     if value.trim().is_empty() {
         return Err(serde::de::Error::custom("must not be empty"));
+    }
+    Ok(value)
+}
+
+fn deserialize_absolute_path_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = deserialize_nonempty_string(deserializer)?;
+    if !Path::new(&value).is_absolute() {
+        return Err(serde::de::Error::custom("must be an absolute path"));
     }
     Ok(value)
 }
@@ -39,8 +51,8 @@ pub enum Request {
     Ping,
     /// Codex app-server ready after narration subscriber attaches (TUI race).
     EnsureCodexStream {
-        /// Executable path already resolved by the launcher.
-        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        /// Absolute executable path suitable for app-server supervision.
+        #[serde(deserialize_with = "deserialize_absolute_path_string")]
         codex_bin: String,
     },
     /// Global mute; speech drains silently, cues suppressed.
@@ -234,10 +246,15 @@ mod tests {
 
     #[test]
     fn request_roundtrips_through_json_lines() {
+        let codex_bin = if cfg!(windows) {
+            r"C:\opt\codex\bin\codex.exe"
+        } else {
+            "/opt/codex/bin/codex"
+        };
         let cases = [
             Request::Ping,
             Request::EnsureCodexStream {
-                codex_bin: "/opt/codex/bin/codex".into(),
+                codex_bin: codex_bin.into(),
             },
             Request::Diarize { seconds: 10 },
             Request::Enroll {
@@ -315,6 +332,12 @@ mod tests {
             let back: Request = serde_json::from_str(&line).unwrap();
             assert_eq!(serde_json::to_string(&back).unwrap(), line);
         }
+    }
+
+    #[test]
+    fn codex_stream_request_rejects_relative_binary_paths() {
+        let request = r#"{"cmd":"ensure_codex_stream","codex_bin":"codex"}"#;
+        assert!(serde_json::from_str::<Request>(request).is_err());
     }
 
     #[test]

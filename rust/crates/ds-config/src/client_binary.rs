@@ -1,8 +1,9 @@
 //! Shared client-executable resolution.
 //!
 //! Presence checks, launch wrappers, usage providers, and the Codex stream supervisor must
-//! agree on whether a client is installed and which executable to run. Keep the directory
-//! order and client-specific install roots here so those callers cannot drift independently.
+//! agree on whether a client is installed and which absolute executable to run. Keep the
+//! directory order and client-specific install roots here so those callers cannot drift
+//! independently.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -126,14 +127,12 @@ pub(crate) fn resolve_client_binary_in(
     } else {
         configured
     };
-    if let Some(binary) = search.override_path.filter(|candidate| candidate.is_file()) {
-        return Some(binary.to_path_buf());
+    if let Some(binary) = search.override_path.and_then(existing_absolute_file) {
+        return Some(binary);
     }
     let configured_path = Path::new(name);
     if configured_path.is_absolute() || configured_path.components().count() > 1 {
-        return configured_path
-            .is_file()
-            .then(|| configured_path.to_path_buf());
+        return existing_absolute_file(configured_path);
     }
 
     let mut dirs = Vec::new();
@@ -203,25 +202,32 @@ pub(crate) fn resolve_client_binary_in(
         .find_map(|dir| executable_in_dir(&dir, name, search.native_windows_executable))
 }
 
+fn existing_absolute_file(candidate: &Path) -> Option<PathBuf> {
+    if !candidate.is_file() {
+        return None;
+    }
+    std::path::absolute(candidate).ok()
+}
+
 #[cfg(windows)]
 fn executable_in_dir(dir: &Path, name: &str, native_only: bool) -> Option<PathBuf> {
     if Path::new(name).extension().is_some() {
-        return dir.join(name).is_file().then(|| dir.join(name));
+        return existing_absolute_file(&dir.join(name));
     }
     if native_only {
         let candidate = dir.join(format!("{name}.exe"));
-        return candidate.is_file().then_some(candidate);
+        return existing_absolute_file(&candidate);
     }
     ["exe", "cmd", "com", "bat"]
         .into_iter()
         .map(|extension| dir.join(format!("{name}.{extension}")))
-        .find(|candidate| candidate.is_file())
+        .find_map(|candidate| existing_absolute_file(&candidate))
 }
 
 #[cfg(not(windows))]
 fn executable_in_dir(dir: &Path, name: &str, _native_only: bool) -> Option<PathBuf> {
     let candidate = dir.join(name);
-    candidate.is_file().then_some(candidate)
+    existing_absolute_file(&candidate)
 }
 
 /// Login-shell PATH once, as a fallback for GUI-launched processes.
@@ -327,6 +333,27 @@ mod tests {
             assert_eq!(
                 resolve_client_binary_in(client, &paths, isolated_search(client)),
                 Some(binary),
+                "{client:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_client_returns_an_absolute_configured_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::tempdir_in(&cwd).unwrap();
+        let relative_root = root.path().strip_prefix(&cwd).unwrap();
+
+        for &client in WiredAgent::ALL {
+            let paths = Paths::rooted_at(root.path());
+            let relative = relative_root.join(binary_name(client));
+            std::fs::write(cwd.join(&relative), b"fixture").unwrap();
+            let mut search = isolated_search(client);
+            search.configured = relative.to_str().unwrap();
+
+            assert_eq!(
+                resolve_client_binary_in(client, &paths, search),
+                Some(cwd.join(relative)),
                 "{client:?}"
             );
         }

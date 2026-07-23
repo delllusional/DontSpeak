@@ -52,6 +52,8 @@ No `MessageDisplay` / `SessionEnd` / `Notification`. Supervisor thread:
 
 `dontspeak codex` for TUI / resume / fork — attach first, then `--remote`. Plain
 `codex` TUI stays Stop-fallback. User rules: [CLIENT-INTEGRATIONS.md](CLIENT-INTEGRATIONS.md).
+The launcher hands the engine its absolute resolved executable; on Windows the
+app-server hint prefers the native payload over an npm command shim.
 
 On Unix, DontSpeak first tries the default control socket. If it is unavailable, it
 resolves `codex_bin` and chooses the lifecycle Codex supports:

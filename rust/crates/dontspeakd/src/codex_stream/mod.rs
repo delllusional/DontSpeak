@@ -77,11 +77,11 @@ impl SessionRegistry {
     ) -> Result<String, String> {
         let deadline = Instant::now() + timeout;
         let mut g = self.inner.lock().unwrap();
+        g.launcher_bin = Some(launcher_bin);
         if let Some(endpoint) = &g.connected_endpoint {
             return Ok(endpoint.clone());
         }
         let seen_error = g.launch_error_seq;
-        g.launcher_bin = Some(launcher_bin);
         g.launch_waiters += 1;
         g.epoch += 1;
         self.cv.notify_all();

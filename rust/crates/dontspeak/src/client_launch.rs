@@ -29,23 +29,26 @@ pub(crate) fn run(spec: &ClientSpec, args: &[String]) -> i32 {
 }
 
 fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: &str) -> i32 {
-    let Some(bin) = ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)
-    else {
+    let invocation = codex_invocation(args);
+    if invocation == CodexInvocation::CustomRemote {
+        eprintln!(
+            "dontspeak codex: `--remote` is managed by DontSpeak; use `codex` directly for a custom remote endpoint"
+        );
+        return 2;
+    }
+    let Some((bin, app_server_bin)) = resolve_codex_launch_bins(spec, paths, configured_bin) else {
         eprintln!(
             "dontspeak {}: client executable {configured_bin:?} was not found",
             spec.target.as_str()
         );
         return 127;
     };
-    match codex_invocation(args) {
+    match invocation {
         CodexInvocation::Direct => run_resolved(spec, args, &bin),
         CodexInvocation::CustomRemote => {
-            eprintln!(
-                "dontspeak codex: `--remote` is managed by DontSpeak; use `codex` directly for a custom remote endpoint"
-            );
-            2
+            unreachable!("custom remotes return before executable resolution")
         }
-        CodexInvocation::Narrated => match prepare_codex_stream(paths, &bin) {
+        CodexInvocation::Narrated => match prepare_codex_stream(paths, &app_server_bin) {
             Some(endpoint) => {
                 let mut remote_args = vec!["--remote".to_string(), endpoint];
                 remote_args.extend_from_slice(args);
@@ -55,6 +58,18 @@ fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: 
             None => run_resolved(spec, args, &bin),
         },
     }
+}
+
+fn resolve_codex_launch_bins(
+    spec: &ClientSpec,
+    paths: &Paths,
+    configured_bin: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let bin = ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)?;
+    let app_server_bin =
+        ds_config::resolve_native_client_binary(spec.target, paths, configured_bin)
+            .unwrap_or_else(|| bin.clone());
+    Some((bin, app_server_bin))
 }
 
 /// Best-effort Codex narration prep; failure does not block launch.
@@ -320,5 +335,54 @@ mod tests {
             ),
             127
         );
+    }
+
+    #[test]
+    fn custom_remote_rejection_precedes_binary_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(temp.path());
+        let spec = ds_config::client_spec(WiredAgent::Codex);
+
+        assert_eq!(
+            run_codex(
+                spec,
+                &args(&["--remote", "ws://127.0.0.1:9"]),
+                &paths,
+                "missing-codex",
+            ),
+            2
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codex_app_server_uses_native_payload_instead_of_npm_shim() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(temp.path());
+        let shim_dir = temp.path().join("npm");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let shim = shim_dir.join("codex.cmd");
+        std::fs::write(&shim, b"fixture").unwrap();
+        paths.path_env = Some(std::env::join_paths([&shim_dir]).unwrap());
+
+        let (package, target) = if cfg!(target_arch = "aarch64") {
+            ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
+        } else {
+            ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
+        };
+        let native = paths
+            .home
+            .join("AppData/Roaming/npm/node_modules/@openai/codex/node_modules")
+            .join(package)
+            .join("vendor")
+            .join(target)
+            .join("bin/codex.exe");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"fixture").unwrap();
+
+        let spec = ds_config::client_spec(WiredAgent::Codex);
+        let (direct, app_server) = resolve_codex_launch_bins(spec, &paths, "codex").unwrap();
+        assert_eq!(direct, shim);
+        assert_eq!(app_server, native);
     }
 }

@@ -565,6 +565,11 @@ fn launcher_waits_for_an_attached_endpoint_and_reuses_it() {
         "ws://127.0.0.1:4500",
         "a second launcher reuses the initialized observer"
     );
+    assert_eq!(
+        reg.launcher_bin(),
+        Some(PathBuf::from("/other/codex")),
+        "the latest resolved binary must remain available for reconnects"
+    );
     reg.launch_detached();
     assert!(
         reg.ensure_remote(PathBuf::from("/launcher/codex"), Duration::ZERO)
