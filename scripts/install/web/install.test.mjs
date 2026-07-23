@@ -283,8 +283,8 @@ async function posixLockDriver(root, name) {
   const source = await readFile(installer, "utf8");
   const block = extractLockBlock(
     source,
-    "# ── BEGIN destination lock",
-    "# ── END destination lock ─────────────────────────────────────────────────────",
+    "# -- BEGIN destination lock",
+    "# -- END destination lock -----------------------------------------------------",
   );
   const driver = join(root, name);
   await executable(

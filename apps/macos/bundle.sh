@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bundle.sh — build+sign DontSpeak.app (engine in-process). Output: $APP
+# bundle.sh -- build+sign DontSpeak.app (engine in-process). Output: $APP
 # (default ~/Applications; override DONTSPEAK_APP_DIR).
 # 0 install-engine  1 build.sh  2 actool icon  3 assemble  4 codesign
 set -euo pipefail
@@ -11,7 +11,7 @@ source "$DIR/bundle-lib.sh"
 require_xcode() {
   xcrun -f actool >/dev/null 2>&1 && return 0
   local hint="/Applications/Xcode.app/Contents/Developer"
-  echo "ERROR: 'actool' not found — the DontSpeak.app build REQUIRES the full Xcode," >&2
+  echo "ERROR: 'actool' not found -- the DontSpeak.app build REQUIRES the full Xcode," >&2
   echo "       not just the Command Line Tools (active dir: $(xcode-select -p 2>/dev/null))." >&2
   if [ -x "$hint/usr/bin/actool" ]; then
     echo "       Xcode IS installed but not selected. Fix it once with:" >&2
@@ -38,13 +38,13 @@ echo "==> 1. build (Rust staticlib + Swift app)"
 EXE="$DIR/.build/release/DontSpeak"
 [ -x "$EXE" ] || { echo "build did not produce $EXE" >&2; exit 1; }
 
-echo "==> 2. compile AppIcon.icon (actool → Assets.car + AppIcon.icns)"
+echo "==> 2. compile AppIcon.icon (actool -> Assets.car + AppIcon.icns)"
 ICONOUT="$(mktemp -d)"; trap 'rm -rf "$ICONOUT"' EXIT
 compile_icon "$ICONOUT"
 
 echo "==> 3. assemble + sign $APP"
 SIGN="$(resolve_sign_identity)"
-# Shim arch from built app binary (not uname — Rosetta).
+# Shim arch from built app binary (not uname -- Rosetta).
 DONTSPEAK_MLX_DYLIB="$(build_dontspeak_mlx_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
 export DONTSPEAK_MLX_DYLIB
 # Helper from install-engine dir; menubar svg at repo assets/.
@@ -58,5 +58,5 @@ require_engine_symbol "$APP/Contents/MacOS/DontSpeak" || {
 echo "   signed app ($(sign_label "$SIGN"))"
 
 echo
-echo "Done → $APP"
+echo "Done -> $APP"
 echo "Launch it: open \"$APP\"  (registers itself as the login item + starts the engine)"

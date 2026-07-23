@@ -133,8 +133,8 @@ fn web_installers_do_not_embed_uninstaller_script_bodies() {
             "{installer} contains its old embedded-uninstaller delimiter"
         );
         for canonical_header in [
-            "# uninstall.sh — THE DontSpeak uninstaller",
-            "# uninstall.ps1 — THE DontSpeak uninstaller",
+            "# uninstall.sh -- THE DontSpeak uninstaller",
+            "# uninstall.ps1 -- THE DontSpeak uninstaller",
         ] {
             assert!(
                 !body.contains(canonical_header),
@@ -375,10 +375,10 @@ fn posix_installers_share_one_destination_lock_block() {
     fn block(rel: &str) -> String {
         let body = repo_file(rel);
         let begin = body
-            .find("# ── BEGIN destination lock")
+            .find("# -- BEGIN destination lock")
             .unwrap_or_else(|| panic!("{rel} has no destination-lock BEGIN marker"));
         let end = body
-            .find("# ── END destination lock")
+            .find("# -- END destination lock")
             .unwrap_or_else(|| panic!("{rel} has no destination-lock END marker"));
         assert!(
             end > begin,

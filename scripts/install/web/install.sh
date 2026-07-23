@@ -1,5 +1,5 @@
 #!/bin/sh
-# DontSpeak one-command installer — macOS + Linux.
+# DontSpeak one-command installer -- macOS + Linux.
 #
 #   curl -fsSL https://github.com/delllusional/DontSpeak/releases/latest/download/install.sh | sh
 #
@@ -16,7 +16,7 @@
 #   DONTSPEAK_DOWNLOAD_BASE  serve the fixed-name checksums.txt from a mirror; versioned
 #                            assets always resolve via the GitHub API regardless
 #   DONTSPEAK_DRY_RUN=1    resolve + print the plan, download nothing
-#   DONTSPEAK_NO_AUTOSTART=1  Linux: skip enabling start-at-login (macOS N/A — the app
+#   DONTSPEAK_NO_AUTOSTART=1  Linux: skip enabling start-at-login (macOS N/A -- the app
 #                             manages its own login item)
 #   DONTSPEAK_INSTALL_DIR  bin dir for CLI launchers + placed uninstaller (default
 #                          ~/.local/bin; macOS app always installs to ~/Applications)
@@ -32,7 +32,7 @@ say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-# ── HTTP: prefer curl, fall back to wget ─────────────────────────────────────
+# -- HTTP: prefer curl, fall back to wget -------------------------------------
 if command -v curl >/dev/null 2>&1; then
   http_get()  { curl -fsSL "$1"; }                 # to stdout
   http_dl()   { curl -fsSL -o "$2" "$1"; }         # url file
@@ -43,7 +43,7 @@ else
   die "need curl or wget on PATH"
 fi
 
-# Fetch the latest release's asset-URL list ONCE into $ASSET_URLS — both the zip and
+# Fetch the latest release's asset-URL list ONCE into $ASSET_URLS -- both the zip and
 # checksums.txt resolve from it. One rate-limited API call per install (anonymous callers
 # get 60/hr/IP), and an unreachable API dies HERE with the real cause instead of a
 # misleading "no asset on the latest release" later.
@@ -63,7 +63,7 @@ asset_url() {  # $1 = extended-regex matching the asset filename
   pat="$1"
   if [ -n "${DONTSPEAK_DOWNLOAD_BASE:-}" ]; then
     case "$pat" in
-      *\[*) ;;  # versioned — fall through to the API list below
+      *\[*) ;;  # versioned -- fall through to the API list below
       *)
         lit=$(printf '%s' "$pat" | sed 's/\\//g')   # unescape the ERE to a literal name
         printf '%s/%s\n' "${DONTSPEAK_DOWNLOAD_BASE%/}" "$lit"; return 0 ;;
@@ -81,7 +81,7 @@ verify_sha() {  # $1 = file, $2 = checksums url
   # A release manifest may be uploaded from Windows. Strip CR before the
   # end-anchored filename match so CRLF and LF manifests verify identically.
   sums=$(printf '%s\n' "$sums" | tr -d '\015')
-  # Match either sha256sum format: text "<hash>  name" or binary "<hash> *name" — i.e. the
+  # Match either sha256sum format: text "<hash>  name" or binary "<hash> *name" -- i.e. the
   # separator right before the basename is a space or a '*'.
   want=$(printf '%s\n' "$sums" | grep -E "[ *]$base\$" | awk '{print $1}' | head -n1)
   [ -n "$want" ] || die "$base is not listed in checksums.txt"
@@ -105,23 +105,23 @@ place_uninstaller() {
   say "uninstaller placed: $UNINSTALLER (run it any time to fully remove DontSpeak)"
 }
 
-# ── BEGIN destination lock ───────────────────────────────────────────────────
-# Serializes the destructive finalization (recheck → stop → replace → wire) of ONE install
+# -- BEGIN destination lock ---------------------------------------------------
+# Serializes the destructive finalization (recheck -> stop -> replace -> wire) of ONE install
 # destination across processes; downloads and staging stay outside it (unique per-invocation
 # names, safe in parallel). Issue #198.
 #
 # COPY: byte-identical in scripts/install/web/install.sh and apps/linux/tarball-install.sh
-# (packaging_sync.rs pins the two equal). Both ship standalone — one through `curl | sh`, one
-# inside the tarball — so neither can source a shared file. POSIX sh only: install.sh runs
+# (packaging_sync.rs pins the two equal). Both ship standalone -- one through `curl | sh`, one
+# inside the tarball -- so neither can source a shared file. POSIX sh only: install.sh runs
 # under /bin/sh (dash on Debian/Ubuntu).
 #
 # mkdir is the atomic primitive because no OS-released shell lock exists on both platforms:
 # flock(1) is absent on macOS, shlock(1) on Linux. (The Windows installer gets an OS-released
 # one from an exclusively-shared file handle and needs none of the rules below.) A mkdir lock
 # outlives its owner, so it is breakable two ways:
-#   • the owner was recorded on THIS host and no longer answers `kill -0` → break now;
-#   • otherwise — a foreign host token (a shared $HOME can hold another machine's lock, where
-#     a pid means nothing), an unreadable owner file, or an owner that still answers → break
+#   - the owner was recorded on THIS host and no longer answers `kill -0` -> break now;
+#   - otherwise -- a foreign host token (a shared $HOME can hold another machine's lock, where
+#     a pid means nothing), an unreadable owner file, or an owner that still answers -> break
 #     only once the lock is DS_LOCK_STALE_MIN old.
 # The age cap also covers an owner that answers because its pid was REUSED by an unrelated
 # process, which liveness alone cannot distinguish from a live owner; with no cap such a lock
@@ -130,14 +130,14 @@ place_uninstaller() {
 # behavior this replaces.
 #
 # Every rm below ends in `|| :` because under `set -e` a failing command that ends an if-body,
-# a case-branch or a trap handler exits the shell: a lock another uid owns (rm → EPERM) would
+# a case-branch or a trap handler exits the shell: a lock another uid owns (rm -> EPERM) would
 # otherwise kill the installer outright instead of waiting out its deadline, and a failing
 # release would skip the rest of cleanup and rewrite a successful install's exit status.
 DS_LOCK_DIR=""
 DS_LOCK_OWNED=0
 DS_LOCK_STALE_MIN=60
 
-ds_lock_path() {  # $1 = destination → sibling ".<name>.ds-install.lock"
+ds_lock_path() {  # $1 = destination -> sibling ".<name>.ds-install.lock"
   printf '%s/.%s.ds-install.lock' "$(dirname "$1")" "$(basename "$1")"
 }
 
@@ -161,7 +161,7 @@ ds_lock_stale() {
 
 # Breaking is itself serialized with the same atomic mkdir: two waiters that both saw one
 # breakable lock would otherwise race `rm -rf` against each other's fresh `mkdir`. The slot is
-# force-reclaimed after a minute — its own critical section is milliseconds, so an older slot
+# force-reclaimed after a minute -- its own critical section is milliseconds, so an older slot
 # is unambiguously abandoned.
 ds_lock_break() {
   ds_lock_breaker="$DS_LOCK_DIR.breaker"
@@ -174,7 +174,7 @@ ds_lock_break() {
   # Recheck inside the slot: another breaker may already have removed this lock and a third
   # process taken a fresh one. Residual, age path only: a lock whose owner is still alive can
   # be removed if that owner releases and a third process re-acquires between this recheck and
-  # the rm — a sub-millisecond window that first requires the lock to be an hour old.
+  # the rm -- a sub-millisecond window that first requires the lock to be an hour old.
   if ds_lock_stale; then rm -rf "$DS_LOCK_DIR" || :; fi
   rmdir "$ds_lock_breaker" 2>/dev/null || :
 }
@@ -215,7 +215,7 @@ ds_lock_acquire() {
 }
 
 # Deleting the dir IS the release: a mkdir lock that outlives its owner can only be re-taken
-# by force-breaking it. (The Windows installer is the mirror image — there the file must stay,
+# by force-breaking it. (The Windows installer is the mirror image -- there the file must stay,
 # because waiters hold an open handle to it.) Owner-gated: a lock broken out from under us and
 # re-taken belongs to someone else.
 ds_lock_release() {
@@ -225,9 +225,9 @@ ds_lock_release() {
   case "$ds_lock_owner" in ''|"$$ "*) rm -rf "$DS_LOCK_DIR" || : ;; esac
   DS_LOCK_DIR=""
 }
-# ── END destination lock ─────────────────────────────────────────────────────
+# -- END destination lock -----------------------------------------------------
 
-# Everything below runs from main(), invoked on the LAST line — `curl | sh` executes the
+# Everything below runs from main(), invoked on the LAST line -- `curl | sh` executes the
 # stream as it arrives, so a connection drop mid-transfer would otherwise run every
 # complete line received (potentially the destructive clean step) and silently stop. A
 # truncated stream now can't execute anything: the `main "$@"` call is the final line.
@@ -239,7 +239,7 @@ STAGED=""
 # this process's own per-invocation cleanup (a staged .app copy is not small).
 cleanup() { ds_lock_release; rm -rf "$TMP"; [ -n "$STAGED" ] && rm -rf "$STAGED"; :; }
 # Signals too: a Ctrl-C mid-download must not leave the mktemp dir behind (POSIX sh
-# doesn't run the EXIT trap on an unhandled signal) — and a signal trap that doesn't
+# doesn't run the EXIT trap on an unhandled signal) -- and a signal trap that doesn't
 # exit would RESUME the script after the interrupted command, mid-install. Stop too.
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM HUP
@@ -249,34 +249,34 @@ ARCH=$(uname -m)
 
 case "$OS" in
   Darwin)
-    # A Rosetta-translated shell reports x86_64 on an Apple-Silicon machine — installing
+    # A Rosetta-translated shell reports x86_64 on an Apple-Silicon machine -- installing
     # the Intel build there. Ask the kernel whether this process is translated.
     if [ "$ARCH" = "x86_64" ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = "1" ]; then
       ARCH=arm64
     fi
     case "$ARCH" in arm64|x86_64) : ;; *) die "unsupported macOS arch: $ARCH" ;; esac
-    # Release-asset arch token is uname-style everywhere: macOS arm64 → aarch64.
+    # Release-asset arch token is uname-style everywhere: macOS arm64 -> aarch64.
     case "$ARCH" in arm64) AARCH=aarch64 ;; *) AARCH="$ARCH" ;; esac
     ZIP_NAME="dontspeak-<ver>-macos-$AARCH.app.zip"
     fetch_assets
     url=$(asset_url "dontspeak-[0-9][^/]*-macos-$AARCH\\.app\\.zip")
     [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
-    say "macOS $ARCH → $url"
+    say "macOS $ARCH -> $url"
     [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into ~/Applications and wire --reconcile"; exit 0; }
 
     zip="$TMP/$(basename "$url")"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
     # The ONE macOS install location, shared with the dev flow (apps/macos/bundle.sh):
-    # per-user, so no admin account and no sudo — everything else about an install
+    # per-user, so no admin account and no sudo -- everything else about an install
     # (wiring, data, models, login item, TCC) is per-user anyway.
     APP="$HOME/Applications/DontSpeak.app"
-    say "installing DontSpeak.app → $HOME/Applications"
+    say "installing DontSpeak.app -> $HOME/Applications"
     out="$TMP/app"; mkdir -p "$out"
     ditto -x -k "$zip" "$out"          # the zip holds DontSpeak.app/ at its root
     [ -d "$out/DontSpeak.app" ] || die "unexpected archive layout (no DontSpeak.app)"
     [ -f "$out/DontSpeak.app/Contents/Resources/uninstall.sh" ] \
       || die "incomplete archive (no canonical uninstall.sh payload)"
-    # Stage the new bundle onto the TARGET volume FIRST — a failed copy (disk full) must
+    # Stage the new bundle onto the TARGET volume FIRST -- a failed copy (disk full) must
     # abort BEFORE anything is deleted, or a broken install would strip the machine of
     # its working copy. The trap cleans $STAGED on any abort; the final rename below is
     # near-instant.
@@ -285,12 +285,12 @@ case "$OS" in
     rm -rf "$STAGED"
     cp -R "$out/DontSpeak.app" "$STAGED" 2>/dev/null \
       || die "cannot write the new app into $HOME/Applications (disk full?)"
-    # Everything below replaces the ONE shared destination — serialize it against a second
+    # Everything below replaces the ONE shared destination -- serialize it against a second
     # installer (#198). Staging above is per-invocation, so it needs no lock. The EXIT/signal
     # traps armed above already cover the release.
     ds_lock_acquire "$APP"
     # CLEAN install, not an upgrade-in-place: quit any running instance (app + engine +
-    # warm helper), then replace the previous bundle — release and dev installs share
+    # warm helper), then replace the previous bundle -- release and dev installs share
     # this one layout, so there is no other location to probe. Also drop dev/CLI
     # installs in ~/.local/bin: on unix the wire step PREFERS a ~/.local/bin binary over
     # the bundled one (sibling_bin), so a stale copy there would get wired (or, once
@@ -317,18 +317,18 @@ case "$OS" in
       say "launcher placed: $BIN/dontspeak"
       say "wiring clients (MCP + hooks)"
       "$cli" wire --reconcile || warn "wire --reconcile reported an issue"
-    else warn "no bundled dontspeak CLI in the app — start it; clients are wired automatically at launch"; fi
+    else warn "no bundled dontspeak CLI in the app -- start it; clients are wired automatically at launch"; fi
     place_uninstaller "$APP/Contents/Resources/uninstall.sh"
     say "launching DontSpeak (first boot downloads the voice models)"
-    open -a "$APP" || warn "could not auto-launch — open DontSpeak from ~/Applications"
+    open -a "$APP" || warn "could not auto-launch -- open DontSpeak from ~/Applications"
     cat <<EOF
 
 Done. Next:
-  • On first launch, grant DontSpeak Accessibility + Microphone
-    (System Settings › Privacy & Security) — one grant set, all on DontSpeak.app.
-  • Start a NEW session in each installed client to load its DontSpeak MCP server.
-  • Models download automatically in the background; watch progress in the app.
-  • Uninstall any time:  $UNINSTALLER
+  - On first launch, grant DontSpeak Accessibility + Microphone
+    (System Settings > Privacy & Security) -- one grant set, all on DontSpeak.app.
+  - Start a NEW session in each installed client to load its DontSpeak MCP server.
+  - Models download automatically in the background; watch progress in the app.
+  - Uninstall any time:  $UNINSTALLER
     (or just unwire:  ~/Applications/DontSpeak.app/Contents/Helpers/dontspeak wire --all --remove)
 EOF
     ;;
@@ -339,7 +339,7 @@ EOF
     url=$(asset_url "dontspeak-[0-9][^/]*-linux-$ARCH\\.tar\\.gz")
     [ -n "$url" ] || die "no Linux tarball (dontspeak-<ver>-linux-$ARCH.tar.gz) on the latest release of $REPO"
     sums=$(asset_url "checksums\\.txt")
-    say "Linux $ARCH → $url"
+    say "Linux $ARCH -> $url"
     [ "$DRY" = "1" ] && { echo "(dry run) would extract the tarball and run its install.sh (wires --all)"; exit 0; }
 
     tgz="$TMP/$(basename "$url")"; http_dl "$url" "$tgz"; verify_sha "$tgz" "$sums"
@@ -348,7 +348,7 @@ EOF
     inner=$(find "$TMP" -maxdepth 2 -name install.sh -path '*dontspeak-*' | head -n1)
     [ -n "$inner" ] || die "tarball has no install.sh"
     say "running the bundled installer (copies to ~/.local/bin, wires --all)"
-    # The bundled installer is bash (pipefail, BASH_SOURCE) — running it with `sh`
+    # The bundled installer is bash (pipefail, BASH_SOURCE) -- running it with `sh`
     # breaks on distros where sh is dash (Debian/Ubuntu).
     command -v bash >/dev/null 2>&1 || die "the bundled installer needs bash on PATH"
     bash "$inner"
@@ -371,14 +371,14 @@ EOF
       say "launching DontSpeak"
       ("$BIN/ds-gtk" >/dev/null 2>&1 &) || true
     else
-      say "no display detected — launch DontSpeak (ds-gtk) from your desktop to start model download"
+      say "no display detected -- launch DontSpeak (ds-gtk) from your desktop to start model download"
     fi
     cat <<EOF
 
 Done. Next:
-  • Start a NEW session in each installed client to load its DontSpeak MCP server.
-  • Grant /dev/uinput access with the sudo step printed above (synthetic keys / Caps-Lock).
-  • Uninstall any time:  $UNINSTALLER
+  - Start a NEW session in each installed client to load its DontSpeak MCP server.
+  - Grant /dev/uinput access with the sudo step printed above (synthetic keys / Caps-Lock).
+  - Uninstall any time:  $UNINSTALLER
     (or just unwire:  ~/.local/bin/dontspeak wire --all --remove)
 EOF
     ;;

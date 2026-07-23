@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# uninstall.sh — THE DontSpeak uninstaller (macOS + Linux): the single source of truth.
+# uninstall.sh -- THE DontSpeak uninstaller (macOS + Linux): the single source of truth.
 #
 # Removes the whole install, whichever flow created it:
-#   • the app bundle: ~/Applications/DontSpeak.app (macOS) — release
+#   - the app bundle: ~/Applications/DontSpeak.app (macOS) -- release
 #     (scripts/install/web/install.sh)
 #     and dev (apps/macos/bundle.sh) share this ONE per-user layout; DONTSPEAK_APP_DIR
 #     overrides it in both
-#   • CLI/engine binaries in ~/.local/bin (all flows, and the whole Linux install)
+#   - CLI/engine binaries in ~/.local/bin (all flows, and the whole Linux install)
 # plus every integration declared in the shared client registry,
 # ALL app data / downloaded models / caches / logs / state, the launchers / login
 # item, and the placed standalone uninstaller itself.
@@ -69,19 +69,19 @@ case "$(uname -s)" in
       "$CLI" wire --all --remove 2>/dev/null \
         || echo "   (wire --all --remove failed or nothing to remove)"
     else
-      echo "   (no dontspeak CLI found — skipping un-wire; strip mcpServers.DontSpeak from"
+      echo "   (no dontspeak CLI found -- skipping un-wire; strip mcpServers.DontSpeak from"
       echo "    ~/.claude.json by hand if it lingers)"
     fi
 
     echo "==> 3. remove the app bundle + installed engine binaries"
     rm -rf "$H/Applications/DontSpeak.app"
     # An installer killed mid-finalization leaves its destination lock (and, rarer, the
-    # breaker slot that serializes stale-lock removal) behind — see the destination-lock
+    # breaker slot that serializes stale-lock removal) behind -- see the destination-lock
     # block in scripts/install/web/install.sh.
     rm -rf "$H/Applications/.DontSpeak.app.ds-install.lock" \
       "$H/Applications/.DontSpeak.app.ds-install.lock.breaker"
     # A bundle installed with the DONTSPEAK_APP_DIR override lives outside the standard
-    # per-user layout — honor the same override here or that bundle is never removed.
+    # per-user layout -- honor the same override here or that bundle is never removed.
     if [ -n "${DONTSPEAK_APP_DIR:-}" ]; then
       rm -rf "$DONTSPEAK_APP_DIR" \
         "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock" \
@@ -91,7 +91,7 @@ case "$(uname -s)" in
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
     # Current config/state roots + the legacy ProjectDirs layout, model cache, and OS app caches.
-    # FluidAudio dirs: the pre-MLX builds' Core ML/ANE model cache — kept so upgraders get cleaned.
+    # FluidAudio dirs: the pre-MLX builds' Core ML/ANE model cache -- kept so upgraders get cleaned.
     rm -rf \
       "$H/Library/Application Support/DontSpeak" \
       "$H/Library/Application Support/org.dontspeak.DontSpeak" \
@@ -119,7 +119,7 @@ case "$(uname -s)" in
     echo "==> 6. reset this app's TCC grants for $BUNDLE_ID so a reinstall re-prompts cleanly"
     # The permissions the app ACTUALLY requests: Accessibility (AXIsProcessTrusted + the
     # CGEventPost dictation inject + the physical-Caps IOHIDManager read, which Accessibility
-    # subsumes), Microphone (AVCaptureDevice — STT capture + Test recognition), and Speech
+    # subsumes), Microphone (AVCaptureDevice -- STT capture + Test recognition), and Speech
     # Recognition (SFSpeechRecognizer, the System STT engine; prompts on first use). Matches the
     # Info.plist usage keys (Mic + Speech) plus the runtime Accessibility/CGEvent grant.
     tccutil reset Accessibility "$BUNDLE_ID" 2>/dev/null || true
@@ -150,7 +150,7 @@ case "$(uname -s)" in
       "$INSTALL_DIR/dontspeak" wire --all --remove 2>/dev/null \
         || echo "   (wire --all --remove failed or nothing to remove)"
     else
-      echo "   (no $INSTALL_DIR/dontspeak — skipping hook removal)"
+      echo "   (no $INSTALL_DIR/dontspeak -- skipping hook removal)"
     fi
 
     echo "==> 3. remove the installed binaries"
@@ -173,7 +173,7 @@ case "$(uname -s)" in
     echo "==> 4b. hand the Caps key back (drop OUR caps:none XKB option, marker-gated)"
     # The engine neutralizes the caps-lock TOGGLE at the keymap level while installed
     # (ds-platform linux/capskey.rs adds `caps:none`; the marker records that WE did).
-    # GNOME/KDE options are PERSISTENT and step 5 deletes the marker — so strip the
+    # GNOME/KDE options are PERSISTENT and step 5 deletes the marker -- so strip the
     # option NOW: an uninstall while the host isn't running (or was SIGKILLed) would
     # otherwise leave Caps Lock dead FOREVER, and a marker-less reinstall treats the
     # leftover option as the user's own and never touches it. Marker-gated exactly like
@@ -199,7 +199,7 @@ case "$(uname -s)" in
           ;;
         x11)
           # Volatile (per-X-server) but the session may still be live: reset, then re-add
-          # every option except caps:none — setxkbmap has no "remove one" (same dance as
+          # every option except caps:none -- setxkbmap has no "remove one" (same dance as
           # the engine's applier). Subshell: `set --` must not clobber OUR script args.
           (
             KEPT="$(setxkbmap -query 2>/dev/null | sed -n 's/^options:[[:space:]]*//p' | tr ',' '\n' | grep -vx 'caps:none' | grep -v '^$')" || KEPT=""
@@ -221,7 +221,7 @@ case "$(uname -s)" in
       sudo udevadm control --reload 2>/dev/null || true
       sudo udevadm trigger 2>/dev/null || true
     else
-      echo "==> 6. (udev rule left intact — pass --udev to also remove it; your 'input' group membership is kept)"
+      echo "==> 6. (udev rule left intact -- pass --udev to also remove it; your 'input' group membership is kept)"
     fi
     ;;
 
@@ -232,7 +232,7 @@ case "$(uname -s)" in
 esac
 
 # Remove the placed standalone uninstaller last (self-delete is safe on unix even while
-# it is running; never touches this file in a repo checkout — INSTALL_DIR is ~/.local/bin).
+# it is running; never touches this file in a repo checkout -- INSTALL_DIR is ~/.local/bin).
 rm -f "$INSTALL_DIR/dontspeak-uninstall"
 
 echo

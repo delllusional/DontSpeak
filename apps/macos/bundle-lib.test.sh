@@ -74,7 +74,7 @@ grep -q "MLX backends unavailable" "$stderr_file" \
   || fail "arm64 development failure did not warn"
 
 # Cached-tree reuse (CI restores one instead of recompiling mlx-swift). Every rejection below
-# must fall through to a real xcodebuild — the stub fails, so "reused" and "rebuilt" are
+# must fall through to a real xcodebuild -- the stub fails, so "reused" and "rebuilt" are
 # distinguishable by exit status alone.
 derived="$test_dir/DontSpeakMLX/.build/xcode-arm64"
 products="$derived/Build/Products/Release"

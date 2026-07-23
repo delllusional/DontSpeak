@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# uninstall.sh — repo-checkout entry point for the Linux uninstall. The ACTUAL logic
-# lives in scripts/install/bundle/uninstall.sh — the single source of truth, which the Linux package
+# uninstall.sh -- repo-checkout entry point for the Linux uninstall. The ACTUAL logic
+# lives in scripts/install/bundle/uninstall.sh -- the single source of truth, which the Linux package
 # carries as a real file and places as ~/.local/bin/dontspeak-uninstall.
 # packaging_sync.rs pins all copies in sync.
 #

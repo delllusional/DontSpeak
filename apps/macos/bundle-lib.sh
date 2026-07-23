@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bundle-lib.sh — shared .app assembly (bundle.sh + dist-apps.sh). Source only.
+# bundle-lib.sh -- shared .app assembly (bundle.sh + dist-apps.sh). Source only.
 
 BUNDLE_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$BUNDLE_LIB_DIR/../../scripts/install/lib/common.sh"
@@ -24,34 +24,34 @@ app_display_name() {
   printf '%s' "${n:-DontSpeak}"
 }
 
-# sign_label IDENTITY — short human label for a codesign identity ("ad-hoc" for "-").
-sign_label() { [ "$1" = "-" ] && echo ad-hoc || echo "${1%% (*}…"; }
+# sign_label IDENTITY -- short human label for a codesign identity ("ad-hoc" for "-").
+sign_label() { [ "$1" = "-" ] && echo ad-hoc || echo "${1%% (*}..."; }
 
-# legacy_icns — full 10-size AppIcon.icns from assets/app-icon.svg (actool stub is 16+128 only;
+# legacy_icns -- full 10-size AppIcon.icns from assets/app-icon.svg (actool stub is 16+128 only;
 # macOS <26 needs CFBundleIconFile; Assets.car is Liquid Glass 26+ only).
 legacy_icns() {
   local out="$1"
   local svg="$BUNDLE_LIB_DIR/../../assets/app-icon.svg"
   if ! command -v rsvg-convert >/dev/null 2>&1; then
-    echo "   WARN: rsvg-convert not found (brew install librsvg) — keeping actool's stub" >&2
+    echo "   WARN: rsvg-convert not found (brew install librsvg) -- keeping actool's stub" >&2
     echo "         AppIcon.icns (16px+128px only); the app icon degrades on macOS < 26." >&2
     return 0
   fi
-  [ -f "$svg" ] || { echo "   WARN: $svg missing — keeping actool's stub .icns" >&2; return 0; }
+  [ -f "$svg" ] || { echo "   WARN: $svg missing -- keeping actool's stub .icns" >&2; return 0; }
   local set; set="$(mktemp -d)/AppIcon.iconset"; mkdir -p "$set"
-  # <pixels>:<iconutil basename> — the two @1x/@2x rows per logical size iconutil expects.
+  # <pixels>:<iconutil basename> -- the two @1x/@2x rows per logical size iconutil expects.
   local s; for s in 16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 256:128x128@2x \
                     256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x; do
     rsvg-convert -w "${s%%:*}" -h "${s%%:*}" "$svg" -o "$set/icon_${s#*:}.png"
   done
   # Apple's official packer. Overwrite the stub so assemble_app ships the full icns.
   iconutil -c icns "$set" -o "$out/AppIcon.icns" \
-    && echo "   full AppIcon.icns ← assets/app-icon.svg (10 sizes)" \
-    || echo "   WARN: iconutil failed — keeping actool's stub .icns" >&2
+    && echo "   full AppIcon.icns <- assets/app-icon.svg (10 sizes)" \
+    || echo "   WARN: iconutil failed -- keeping actool's stub .icns" >&2
   rm -rf "$(dirname "$set")"
 }
 
-# compile_icon — actool Assets.car + full legacy icns. SDK 26 for AppIcon.icon.
+# compile_icon -- actool Assets.car + full legacy icns. SDK 26 for AppIcon.icon.
 compile_icon() {
   local out="$1"
   xcrun actool "$BUNDLE_LIB_DIR/AppIcon.icon" --compile "$out" --app-icon AppIcon \
@@ -62,22 +62,22 @@ compile_icon() {
   legacy_icns "$out"
 }
 
-# mlx_shim_missing WHY — dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
+# mlx_shim_missing WHY -- dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
 # DONTSPEAK_ALLOW_MISSING_MLX=1; dev builds warn and continue (rc 0).
 mlx_shim_missing() {
   if [ "${DONTSPEAK_DIST:-0}" = "1" ] && [ -z "${DONTSPEAK_ALLOW_MISSING_MLX:-}" ]; then
-    echo "   ERROR: libdontspeak_mlx $1 — dist build would ship without MLX backends" >&2
+    echo "   ERROR: libdontspeak_mlx $1 -- dist build would ship without MLX backends" >&2
     echo "          (BuiltIn TTS/STT silently degrade to ONNX-CPU on Apple Silicon)." >&2
     echo "          Set DONTSPEAK_ALLOW_MISSING_MLX=1 to waive." >&2
     return 1
   fi
-  echo "   WARN: libdontspeak_mlx $1 — MLX backends unavailable in this build" >&2
+  echo "   WARN: libdontspeak_mlx $1 -- MLX backends unavailable in this build" >&2
   echo "         (BuiltIn TTS/STT degrade to ONNX-CPU)" >&2
 }
 
-# mlx_prebuilt_usable DERIVED SWARCH — is a restored (CI-cached) Xcode product tree shippable?
+# mlx_prebuilt_usable DERIVED SWARCH -- is a restored (CI-cached) Xcode product tree shippable?
 # Requires all three things assemble_app harvests: a dylib of the REQUESTED arch, MLX's Metal
-# library, and the dependency checkouts the license bundler reads — a partial cache must
+# library, and the dependency checkouts the license bundler reads -- a partial cache must
 # rebuild rather than ship a wrong-arch or license-less app. Opt-in via
 # DONTSPEAK_MLX_REUSE_PREBUILT: staleness is the cache key's problem (CI keys on
 # Package.resolved + the shim sources + the Xcode build), so local builds keep rebuilding.
@@ -92,7 +92,7 @@ mlx_prebuilt_usable() {
   lipo -archs "$bin" 2>/dev/null | tr ' ' '\n' | grep -qx "$swarch"
 }
 
-# build_dontspeak_mlx_dylib SWARCH — MLX on arm64; system-speech-only compatibility shim on Intel.
+# build_dontspeak_mlx_dylib SWARCH -- MLX on arm64; system-speech-only compatibility shim on Intel.
 # Built-in Intel models stay on ORT CPU. The small Intel dylib retains System STT without linking
 # MLX. MLX's Metal shaders are Xcode resources, so build the arm64 product through Xcode.
 build_dontspeak_mlx_dylib() {
@@ -128,9 +128,9 @@ build_dontspeak_mlx_dylib() {
   local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
   local metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
   # mlx-swift + mlx-audio-swift compile from source (~12 min) and change only when their
-  # exact pins do — reuse a verified prebuilt tree instead of rebuilding it every release.
+  # exact pins do -- reuse a verified prebuilt tree instead of rebuilding it every release.
   if mlx_prebuilt_usable "$derived" "$swarch"; then
-    echo "   reusing prebuilt libdontspeak_mlx ($swarch) ← $products" >&2
+    echo "   reusing prebuilt libdontspeak_mlx ($swarch) <- $products" >&2
     echo "$bin"
     return 0
   fi
@@ -140,7 +140,7 @@ build_dontspeak_mlx_dylib() {
     mlx_shim_missing "$swarch build failed" || return 1
     return 0
   fi
-  # if/else not bare && — missing file must not kill set -e with empty contract.
+  # if/else not bare && -- missing file must not kill set -e with empty contract.
   if [ -f "$bin" ] && [ -f "$metallib" ]; then
     echo "$bin"
   else
@@ -205,20 +205,20 @@ bundle_swift_package_licenses() {
   echo "   bundled $copied Swift package license/notice files"
 }
 
-# strip_locals FILE — drop local symbols from a bundled Mach-O (`-x` keeps every external
+# strip_locals FILE -- drop local symbols from a bundled Mach-O (`-x` keeps every external
 # one, so `nm`'s `ds_engine_start` guard and the Rust side's `dlsym("ds_mlx_*")` still
 # resolve). Called on the copy inside the .app and always before codesign, so signatures
 # cover the stripped bytes. Best-effort: a strip failure costs size, never correctness.
-# The Xcode-built MLX shim carries ~677k local symbols (~30 MB) — by far the biggest win.
+# The Xcode-built MLX shim carries ~677k local symbols (~30 MB) -- by far the biggest win.
 strip_locals() {
   local bin="$1" before after
   before="$(stat -f%z "$bin" 2>/dev/null || echo 0)"
   if ! strip -x "$bin" 2>/dev/null; then
-    echo "   WARN: strip -x $bin failed — shipping unstripped" >&2
+    echo "   WARN: strip -x $bin failed -- shipping unstripped" >&2
     return 0
   fi
   after="$(stat -f%z "$bin" 2>/dev/null || echo 0)"
-  echo "   stripped $(basename "$bin"): $before → $after bytes"
+  echo "   stripped $(basename "$bin"): $before -> $after bytes"
 }
 
 # assemble_app: 1 app 2 exe 3 helper 4 car 5 icns 6 plist 7 menubar_svg 8 sign
@@ -234,17 +234,17 @@ assemble_app() {
   cp "$helper" "$app/Contents/MacOS/ds-helper"
   local cli="${DONTSPEAK_CLI_BIN:-}"
   if [ -n "$cli" ] && [ -f "$cli" ]; then
-    # Contents/Helpers — case-insensitive volume: MacOS/dontspeak would clobber DontSpeak.
+    # Contents/Helpers -- case-insensitive volume: MacOS/dontspeak would clobber DontSpeak.
     mkdir -p "$app/Contents/Helpers"
     cp "$cli" "$app/Contents/Helpers/dontspeak"
-    echo "   bundled dontspeak CLI ← $cli"
+    echo "   bundled dontspeak CLI <- $cli"
   fi
   local mlx="${DONTSPEAK_MLX_DYLIB:-}"
   if [ -n "$mlx" ] && [ -f "$mlx" ]; then
     mkdir -p "$app/Contents/Frameworks"
     cp "$mlx" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
     strip_locals "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
-    echo "   bundled libdontspeak_mlx ← $mlx"
+    echo "   bundled libdontspeak_mlx <- $mlx"
   fi
   cp "$plist"  "$app/Contents/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$(product_version)" "$app/Contents/Info.plist"
@@ -268,7 +268,7 @@ assemble_app() {
     command -v rsvg-convert >/dev/null 2>&1 \
       && rsvg-convert -w 72 -h 72 "$mbsvg" -o "$app/Contents/Resources/MenuBarIcon.png" || true
   else
-    echo "   WARN: menu-bar icon '$mbsvg' not found — bundling NONE; the menu bar will fall back to the system waveform glyph" >&2
+    echo "   WARN: menu-bar icon '$mbsvg' not found -- bundling NONE; the menu bar will fall back to the system waveform glyph" >&2
   fi
   if [ "${DONTSPEAK_DIST:-0}" = "1" ]; then
     sign_app_dist "$app" "$sign"
@@ -278,7 +278,7 @@ assemble_app() {
   fi
 }
 
-# sign_app_dist — inside-out, hardened runtime + timestamp + entitlements (no --deep).
+# sign_app_dist -- inside-out, hardened runtime + timestamp + entitlements (no --deep).
 sign_app_dist() {
   local app="$1" sign="$2"
   [ "$sign" != "-" ] || {
@@ -288,7 +288,7 @@ sign_app_dist() {
   local ent="$BUNDLE_LIB_DIR/Bundle/DontSpeak.entitlements"
 
   # onnxruntime ships OUT of the bundle: ds-model fetches the pinned dist into the model
-  # cache (SHA-256 verified, Microsoft Developer-ID signed, no quarantine xattr — and the
+  # cache (SHA-256 verified, Microsoft Developer-ID signed, no quarantine xattr -- and the
   # hardened runtime already entitles disable-library-validation for exactly this dylib).
   # DONTSPEAK_ORT_DYLIB opts a build into embedding one instead; releases don't, so every
   # published app is the same artifact.
@@ -303,7 +303,7 @@ sign_app_dist() {
   fi
   if [ -n "$ort" ] && [ -f "$ort" ]; then
     cp "$ort" "$app/Contents/Frameworks/libonnxruntime.dylib"
-    echo "   bundled onnxruntime ← $ort"
+    echo "   bundled onnxruntime <- $ort"
   else
     echo "   onnxruntime: fetched at first run (set DONTSPEAK_ORT_DYLIB to embed one instead)"
   fi

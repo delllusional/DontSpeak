@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dist-apps.sh — signed (+ notarized) DontSpeak.app zips per arch.
+# dist-apps.sh -- signed (+ notarized) DontSpeak.app zips per arch.
 # Output: $OUTDIR/dontspeak-<ver>-macos-<aarch64|x86_64>.app.zip (default Desktop).
 # DONTSPEAK_ARCHES default arm64. No models in zip. DONTSPEAK_DIST=0 for ad-hoc.
 set -euo pipefail
@@ -43,7 +43,7 @@ export DONTSPEAK_BUILD_ID="$(compute_build_id "$REPO")"
 SIGN="$(resolve_sign_identity)"
 # Fail before multi-minute builds if dist lacks Developer ID.
 if [ "$DONTSPEAK_DIST" = "1" ] && [ "$SIGN" = "-" ]; then
-  echo "ERROR: dist build needs a Developer ID Application identity — set DONTSPEAK_CODESIGN_ID," >&2
+  echo "ERROR: dist build needs a Developer ID Application identity -- set DONTSPEAK_CODESIGN_ID," >&2
   echo "       or DONTSPEAK_DIST=0 for an ad-hoc, no-notarization build." >&2
   exit 1
 fi
@@ -85,7 +85,7 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   local EXE="$BIN/DontSpeak"
   [ -x "$EXE" ] || { echo "no app binary $EXE" >&2; exit 1; }
   if ! require_engine_symbol "$EXE"; then
-    echo "FATAL: $EXE is missing ds_engine_start — the Rust staticlib was not linked" >&2
+    echo "FATAL: $EXE is missing ds_engine_start -- the Rust staticlib was not linked" >&2
     echo "       (force_load of libds_core.a dropped; size=$(stat -f%z "$EXE" 2>/dev/null) bytes)." >&2
     exit 1
   fi
@@ -95,7 +95,7 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   local DONTSPEAK_MLX_DYLIB; DONTSPEAK_MLX_DYLIB="$(build_dontspeak_mlx_dylib "$SWARCH")"
   export DONTSPEAK_MLX_DYLIB
 
-  # Per-arch ORT: DONTSPEAK_ORT_DYLIB_<arch> else ORT_GLOBAL (not live env — clobbered).
+  # Per-arch ORT: DONTSPEAK_ORT_DYLIB_<arch> else ORT_GLOBAL (not live env -- clobbered).
   local ORT_VAR="DONTSPEAK_ORT_DYLIB_${ARCH}"
   local ORT="${!ORT_VAR:-$ORT_GLOBAL}"
   export DONTSPEAK_ORT_DYLIB="$ORT"
@@ -108,22 +108,22 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   # Final backstop: CLI must not have clobbered DontSpeak on case-insensitive volumes.
   local shipped="$APP/Contents/MacOS/DontSpeak"
   if ! require_engine_symbol "$shipped"; then
-    echo "FATAL: assembled $shipped has no ds_engine_start — the app executable is not the" >&2
+    echo "FATAL: assembled $shipped has no ds_engine_start -- the app executable is not the" >&2
     echo "       engine-linked SwiftUI app (likely the bundled CLI clobbered it). Aborting." >&2
     exit 1
   fi
 
   if [ -n "${DONTSPEAK_NOTARY_PROFILE:-}" ] || [ -n "${DONTSPEAK_APPLE_ID:-}" ]; then
-    echo "==> [6/6] notarize + staple, then zip → $OUTDIR/$(zip_name "$ARCH")"
+    echo "==> [6/6] notarize + staple, then zip -> $OUTDIR/$(zip_name "$ARCH")"
     "$HERE/notarize.sh" "$APP"
   else
-    echo "==> [6/6] NOT notarized (no credentials) — zipping the signed app → $OUTDIR/$(zip_name "$ARCH")"
+    echo "==> [6/6] NOT notarized (no credentials) -- zipping the signed app -> $OUTDIR/$(zip_name "$ARCH")"
     echo "    (set DONTSPEAK_NOTARY_PROFILE or the APPLE_* trio to notarize; else first launch hits Gatekeeper)"
   fi
   local ZIP="$OUTDIR/$(zip_name "$ARCH")"
   rm -f "$ZIP"
   ditto -c -k --keepParent "$APP" "$ZIP"
-  echo "    → $ZIP ($(du -h "$ZIP" | cut -f1))"
+  echo "    -> $ZIP ($(du -h "$ZIP" | cut -f1))"
 }
 
 # Capture global ORT once before per-arch exports clobber it.

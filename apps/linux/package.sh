@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# package.sh — build DontSpeak Linux distributables (the Linux analogue of the Windows
+# package.sh -- build DontSpeak Linux distributables (the Linux analogue of the Windows
 # portable-zip and the macOS .app.zip). Closes the "no Linux package" gap.
 #
 # Produces a portable tarball with no packaging toolchain. The target still needs the
 # compatible GTK/libadwaita and audio runtime libraries documented by the installer.
 #
-#   .tar.gz — bin/ + .desktop + udev rule + an install.sh; extract & run install.sh
+#   .tar.gz -- bin/ + .desktop + udev rule + an install.sh; extract & run install.sh
 #
 # Payload: the GTK host ds-gtk (hosts the engine in-process) + the MCP/hook bin
 # dontspeak + the warm-synth helper ds-helper + dontspeak.desktop + app-icon.svg +
@@ -25,15 +25,15 @@ for a in "$@"; do case "$a" in
   *) echo "package.sh: unknown option '$a' (try --help)" >&2; exit 2 ;;
 esac; done
 
-# Strip any stray CR (a CRLF Cargo.toml — e.g. a Windows-checkout working tree — would
+# Strip any stray CR (a CRLF Cargo.toml -- e.g. a Windows-checkout working tree -- would
 # otherwise put a carriage return into every artifact filename).
 VERSION="$(python3 "$REPO/scripts/release/sync-workspace-version.py" --print 2>/dev/null | tr -d '\r\n')"
 [ -n "$VERSION" ] || VERSION=0.0.0
 ARCH="$(uname -m)"
 mkdir -p "$OUTDIR"
-echo "==> DontSpeak $VERSION ($ARCH) → $OUTDIR"
+echo "==> DontSpeak $VERSION ($ARCH) -> $OUTDIR"
 
-# ── 1. build the CLI bins (rust/ workspace) + the GTK host (standalone crate) ─────────────
+# -- 1. build the CLI bins (rust/ workspace) + the GTK host (standalone crate) -------------
 # The GTK host links the engine in-process via ds-core; there is no standalone daemon bin.
 echo "==> [1/2] cargo build --release (dontspeak + ds-helper + ds-gtk)"
 ( cd "$REPO/rust" && cargo build --release --locked -p dontspeak && \
@@ -46,7 +46,7 @@ for b in "$GREL/ds-gtk" "$RREL/dontspeak" "$RREL/ds-helper"; do
   [ -x "$b" ] || { echo "MISSING build output: $b" >&2; exit 1; }
 done
 
-# ── 2. portable tarball ──────────────────────────────────────────────────────────────────
+# -- 2. portable tarball ------------------------------------------------------------------
 echo "==> [2/2] portable tarball"
 PKG="dontspeak-$VERSION-linux-$ARCH"
 STAGE="$(mktemp -d)"; trap 'rm -rf "$STAGE"' EXIT INT TERM HUP
@@ -64,7 +64,7 @@ install -m0644 "$REPO/licenses/Boson-Higgs-Audio-2-Community-License.txt" "$ROOT
 install -m0644 "$REPO/licenses/Meta-Llama-3-Community-License.txt" "$ROOT/licenses/Meta-Llama-3-Community-License.txt"
 
 # Self-contained installer inside the tarball (mirrors the Windows portable zip's run
-# path). Shipped verbatim from tarball-install.sh — the single source; don't inline a
+# path). Shipped verbatim from tarball-install.sh -- the single source; don't inline a
 # copy here (packaging_sync.rs pins this stays a file copy). The uninstaller rides
 # along too: install.sh places it on PATH as dontspeak-uninstall, so removal still
 # works after the extracted dir is deleted.
@@ -74,7 +74,7 @@ printf 'DontSpeak %s (%s) portable bundle.\nRun ./install.sh to install into ~/.
 
 TARBALL="$OUTDIR/$PKG.tar.gz"
 tar -C "$STAGE" -czf "$TARBALL" "$PKG"
-echo "    → $TARBALL"
+echo "    -> $TARBALL"
 
 echo
 echo "==> Done. Artifacts in $OUTDIR:"
