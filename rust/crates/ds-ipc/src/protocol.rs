@@ -3,7 +3,7 @@
 //!
 //! Config as `serde_json::Value` (`ds_config` voice_to/from_value) — no VoiceConfig mirror.
 
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,13 +18,20 @@ where
     Ok(value)
 }
 
+fn deserialize_client_source<'de, D>(deserializer: D) -> Result<Option<WiredClient>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<WiredClient>::deserialize(deserializer)
+}
+
 /// Client → engine (`#[serde(tag = "cmd")]`, snake_case).
 ///
 /// ## `source` field
 ///
 /// Required on: GreetSession, MarkActive, SessionEnd, Stop, Speak, SpeakNarration, Earcon.
-/// Absent field = hard decode error (stale hooks rejected). Unrecognised token →
-/// `ClientSource::Unknown`. Guard: `request_without_source_is_a_hard_decode_error`.
+/// Absent field = hard decode error (stale hooks rejected). `null` means the MCP peer is not
+/// a wired client; unrecognised non-null tokens fail closed.
 /// Tray / engine self-talk / STT tools omit `source` (FFI unchanged).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
@@ -44,7 +51,8 @@ pub enum Request {
         /// Terminal/window identity used only by the TTS queue.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_session: Option<String>,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// UserPromptSubmit: mark active terminal; other sessions held.
     MarkActive {
@@ -56,7 +64,8 @@ pub enum Request {
         /// Classifier: `dontspeak::hook_speak::is_synthetic_continuation`.
         #[serde(default)]
         synthetic: bool,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// MCP speak (reply; survives record-barge when resume policy set).
     Speak {
@@ -66,7 +75,8 @@ pub enum Request {
         /// Required: MCP speech is always scoped to its stdio/window identity.
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session: String,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// Mid-turn narration (barge/skip drops first); sentence-split on warm child.
     SpeakNarration {
@@ -82,13 +92,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         narration_id: Option<String>,
         /// Required for uniform source contract (engine skips logging this variant).
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// MCP barge-in, scoped to its stdio/window identity.
     Stop {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session: String,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// Per-window stop; agent voice assignment survives.
     SessionEnd {
@@ -96,7 +108,8 @@ pub enum Request {
         session: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_session: Option<String>,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// Stream Listening/partials → terminal Transcript.
     TestRecognitionStart,
@@ -136,7 +149,8 @@ pub enum Request {
         event: ds_earcon::EarconEvent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
-        source: ClientSource,
+        #[serde(deserialize_with = "deserialize_client_source")]
+        source: Option<WiredClient>,
     },
     /// macOS System STT TCC + capability before persisting `stt_engine=system`.
     AuthorizeSystemStt,
@@ -234,47 +248,47 @@ mod tests {
                     "kokoro": { "voice": "af_sarah", "language": "en", "rate": 1.5 }
                 })),
                 session: "sess-1".into(),
-                source: ClientSource::ClaudeCode,
+                source: Some(WiredClient::ClaudeCode),
             },
             Request::SpeakNarration {
                 text: "working on it".into(),
                 detection_text: Some("full turn so far for language".into()),
                 session: None,
                 narration_id: Some("narration-1".into()),
-                source: ClientSource::QwenCode,
+                source: Some(WiredClient::QwenCode),
             },
             Request::SpeakNarration {
                 text: "legacy digest only".into(),
                 detection_text: None,
                 session: Some("sess-1".into()),
                 narration_id: None,
-                source: ClientSource::ClaudeCode,
+                source: Some(WiredClient::ClaudeCode),
             },
             Request::Stop {
                 session: "sess-1".into(),
-                source: ClientSource::ClaudeCode,
+                source: Some(WiredClient::ClaudeCode),
             },
             Request::MarkActive {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
                 synthetic: false,
-                source: ClientSource::Codex,
+                source: Some(WiredClient::Codex),
             },
             Request::MarkActive {
                 session: None,
                 queue_session: None,
                 synthetic: true,
-                source: ClientSource::ClaudeCode,
+                source: Some(WiredClient::ClaudeCode),
             },
             Request::GreetSession {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
-                source: ClientSource::Grok,
+                source: Some(WiredClient::Grok),
             },
             Request::SessionEnd {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
-                source: ClientSource::QwenCode,
+                source: Some(WiredClient::QwenCode),
             },
             Request::TestRecognitionStart,
             Request::ModelStatus,
@@ -286,7 +300,7 @@ mod tests {
             Request::Earcon {
                 event: ds_earcon::EarconEvent::ReplyDone,
                 session: Some("sess-1".into()),
-                source: ClientSource::Grok,
+                source: Some(WiredClient::Grok),
             },
         ];
         for req in cases {
@@ -350,13 +364,13 @@ mod tests {
             Request::MarkActive {
                 session: Some(ref s),
                 synthetic: false,
-                source: ClientSource::ClaudeCode,
+                source: Some(WiredClient::ClaudeCode),
                 ..
             } if s == "sess-1"
         ));
     }
 
-    /// Absent `source` = hard decode error; unrecognised token is open (`Unknown`).
+    /// Absent `source` remains a hard decode error even though `null` is a valid value.
     #[test]
     fn request_without_source_is_a_hard_decode_error() {
         let cases = [
@@ -409,25 +423,23 @@ mod tests {
     }
 
     #[test]
-    fn unknown_client_token_decodes_to_unknown() {
-        let req: Request = serde_json::from_str(r#"{"cmd":"greet_session","source":"gemini_cli"}"#)
-            .expect("an unrecognised client token must decode to Unknown, not error out");
-        assert!(matches!(
-            req,
-            Request::GreetSession {
-                source: ClientSource::Unknown,
-                ..
-            }
-        ));
+    fn nullable_source_accepts_unwired_mcp_and_rejects_unknown_tokens() {
+        let req: Request =
+            serde_json::from_str(r#"{"cmd":"greet_session","source":null}"#).unwrap();
+        assert!(matches!(req, Request::GreetSession { source: None, .. }));
+        assert!(
+            serde_json::from_str::<Request>(r#"{"cmd":"greet_session","source":"gemini_cli"}"#)
+                .is_err()
+        );
         let line = format!(
             r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
-            ClientSource::Codex.as_str()
+            WiredClient::Codex.as_str()
         );
         let req: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(
             req,
             Request::Earcon {
-                source: ClientSource::Codex,
+                source: Some(WiredClient::Codex),
                 ..
             }
         ));
@@ -438,7 +450,7 @@ mod tests {
         let with_session = Request::Earcon {
             event: ds_earcon::EarconEvent::NeedsInput,
             session: Some("sess-1".into()),
-            source: ClientSource::ClaudeCode,
+            source: Some(WiredClient::ClaudeCode),
         };
         let line = serde_json::to_string(&with_session).unwrap();
         assert!(line.contains(r#""session":"sess-1""#));
@@ -452,7 +464,7 @@ mod tests {
 
         let line = format!(
             r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
-            ClientSource::Codex.as_str()
+            WiredClient::Codex.as_str()
         );
         let old: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(old, Request::Earcon { session: None, .. }));
@@ -465,7 +477,7 @@ mod tests {
             detection_text: Some("full so-far corpus".into()),
             session: Some("sess-1".into()),
             narration_id: Some("n1".into()),
-            source: ClientSource::Codex,
+            source: Some(WiredClient::Codex),
         };
         let line = serde_json::to_string(&with_fields).unwrap();
         assert!(line.contains(r#""detection_text":"full so-far corpus""#));
@@ -499,7 +511,7 @@ mod tests {
             detection_text: None,
             session: None,
             narration_id: None,
-            source: ClientSource::ClaudeCode,
+            source: Some(WiredClient::ClaudeCode),
         };
         let bare_line = serde_json::to_string(&bare).unwrap();
         assert!(!bare_line.contains("detection_text"));

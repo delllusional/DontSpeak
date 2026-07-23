@@ -10,7 +10,7 @@ use serde_json::{Map, Value, json};
 /// `(event, command)` pairs Hermes consent needs for our wired shell hooks.
 /// Delegates to `hermes_hooks::desired_hook_commands` so allowlist and
 /// `hooks:` cannot drift (exact match is Hermes' non-TTY registration key).
-pub fn desired_approvals(bin: &str, client: ds_client::ClientSource) -> Vec<(String, String)> {
+pub fn desired_approvals(bin: &str, client: ds_client::WiredClient) -> Vec<(String, String)> {
     super::hermes_hooks::desired_hook_commands(bin, client)
 }
 
@@ -30,7 +30,7 @@ fn approval_matches(entry: &Value, event: &str, command: &str) -> bool {
 pub fn merge_hermes_allowlist(
     existing: &Value,
     bin: &str,
-    client: ds_client::ClientSource,
+    client: ds_client::WiredClient,
 ) -> Value {
     let mut root = if existing.is_object() {
         existing.clone()
@@ -92,16 +92,16 @@ pub fn strip_hermes_allowlist(existing: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ds_client::ClientSource;
+    use ds_client::WiredClient;
 
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
     #[test]
     fn merge_into_empty_wires_all_event_command_pairs() {
-        let out = merge_hermes_allowlist(&Value::Null, BIN, ClientSource::Hermes);
+        let out = merge_hermes_allowlist(&Value::Null, BIN, WiredClient::Hermes);
         let arr = out["approvals"].as_array().unwrap();
         assert_eq!(arr.len(), 5);
-        let desired = desired_approvals(BIN, ClientSource::Hermes);
+        let desired = desired_approvals(BIN, WiredClient::Hermes);
         for (i, (event, command)) in desired.iter().enumerate() {
             assert_eq!(arr[i]["event"], *event);
             assert_eq!(arr[i]["command"], *command);
@@ -116,7 +116,7 @@ mod tests {
                 { "event": "pre_tool_call", "command": "/usr/bin/true" }
             ]
         });
-        let once = merge_hermes_allowlist(&existing, BIN, ClientSource::Hermes);
+        let once = merge_hermes_allowlist(&existing, BIN, WiredClient::Hermes);
         assert_eq!(once["approvals"].as_array().unwrap().len(), 6);
         assert!(
             once["approvals"]
@@ -125,7 +125,7 @@ mod tests {
                 .iter()
                 .any(|e| e["command"] == "/usr/bin/true")
         );
-        let twice = merge_hermes_allowlist(&once, BIN, ClientSource::Hermes);
+        let twice = merge_hermes_allowlist(&once, BIN, WiredClient::Hermes);
         assert_eq!(once, twice);
     }
 
@@ -136,7 +136,7 @@ mod tests {
                 { "event": "post_llm_call", "command": "/home/u/bin/my-dontspeak-checker" }
             ]
         });
-        let out = merge_hermes_allowlist(&existing, BIN, ClientSource::Hermes);
+        let out = merge_hermes_allowlist(&existing, BIN, WiredClient::Hermes);
         assert!(
             out["approvals"]
                 .as_array()
@@ -163,15 +163,15 @@ mod tests {
 
     #[test]
     fn rewire_heals_stale_bin_path() {
-        let first = merge_hermes_allowlist(&Value::Null, BIN, ClientSource::Hermes);
+        let first = merge_hermes_allowlist(&Value::Null, BIN, WiredClient::Hermes);
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second = merge_hermes_allowlist(&first, new_bin, ClientSource::Hermes);
+        let second = merge_hermes_allowlist(&first, new_bin, WiredClient::Hermes);
         let text = second.to_string();
         assert!(!text.contains(BIN), "stale bin healed");
         assert!(text.contains(new_bin));
         assert_eq!(
             second["approvals"].as_array().unwrap().len(),
-            desired_approvals(new_bin, ClientSource::Hermes).len()
+            desired_approvals(new_bin, WiredClient::Hermes).len()
         );
     }
 
@@ -182,12 +182,12 @@ mod tests {
                 { "event": "pre_tool_call", "command": "/usr/bin/true" }
             ]
         });
-        let wired = merge_hermes_allowlist(&existing, BIN, ClientSource::Hermes);
+        let wired = merge_hermes_allowlist(&existing, BIN, WiredClient::Hermes);
         let stripped = strip_hermes_allowlist(&wired);
         assert_eq!(stripped["approvals"].as_array().unwrap().len(), 1);
         assert_eq!(stripped["approvals"][0]["command"], "/usr/bin/true");
 
-        let only_ours = merge_hermes_allowlist(&Value::Null, BIN, ClientSource::Hermes);
+        let only_ours = merge_hermes_allowlist(&Value::Null, BIN, WiredClient::Hermes);
         let stripped = strip_hermes_allowlist(&only_ours);
         assert!(stripped.get("approvals").is_none());
     }
@@ -195,8 +195,8 @@ mod tests {
     #[test]
     fn allowlist_pairs_lockstep_with_hook_commands() {
         assert_eq!(
-            desired_approvals(BIN, ClientSource::Hermes),
-            super::super::hermes_hooks::desired_hook_commands(BIN, ClientSource::Hermes)
+            desired_approvals(BIN, WiredClient::Hermes),
+            super::super::hermes_hooks::desired_hook_commands(BIN, WiredClient::Hermes)
         );
     }
 }

@@ -447,7 +447,7 @@ fn unix_start_kind(bin: &Path, codex_home: &Path) -> UnixStartKind {
 
 /// Codex uses the same binary resolver as presence, launch wrappers, and usage probes.
 fn resolve_codex_bin(cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
-    ds_config::resolve_native_client_binary(ds_config::ClientSource::Codex, paths, cfg_bin)
+    ds_config::resolve_native_client_binary(ds_config::WiredClient::Codex, paths, cfg_bin)
 }
 
 fn direct_app_server_command(bin: &Path, listen: &str) -> std::process::Command {
@@ -1224,7 +1224,7 @@ pub(crate) fn spawn_supervisor(
             let mut speak = move |session: &str, utterance: &NarrationUtterance| {
                 ttsq.enqueue_narration(
                     utterance.text.clone(),
-                    ds_config::ClientSource::Codex,
+                    Some(ds_config::WiredClient::Codex),
                     Some(session.to_string()),
                     Some(utterance.id.clone()),
                     Some(utterance.detection_text.clone()).filter(|s| !s.is_empty()),

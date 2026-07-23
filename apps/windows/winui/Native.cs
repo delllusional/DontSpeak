@@ -162,7 +162,7 @@ public sealed record Activity
     public bool CapsActive, CapsEnabled, Recording, Speaking;
     // Silences voice; playback continues (tray slash + menu checkmark).
     public bool Muted;
-    /// Wireable client of the in-flight TTS utterance (`claude`/…); null when idle.
+    /// Wired client of the in-flight TTS utterance (`claude`/…); null when unattributed.
     public string? Speaker;
     // Tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Host fallback only — engine is source of truth.

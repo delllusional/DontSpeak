@@ -88,7 +88,7 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// COMMAND: side effect for `event`; no reply. Unknown events ignored (forward-compatible).
 /// `greet_only` = `notify --greet-only` (non-streaming SessionStart — see [`notify_at`]).
 /// `client` from wiring stamps every ds-ipc request so the activity log knows who caused it.
-pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::ClientSource) {
+pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::WiredClient) {
     let Some(paths) = ds_config::Paths::resolve() else {
         return;
     };
@@ -101,7 +101,7 @@ pub(crate) fn notify_at(
     event: &str,
     payload: &str,
     greet_only: bool,
-    client: ds_config::ClientSource,
+    client: ds_config::WiredClient,
 ) {
     match event {
         "SessionStart" => {
@@ -149,7 +149,7 @@ pub(crate) fn notify_at(
 
 /// QUERY: context JSON for `event`, or `None` when no reply / narration off.
 /// Hermes uses flat `{"context":…}`; other clients keep Claude `hookSpecificOutput`.
-pub fn provide(event: &str, _payload: &str, client: ds_config::ClientSource) -> Option<Value> {
+pub fn provide(event: &str, _payload: &str, client: ds_config::WiredClient) -> Option<Value> {
     match event {
         "UserPromptSubmit" => hook_prompt::narration_context(client),
         _ => None,
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn session_start_owes_no_provide_reply() {
         // Greeting is voice-only; SessionStart no longer returns a banner (CC 2.1+).
-        assert!(provide("SessionStart", "{}", ds_config::ClientSource::ClaudeCode).is_none());
+        assert!(provide("SessionStart", "{}", ds_config::WiredClient::ClaudeCode).is_none());
     }
 
     /// Digest-shaped reply — what Stop would voice (or wrongly suppress).
@@ -215,7 +215,7 @@ mod tests {
             "SessionStart",
             &payload,
             /*greet_only*/ true,
-            ds_config::ClientSource::QwenCode,
+            ds_config::WiredClient::QwenCode,
         );
         let streamed = hook_narrate::streamed_via_message_display(&paths, session);
         assert!(
@@ -242,7 +242,7 @@ mod tests {
             "SessionStart",
             &payload,
             /*greet_only*/ false,
-            ds_config::ClientSource::ClaudeCode,
+            ds_config::WiredClient::ClaudeCode,
         );
         let streamed = hook_narrate::streamed_via_message_display(&paths, session);
         assert!(streamed, "streaming SessionStart seeds the witness");

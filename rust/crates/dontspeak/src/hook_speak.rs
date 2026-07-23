@@ -8,7 +8,7 @@
 //!
 //! Spoken replies not here: MessageDisplay → `hook_narrate`; Stop → `hook_core`.
 
-use ds_config::{ClientSource, Paths};
+use ds_config::{Paths, WiredClient};
 use serde::Deserialize;
 
 pub enum Ping {
@@ -44,22 +44,22 @@ fn prompt_from_payload(payload: &str) -> String {
 }
 
 /// Split from [`engine_ping`] so shape is unit-testable.
-fn mark_active_request(payload: &str, client: ClientSource) -> ds_ipc::Request {
+fn mark_active_request(payload: &str, client: WiredClient) -> ds_ipc::Request {
     ds_ipc::Request::MarkActive {
         session: crate::hook_core::session_id_from_payload(payload),
         queue_session: crate::session_scope::for_hook(payload),
         synthetic: is_synthetic_continuation(&prompt_from_payload(payload)),
-        source: client,
+        source: Some(client),
     }
 }
 
 /// Best-effort ping from already-read payload. Engine down ⇒ no-op.
-pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSource) {
+pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: WiredClient) {
     let req = match ping {
         Ping::Greet => ds_ipc::Request::GreetSession {
             session: crate::hook_core::session_id_from_payload(payload),
             queue_session: crate::session_scope::for_hook(payload),
-            source: client,
+            source: Some(client),
         },
         Ping::MarkActive => mark_active_request(payload, client),
     };
@@ -73,12 +73,12 @@ pub fn engine_ping(paths: &Paths, ping: Ping, payload: &str, client: ClientSourc
 fn earcon_request(
     payload: &str,
     event: ds_earcon::EarconEvent,
-    client: ClientSource,
+    client: WiredClient,
 ) -> ds_ipc::Request {
     ds_ipc::Request::Earcon {
         event,
         session: crate::session_scope::for_hook(payload),
-        source: client,
+        source: Some(client),
     }
 }
 
@@ -87,7 +87,7 @@ pub fn engine_earcon(
     paths: &Paths,
     event: ds_earcon::EarconEvent,
     payload: &str,
-    client: ClientSource,
+    client: WiredClient,
 ) {
     let _ = ds_ipc::request(&paths.engine_sock, &earcon_request(payload, event, client));
 }
@@ -98,14 +98,14 @@ pub fn engine_earcon_for_session(
     paths: &Paths,
     event: ds_earcon::EarconEvent,
     session: Option<String>,
-    client: ClientSource,
+    client: WiredClient,
 ) {
     let _ = ds_ipc::request(
         &paths.engine_sock,
         &ds_ipc::Request::Earcon {
             event,
             session,
-            source: client,
+            source: Some(client),
         },
     );
 }
@@ -125,7 +125,7 @@ fn wants_needs_input_earcon(payload: &str) -> bool {
 }
 
 /// Needs-input earcon only for "waiting on you" notification types.
-pub fn notification_earcon(paths: &Paths, payload: &str, client: ClientSource) {
+pub fn notification_earcon(paths: &Paths, payload: &str, client: WiredClient) {
     if wants_needs_input_earcon(payload) {
         engine_earcon(paths, ds_earcon::EarconEvent::NeedsInput, payload, client);
     }
@@ -162,7 +162,7 @@ mod tests {
     fn engine_ping_with_no_socket_returns_promptly() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        let c = ClientSource::ClaudeCode;
+        let c = WiredClient::ClaudeCode;
         engine_ping(&paths, Ping::Greet, r#"{"session_id":"s1"}"#, c);
         engine_ping(&paths, Ping::MarkActive, r#"{"session_id":"s1"}"#, c);
     }
@@ -175,7 +175,7 @@ mod tests {
             &paths,
             ds_earcon::EarconEvent::NeedsInput,
             r#"{"sessionId":"grok-session"}"#,
-            ClientSource::Grok,
+            WiredClient::Grok,
         );
     }
 
@@ -189,7 +189,7 @@ mod tests {
                 earcon_request(
                     payload,
                     ds_earcon::EarconEvent::ReplyDone,
-                    ClientSource::ClaudeCode
+                    WiredClient::ClaudeCode
                 ),
                 ds_ipc::Request::Earcon {
                     session: Some(ref session),
@@ -234,7 +234,7 @@ mod tests {
     fn mark_active_request_carries_synthetic_flag_from_payload_shape() {
         let synthetic_payload =
             r#"{"session_id":"s1","prompt":"<task-notification>\nfoo\n</task-notification>"}"#;
-        match mark_active_request(synthetic_payload, ClientSource::ClaudeCode) {
+        match mark_active_request(synthetic_payload, WiredClient::ClaudeCode) {
             ds_ipc::Request::MarkActive {
                 session,
                 queue_session,
@@ -247,13 +247,13 @@ mod tests {
                     crate::session_scope::for_hook(synthetic_payload)
                 );
                 assert!(synthetic);
-                assert_eq!(source, ClientSource::ClaudeCode);
+                assert_eq!(source, Some(WiredClient::ClaudeCode));
             }
             other => panic!("expected MarkActive, got {other:?}"),
         }
 
         let ordinary_payload = r#"{"session_id":"s2","prompt":"fix the bug in foo.rs"}"#;
-        match mark_active_request(ordinary_payload, ClientSource::Codex) {
+        match mark_active_request(ordinary_payload, WiredClient::Codex) {
             ds_ipc::Request::MarkActive {
                 session,
                 queue_session,
@@ -268,7 +268,7 @@ mod tests {
                 assert!(!synthetic);
                 assert_eq!(
                     source,
-                    ClientSource::Codex,
+                    Some(WiredClient::Codex),
                     "the request carries the CLIENT that invoked the hook, verbatim"
                 );
             }

@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::client_binary::resolve_client_binary;
 use crate::paths::Paths;
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 
 /// Where config lives by convention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +92,8 @@ pub struct DocRef {
 
 /// One wireable client.
 pub struct ClientSpec {
-    /// Canonical token; always in [`ClientSource::CLIENTS`] (`DontSpeak`/`Unknown` omitted).
-    pub target: ClientSource,
+    /// Canonical token; always in [`WiredClient::ALL`].
+    pub target: WiredClient,
     pub display_name: &'static str,
     pub kind: ClientKind,
     pub launch: LaunchSpec,
@@ -115,10 +115,10 @@ impl ClientSpec {
     }
 }
 
-/// Order matches [`ClientSource::CLIENTS`] (pinned by test).
+/// Order matches [`WiredClient::ALL`] (pinned by test).
 pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     ClientSpec {
-        target: ClientSource::ClaudeCode,
+        target: WiredClient::ClaudeCode,
         display_name: "Claude Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -156,7 +156,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_on: "2026-07-15",
     },
     ClientSpec {
-        target: ClientSource::Codex,
+        target: WiredClient::Codex,
         display_name: "OpenAI Codex",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -205,7 +205,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_on: "2026-07-15",
     },
     ClientSpec {
-        target: ClientSource::QwenCode,
+        target: WiredClient::QwenCode,
         display_name: "Qwen Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -245,7 +245,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_on: "2026-07-15",
     },
     ClientSpec {
-        target: ClientSource::Grok,
+        target: WiredClient::Grok,
         display_name: "Grok",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -286,7 +286,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_on: "2026-07-15",
     },
     ClientSpec {
-        target: ClientSource::KimiCode,
+        target: WiredClient::KimiCode,
         display_name: "Kimi Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -325,7 +325,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         verified_on: "2026-07-18",
     },
     ClientSpec {
-        target: ClientSource::Hermes,
+        target: WiredClient::Hermes,
         display_name: "Hermes Agent",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
@@ -375,9 +375,12 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     },
 ];
 
-/// `None` for DontSpeak/Unknown (not wireable).
-pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
-    CLIENT_REGISTRY.iter().find(|s| s.target == target)
+/// Look up a wired client's configuration.
+pub fn client_spec(target: WiredClient) -> &'static ClientSpec {
+    CLIENT_REGISTRY
+        .iter()
+        .find(|spec| spec.target == target)
+        .expect("every WiredClient must have a registry entry")
 }
 
 /// `dontspeak <client>` via its single canonical command (internal verbs excluded).
@@ -392,24 +395,24 @@ fn normalize_mcp_name(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
 
-/// MCP name → [`ClientSource`] via the same canonical client identity; else Unknown.
+/// MCP name → [`WiredClient`] via the same canonical client identity.
 /// Matching is prefix-based because upstream names add suffixes such as `-code` or `-vscode`.
-pub fn client_from_mcp_name(name: &str) -> ClientSource {
+pub fn client_from_mcp_name(name: &str) -> Option<WiredClient> {
     let n = normalize_mcp_name(name);
     if n.is_empty() {
-        return ClientSource::Unknown;
+        return None;
     }
     CLIENT_REGISTRY
         .iter()
         .find(|spec| n.starts_with(spec.target.as_str()))
-        .map_or(ClientSource::Unknown, |s| s.target)
+        .map(|spec| spec.target)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn write_client_stub(dir: &Path, client: ClientSource) {
+    fn write_client_stub(dir: &Path, client: WiredClient) {
         let command = client.as_str();
         let filename = if cfg!(windows) {
             format!("{command}.exe")
@@ -427,7 +430,7 @@ mod tests {
         let paths = Paths::rooted_at(root.path());
         std::fs::create_dir_all(&paths.grok_dir).unwrap();
 
-        assert!(!client_spec(ClientSource::Grok).unwrap().present(&paths));
+        assert!(!client_spec(WiredClient::Grok).present(&paths));
     }
 
     #[test]
@@ -436,10 +439,10 @@ mod tests {
         let mut paths = Paths::rooted_at(root.path());
         let bin_dir = root.path().join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        write_client_stub(&bin_dir, ClientSource::Grok);
+        write_client_stub(&bin_dir, WiredClient::Grok);
         paths.path_env = Some(std::env::join_paths([&bin_dir]).unwrap());
 
-        assert!(client_spec(ClientSource::Grok).unwrap().present(&paths));
+        assert!(client_spec(WiredClient::Grok).present(&paths));
     }
 
     /// Fallback dirs are checked even with no `$PATH` at all (GUI-launched hosts).
@@ -449,16 +452,16 @@ mod tests {
         let paths = Paths::rooted_at(root.path());
         let bin_dir = root.path().join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
-        write_client_stub(&bin_dir, ClientSource::Codex);
+        write_client_stub(&bin_dir, WiredClient::Codex);
 
-        assert!(client_spec(ClientSource::Codex).unwrap().present(&paths));
+        assert!(client_spec(WiredClient::Codex).present(&paths));
     }
 
-    /// Same set/order as [`ClientSource::CLIENTS`].
+    /// Same set/order as [`WiredClient::ALL`].
     #[test]
     fn registry_matches_the_canonical_client_list() {
-        let registry: Vec<ClientSource> = CLIENT_REGISTRY.iter().map(|s| s.target).collect();
-        assert_eq!(registry, ClientSource::CLIENTS);
+        let registry: Vec<WiredClient> = CLIENT_REGISTRY.iter().map(|s| s.target).collect();
+        assert_eq!(registry, WiredClient::ALL);
     }
 
     /// Surfaces + docs + version pin + ISO date.
@@ -502,18 +505,11 @@ mod tests {
         }
     }
 
-    /// DontSpeak/Unknown absent — `ds_wire::run` depends on this for `wire dontspeak`.
     #[test]
     fn lookup_covers_every_client() {
-        for &t in ClientSource::CLIENTS {
-            assert!(
-                client_spec(t).is_some(),
-                "{} missing from registry",
-                t.as_str()
-            );
+        for &t in WiredClient::ALL {
+            assert_eq!(client_spec(t).target, t);
         }
-        assert!(client_spec(ClientSource::DontSpeak).is_none());
-        assert!(client_spec(ClientSource::Unknown).is_none());
     }
 
     /// Every client has one unique canonical launcher command.
@@ -565,26 +561,26 @@ mod tests {
     #[test]
     fn known_mcp_names_map_to_their_client() {
         for (name, want) in [
-            ("claude-code", ClientSource::ClaudeCode),
-            ("codex-mcp-client", ClientSource::Codex),
-            (ClientSource::Codex.as_str(), ClientSource::Codex),
-            ("codex-vscode", ClientSource::Codex),
-            ("qwen-code", ClientSource::QwenCode),
-            ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
-            ("grok-shell-DontSpeak", ClientSource::Grok),
-            ("kimi-code", ClientSource::KimiCode),
-            (ClientSource::Hermes.as_str(), ClientSource::Hermes),
-            ("hermes-agent-DontSpeak", ClientSource::Hermes),
+            ("claude-code", WiredClient::ClaudeCode),
+            ("codex-mcp-client", WiredClient::Codex),
+            (WiredClient::Codex.as_str(), WiredClient::Codex),
+            ("codex-vscode", WiredClient::Codex),
+            ("qwen-code", WiredClient::QwenCode),
+            ("qwen-cli-mcp-client-DontSpeak", WiredClient::QwenCode),
+            ("grok-shell-DontSpeak", WiredClient::Grok),
+            ("kimi-code", WiredClient::KimiCode),
+            (WiredClient::Hermes.as_str(), WiredClient::Hermes),
+            ("hermes-agent-DontSpeak", WiredClient::Hermes),
         ] {
-            assert_eq!(client_from_mcp_name(name), want, "{name}");
+            assert_eq!(client_from_mcp_name(name), Some(want), "{name}");
             assert_eq!(
                 client_from_mcp_name(&name.to_ascii_uppercase().replace('-', "_")),
-                want,
+                Some(want),
                 "{name} (case + underscore variant)"
             );
             assert_eq!(
                 client_from_mcp_name(&format!("  {name}\n")),
-                want,
+                Some(want),
                 "{name} (padded)"
             );
         }
@@ -595,20 +591,20 @@ mod tests {
     fn prefix_match_accepts_the_foreign_client_collision_tradeoff() {
         assert_eq!(
             client_from_mcp_name("codex-community-fork"),
-            ClientSource::Codex
+            Some(WiredClient::Codex)
         );
         assert_eq!(
             client_from_mcp_name("claude-code-fork"),
-            ClientSource::ClaudeCode
+            Some(WiredClient::ClaudeCode)
         );
     }
 
     #[test]
-    fn unrecognised_mcp_names_are_unknown_not_guessed() {
+    fn unrecognised_mcp_names_are_not_guessed() {
         for name in ["gemini-cli-mcp-client", "", "   ", "🙂"] {
             assert_eq!(
                 client_from_mcp_name(name),
-                ClientSource::Unknown,
+                None,
                 "{name:?} must not be attributed to a wired client"
             );
         }

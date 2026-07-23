@@ -2,7 +2,7 @@
 resolver = "3"
 members = [
     "crates/ds-config",
-    # The ONE client-identity enum (ClientSource). Sits BELOW ds-log and ds-ipc — ds-log must
+    # The ONE client-identity enum (WiredClient). Sits BELOW ds-log and ds-ipc — ds-log must
     # be able to take a client without depending on ds-config (ds-config depends on ds-log,
     # so that edge would be a cycle), and ds-ipc needs the same type on the wire. Depends on
     # serde only.

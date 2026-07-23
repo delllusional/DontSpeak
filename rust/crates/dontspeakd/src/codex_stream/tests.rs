@@ -459,7 +459,7 @@ fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
     std::fs::write(&bin, b"test").unwrap();
 
     assert_eq!(
-        resolve_codex_bin(ds_config::ClientSource::Codex.as_str(), &paths),
+        resolve_codex_bin(ds_config::WiredClient::Codex.as_str(), &paths),
         Some(bin)
     );
 }

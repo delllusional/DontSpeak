@@ -1,6 +1,6 @@
 //! UserPromptSubmit `provide`: inject narration context when digests are on.
 
-use ds_config::ClientSource;
+use ds_config::WiredClient;
 use ds_ipc::{Request, Response};
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ const MUTED_NOTICE: &str = "\n\n## Voice state\nMUTED: speech and narration play
 /// `hookSpecificOutput.additionalContext`; Hermes wants flat `{"context":…}`.
 /// `None` when digests off (no instruction tokens). Also folds a best-effort mute notice
 /// from the engine — read-only; down/unreachable engine omits the notice, never blocks.
-pub(crate) fn narration_context(client: ClientSource) -> Option<Value> {
+pub(crate) fn narration_context(client: WiredClient) -> Option<Value> {
     let paths = ds_config::Paths::resolve()?;
     if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
         return None;
@@ -26,8 +26,8 @@ pub(crate) fn narration_context(client: ClientSource) -> Option<Value> {
 }
 
 /// Pure dual-shape for unit tests (no engine / Paths).
-fn provide_shape(client: ClientSource, context: String) -> Value {
-    if client == ClientSource::Hermes {
+fn provide_shape(client: WiredClient, context: String) -> Value {
+    if client == WiredClient::Hermes {
         json!({ "context": context })
     } else {
         json!({
@@ -77,11 +77,11 @@ mod tests {
 
     #[test]
     fn hermes_provide_is_flat_context_others_keep_hook_specific_output() {
-        let hermes = provide_shape(ClientSource::Hermes, "SPEC".into());
+        let hermes = provide_shape(WiredClient::Hermes, "SPEC".into());
         assert_eq!(hermes["context"], "SPEC");
         assert!(hermes.get("hookSpecificOutput").is_none());
 
-        let claude = provide_shape(ClientSource::ClaudeCode, "SPEC".into());
+        let claude = provide_shape(WiredClient::ClaudeCode, "SPEC".into());
         assert_eq!(claude["hookSpecificOutput"]["additionalContext"], "SPEC");
         assert!(claude.get("context").is_none());
     }

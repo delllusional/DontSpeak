@@ -8,11 +8,11 @@
 //! UserPromptSubmit notify+provide. "Ours" = basename `dontspeak` ([`command_is_ours`]).
 
 use super::cmdline::{ShellOverride, command_is_ours, shell_client_command};
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 use toml_edit::{ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
 /// No `shell`/`args` → inlined verbs + `--client`; spaced bin → 8.3.
-fn kimi_command(bin: &str, verb: &str, client: ClientSource) -> String {
+fn kimi_command(bin: &str, verb: &str, client: WiredClient) -> String {
     shell_client_command(bin, verb, client, ShellOverride::Unsupported)
 }
 
@@ -49,7 +49,7 @@ fn kimi_entry(event: &str, command: &str, timeout: i64) -> TomlTable {
     entry
 }
 
-fn desired_entries(bin: &str, client: ClientSource) -> Vec<(String, String, i64)> {
+fn desired_entries(bin: &str, client: WiredClient) -> Vec<(String, String, i64)> {
     KIMI_HOOKS
         .iter()
         .flat_map(|(event, verbs)| {
@@ -66,7 +66,7 @@ fn desired_entries(bin: &str, client: ClientSource) -> Vec<(String, String, i64)
 
 /// Additive + idempotent + REPLACE-OURS (self-heal when path/verbs change). User entries
 /// never touched.
-pub fn merge_kimi_hooks(existing: &str, bin: &str, client: ClientSource) -> Result<String, String> {
+pub fn merge_kimi_hooks(existing: &str, bin: &str, client: WiredClient) -> Result<String, String> {
     let mut doc: DocumentMut = if existing.trim().is_empty() {
         DocumentMut::new()
     } else {
@@ -136,11 +136,11 @@ mod tests {
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
     fn merged(existing: &str) -> String {
-        merge_kimi_hooks(existing, BIN, ClientSource::KimiCode).expect("merge ok")
+        merge_kimi_hooks(existing, BIN, WiredClient::KimiCode).expect("merge ok")
     }
 
     fn cmd(verb: &str) -> String {
-        kimi_command(BIN, verb, ClientSource::KimiCode)
+        kimi_command(BIN, verb, WiredClient::KimiCode)
     }
 
     /// Ours entries as `(event, command, timeout)`; asserts allowed keys only.
@@ -170,7 +170,7 @@ mod tests {
     }
 
     fn expected() -> Vec<(String, String, i64)> {
-        desired_entries(BIN, ClientSource::KimiCode)
+        desired_entries(BIN, WiredClient::KimiCode)
     }
 
     #[test]
@@ -235,13 +235,13 @@ mod tests {
     fn rewire_heals_a_changed_binary_path_by_replacing_stale_entries() {
         let first = merged("");
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second = merge_kimi_hooks(&first, new_bin, ClientSource::KimiCode).expect("merge ok");
+        let second = merge_kimi_hooks(&first, new_bin, WiredClient::KimiCode).expect("merge ok");
         assert!(!second.contains(BIN), "stale bin path healed away");
         assert!(second.contains(new_bin), "re-wire re-points the command");
         let doc: DocumentMut = second.parse().unwrap();
         assert_eq!(
             our_entries(&doc),
-            desired_entries(new_bin, ClientSource::KimiCode),
+            desired_entries(new_bin, WiredClient::KimiCode),
             "stale entries replaced, not duplicated"
         );
     }
@@ -301,14 +301,14 @@ mod tests {
     #[test]
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks = \"oops\"\n";
-        let err = merge_kimi_hooks(bad, BIN, ClientSource::KimiCode).unwrap_err();
+        let err = merge_kimi_hooks(bad, BIN, WiredClient::KimiCode).unwrap_err();
         assert!(err.contains("unexpected `hooks` shape"), "{err}");
     }
 
     #[test]
     fn parse_error_surfaces() {
         let bad = "this is = = not toml\n";
-        let err = merge_kimi_hooks(bad, BIN, ClientSource::KimiCode).unwrap_err();
+        let err = merge_kimi_hooks(bad, BIN, WiredClient::KimiCode).unwrap_err();
         assert!(err.contains("not valid TOML"), "{err}");
     }
 }

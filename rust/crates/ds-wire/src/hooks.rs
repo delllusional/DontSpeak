@@ -5,7 +5,7 @@
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
-use ds_config::{ClientSource, HookCommandStyle, HookSpec, Paths};
+use ds_config::{HookCommandStyle, HookSpec, Paths, WiredClient};
 
 /// Seed missing `config.toml`. Interactive wire only (not engine reconcile).
 pub(crate) fn seed_config(paths: &Paths) {
@@ -29,7 +29,7 @@ pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
     streaming: bool,
     command_style: HookCommandStyle,
-    client: ClientSource,
+    client: WiredClient,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -180,7 +180,7 @@ fn toml_hooks_body<E: std::fmt::Display>(
 /// Claude-contract TOML hooks (e.g. Codex). Same writer contract as JSON path.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
-    client: ClientSource,
+    client: WiredClient,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -203,7 +203,7 @@ pub(crate) fn claude_toml_hooks(
 /// Kimi flat-`[[hooks]]` TOML. Same writer contract as [`claude_toml_hooks`].
 pub(crate) fn kimi_toml_hooks(
     cfg: &std::path::Path,
-    client: ClientSource,
+    client: WiredClient,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -302,7 +302,7 @@ fn yaml_text_body<E: std::fmt::Display>(
 /// Hermes nested `hooks.<event>` YAML. Same writer contract as TOML path.
 pub(crate) fn hermes_yaml_hooks(
     cfg: &std::path::Path,
-    client: ClientSource,
+    client: WiredClient,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -358,7 +358,7 @@ pub(crate) fn hermes_yaml_mcp(
 /// Hermes shell-hooks allowlist JSON (consent for every wired `(event, command)`).
 pub(crate) fn hermes_shell_allowlist(
     cfg: &std::path::Path,
-    client: ClientSource,
+    client: WiredClient,
     remove: bool,
     print_only: bool,
     paths: &Paths,
@@ -534,7 +534,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -552,7 +552,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -576,7 +576,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -590,7 +590,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 true,
                 false,
                 &paths,
@@ -620,7 +620,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -648,7 +648,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -671,7 +671,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 true,
                 &paths,
@@ -698,7 +698,7 @@ mod tests {
                 &cfg,
                 true,
                 HookCommandStyle::ArgsArray,
-                ClientSource::ClaudeCode,
+                WiredClient::ClaudeCode,
                 false,
                 false,
                 &paths,
@@ -723,7 +723,7 @@ mod tests {
                 &cfg,
                 false,
                 qwen,
-                ClientSource::QwenCode,
+                WiredClient::QwenCode,
                 false,
                 false,
                 &paths,
@@ -756,7 +756,7 @@ mod tests {
                 &cfg,
                 false,
                 qwen,
-                ClientSource::QwenCode,
+                WiredClient::QwenCode,
                 false,
                 false,
                 &paths,
@@ -771,7 +771,7 @@ mod tests {
                 &cfg,
                 false,
                 qwen,
-                ClientSource::QwenCode,
+                WiredClient::QwenCode,
                 true,
                 false,
                 &paths,
@@ -790,7 +790,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, false, &paths, None, None),
             0
         );
         let first = std::fs::read_to_string(&cfg).unwrap();
@@ -810,7 +810,7 @@ mod tests {
 
         // Re-run: an unchanged command is a true byte-for-byte no-op (see `codex_group_matches`).
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, false, &paths, None, None),
             0
         );
         let second = std::fs::read_to_string(&cfg).unwrap();
@@ -824,11 +824,11 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, false, &paths, None, None),
             0
         );
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, true, false, &paths, None, None),
             0
         );
 
@@ -844,7 +844,7 @@ mod tests {
 
         // Missing is an empty document, so strip stays a no-op without resolving the binary.
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, true, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, true, false, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -859,7 +859,7 @@ mod tests {
         std::fs::write(&cfg, raw).unwrap();
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, false, &paths, None, None),
             1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), raw);
@@ -872,7 +872,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, true, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, true, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -888,7 +888,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            claude_toml_hooks(&cfg, ClientSource::Codex, false, false, &paths, None, None),
+            claude_toml_hooks(&cfg, WiredClient::Codex, false, false, &paths, None, None),
             1
         );
     }
@@ -906,7 +906,7 @@ mod tests {
         assert_eq!(
             kimi_toml_hooks(
                 &cfg,
-                ClientSource::KimiCode,
+                WiredClient::KimiCode,
                 false,
                 false,
                 &paths,
@@ -932,7 +932,7 @@ mod tests {
         assert_eq!(
             kimi_toml_hooks(
                 &cfg,
-                ClientSource::KimiCode,
+                WiredClient::KimiCode,
                 false,
                 false,
                 &paths,
@@ -954,7 +954,7 @@ mod tests {
         assert_eq!(
             kimi_toml_hooks(
                 &cfg,
-                ClientSource::KimiCode,
+                WiredClient::KimiCode,
                 false,
                 false,
                 &paths,
@@ -964,15 +964,7 @@ mod tests {
             0
         );
         assert_eq!(
-            kimi_toml_hooks(
-                &cfg,
-                ClientSource::KimiCode,
-                true,
-                false,
-                &paths,
-                None,
-                None
-            ),
+            kimi_toml_hooks(&cfg, WiredClient::KimiCode, true, false, &paths, None, None),
             0
         );
 
@@ -987,15 +979,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(
-                &cfg,
-                ClientSource::KimiCode,
-                true,
-                false,
-                &paths,
-                None,
-                None
-            ),
+            kimi_toml_hooks(&cfg, WiredClient::KimiCode, true, false, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -1012,7 +996,7 @@ mod tests {
         assert_eq!(
             kimi_toml_hooks(
                 &cfg,
-                ClientSource::KimiCode,
+                WiredClient::KimiCode,
                 false,
                 false,
                 &paths,
@@ -1031,15 +1015,7 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
 
         assert_eq!(
-            kimi_toml_hooks(
-                &cfg,
-                ClientSource::KimiCode,
-                false,
-                true,
-                &paths,
-                None,
-                None
-            ),
+            kimi_toml_hooks(&cfg, WiredClient::KimiCode, false, true, &paths, None, None),
             0
         );
         assert!(!cfg.exists());
@@ -1057,7 +1033,7 @@ mod tests {
         assert_eq!(
             kimi_toml_hooks(
                 &cfg,
-                ClientSource::KimiCode,
+                WiredClient::KimiCode,
                 false,
                 false,
                 &paths,

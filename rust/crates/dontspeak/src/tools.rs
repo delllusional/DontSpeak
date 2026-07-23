@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ds_config::{ClientSource, Paths, TtsEngine, TtsModel, VoiceConfig};
+use ds_config::{Paths, TtsEngine, TtsModel, VoiceConfig, WiredClient};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ pub(crate) fn tools_call(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: ClientSource,
+    client: Option<WiredClient>,
 ) -> Value {
     tools_call_cancellable(
         id,
@@ -61,7 +61,7 @@ pub(crate) fn tools_call_validated(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: ClientSource,
+    client: Option<WiredClient>,
     queue_session: &str,
     cancelled: Arc<AtomicBool>,
     agents: bool,
@@ -84,7 +84,7 @@ pub(crate) fn tools_call_cancellable(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: ClientSource,
+    client: Option<WiredClient>,
     queue_session: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Value {
@@ -496,7 +496,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
 fn call_speak(
     sock: &Path,
     args: &Value,
-    client: ClientSource,
+    client: Option<WiredClient>,
     queue_session: &str,
 ) -> Result<String, String> {
     let a: SpeakArgs = serde_json::from_value(args.clone())
@@ -525,7 +525,11 @@ fn call_speak(
     }
 }
 
-fn call_stop(sock: &Path, client: ClientSource, queue_session: &str) -> Result<String, String> {
+fn call_stop(
+    sock: &Path,
+    client: Option<WiredClient>,
+    queue_session: &str,
+) -> Result<String, String> {
     let response = ds_ipc::request(
         sock,
         &Request::Stop {
@@ -741,7 +745,7 @@ mod drift {
         let bogus = json!({ "__not_a_real_field__": true });
         for name in ds_tools::tool_names(true) {
             let msg = json!({ "params": { "name": name, "arguments": bogus.clone() } });
-            let resp = tools_call(None, &msg, None, ClientSource::Unknown);
+            let resp = tools_call(None, &msg, None, None);
             let text = resp["result"]["content"][0]["text"]
                 .as_str()
                 .unwrap_or_default();
@@ -920,7 +924,7 @@ mod usage_output {
                 assert!(refresh);
                 Ok(Some(UsageDeck {
                     cards: vec![UsageCard {
-                        agent: ClientSource::Codex,
+                        agent: WiredClient::Codex,
                         account: Some("dev@example.com".into()),
                         rows: vec![UsageRow {
                             period: Period::Week,
@@ -946,7 +950,7 @@ mod usage_output {
             value,
             json!({
                 "cards": [{
-                    "agent": ClientSource::Codex.as_str(),
+                    "agent": WiredClient::Codex.as_str(),
                     "account": "dev@example.com",
                     "rows": [{
                         "period": "week",
@@ -962,7 +966,7 @@ mod usage_output {
     fn usage_sends_the_refresh_flag_to_a_reachable_engine() {
         let deck = serde_json::to_value(UsageDeck {
             cards: vec![UsageCard {
-                agent: ClientSource::ClaudeCode,
+                agent: WiredClient::ClaudeCode,
                 account: None,
                 rows: Vec::new(),
                 needs_auth: true,
@@ -988,7 +992,7 @@ mod usage_output {
             |_| {
                 Ok(Some(UsageDeck {
                     cards: vec![UsageCard {
-                        agent: ClientSource::ClaudeCode,
+                        agent: WiredClient::ClaudeCode,
                         account: None,
                         rows: Vec::new(),
                         needs_auth: true,
@@ -1041,7 +1045,7 @@ mod status_output {
             "seq": 8,
             "activity": {
                 "caps": true, "caps_active": false, "recording": false,
-                "speaking": true, "speaker": ClientSource::Codex.as_str(), "voice": "if_sara",
+                "speaking": true, "speaker": WiredClient::Codex.as_str(), "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
             "tts": {
@@ -1227,14 +1231,19 @@ mod arg_validation {
 
     #[test]
     fn speak_requires_nonempty_text() {
-        let err =
-            call_speak(&dead_sock(), &json!({}), ClientSource::ClaudeCode, "scope").unwrap_err();
+        let err = call_speak(
+            &dead_sock(),
+            &json!({}),
+            Some(WiredClient::ClaudeCode),
+            "scope",
+        )
+        .unwrap_err();
         assert_eq!(err, "`text` is required.");
 
         let err = call_speak(
             &dead_sock(),
             &json!({ "text": "   " }),
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             "scope",
         )
         .unwrap_err();
@@ -1330,11 +1339,14 @@ mod engine_unavailable {
                 call_speak(
                     &sock,
                     &json!({ "text": "hello" }),
-                    ClientSource::ClaudeCode,
+                    Some(WiredClient::ClaudeCode),
                     "scope",
                 ),
             ),
-            ("stop", call_stop(&sock, ClientSource::ClaudeCode, "scope")),
+            (
+                "stop",
+                call_stop(&sock, Some(WiredClient::ClaudeCode), "scope"),
+            ),
             ("mute", call_mute(&sock, &json!({ "on": true }))),
             ("diarize", call_diarize(&sock, &json!({}))),
             (

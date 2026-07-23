@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use ds_config::{ClientSource, Paths, TtsArgPools, VoiceConfig};
+use ds_config::{Paths, TtsArgPools, VoiceConfig, WiredClient};
 
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
@@ -27,7 +27,7 @@ impl Drop for HealingGuard {
 /// In-flight claim. `session: None` = untagged/global.
 #[derive(Clone, Debug)]
 struct PlayingClaim {
-    source: ClientSource,
+    source: Option<WiredClient>,
     session: Option<String>,
     /// Speech, not a cue — the in-flight half of the depth the status reports.
     speech: bool,
@@ -151,9 +151,9 @@ fn apply_tts_arg_params(
 /// Load is counted only among agents holding a voice for the SAME language, so spreading
 /// voices across agents stays independent per language.
 fn pick_agent_voice(
-    assignments: &HashMap<(ClientSource, String), String>,
+    assignments: &HashMap<(Option<WiredClient>, String), String>,
     pool: &[String],
-    agent: &(ClientSource, String),
+    agent: &(Option<WiredClient>, String),
     roll: &mut dyn FnMut(usize) -> usize,
 ) -> String {
     if let Some(v) = assignments.get(agent)
@@ -215,7 +215,7 @@ impl QueueAction {
 struct Item {
     action: QueueAction,
     /// Producer → `activity.speaker` while in flight.
-    source: ClientSource,
+    source: Option<WiredClient>,
     /// Session tag (`None` = global). Voice keys off `source`.
     session: Option<String>,
     /// Batch resume high-water (`PROGRESS`). Record-barge resume sends as `skip`.
@@ -225,7 +225,7 @@ struct Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TtsStatusSample {
     pub speaking: bool,
-    pub speaker: Option<ClientSource>,
+    pub speaker: Option<WiredClient>,
     pub queued: u64,
     pub utterance: Option<ds_status::UtteranceStatus>,
     pub last_utterance: Option<ds_status::UtteranceStatus>,
@@ -371,8 +371,8 @@ pub struct TtsQueue {
     config: Mutex<VoiceConfig>,
     /// Lazy pool roll; SessionEnd keeps assignment. Keyed per language so an agent holds one
     /// voice per language it speaks instead of flapping when a reply switches language.
-    /// Bounded by ClientSource cardinality × languages spoken.
-    agent_voices: Mutex<HashMap<(ClientSource, String), String>>,
+    /// Bounded by wired-client cardinality plus one unwired bucket × languages spoken.
+    agent_voices: Mutex<HashMap<(Option<WiredClient>, String), String>>,
     /// `say -v ?` enumeration, read once per process for System language matching.
     system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
     /// Always acquired inside `items`.
@@ -503,7 +503,7 @@ impl TtsQueue {
         &self,
         text: String,
         tts_args: Option<TtsArgPools>,
-        source: ClientSource,
+        source: Option<WiredClient>,
         session: Option<String>,
     ) -> Result<(), String> {
         if text.len() > MAX_SPEAK_BYTES {
@@ -528,7 +528,7 @@ impl TtsQueue {
     pub fn enqueue_earcon(
         &self,
         event: ds_earcon::EarconEvent,
-        source: ClientSource,
+        source: Option<WiredClient>,
         session: Option<String>,
     ) -> Result<(), String> {
         self.enqueue_action(QueueAction::Earcon(event), source, session)
@@ -548,7 +548,7 @@ impl TtsQueue {
     pub fn dispatch_earcon(
         self: &Arc<Self>,
         event: ds_earcon::EarconEvent,
-        source: ClientSource,
+        source: Option<WiredClient>,
         session: Option<String>,
     ) -> Result<(), String> {
         // reply_done never bypasses — skip hold-state snapshot.
@@ -606,7 +606,7 @@ impl TtsQueue {
     fn enqueue_action(
         &self,
         action: QueueAction,
-        source: ClientSource,
+        source: Option<WiredClient>,
         session: Option<String>,
     ) -> Result<(), String> {
         let mut q = self.items.lock().unwrap();
@@ -682,7 +682,7 @@ impl TtsQueue {
     pub fn enqueue_narration(
         &self,
         text: String,
-        source: ClientSource,
+        source: Option<WiredClient>,
         session: Option<String>,
         narration_id: Option<String>,
         detection_text: Option<String>,
@@ -1018,10 +1018,7 @@ impl TtsQueue {
         let claim = active
             .then(|| self.playing.lock().unwrap().clone())
             .flatten();
-        let source = claim
-            .as_ref()
-            .map(|claim| claim.source)
-            .filter(|source| source.is_client());
+        let source = claim.as_ref().and_then(|claim| claim.source);
         // Playback edges already publish changes to this in-flight addend.
         let speaking_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
         TtsStatusSample {
@@ -1142,7 +1139,12 @@ impl TtsQueue {
     }
 
     /// Get-or-assign agent voice ([`pick_agent_voice`]). Pool non-empty.
-    fn assign_agent_voice(&self, agent: ClientSource, language: &str, pool: &[String]) -> String {
+    fn assign_agent_voice(
+        &self,
+        agent: Option<WiredClient>,
+        language: &str,
+        pool: &[String],
+    ) -> String {
         let key = (agent, language.to_string());
         let mut map = self.agent_voices.lock().unwrap();
         let voice = pick_agent_voice(&map, pool, &key, &mut |n| fastrand::usize(..n));
@@ -1163,7 +1165,7 @@ impl TtsQueue {
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
-        source: ClientSource,
+        source: Option<WiredClient>,
         language: Option<&str>,
     ) -> Option<(ds_config::TtsEngine, String)> {
         let engine = cfg.resolved_tts()?;
@@ -1206,7 +1208,7 @@ impl TtsQueue {
     fn pick_for_language<'a>(
         &self,
         catalog: impl FnOnce() -> ds_tts::enumerate::VoiceCatalog<'a>,
-        source: ClientSource,
+        source: Option<WiredClient>,
         language: Option<&str>,
         pool: &[String],
     ) -> String {
@@ -1228,7 +1230,7 @@ impl TtsQueue {
     }
 
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
-    pub fn greet_session(&self, source: ClientSource, session: Option<String>) {
+    pub fn greet_session(&self, source: Option<WiredClient>, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet {
             return;
@@ -2012,8 +2014,8 @@ mod tests {
     }
 
     /// Assignment key for `agent` speaking English.
-    fn key(agent: ClientSource) -> (ClientSource, String) {
-        (agent, "en".to_string())
+    fn key(agent: WiredClient) -> (Option<WiredClient>, String) {
+        (Some(agent), "en".to_string())
     }
 
     #[test]
@@ -2022,7 +2024,7 @@ mod tests {
         let a = HashMap::new();
         for (roll, expect) in [(0, "af_sarah"), (1, "am_adam"), (2, "bf_emma")] {
             assert_eq!(
-                pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| roll),
+                pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| roll),
                 expect
             );
         }
@@ -2038,9 +2040,9 @@ mod tests {
             let p = pool();
             let mut a = HashMap::new();
             for agent in [
-                ClientSource::ClaudeCode,
-                ClientSource::Codex,
-                ClientSource::QwenCode,
+                WiredClient::ClaudeCode,
+                WiredClient::Codex,
+                WiredClient::QwenCode,
             ] {
                 let v = pick_agent_voice(&a, &p, &key(agent), &mut roll);
                 assert!(
@@ -2058,15 +2060,15 @@ mod tests {
         // (new windows, later replies) return the SAME voice, whatever the roll says.
         let p = pool();
         let mut a = HashMap::new();
-        let first = pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 1);
-        a.insert(key(ClientSource::ClaudeCode), first.clone());
-        a.insert(key(ClientSource::Codex), "am_adam".into());
+        let first = pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 1);
+        a.insert(key(WiredClient::ClaudeCode), first.clone());
+        a.insert(key(WiredClient::Codex), "am_adam".into());
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
             first
         );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |n| n - 1),
+            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |n| n - 1),
             first
         );
     }
@@ -2078,14 +2080,20 @@ mod tests {
         // pool and cross-language load would starve agents of their assignment.
         let p = pool();
         let mut a = HashMap::new();
-        a.insert((ClientSource::Codex, "it".to_string()), "af_sarah".into());
+        a.insert(
+            (Some(WiredClient::Codex), "it".to_string()),
+            "af_sarah".into(),
+        );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
             "af_sarah"
         );
-        a.insert((ClientSource::Codex, "en".to_string()), "af_sarah".into());
+        a.insert(
+            (Some(WiredClient::Codex), "en".to_string()),
+            "af_sarah".into(),
+        );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
             "am_adam"
         );
     }
@@ -2097,10 +2105,10 @@ mod tests {
         let p = vec!["af_sarah".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
         for agent in [
-            ClientSource::ClaudeCode,
-            ClientSource::Codex,
-            ClientSource::QwenCode,
-            ClientSource::Grok,
+            WiredClient::ClaudeCode,
+            WiredClient::Codex,
+            WiredClient::QwenCode,
+            WiredClient::Grok,
         ] {
             let v = pick_agent_voice(&a, &p, &key(agent), &mut |_| 0);
             a.insert(key(agent), v);
@@ -2121,10 +2129,10 @@ mod tests {
         // the roll ranges over the free set only, so index 0 is not pool[0] here.
         let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
-        a.insert(key(ClientSource::ClaudeCode), "af_sarah".to_string()); // stale (old pool)
-        a.insert(key(ClientSource::Codex), "af_nicole".to_string()); // valid, holds af_nicole
+        a.insert(key(WiredClient::ClaudeCode), "af_sarah".to_string()); // stale (old pool)
+        a.insert(key(WiredClient::Codex), "af_nicole".to_string()); // valid, holds af_nicole
         let mut seen_n = usize::MAX;
-        let v = pick_agent_voice(&a, &p, &key(ClientSource::ClaudeCode), &mut |n| {
+        let v = pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |n| {
             seen_n = n;
             0
         });
@@ -2137,7 +2145,7 @@ mod tests {
         let picks: Vec<String> = (0..2)
             .map(|_| {
                 let mut rng = fastrand::Rng::with_seed(7);
-                pick_agent_voice(&empty, &pool(), &key(ClientSource::Grok), &mut |n| {
+                pick_agent_voice(&empty, &pool(), &key(WiredClient::Grok), &mut |n| {
                     rng.usize(..n)
                 })
             })
@@ -2153,17 +2161,17 @@ mod tests {
         // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
         let mut a = HashMap::new();
-        a.insert(key(ClientSource::ClaudeCode), "af_sarah".to_string()); // old default
+        a.insert(key(WiredClient::ClaudeCode), "af_sarah".to_string()); // old default
         let new_pool = vec!["af_nicole".to_string()]; // user switched to Nicole-only
-        let v = pick_agent_voice(&a, &new_pool, &key(ClientSource::ClaudeCode), &mut |_| 0);
+        let v = pick_agent_voice(&a, &new_pool, &key(WiredClient::ClaudeCode), &mut |_| 0);
         assert_eq!(
             v, "af_nicole",
             "a voice no longer in the pool must not be reused"
         );
         // And once re-recorded, the fresh pick is stable.
-        a.insert(key(ClientSource::ClaudeCode), v);
+        a.insert(key(WiredClient::ClaudeCode), v);
         assert_eq!(
-            pick_agent_voice(&a, &new_pool, &key(ClientSource::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &new_pool, &key(WiredClient::ClaudeCode), &mut |_| 0),
             "af_nicole"
         );
     }
@@ -2177,7 +2185,7 @@ mod tests {
                 language: "en".into(),
                 tts_args: None,
             },
-            source: ClientSource::Unknown,
+            source: None,
             session: session.map(str::to_string),
             resume_skip: 0,
         }
@@ -2372,7 +2380,7 @@ mod tests {
                 language: "en".into(),
                 tts_args: None,
             },
-            source: ClientSource::Unknown,
+            source: None,
             session: None,
             resume_skip: 0,
         }
@@ -2501,17 +2509,14 @@ mod tests {
     #[test]
     fn enqueue_drops_empty_text_and_counts_real_items() {
         let q = mk_queue();
-        q.enqueue("".into(), None, ClientSource::Unknown, None)
-            .unwrap();
-        q.enqueue("   \n\t".into(), None, ClientSource::Unknown, None)
-            .unwrap();
+        q.enqueue("".into(), None, None, None).unwrap();
+        q.enqueue("   \n\t".into(), None, None, None).unwrap();
         assert_eq!(
             q.tts_status_sample().queued,
             0,
             "empty/whitespace-only text is dropped, not queued"
         );
-        q.enqueue("hello there".into(), None, ClientSource::Unknown, None)
-            .unwrap();
+        q.enqueue("hello there".into(), None, None, None).unwrap();
         assert_eq!(
             q.tts_status_sample().queued,
             1,
@@ -2523,16 +2528,11 @@ mod tests {
     fn speech_and_cues_preserve_fifo_action_order() {
         let q = mk_queue();
         let session = Some("turn-1".to_string());
-        q.enqueue("first".into(), None, ClientSource::Unknown, session.clone())
+        q.enqueue("first".into(), None, None, session.clone())
             .unwrap();
-        q.enqueue_earcon(
-            ds_earcon::EarconEvent::ReplyDone,
-            ClientSource::Unknown,
-            session.clone(),
-        )
-        .unwrap();
-        q.enqueue("later".into(), None, ClientSource::Unknown, session)
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, None, session.clone())
             .unwrap();
+        q.enqueue("later".into(), None, None, session).unwrap();
 
         let items = q.items.lock().unwrap();
         assert!(matches!(
@@ -2606,12 +2606,8 @@ mod tests {
         // default EMPTY needs_input sound and returns before any helper contact. Wait for
         // its single-flight flag to clear so the thread can't interleave with the phases
         // below (where a flipped tts_active would make its re-check fall back to enqueue).
-        q.dispatch_earcon(
-            ds_earcon::EarconEvent::NeedsInput,
-            ClientSource::Unknown,
-            s.clone(),
-        )
-        .unwrap();
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, None, s.clone())
+            .unwrap();
         let done = std::time::Instant::now() + Duration::from_secs(5);
         while q.oob_cue.load(Ordering::SeqCst) {
             assert!(
@@ -2628,12 +2624,8 @@ mod tests {
         // A bypass raced by an in-flight oob cue is coalesced: Ok, nothing enqueued, and
         // the (simulated) in-flight thread keeps sole ownership of the flag.
         q.oob_cue.store(true, Ordering::SeqCst);
-        q.dispatch_earcon(
-            ds_earcon::EarconEvent::NeedsInput,
-            ClientSource::Unknown,
-            s.clone(),
-        )
-        .unwrap();
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, None, s.clone())
+            .unwrap();
         assert!(
             q.items.lock().unwrap().is_empty(),
             "a coalesced cue is dropped, not queued"
@@ -2642,29 +2634,21 @@ mod tests {
         q.oob_cue.store(false, Ordering::SeqCst);
 
         // reply_done never escapes the ordered queue.
-        q.dispatch_earcon(
-            ds_earcon::EarconEvent::ReplyDone,
-            ClientSource::Unknown,
-            s.clone(),
-        )
-        .unwrap();
+        q.dispatch_earcon(ds_earcon::EarconEvent::ReplyDone, None, s.clone())
+            .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 1);
 
         // An utterance already sounding: the idle gate routes needs_input to the queue
         // instead of mixing the cue over it.
         q.tts_active.store(true, Ordering::SeqCst);
-        q.dispatch_earcon(
-            ds_earcon::EarconEvent::NeedsInput,
-            ClientSource::Unknown,
-            s.clone(),
-        )
-        .unwrap();
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, None, s.clone())
+            .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 2);
         q.tts_active.store(false, Ordering::SeqCst);
 
         // Hold cleared (terminal refocused) → ordered queue again.
         q.set_terminal_front(true);
-        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, ClientSource::Unknown, s)
+        q.dispatch_earcon(ds_earcon::EarconEvent::NeedsInput, None, s)
             .unwrap();
         assert_eq!(q.items.lock().unwrap().len(), 3);
     }
@@ -2704,7 +2688,7 @@ mod tests {
         let q = mk_queue();
         q.enqueue_earcon(
             ds_earcon::EarconEvent::ReplyDone,
-            ClientSource::Unknown,
+            None,
             Some("turn-1".into()),
         )
         .unwrap();
@@ -2723,12 +2707,8 @@ mod tests {
     fn explicit_clears_prune_queued_cues_with_their_sessions() {
         let q = mk_queue();
         for session in [Some("a".into()), Some("b".into()), None] {
-            q.enqueue_earcon(
-                ds_earcon::EarconEvent::NeedsInput,
-                ClientSource::Unknown,
-                session,
-            )
-            .unwrap();
+            q.enqueue_earcon(ds_earcon::EarconEvent::NeedsInput, None, session)
+                .unwrap();
         }
         q.clear_session(Some("a".into()));
         let kept: Vec<_> = q
@@ -2760,7 +2740,7 @@ mod tests {
             .enqueue(
                 "x".repeat(MAX_SPEAK_BYTES + 1),
                 None,
-                ClientSource::Unknown,
+                None,
                 Some("oversize".into()),
             )
             .unwrap_err();
@@ -2770,7 +2750,7 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
-    /// In-flight claim carries the producer's `ClientSource` so `activity.speaker`
+    /// In-flight claim carries the producer's `WiredClient` so `activity.speaker`
     /// can highlight the matching Usage card. Non-client producers stay null.
     #[test]
     fn tts_status_sample_exposes_wireable_playing_source_only() {
@@ -2783,7 +2763,7 @@ mod tests {
         q.enqueue(
             "hello".into(),
             None,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("sess".into()),
         )
         .unwrap();
@@ -2795,12 +2775,12 @@ mod tests {
         // Nothing waiting, but the claimed utterance is still outstanding → 1.
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
-        assert_eq!(speaking.speaker, Some(ClientSource::ClaudeCode));
+        assert_eq!(speaking.speaker, Some(WiredClient::ClaudeCode));
         assert_eq!(speaking.queued, 1);
 
-        // Non-wireable producers (legacy DontSpeak self-talk) must not light a Usage card.
+        // Unwired producers must not light a Usage card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::DontSpeak,
+            source: None,
             session: None,
             speech: true,
             utterance: None,
@@ -2810,16 +2790,16 @@ mod tests {
         assert_eq!(speaking.speaker, None);
         assert_eq!(speaking.queued, 1);
 
-        // GreetSession-style path: client source on the item lights the matching card.
+        // GreetSession-style path: wired-client attribution lights the matching card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Grok,
+            source: Some(WiredClient::Grok),
             session: Some("open".into()),
             speech: true,
             utterance: None,
         });
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
-        assert_eq!(speaking.speaker, Some(ClientSource::Grok));
+        assert_eq!(speaking.speaker, Some(WiredClient::Grok));
         assert_eq!(speaking.queued, 1);
 
         q.set_active_for_test(false);
@@ -2833,12 +2813,8 @@ mod tests {
     #[test]
     fn cues_never_count_toward_the_reported_depth() {
         let q = mk_queue();
-        q.enqueue_earcon(
-            ds_earcon::EarconEvent::ReplyDone,
-            ClientSource::Unknown,
-            None,
-        )
-        .unwrap();
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, None, None)
+            .unwrap();
         assert_eq!(
             q.tts_status_sample().queued,
             0,
@@ -2861,7 +2837,7 @@ mod tests {
         q.enqueue(
             "spoken".into(),
             None,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("sess".into()),
         )
         .unwrap();
@@ -2895,7 +2871,7 @@ mod tests {
         q.enqueue(
             "waiting".into(),
             None,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -2925,7 +2901,7 @@ mod tests {
         q.enqueue(
             "   ".into(),
             None,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -2934,7 +2910,7 @@ mod tests {
             .enqueue(
                 "x".repeat(MAX_SPEAK_BYTES + 1),
                 None,
-                ClientSource::ClaudeCode,
+                Some(WiredClient::ClaudeCode),
                 Some("a".into()),
             )
             .unwrap_err();
@@ -2999,7 +2975,7 @@ mod tests {
         q.enqueue(
             "pending".into(),
             None,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -3026,26 +3002,16 @@ mod tests {
     fn enqueue_bounds_each_session_and_keeps_other_sessions_usable() {
         let q = mk_queue();
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
-            q.enqueue("x".into(), None, ClientSource::Unknown, Some("full".into()))
+            q.enqueue("x".into(), None, None, Some("full".into()))
                 .unwrap();
         }
 
         let err = q
-            .enqueue(
-                "overflow".into(),
-                None,
-                ClientSource::Unknown,
-                Some("full".into()),
-            )
+            .enqueue("overflow".into(), None, None, Some("full".into()))
             .unwrap_err();
         assert!(err.contains("session speech queue is full"));
-        q.enqueue(
-            "still accepted".into(),
-            None,
-            ClientSource::Unknown,
-            Some("other".into()),
-        )
-        .unwrap();
+        q.enqueue("still accepted".into(), None, None, Some("other".into()))
+            .unwrap();
     }
 
     #[test]
@@ -3057,13 +3023,8 @@ mod tests {
         let paths = Paths::rooted_at(dir.path());
         let session = "full";
         for _ in 0..MAX_SESSION_PENDING_ITEMS {
-            q.enqueue(
-                "filler".into(),
-                None,
-                ClientSource::Unknown,
-                Some(session.into()),
-            )
-            .unwrap();
+            q.enqueue("filler".into(), None, None, Some(session.into()))
+                .unwrap();
         }
 
         let delta = ds_narrate::StreamBatch {
@@ -3077,7 +3038,7 @@ mod tests {
         ds_narrate::deliver_batch(&paths, session, &delta, false, true, false, |utt| {
             q.enqueue_narration(
                 utt.text.clone(),
-                ClientSource::Unknown,
+                None,
                 Some(session.into()),
                 Some(utt.id.clone()),
                 Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
@@ -3096,7 +3057,7 @@ mod tests {
             ds_narrate::deliver_batch(&paths, session, &completed, false, true, false, |utt| {
                 q.enqueue_narration(
                     utt.text.clone(),
-                    ClientSource::Unknown,
+                    None,
                     Some(session.into()),
                     Some(utt.id.clone()),
                     Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
@@ -3111,7 +3072,7 @@ mod tests {
             admitted_id = Some(utt.id.clone());
             q.enqueue_narration(
                 utt.text.clone(),
-                ClientSource::Unknown,
+                None,
                 Some(session.into()),
                 Some(utt.id.clone()),
                 Some(utt.detection_text.clone()).filter(|s| !s.is_empty()),
@@ -3132,7 +3093,7 @@ mod tests {
         // the state commit. Engine-side idempotency reports success without duplicating work.
         q.enqueue_narration(
             "Blocked digest.".into(),
-            ClientSource::Unknown,
+            None,
             Some(session.into()),
             admitted_id,
             None,
@@ -3145,22 +3106,12 @@ mod tests {
     fn enqueue_bounds_global_pending_work() {
         let q = mk_queue();
         for i in 0..MAX_PENDING_ITEMS {
-            q.enqueue(
-                "x".into(),
-                None,
-                ClientSource::Unknown,
-                Some(format!("session-{i}")),
-            )
-            .unwrap();
+            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
+                .unwrap();
         }
 
         let err = q
-            .enqueue(
-                "overflow".into(),
-                None,
-                ClientSource::Unknown,
-                Some("last".into()),
-            )
+            .enqueue("overflow".into(), None, None, Some("last".into()))
             .unwrap_err();
         assert!(err.contains("speech queue is full"));
         assert_eq!(q.items.lock().unwrap().len(), MAX_PENDING_ITEMS);
@@ -3173,7 +3124,7 @@ mod tests {
             global
                 .enqueue_earcon(
                     ds_earcon::EarconEvent::ReplyDone,
-                    ClientSource::Unknown,
+                    None,
                     Some(format!("cue-session-{i}")),
                 )
                 .unwrap();
@@ -3182,7 +3133,7 @@ mod tests {
             global
                 .enqueue_earcon(
                     ds_earcon::EarconEvent::ReplyDone,
-                    ClientSource::Unknown,
+                    None,
                     Some("overflow".into())
                 )
                 .unwrap_err()
@@ -3192,7 +3143,7 @@ mod tests {
             .enqueue(
                 "narration survives".into(),
                 None,
-                ClientSource::Unknown,
+                None,
                 Some("overflow".into()),
             )
             .unwrap();
@@ -3202,7 +3153,7 @@ mod tests {
             per_session
                 .enqueue_earcon(
                     ds_earcon::EarconEvent::NeedsInput,
-                    ClientSource::Unknown,
+                    None,
                     Some("held".into()),
                 )
                 .unwrap();
@@ -3211,19 +3162,14 @@ mod tests {
             per_session
                 .enqueue_earcon(
                     ds_earcon::EarconEvent::NeedsInput,
-                    ClientSource::Unknown,
+                    None,
                     Some("held".into())
                 )
                 .unwrap_err()
                 .contains("session audio cue queue is full")
         );
         per_session
-            .enqueue(
-                "still admitted".into(),
-                None,
-                ClientSource::Unknown,
-                Some("held".into()),
-            )
+            .enqueue("still admitted".into(), None, None, Some("held".into()))
             .unwrap();
     }
 
@@ -3231,17 +3177,12 @@ mod tests {
     fn speech_saturation_leaves_bounded_cue_capacity() {
         let q = mk_queue();
         for i in 0..MAX_PENDING_ITEMS {
-            q.enqueue(
-                "x".into(),
-                None,
-                ClientSource::Unknown,
-                Some(format!("session-{i}")),
-            )
-            .unwrap();
+            q.enqueue("x".into(), None, None, Some(format!("session-{i}")))
+                .unwrap();
         }
         q.enqueue_earcon(
             ds_earcon::EarconEvent::ReplyDone,
-            ClientSource::Unknown,
+            None,
             Some("session-0".into()),
         )
         .unwrap();
@@ -3253,25 +3194,15 @@ mod tests {
         let per_session = mk_queue();
         for _ in 0..25 {
             per_session
-                .enqueue(
-                    "x".repeat(MAX_SPEAK_BYTES),
-                    None,
-                    ClientSource::Unknown,
-                    Some("same".into()),
-                )
+                .enqueue("x".repeat(MAX_SPEAK_BYTES), None, None, Some("same".into()))
                 .unwrap();
         }
         per_session
-            .enqueue(
-                "x".repeat(6144),
-                None,
-                ClientSource::Unknown,
-                Some("same".into()),
-            )
+            .enqueue("x".repeat(6144), None, None, Some("same".into()))
             .unwrap();
         assert!(
             per_session
-                .enqueue("x".into(), None, ClientSource::Unknown, Some("same".into()))
+                .enqueue("x".into(), None, None, Some("same".into()))
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -3282,22 +3213,17 @@ mod tests {
                 .enqueue(
                     "x".repeat(MAX_SPEAK_BYTES),
                     None,
-                    ClientSource::Unknown,
+                    None,
                     Some(format!("session-{i}")),
                 )
                 .unwrap();
         }
         global
-            .enqueue(
-                "x".repeat(4096),
-                None,
-                ClientSource::Unknown,
-                Some("exact".into()),
-            )
+            .enqueue("x".repeat(4096), None, None, Some("exact".into()))
             .unwrap();
         assert!(
             global
-                .enqueue("x".into(), None, ClientSource::Unknown, Some("over".into()))
+                .enqueue("x".into(), None, None, Some("over".into()))
                 .unwrap_err()
                 .contains("pending text bytes")
         );
@@ -3364,7 +3290,7 @@ mod tests {
         let q = mk_queue();
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("a".into()),
             speech: true,
             utterance: None,
@@ -3381,7 +3307,7 @@ mod tests {
         let q2 = mk_queue();
         q2.tts_active.store(true, Ordering::SeqCst);
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("b".into()),
             speech: true,
             utterance: None,
@@ -3419,7 +3345,7 @@ mod tests {
         q.edit_items_for_test(|q| q.extend(sessions.iter().map(|s| narr(*s))));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: playing.map(str::to_string),
             speech: true,
             utterance: None,
@@ -3548,7 +3474,7 @@ mod tests {
         q.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b")), narr(None)]));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("other".into()),
             speech: true,
             utterance: None,
@@ -3580,7 +3506,7 @@ mod tests {
         q2.edit_items_for_test(|q| q.extend([narr(Some("a")), narr(Some("b"))]));
         q2.tts_active.store(true, Ordering::SeqCst);
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("a".into()),
             speech: true,
             utterance: None,
@@ -3611,7 +3537,7 @@ mod tests {
         });
         q3.tts_active.store(true, Ordering::SeqCst);
         *q3.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("grok-stop:a".into()),
             speech: true,
             utterance: None,
@@ -4001,7 +3927,7 @@ mod tests {
     fn session_clear_does_not_cancel_a_foreign_item_claimed_after_pruning() {
         let q = mk_queue();
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("cleared".into()),
             speech: true,
             utterance: None,
@@ -4022,7 +3948,7 @@ mod tests {
     fn current_scope_does_not_cancel_a_foreign_item_claimed_after_pruning() {
         let q = mk_queue();
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("current".into()),
             speech: true,
             utterance: None,
@@ -4043,7 +3969,7 @@ mod tests {
     fn other_scope_does_not_cancel_the_target_item_claimed_after_pruning() {
         let q = mk_queue();
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("other".into()),
             speech: true,
             utterance: None,
@@ -4496,13 +4422,8 @@ mod tests {
         assert_eq!(q.active_session(), None);
 
         // `enqueue` records the recency fallback.
-        q.enqueue(
-            "hi".into(),
-            None,
-            ClientSource::Unknown,
-            Some("recent-sess".into()),
-        )
-        .unwrap();
+        q.enqueue("hi".into(), None, None, Some("recent-sess".into()))
+            .unwrap();
         assert_eq!(q.active_session(), Some("recent-sess".into()));
 
         // `set_active_session` writes the authoritative explicit pick, which wins.
@@ -4575,13 +4496,13 @@ mod tests {
     fn end_session_barges_the_window_but_keeps_the_agent_assignment() {
         let q = mk_queue();
         q.agent_voices.lock().unwrap().insert(
-            (ClientSource::ClaudeCode, String::new()),
+            (Some(WiredClient::ClaudeCode), String::new()),
             "af_sarah".to_string(),
         );
         q.edit_items_for_test(|q| q.extend([narr(Some("other")), narr(Some("s1"))]));
         q.tts_active.store(true, Ordering::SeqCst);
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: ClientSource::Unknown,
+            source: None,
             session: Some("s1".into()),
             speech: true,
             utterance: None,
@@ -4608,7 +4529,7 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(ClientSource::ClaudeCode, String::new())),
+                .get(&(Some(WiredClient::ClaudeCode), String::new())),
             Some(&"af_sarah".to_string())
         );
     }
@@ -4618,23 +4539,23 @@ mod tests {
         let q = mk_queue();
         let pool = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
-        let v1 = q.assign_agent_voice(ClientSource::ClaudeCode, "en", &pool);
+        let v1 = q.assign_agent_voice(Some(WiredClient::ClaudeCode), "en", &pool);
         assert!(pool.contains(&v1), "the pick comes from the pool");
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(ClientSource::ClaudeCode, "en".to_string())),
+                .get(&(Some(WiredClient::ClaudeCode), "en".to_string())),
             Some(&v1)
         );
         // The same agent reuses its recorded pick.
         assert_eq!(
-            q.assign_agent_voice(ClientSource::ClaudeCode, "en", &pool),
+            q.assign_agent_voice(Some(WiredClient::ClaudeCode), "en", &pool),
             v1
         );
         // A different agent picks among the remaining free voices — with one voice left,
         // that's deterministic: the other one.
-        let v2 = q.assign_agent_voice(ClientSource::Codex, "en", &pool);
+        let v2 = q.assign_agent_voice(Some(WiredClient::Codex), "en", &pool);
         assert!(pool.contains(&v2));
         assert_ne!(v2, v1, "a free voice remains, so agents must not share");
     }
@@ -4646,10 +4567,7 @@ mod tests {
             tts_engine_ladder: Vec::new(), // empty ladder = off
             ..VoiceConfig::default()
         };
-        assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::Unknown, None),
-            None
-        );
+        assert_eq!(q.resolve_engine_voice(&cfg, None, None), None);
     }
 
     // System is only buildable on macOS/Windows (see `system_tts_buildable_on`) — gated like
@@ -4668,7 +4586,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None),
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None),
             Some((ds_config::TtsEngine::System, "Ava (Premium)".to_string()))
         );
     }
@@ -4683,14 +4601,14 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None),
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None),
             Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
         );
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(ClientSource::ClaudeCode, String::new())),
+                .get(&(Some(WiredClient::ClaudeCode), String::new())),
             Some(&"default".to_string())
         );
     }
@@ -4711,7 +4629,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None)
+            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None)
             .expect("Kokoro is usable on this build");
         assert_eq!(engine, ds_config::TtsEngine::BuiltIn);
         assert!(cfg.tts_voices.kokoro.contains(&voice));
@@ -4720,18 +4638,18 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(ClientSource::ClaudeCode, String::new())),
+                .get(&(Some(WiredClient::ClaudeCode), String::new())),
             Some(&voice)
         );
         // Every later resolution for the same agent — any window, any request — reuses it.
         let (_, again) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, None)
+            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None)
             .expect("Kokoro again");
         assert_eq!(again, voice);
         assert_eq!(q.agent_voices.lock().unwrap().len(), 1);
         // A second agent claims the remaining free voice — no sharing while one is free.
         let (_, other) = q
-            .resolve_engine_voice(&cfg, ClientSource::Codex, None)
+            .resolve_engine_voice(&cfg, Some(WiredClient::Codex), None)
             .expect("Kokoro for Codex");
         assert_ne!(other, voice);
     }
@@ -4756,23 +4674,23 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (_, italian) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("it"))
+            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("it"))
             .expect("Kokoro is usable on this build");
         assert_eq!(italian, "if_sara");
 
         let (_, english) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
             .expect("Kokoro again");
         assert!(["af_sarah", "bf_emma"].contains(&english.as_str()));
 
         // Both assignments coexist: switching language back must not re-roll the other.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("it"))
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("it"))
                 .map(|(_, v)| v),
             Some(italian)
         );
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
                 .map(|(_, v)| v),
             Some(english)
         );
@@ -4809,18 +4727,18 @@ mod tests {
         };
         // The pool owns no German, so the choice is made among the catalog's German voices.
         let (_, german) = q
-            .resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("de"))
+            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("de"))
             .expect("System is usable on this build");
         assert!(["Anna", "Otto"].contains(&german.as_str()));
         // Borrowed voices are sticky too: the roll happens once per agent and language.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("de"))
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("de"))
                 .map(|(_, v)| v),
             Some(german)
         );
         // The configured pool still serves the language it does own.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some("en"))
+            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
                 .map(|(_, v)| v),
             Some("Samantha".to_string())
         );
@@ -4839,7 +4757,7 @@ mod tests {
         };
         for language in ["en", "it", "ja"] {
             assert_eq!(
-                q.resolve_engine_voice(&cfg, ClientSource::ClaudeCode, Some(language)),
+                q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some(language)),
                 Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
             );
         }
@@ -4860,7 +4778,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&empty_pool, ClientSource::ClaudeCode, None),
+            q.resolve_engine_voice(&empty_pool, Some(WiredClient::ClaudeCode), None),
             None
         );
         assert!(q.agent_voices.lock().unwrap().is_empty());
@@ -4868,10 +4786,7 @@ mod tests {
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
-    fn unknown_source_with_a_pool_claims_an_agent_voice() {
-        // Behavior change from the session-keyed pool: sessionless/global audio from an
-        // unknown client resolves to the stable Unknown voice bucket, not a shared fixed
-        // voice. MCP speech itself is always session-scoped.
+    fn unwired_source_with_a_pool_claims_a_stable_voice() {
         let q = mk_queue();
         let cfg = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
@@ -4882,41 +4797,11 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (_, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::Unknown, None)
+            .resolve_engine_voice(&cfg, None, None)
             .expect("Kokoro is usable on this build");
         assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(ClientSource::Unknown, String::new())),
-            Some(&voice)
-        );
-    }
-
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-    #[test]
-    fn dontspeak_source_claims_a_pool_voice_like_any_agent() {
-        // Engine self-talk is just another speaker: it claims a stable pool voice too —
-        // no special-cased fixed voice.
-        let q = mk_queue();
-        let cfg = VoiceConfig {
-            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
-            tts_voices: ds_config::TtsVoicePools {
-                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
-                ..Default::default()
-            },
-            ..VoiceConfig::default()
-        };
-        let (_, voice) = q
-            .resolve_engine_voice(&cfg, ClientSource::DontSpeak, None)
-            .expect("Kokoro is usable on this build");
-        assert!(cfg.tts_voices.kokoro.contains(&voice));
-        assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(ClientSource::DontSpeak, String::new())),
+            q.agent_voices.lock().unwrap().get(&(None, String::new())),
             Some(&voice)
         );
     }
@@ -4938,13 +4823,13 @@ mod tests {
         };
         *q.config.lock().unwrap() = cfg.clone();
 
-        q.greet_session(ClientSource::Codex, Some("sess-1".to_string()));
+        q.greet_session(Some(WiredClient::Codex), Some("sess-1".to_string()));
 
         let claimed = q
             .agent_voices
             .lock()
             .unwrap()
-            .get(&(ClientSource::Codex, String::new()))
+            .get(&(Some(WiredClient::Codex), String::new()))
             .cloned()
             .expect("greeting claims the agent voice at open");
         // The queued greeting carries the claimed voice as its per-item override.
@@ -4966,7 +4851,7 @@ mod tests {
         }
         // A later reply (any session of the same agent) speaks the same voice.
         let (_, later) = q
-            .resolve_engine_voice(&cfg, ClientSource::Codex, None)
+            .resolve_engine_voice(&cfg, Some(WiredClient::Codex), None)
             .expect("Kokoro later reply");
         assert_eq!(later, claimed);
     }
@@ -5000,7 +4885,7 @@ mod tests {
         for (i, quote) in [IT_QUOTE, EN_QUOTE].iter().enumerate() {
             q.enqueue_narration(
                 (*quote).into(),
-                ClientSource::ClaudeCode,
+                Some(WiredClient::ClaudeCode),
                 Some("sess".into()),
                 Some(format!("n{i}")),
                 Some(corpus.clone()),
@@ -5017,7 +4902,7 @@ mod tests {
         // Short FR/PT false-friend digest inside an English turn.
         q.enqueue_narration(
             "Bon courage.".into(),
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("sess".into()),
             Some("n1".into()),
             Some(EN_DETECTION.into()),
@@ -5026,7 +4911,7 @@ mod tests {
         // Same digest with no corpus behind it: English, never a coin flip.
         q.enqueue_narration(
             "Bon courage.".into(),
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
             Some("sess".into()),
             Some("n2".into()),
             None,
@@ -5040,7 +4925,7 @@ mod tests {
         let q = mk_queue();
         q.config.lock().unwrap().tts_model = ds_config::TtsModel::Kokoro;
         for text in ["hello from MCP", IT_QUOTE] {
-            q.enqueue(text.into(), None, ClientSource::Unknown, Some("s".into()))
+            q.enqueue(text.into(), None, None, Some("s".into()))
                 .unwrap();
         }
         assert_eq!(queued_languages(&q), vec!["en", "it"]);
@@ -5053,7 +4938,7 @@ mod tests {
         assert!(huge.len() > MAX_SPEAK_BYTES);
         q.enqueue_narration(
             "digest".into(),
-            ClientSource::Unknown,
+            None,
             Some("s".into()),
             Some("id".into()),
             Some(huge),
@@ -5068,7 +4953,7 @@ mod tests {
         let admit = |session: &str, id: &str| {
             q.enqueue_narration(
                 "a".into(),
-                ClientSource::Grok,
+                Some(WiredClient::Grok),
                 Some(session.into()),
                 Some(id.into()),
                 None,

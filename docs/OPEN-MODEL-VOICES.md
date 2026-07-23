@@ -19,7 +19,7 @@ No host-only picker, no hand-editing `config.toml` as the supported way to choos
 
 `set_config` validates non-Kokoro pools with `descriptor.voices.contains(...)`, so free-form Omni prompts and alternate Chatterbox refs are rejected before they reach the synth.
 
-Agent sticky map on main is `(ClientSource, language) → voice id` in `ttsq` — **agent-scoped**, not terminal-session-scoped. SessionEnd barges FIFO but keeps the assignment.
+Agent sticky map on main is `(WiredClient, language) → voice id` in `ttsq` — **agent-scoped**, not terminal-session-scoped. SessionEnd barges FIFO but keeps the assignment.
 
 ---
 
@@ -147,7 +147,7 @@ Wire sketch (illustrative):
 
 | Layer | Today | After this plan |
 | --- | --- | --- |
-| **Agent sticky** | `(ClientSource, language) → voice id` | Same map; ids are **package ids**. `manage_voices select` writes it deliberately. |
+| **Agent sticky** | `(WiredClient, language) → voice id` | Same map; ids are **package ids**. `manage_voices select` writes it deliberately. |
 | **Session sticky** | No | Optional later; not required for #152. |
 | **Description sticky** | No | Design alone drifts; `materialize` → clone for true lock. |
 | **Per-utterance** | `speak.tts_args.<target>.voice` | Package id override; does not change sticky unless product chooses to. |

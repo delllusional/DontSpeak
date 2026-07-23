@@ -9,7 +9,7 @@ pub(crate) mod mcp;
 
 use std::path::{Path, PathBuf};
 
-use ds_config::{ClientKind, ClientSource, ClientSpec, Paths, Surface, WireMechanism};
+use ds_config::{ClientKind, ClientSpec, Paths, Surface, WireMechanism, WiredClient};
 
 /// Merged surface doc for print-only threading (JSON, format-preserving TOML, or YAML text).
 #[derive(Debug)]
@@ -24,7 +24,7 @@ pub const SERVER_NAME: &str = "DontSpeak";
 
 /// CLI entry. Exit 0 ok/skip, 1 hard error. Wire-able tokens only.
 pub fn run(args: &[String]) -> i32 {
-    let mut client: Option<ClientSource> = None;
+    let mut client: Option<WiredClient> = None;
     let mut remove = false;
     let mut print_only = false;
     let mut all = false;
@@ -51,8 +51,8 @@ pub fn run(args: &[String]) -> i32 {
                 eprintln!("wire: unknown flag {other:?}");
                 return 1;
             }
-            other => match ClientSource::parse(other) {
-                Some(t) if ds_config::client_spec(t).is_some() => {
+            other => match WiredClient::parse(other) {
+                Some(t) => {
                     if let Some(prev) = client {
                         eprintln!(
                             "wire: multiple clients given ({} and {other}); pass exactly one client, or use --all",
@@ -111,7 +111,7 @@ pub fn run(args: &[String]) -> i32 {
     }
 
     if all {
-        return wire_selected(ClientSource::CLIENTS, &paths, remove, print_only);
+        return wire_selected(WiredClient::ALL, &paths, remove, print_only);
     }
 
     wire_selected(
@@ -123,7 +123,7 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 /// Manual selections update the desired state before converging client files.
-fn wire_selected(clients: &[ClientSource], paths: &Paths, remove: bool, print_only: bool) -> i32 {
+fn wire_selected(clients: &[WiredClient], paths: &Paths, remove: bool, print_only: bool) -> i32 {
     if !print_only && let Err(error) = ds_config::set_clients_excluded(paths, clients, remove) {
         eprintln!("wire: {error}");
         return 1;
@@ -139,7 +139,7 @@ fn wire_selected(clients: &[ClientSource], paths: &Paths, remove: bool, print_on
 /// Engine boot + `wire --reconcile`. Worst exit code wins.
 pub fn reconcile(paths: &Paths) -> i32 {
     let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
-    ClientSource::CLIENTS
+    WiredClient::ALL
         .iter()
         .map(|&c| {
             wire_client(
@@ -154,11 +154,8 @@ pub fn reconcile(paths: &Paths) -> i32 {
 }
 
 /// All surfaces run even if one fails (worst code wins) so `--remove` cannot leave dangling MCP.
-fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bool) -> i32 {
-    let spec = ds_config::client_spec(client).expect(
-        "wire_client only called with CLIENTS members (run gates on client_spec; \
-         --all / reconcile iterate CLIENTS)",
-    );
+fn wire_client(client: WiredClient, paths: &Paths, remove: bool, print_only: bool) -> i32 {
+    let spec = ds_config::client_spec(client);
 
     if !print_only {
         if remove {
@@ -193,7 +190,7 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
             .max()
             .unwrap_or(0)
     };
-    if client == ClientSource::Codex && !remove && !print_only && code == 0 {
+    if client == WiredClient::Codex && !remove && !print_only && code == 0 {
         eprintln!("wire: launch interactive Codex with `dontspeak codex` for mid-turn narration");
     }
     code
@@ -431,7 +428,7 @@ mod tests {
     /// Satisfy a client's presence gate: drop a stub executable where
     /// `ClientSpec::present` looks (`~/.local/bin`, one of its unconditional fallback
     /// dirs) — not a dot-dir, which is no longer the presence signal.
-    fn make_present(paths: &Paths, client: ClientSource) {
+    fn make_present(paths: &Paths, client: WiredClient) {
         let command = client.as_str();
         let bin_dir = paths.home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -444,11 +441,10 @@ mod tests {
     }
 
     /// Guard hits before `Paths::resolve()` (no $HOME I/O).
-    /// `dontspeak` parses as ClientSource but has no client_spec → "unknown client".
     #[test]
     fn missing_or_invalid_client_selection_is_a_hard_error() {
-        let codex = ClientSource::Codex.as_str();
-        let claude = ClientSource::ClaudeCode.as_str();
+        let codex = WiredClient::Codex.as_str();
+        let claude = WiredClient::ClaudeCode.as_str();
         for argv in [
             &[][..],
             &["not_a_real_client"][..],
@@ -476,7 +472,7 @@ mod tests {
 
     #[test]
     fn unknown_flags_and_conflicting_modes_are_hard_errors_before_io() {
-        let codex = ClientSource::Codex.as_str();
+        let codex = WiredClient::Codex.as_str();
         assert_eq!(run(&args(&["--not-a-real-flag"])), 1);
         assert_eq!(run(&args(&[codex, "--remvoe"])), 1);
         assert_eq!(run(&args(&["--reconcile", "--print-only"])), 1);
@@ -488,7 +484,7 @@ mod tests {
     fn wire_client_skips_absent_client() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::Codex, &paths, false, false), 0);
         assert!(!paths.codex_dir.exists());
     }
 
@@ -496,7 +492,7 @@ mod tests {
     fn wire_client_remove_with_no_existing_config_is_a_noop() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        assert_eq!(wire_client(ClientSource::Codex, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::Codex, &paths, true, false), 0);
         assert!(!paths.codex_config.exists());
     }
 
@@ -505,9 +501,9 @@ mod tests {
     fn wire_client_qwen_code_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::QwenCode);
+        make_present(&paths, WiredClient::QwenCode);
 
-        assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::QwenCode, &paths, false, false), 0);
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(v["hooks"]["Stop"].as_array().is_some(), "hooks wired");
@@ -530,7 +526,7 @@ mod tests {
             "mcp entry wired alongside hooks in the same file"
         );
 
-        assert_eq!(wire_client(ClientSource::QwenCode, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::QwenCode, &paths, true, false), 0);
         let v2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(v2.get("hooks").is_none(), "hooks stripped");
@@ -542,9 +538,9 @@ mod tests {
     fn wire_client_codex_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::Codex);
+        make_present(&paths, WiredClient::Codex);
 
-        assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::Codex, &paths, false, false), 0);
         let text = std::fs::read_to_string(&paths.codex_config).unwrap();
         assert!(text.contains("[[hooks.Stop]]"), "hooks wired: {text}");
         assert!(
@@ -556,7 +552,7 @@ mod tests {
             "mcp entry carries a command: {text}"
         );
 
-        assert_eq!(wire_client(ClientSource::Codex, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::Codex, &paths, true, false), 0);
         let text2 = std::fs::read_to_string(&paths.codex_config).unwrap();
         assert!(!text2.contains("hooks"), "hooks stripped: {text2}");
         assert!(
@@ -570,9 +566,9 @@ mod tests {
     fn wire_surfaces_print_only_codex_shows_the_union_of_both_surfaces() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::Codex);
+        make_present(&paths, WiredClient::Codex);
 
-        let spec = ds_config::client_spec(ClientSource::Codex).unwrap();
+        let spec = ds_config::client_spec(WiredClient::Codex);
         let results = wire_surfaces_print_only(spec, &paths, false);
         assert_eq!(
             results.len(),
@@ -595,7 +591,7 @@ mod tests {
         );
         assert!(!paths.codex_config.exists(), "print-only never writes");
 
-        assert_eq!(wire_client(ClientSource::Codex, &paths, false, true), 0);
+        assert_eq!(wire_client(WiredClient::Codex, &paths, false, true), 0);
         assert!(
             !paths.codex_config.exists(),
             "print-only via wire_client still never writes"
@@ -607,9 +603,9 @@ mod tests {
     fn wire_surfaces_print_only_qwen_shows_the_union_of_both_surfaces() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::QwenCode);
+        make_present(&paths, WiredClient::QwenCode);
 
-        let spec = ds_config::client_spec(ClientSource::QwenCode).unwrap();
+        let spec = ds_config::client_spec(WiredClient::QwenCode);
         let results = wire_surfaces_print_only(spec, &paths, false);
         assert_eq!(
             results.len(),
@@ -638,9 +634,9 @@ mod tests {
     fn wire_client_grok_wires_both_surfaces_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::Grok);
+        make_present(&paths, WiredClient::Grok);
 
-        assert_eq!(wire_client(ClientSource::Grok, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::Grok, &paths, false, false), 0);
         let text = std::fs::read_to_string(&paths.grok_config).unwrap();
         assert!(
             text.contains("[mcp_servers.DontSpeak]"),
@@ -669,7 +665,7 @@ mod tests {
             "Grok hooks run synchronously — no async key: {stop}"
         );
 
-        assert_eq!(wire_client(ClientSource::Grok, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::Grok, &paths, true, false), 0);
         assert!(
             !paths.grok_hooks_json.exists(),
             "dedicated hooks file deleted on unwire"
@@ -687,9 +683,9 @@ mod tests {
     fn wire_client_kimi_code_wires_both_surfaces_then_removes_both_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::KimiCode);
+        make_present(&paths, WiredClient::KimiCode);
 
-        assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::KimiCode, &paths, false, false), 0);
 
         // Hooks: five events — six entries, UserPromptSubmit carries notify AND provide.
         let text = std::fs::read_to_string(&paths.kimi_config_toml).unwrap();
@@ -747,7 +743,7 @@ mod tests {
         let hooks_before = std::fs::read(&paths.kimi_config_toml).unwrap();
         let mcp_before = std::fs::read(&paths.kimi_mcp_json).unwrap();
         let baks_before = count_bak_files(dir.path());
-        assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::KimiCode, &paths, false, false), 0);
         assert_eq!(
             std::fs::read(&paths.kimi_config_toml).unwrap(),
             hooks_before
@@ -760,7 +756,7 @@ mod tests {
         );
 
         // Remove: both surfaces stripped cleanly.
-        assert_eq!(wire_client(ClientSource::KimiCode, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::KimiCode, &paths, true, false), 0);
         let text2 = std::fs::read_to_string(&paths.kimi_config_toml).unwrap();
         assert!(!text2.contains("dontspeak"), "hooks stripped: {text2}");
         let mcp2: serde_json::Value =
@@ -776,9 +772,9 @@ mod tests {
     fn wire_client_hermes_wires_all_surfaces_then_removes_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::Hermes);
+        make_present(&paths, WiredClient::Hermes);
 
-        assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::Hermes, &paths, false, false), 0);
 
         let text = std::fs::read_to_string(&paths.hermes_config_yaml).unwrap();
         // serde-saphyr may fold long Windows paths with `>-` (newlines in the scalar).
@@ -818,7 +814,7 @@ mod tests {
         let cfg_before = std::fs::read(&paths.hermes_config_yaml).unwrap();
         let allow_before = std::fs::read(&paths.hermes_shell_hooks_allowlist).unwrap();
         let baks_before = count_bak_files(dir.path());
-        assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::Hermes, &paths, false, false), 0);
         assert_eq!(
             std::fs::read(&paths.hermes_config_yaml).unwrap(),
             cfg_before
@@ -833,7 +829,7 @@ mod tests {
             "unchanged re-wire creates no .bak"
         );
 
-        assert_eq!(wire_client(ClientSource::Hermes, &paths, true, false), 0);
+        assert_eq!(wire_client(WiredClient::Hermes, &paths, true, false), 0);
         let text2 = std::fs::read_to_string(&paths.hermes_config_yaml).unwrap();
         assert!(!text2.contains("dontspeak"), "hooks/mcp stripped: {text2}");
         let allow2: serde_json::Value = serde_json::from_str(
@@ -850,29 +846,29 @@ mod tests {
     fn malformed_shared_configs_are_unchanged_hard_errors_for_every_surface() {
         let qwen_dir = tempfile::tempdir().unwrap();
         let qwen = Paths::rooted_at(qwen_dir.path());
-        make_present(&qwen, ClientSource::QwenCode);
+        make_present(&qwen, WiredClient::QwenCode);
         std::fs::create_dir_all(&qwen.qwen_dir).unwrap(); // parent for the file written below
         let bad_json = b"{ not json";
         std::fs::write(&qwen.qwen_settings, bad_json).unwrap();
-        assert_eq!(wire_client(ClientSource::QwenCode, &qwen, false, false), 1);
+        assert_eq!(wire_client(WiredClient::QwenCode, &qwen, false, false), 1);
         assert_eq!(std::fs::read(&qwen.qwen_settings).unwrap(), bad_json);
 
         let codex_dir = tempfile::tempdir().unwrap();
         let codex = Paths::rooted_at(codex_dir.path());
-        make_present(&codex, ClientSource::Codex);
+        make_present(&codex, WiredClient::Codex);
         std::fs::create_dir_all(&codex.codex_dir).unwrap(); // parent for the file written below
         let bad_toml = b"hooks = [not valid toml";
         std::fs::write(&codex.codex_config, bad_toml).unwrap();
-        assert_eq!(wire_client(ClientSource::Codex, &codex, false, false), 1);
+        assert_eq!(wire_client(WiredClient::Codex, &codex, false, false), 1);
         assert_eq!(std::fs::read(&codex.codex_config).unwrap(), bad_toml);
 
         let hermes_dir = tempfile::tempdir().unwrap();
         let hermes = Paths::rooted_at(hermes_dir.path());
-        make_present(&hermes, ClientSource::Hermes);
+        make_present(&hermes, WiredClient::Hermes);
         std::fs::create_dir_all(&hermes.hermes_dir).unwrap(); // parent for the file written below
         let bad_yaml = b"hooks: [\n  - :\n";
         std::fs::write(&hermes.hermes_config_yaml, bad_yaml).unwrap();
-        assert_eq!(wire_client(ClientSource::Hermes, &hermes, false, false), 1);
+        assert_eq!(wire_client(WiredClient::Hermes, &hermes, false, false), 1);
         assert_eq!(std::fs::read(&hermes.hermes_config_yaml).unwrap(), bad_yaml);
     }
 
@@ -881,9 +877,9 @@ mod tests {
     fn wire_surfaces_print_only_hermes_shows_hooks_and_mcp_union() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::Hermes);
+        make_present(&paths, WiredClient::Hermes);
 
-        let spec = ds_config::client_spec(ClientSource::Hermes).unwrap();
+        let spec = ds_config::client_spec(WiredClient::Hermes);
         let results = wire_surfaces_print_only(spec, &paths, false);
         // config.yaml (hooks+mcp) + allowlist file = 2 groups.
         assert_eq!(
@@ -928,7 +924,7 @@ mod tests {
     }
 
     fn make_all_clients_present(paths: &Paths) {
-        for &client in ClientSource::CLIENTS {
+        for &client in WiredClient::ALL {
             make_present(paths, client);
         }
     }
@@ -1001,10 +997,10 @@ mod tests {
     fn reconcile_strips_a_client_dropped_from_the_desired_set() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::QwenCode);
+        make_present(&paths, WiredClient::QwenCode);
 
         // Pre-wire Qwen (as a prior reconcile / installer would have).
-        assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
+        assert_eq!(wire_client(WiredClient::QwenCode, &paths, false, false), 0);
         let before: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&paths.qwen_settings).unwrap()).unwrap();
         assert!(
@@ -1014,7 +1010,7 @@ mod tests {
 
         // Exclude Qwen (the wired client), then reconcile → it must be stripped.
         let cfg = ds_config::VoiceConfig {
-            exclude_clients: Some(vec![ClientSource::QwenCode]),
+            exclude_clients: Some(vec![WiredClient::QwenCode]),
             ..ds_config::VoiceConfig::default()
         };
         ds_config::write_settings(&paths, &cfg).unwrap();
@@ -1033,14 +1029,14 @@ mod tests {
     fn manual_wire_selection_survives_boot_reconcile_in_both_directions() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_present(&paths, ClientSource::QwenCode);
+        make_present(&paths, WiredClient::QwenCode);
 
         assert_eq!(
-            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            wire_selected(&[WiredClient::QwenCode], &paths, false, false),
             0
         );
         assert_eq!(
-            wire_selected(&[ClientSource::QwenCode], &paths, true, false),
+            wire_selected(&[WiredClient::QwenCode], &paths, true, false),
             0
         );
         assert_eq!(reconcile(&paths), 0);
@@ -1050,7 +1046,7 @@ mod tests {
         assert!(removed.get("mcpServers").is_none());
 
         assert_eq!(
-            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            wire_selected(&[WiredClient::QwenCode], &paths, false, false),
             0
         );
         assert_eq!(reconcile(&paths), 0);
@@ -1065,12 +1061,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
-        make_present(&paths, ClientSource::QwenCode);
+        make_present(&paths, WiredClient::QwenCode);
         let malformed = "exclude_clients = [\n";
         std::fs::write(&paths.config_toml, malformed).unwrap();
 
         assert_eq!(
-            wire_selected(&[ClientSource::QwenCode], &paths, false, false),
+            wire_selected(&[WiredClient::QwenCode], &paths, false, false),
             1
         );
         assert_eq!(

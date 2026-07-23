@@ -21,12 +21,7 @@ pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> 
         .map(|value| value.trim_end_matches('/').to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_BASE.to_owned());
-    let client = ds_config::client_spec(ds_config::ClientSource::KimiCode).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "Kimi Code client registry entry unavailable",
-        )
-    })?;
+    let client = ds_config::client_spec(ds_config::WiredClient::KimiCode);
     let user_agent = format!("kimi-code/{}", client.verified_client_version);
     let json = send_json(
         request(ds_http::Method::GET, &format!("{base}/usages"))?

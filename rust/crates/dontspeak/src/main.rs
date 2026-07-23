@@ -20,7 +20,7 @@ mod session_scope;
 mod tools;
 mod voices;
 
-use ds_config::ClientSource;
+use ds_config::WiredClient;
 
 /// Pure argv\[1\] roles (unit-testable without stdio/spawns).
 #[derive(Debug, PartialEq, Eq)]
@@ -28,7 +28,7 @@ enum Subcommand<'a> {
     Notify,
     Provide,
     Wire(&'a [String]),
-    Launch(ClientSource, &'a [String]),
+    Launch(WiredClient, &'a [String]),
     Version,
     Help,
     /// MCP `status` path; no engine call.
@@ -38,14 +38,12 @@ enum Subcommand<'a> {
     Unknown(String),
 }
 
-/// `--client` at argv\[2+\]. Unrecognised/missing → Unknown (hooks degrade, fail-open).
-fn client_from_argv(argv: &[String]) -> ClientSource {
+/// `--client` at argv\[2+\]. Unrecognised/missing hooks degrade to a no-op.
+fn client_from_argv(argv: &[String]) -> Option<WiredClient> {
     argv.iter()
         .position(|a| a == "--client")
         .and_then(|i| argv.get(i + 1))
-        .and_then(|t| ClientSource::parse(t))
-        .filter(|c| c.is_client())
-        .unwrap_or(ClientSource::Unknown)
+        .and_then(|t| WiredClient::parse(t))
 }
 
 fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
@@ -130,8 +128,8 @@ fn is_grok_hook_launch(marker: Option<&std::ffi::OsStr>) -> bool {
 fn run_grok_hook() {
     let payload = read_stdin();
     let event = hook_core::event_name(&payload);
-    hook_core::notify(&event, &payload, true, ClientSource::Grok);
-    if let Some(out) = hook_core::provide(&event, &payload, ClientSource::Grok) {
+    hook_core::notify(&event, &payload, true, WiredClient::Grok);
+    if let Some(out) = hook_core::provide(&event, &payload, WiredClient::Grok) {
         println!("{out}");
     }
     if let Some(paths) = ds_config::Paths::resolve()
@@ -159,19 +157,21 @@ fn main() {
             // `--greet-only`: SessionStart for non-streaming — greet but skip witness seed
             // (would silence Stop when there is no MessageDisplay).
             let greet_only = argv.iter().any(|a| a == "--greet-only");
-            hook_core::notify(
-                &hook_core::event_name(&payload),
-                &payload,
-                greet_only,
-                client_from_argv(&argv),
-            );
+            if let Some(client) = client_from_argv(&argv) {
+                hook_core::notify(
+                    &hook_core::event_name(&payload),
+                    &payload,
+                    greet_only,
+                    client,
+                );
+            }
             std::process::exit(0);
         }
         Subcommand::Provide => {
             let payload = read_stdin();
-            let client = client_from_argv(&argv);
-            if let Some(out) =
-                hook_core::provide(&hook_core::event_name(&payload), &payload, client)
+            if let Some(client) = client_from_argv(&argv)
+                && let Some(out) =
+                    hook_core::provide(&hook_core::event_name(&payload), &payload, client)
             {
                 println!("{out}");
             }
@@ -181,8 +181,7 @@ fn main() {
             std::process::exit(ds_wire::run(args));
         }
         Subcommand::Launch(client, args) => {
-            let spec = ds_config::client_spec(client)
-                .expect("every launchable client is a registry client");
+            let spec = ds_config::client_spec(client);
             std::process::exit(client_launch::run(spec, args));
         }
         Subcommand::Version => {
@@ -302,7 +301,7 @@ mod tests {
     #[test]
     fn only_launch_keeps_the_console_attached() {
         assert!(!should_detach_console(&Subcommand::Launch(
-            ClientSource::Codex,
+            WiredClient::Codex,
             &[]
         )));
         for subcommand in [
@@ -375,10 +374,10 @@ mod tests {
 
     #[test]
     fn client_token_is_parsed_from_argv() {
-        for &want in ClientSource::CLIENTS {
+        for &want in WiredClient::ALL {
             let tok = want.as_str();
             let argv = argv(&["dontspeak", "notify", "--client", tok]);
-            assert_eq!(client_from_argv(&argv), want, "{tok}");
+            assert_eq!(client_from_argv(&argv), Some(want), "{tok}");
         }
         assert_eq!(
             client_from_argv(&argv(&[
@@ -388,12 +387,12 @@ mod tests {
                 "--client",
                 "qwen"
             ])),
-            ClientSource::QwenCode
+            Some(WiredClient::QwenCode)
         );
     }
 
     #[test]
-    fn a_missing_malformed_or_non_client_token_degrades_to_unknown() {
+    fn a_missing_malformed_or_non_client_token_is_absent() {
         // Hooks degrade — never hard-error.
         for argv_ in [
             vec!["dontspeak", "notify"],
@@ -403,17 +402,13 @@ mod tests {
             vec!["dontspeak", "notify", "--client", "unknown"],
             vec!["dontspeak", "notify", "--client", ""],
         ] {
-            assert_eq!(
-                client_from_argv(&argv(&argv_)),
-                ClientSource::Unknown,
-                "{argv_:?}"
-            );
+            assert_eq!(client_from_argv(&argv(&argv_)), None, "{argv_:?}");
         }
     }
 
     #[test]
     fn client_flag_does_not_disturb_subcommand_dispatch() {
-        let client = ClientSource::Codex.as_str();
+        let client = WiredClient::Codex.as_str();
         let notify = argv(&["dontspeak", "notify", "--client", client]);
         assert_eq!(resolve_subcommand(&notify), Subcommand::Notify);
         let provide = argv(&["dontspeak", "provide", "--client", client]);

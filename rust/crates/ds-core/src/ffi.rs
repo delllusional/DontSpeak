@@ -158,7 +158,7 @@ fn agent_usage_skeleton_json_gated(agents: bool) -> *mut c_char {
     to_cstring(ds_agent_usage::skeleton().to_json())
 }
 
-/// Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
+/// Blocking card refresh (`WiredClient` token). Off UI thread. `refresh` skips soft cache.
 /// Empty card while the config `agents` gate is off (keychain guard: no provider probe).
 /// Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
@@ -173,10 +173,12 @@ fn agent_usage_card_json_gated(
     refresh: bool,
     agents: impl FnOnce() -> bool,
 ) -> *mut c_char {
-    let source = ds_agent_usage::parse_agent(token);
+    let Some(source) = ds_agent_usage::parse_agent(token) else {
+        return to_cstring(USAGE_CARD_EMPTY);
+    };
     // Non-client exits before the gate: `agents` resolves Paths + reads config, and a
     // non-client call must touch nothing (contract pinned by the tests below).
-    if source.is_client() && !agents() {
+    if !agents() {
         return to_cstring(USAGE_CARD_EMPTY);
     }
     to_cstring(ds_agent_usage::refresh_card(source, refresh).to_json())
@@ -196,9 +198,11 @@ fn agent_usage_card_authorize_json_gated(
     token: &str,
     agents: impl FnOnce() -> bool,
 ) -> *mut c_char {
-    let source = ds_agent_usage::parse_agent(token);
+    let Some(source) = ds_agent_usage::parse_agent(token) else {
+        return to_cstring(USAGE_CARD_EMPTY);
+    };
     // Same non-client-before-gate ordering as `agent_usage_card_json_gated`.
-    if source.is_client() && !agents() {
+    if !agents() {
         return to_cstring(USAGE_CARD_EMPTY);
     }
     to_cstring(ds_agent_usage::authorize_card(source).to_json())
@@ -545,8 +549,7 @@ mod tests {
     #[test]
     fn agent_usage_card_json_unknown_agent_has_no_rows() {
         let json = take_string(agent_usage_card_json_gated("not_a_client", true, || true));
-        let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
-        assert!(card.rows.is_empty());
+        assert_eq!(json, USAGE_CARD_EMPTY);
     }
 
     // Non-client exits before Paths::resolve (no dirs, no prompt).
@@ -556,9 +559,7 @@ mod tests {
             "not_a_client",
             || true,
         ));
-        let card: ds_agent_usage::UsageCard = serde_json::from_str(&json).unwrap();
-        assert!(card.rows.is_empty());
-        assert!(!card.needs_auth);
+        assert_eq!(json, USAGE_CARD_EMPTY);
     }
 
     /// Agents gate OFF: usage exports return their EMPTY consts before any provider

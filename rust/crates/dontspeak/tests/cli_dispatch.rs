@@ -68,7 +68,7 @@ fn run_no_args_with_input(grok_hook: bool, input: &str) -> BareLaunch {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let grok_home = if grok_hook {
-        let grok_home = home.path().join(ds_config::ClientSource::Grok.as_str());
+        let grok_home = home.path().join(ds_config::WiredClient::Grok.as_str());
         std::fs::create_dir_all(&grok_home).expect("create temp GROK_HOME");
         // Canary outside the managed section survives digests on/off; "OLD" inside must go
         // either way (rewrite or strip) so we prove sync targeted this file.

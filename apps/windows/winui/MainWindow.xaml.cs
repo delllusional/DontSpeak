@@ -167,7 +167,7 @@ public sealed partial class MainWindow : Window
     }
 
     private int _usageGeneration;
-    // ClientSource::CLIENTS order from the skeleton deck.
+    // WiredClient::ALL order from the skeleton deck.
     private readonly List<string> _usageAgentOrder = new();
     private readonly Dictionary<string, ContentControl> _usageCardBodies = new();
     private readonly Dictionary<string, Border> _usageCardShells = new();

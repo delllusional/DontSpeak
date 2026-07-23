@@ -106,9 +106,8 @@ pub struct Activity {
     pub caps_active: bool,
     pub recording: bool,
     pub speaking: bool,
-    /// Wireable client for the in-flight TTS utterance. `null` when idle or the producer
-    /// is not a Usage agent (greet / unknown / DontSpeak).
-    pub speaker: Option<ds_client::ClientSource>,
+    /// Wired client for the in-flight TTS utterance. `null` when idle or unattributed.
+    pub speaker: Option<ds_client::WiredClient>,
     /// `null` while idle.
     pub voice: Option<String>,
     /// `null` while idle.
@@ -425,17 +424,8 @@ mod tests {
         prop::sample::select(StatusTrayKind::ALL.to_vec())
     }
 
-    fn client_source_strategy() -> impl Strategy<Value = ds_client::ClientSource> {
-        prop::sample::select(
-            ds_client::ClientSource::CLIENTS
-                .iter()
-                .copied()
-                .chain([
-                    ds_client::ClientSource::DontSpeak,
-                    ds_client::ClientSource::Unknown,
-                ])
-                .collect::<Vec<_>>(),
-        )
+    fn wired_client_strategy() -> impl Strategy<Value = ds_client::WiredClient> {
+        prop::sample::select(ds_client::WiredClient::ALL.to_vec())
     }
 
     prop_compose! {
@@ -454,7 +444,7 @@ mod tests {
             caps_active in any::<bool>(),
             recording in any::<bool>(),
             speaking in any::<bool>(),
-            speaker in prop::option::of(client_source_strategy()),
+            speaker in prop::option::of(wired_client_strategy()),
             voice in opt_short_string(),
             language in opt_short_string(),
             warning in prop::option::of(utterance_warning_strategy()),

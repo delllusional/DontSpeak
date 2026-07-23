@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 #[cfg(not(windows))]
 use std::time::Duration;
 
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 
 use crate::paths::Paths;
 use crate::voice::VoiceConfig;
@@ -37,11 +37,8 @@ pub(crate) struct ClientBinarySearch<'a> {
 
 /// Resolve a registry client using its normal configuration and the live environment captured
 /// by [`Paths::resolve`]. [`Paths::rooted_at`] remains isolated from the host environment.
-pub fn resolve_client_binary(client: ClientSource, paths: &Paths) -> Option<PathBuf> {
-    if !client.is_client() {
-        return None;
-    }
-    let configured = if client == ClientSource::Codex {
+pub fn resolve_client_binary(client: WiredClient, paths: &Paths) -> Option<PathBuf> {
+    let configured = if client == WiredClient::Codex {
         VoiceConfig::load(paths).codex_bin
     } else {
         client.as_str().to_string()
@@ -51,7 +48,7 @@ pub fn resolve_client_binary(client: ClientSource, paths: &Paths) -> Option<Path
 
 /// Resolve a registry client with a caller-provided executable name or path.
 pub fn resolve_configured_client_binary(
-    client: ClientSource,
+    client: WiredClient,
     paths: &Paths,
     configured: &str,
 ) -> Option<PathBuf> {
@@ -62,7 +59,7 @@ pub fn resolve_configured_client_binary(
 /// command shims during directory search and selects a native `.exe`; explicit override or
 /// configured paths remain authoritative.
 pub fn resolve_native_client_binary(
-    client: ClientSource,
+    client: WiredClient,
     paths: &Paths,
     configured: &str,
 ) -> Option<PathBuf> {
@@ -70,7 +67,7 @@ pub fn resolve_native_client_binary(
 }
 
 fn resolve_configured_client_binary_with_policy(
-    client: ClientSource,
+    client: WiredClient,
     paths: &Paths,
     configured: &str,
     native_windows_executable: bool,
@@ -105,10 +102,10 @@ fn resolve_configured_client_binary_with_policy(
     )
 }
 
-fn client_binary_override(client: ClientSource) -> Option<PathBuf> {
+fn client_binary_override(client: WiredClient) -> Option<PathBuf> {
     let variable = match client {
-        ClientSource::Codex => "CODEX_CLI_PATH",
-        ClientSource::Grok => "GROK_CLI_PATH",
+        WiredClient::Codex => "CODEX_CLI_PATH",
+        WiredClient::Grok => "GROK_CLI_PATH",
         _ => return None,
     };
     std::env::var_os(variable)
@@ -118,13 +115,10 @@ fn client_binary_override(client: ClientSource) -> Option<PathBuf> {
 
 /// Pure resolver core shared by production entry points and table-driven tests.
 pub(crate) fn resolve_client_binary_in(
-    client: ClientSource,
+    client: WiredClient,
     paths: &Paths,
     search: ClientBinarySearch<'_>,
 ) -> Option<PathBuf> {
-    if !client.is_client() {
-        return None;
-    }
     let canonical = client.as_str();
     let configured = search.configured.trim();
     let name = if configured.is_empty() {
@@ -151,8 +145,8 @@ pub(crate) fn resolve_client_binary_in(
     }
     dirs.push(paths.home.join(".local/bin"));
     match client {
-        ClientSource::Grok => dirs.push(paths.grok_dir.join("bin")),
-        ClientSource::Codex => {
+        WiredClient::Grok => dirs.push(paths.grok_dir.join("bin")),
+        WiredClient::Codex => {
             dirs.push(paths.codex_dir.join("packages/standalone/current"));
             #[cfg(target_os = "macos")]
             dirs.extend([
@@ -171,7 +165,7 @@ pub(crate) fn resolve_client_binary_in(
             PathBuf::from("/opt/homebrew/bin"),
         ]);
         #[cfg(target_os = "macos")]
-        if client == ClientSource::Codex {
+        if client == WiredClient::Codex {
             dirs.extend([
                 PathBuf::from("/Applications/ChatGPT.app/Contents/Resources"),
                 PathBuf::from("/Applications/Codex.app/Contents/Resources"),
@@ -186,7 +180,7 @@ pub(crate) fn resolve_client_binary_in(
             .map(Path::to_path_buf)
             .unwrap_or_else(|| paths.home.join("AppData/Roaming"));
         dirs.push(roaming.join("npm"));
-        if client == ClientSource::Codex {
+        if client == WiredClient::Codex {
             let (package, target) = if cfg!(target_arch = "aarch64") {
                 ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
             } else {
@@ -299,7 +293,7 @@ fn capture_login_shell_path() -> Option<std::ffi::OsString> {
 mod tests {
     use super::*;
 
-    fn binary_name(client: ClientSource) -> String {
+    fn binary_name(client: WiredClient) -> String {
         let command = client.as_str();
         if cfg!(windows) {
             format!("{command}.exe")
@@ -308,7 +302,7 @@ mod tests {
         }
     }
 
-    fn isolated_search<'a>(client: ClientSource) -> ClientBinarySearch<'a> {
+    fn isolated_search<'a>(client: WiredClient) -> ClientBinarySearch<'a> {
         ClientBinarySearch {
             configured: client.as_str(),
             override_path: None,
@@ -322,7 +316,7 @@ mod tests {
 
     #[test]
     fn every_client_uses_the_same_common_search_path() {
-        for &client in ClientSource::CLIENTS {
+        for &client in WiredClient::ALL {
             let root = tempfile::tempdir().unwrap();
             let paths = Paths::rooted_at(root.path());
             let local_bin = root.path().join(".local/bin");
@@ -346,7 +340,7 @@ mod tests {
         let process_dir = root.path().join("process-bin");
         std::fs::create_dir_all(&login_dir).unwrap();
         std::fs::create_dir_all(&process_dir).unwrap();
-        let filename = binary_name(ClientSource::Codex);
+        let filename = binary_name(WiredClient::Codex);
         let explicit = root.path().join(&filename);
         let login = login_dir.join(&filename);
         std::fs::write(&explicit, b"explicit").unwrap();
@@ -355,23 +349,23 @@ mod tests {
         let login_path = std::env::join_paths([&login_dir]).unwrap();
         let process_path = std::env::join_paths([&process_dir]).unwrap();
 
-        let mut search = isolated_search(ClientSource::Codex);
+        let mut search = isolated_search(WiredClient::Codex);
         search.override_path = Some(&explicit);
         search.login_path = Some(&login_path);
         search.path = Some(&process_path);
         assert_eq!(
-            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            resolve_client_binary_in(WiredClient::Codex, &paths, search),
             Some(explicit.clone())
         );
 
         search.override_path = None;
         assert_eq!(
-            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            resolve_client_binary_in(WiredClient::Codex, &paths, search),
             Some(process_dir.join(&filename))
         );
         std::fs::remove_file(process_dir.join(&filename)).unwrap();
         assert_eq!(
-            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            resolve_client_binary_in(WiredClient::Codex, &paths, search),
             Some(login)
         );
     }
@@ -380,16 +374,16 @@ mod tests {
     fn environment_override_precedes_an_explicit_configured_path() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(root.path());
-        let configured = root.path().join(binary_name(ClientSource::Codex));
+        let configured = root.path().join(binary_name(WiredClient::Codex));
         let override_path = root.path().join("override-codex");
         std::fs::write(&configured, b"configured").unwrap();
         std::fs::write(&override_path, b"override").unwrap();
 
-        let mut search = isolated_search(ClientSource::Codex);
+        let mut search = isolated_search(WiredClient::Codex);
         search.configured = configured.to_str().unwrap();
         search.override_path = Some(&override_path);
         assert_eq!(
-            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            resolve_client_binary_in(WiredClient::Codex, &paths, search),
             Some(override_path)
         );
     }
@@ -399,9 +393,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(root.path());
         for (client, dir) in [
-            (ClientSource::Grok, paths.grok_dir.join("bin")),
+            (WiredClient::Grok, paths.grok_dir.join("bin")),
             (
-                ClientSource::Codex,
+                WiredClient::Codex,
                 paths.codex_dir.join("packages/standalone/current"),
             ),
         ] {
@@ -440,12 +434,12 @@ mod tests {
         std::fs::write(&native, b"native").unwrap();
         let process_path = std::env::join_paths([&shim_dir]).unwrap();
 
-        let mut search = isolated_search(ClientSource::Codex);
+        let mut search = isolated_search(WiredClient::Codex);
         search.path = Some(&process_path);
         search.app_data = Some(&roaming);
         search.native_windows_executable = true;
         assert_eq!(
-            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            resolve_client_binary_in(WiredClient::Codex, &paths, search),
             Some(native)
         );
     }

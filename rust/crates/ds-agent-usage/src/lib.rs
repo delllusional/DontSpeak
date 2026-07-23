@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 use providers::FetchError;
 use serde::{Deserialize, Serialize};
 
@@ -50,8 +50,8 @@ impl UsageRow {
 /// One Agents tab card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCard {
-    /// Canonical [`ClientSource`] identity (`claude`, `codex`, `qwen`, `grok`, `kimi`, `hermes`).
-    pub agent: ClientSource,
+    /// Canonical [`WiredClient`] identity (`claude`, `codex`, `qwen`, `grok`, `kimi`, `hermes`).
+    pub agent: WiredClient,
     /// Local login label when present (absent for API-key-only / missing identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
@@ -67,12 +67,12 @@ fn is_false(flag: &bool) -> bool {
 }
 
 /// Only keychain-backed clients may offer authorize.
-fn requires_macos_keychain(agent: ClientSource) -> bool {
-    agent == ClientSource::ClaudeCode
+fn requires_macos_keychain(agent: WiredClient) -> bool {
+    agent == WiredClient::ClaudeCode
 }
 
 impl UsageCard {
-    fn empty(agent: ClientSource) -> Self {
+    fn empty(agent: WiredClient) -> Self {
         Self {
             agent,
             account: None,
@@ -82,7 +82,7 @@ impl UsageCard {
     }
 
     fn from_result(
-        agent: ClientSource,
+        agent: WiredClient,
         account: Option<String>,
         result: Result<Vec<UsageRow>, FetchError>,
     ) -> Self {
@@ -168,7 +168,7 @@ struct CacheFile {
 #[derive(Default)]
 struct UsageCache {
     loaded_from: Option<PathBuf>,
-    cards: HashMap<ClientSource, CachedCard>,
+    cards: HashMap<WiredClient, CachedCard>,
 }
 
 impl UsageCache {
@@ -185,13 +185,13 @@ impl UsageCache {
         };
         for mut cached in snapshot.cards {
             cached.card.normalize();
-            if cached.card.agent.is_client() && cached.card.has_data() {
+            if cached.card.has_data() {
                 self.cards.insert(cached.card.agent, cached);
             }
         }
     }
 
-    fn get(&mut self, paths: &ds_config::Paths, agent: ClientSource) -> Option<CachedCard> {
+    fn get(&mut self, paths: &ds_config::Paths, agent: WiredClient) -> Option<CachedCard> {
         self.ensure_loaded(paths);
         self.cards.get(&agent).cloned()
     }
@@ -212,7 +212,7 @@ impl UsageCache {
     }
 
     fn persist(&self, paths: &ds_config::Paths) {
-        let cards = ClientSource::CLIENTS
+        let cards = WiredClient::ALL
             .iter()
             .filter_map(|agent| self.cards.get(agent).cloned())
             .collect();
@@ -229,15 +229,15 @@ struct RefreshSlot {
 }
 
 static CACHE: OnceLock<Mutex<UsageCache>> = OnceLock::new();
-static REFRESH_SLOTS: OnceLock<HashMap<ClientSource, Mutex<RefreshSlot>>> = OnceLock::new();
+static REFRESH_SLOTS: OnceLock<HashMap<WiredClient, Mutex<RefreshSlot>>> = OnceLock::new();
 
 fn cache() -> &'static Mutex<UsageCache> {
     CACHE.get_or_init(|| Mutex::new(UsageCache::default()))
 }
 
-fn refresh_slots() -> &'static HashMap<ClientSource, Mutex<RefreshSlot>> {
+fn refresh_slots() -> &'static HashMap<WiredClient, Mutex<RefreshSlot>> {
     REFRESH_SLOTS.get_or_init(|| {
-        ClientSource::CLIENTS
+        WiredClient::ALL
             .iter()
             .map(|&agent| (agent, Mutex::new(RefreshSlot::default())))
             .collect()
@@ -275,7 +275,7 @@ fn read_cache_file(path: &Path) -> Option<CacheFile> {
 fn cached_card(
     cache: &Mutex<UsageCache>,
     paths: &ds_config::Paths,
-    agent: ClientSource,
+    agent: WiredClient,
 ) -> Option<CachedCard> {
     cache
         .lock()
@@ -285,12 +285,12 @@ fn cached_card(
 
 // ── Install gate (wire registry) ────────────────────────────────────────────
 
-fn client_installed(paths: &ds_config::Paths, client: ClientSource) -> bool {
-    ds_config::client_spec(client).is_some_and(|spec| spec.present(paths))
+fn client_installed(paths: &ds_config::Paths, client: WiredClient) -> bool {
+    ds_config::client_spec(client).present(paths)
 }
 
-fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
-    ClientSource::CLIENTS
+fn installed_agents(paths: &ds_config::Paths) -> Vec<WiredClient> {
+    WiredClient::ALL
         .iter()
         .copied()
         .filter(|&client| client_installed(paths, client))
@@ -299,41 +299,34 @@ fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
 
 fn fetch_rows(
     paths: &ds_config::Paths,
-    agent: ClientSource,
+    agent: WiredClient,
     interactive: bool,
 ) -> Result<Vec<UsageRow>, FetchError> {
     match agent {
-        ClientSource::ClaudeCode => providers::claude::fetch(paths, interactive),
-        ClientSource::Codex => providers::codex::fetch(paths).map_err(FetchError::from),
-        ClientSource::QwenCode => providers::qwen::fetch(paths).map_err(FetchError::from),
-        ClientSource::Grok => providers::grok::fetch(paths).map_err(FetchError::from),
-        ClientSource::KimiCode => providers::kimi::fetch(paths).map_err(FetchError::from),
-        ClientSource::Hermes => providers::hermes::fetch(paths).map_err(FetchError::from),
-        ClientSource::DontSpeak | ClientSource::Unknown => Err(FetchError::Io(
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a usage agent"),
-        )),
+        WiredClient::ClaudeCode => providers::claude::fetch(paths, interactive),
+        WiredClient::Codex => providers::codex::fetch(paths).map_err(FetchError::from),
+        WiredClient::QwenCode => providers::qwen::fetch(paths).map_err(FetchError::from),
+        WiredClient::Grok => providers::grok::fetch(paths).map_err(FetchError::from),
+        WiredClient::KimiCode => providers::kimi::fetch(paths).map_err(FetchError::from),
+        WiredClient::Hermes => providers::hermes::fetch(paths).map_err(FetchError::from),
     }
 }
 
 /// Local identity only (offline).
-fn fetch_account(paths: &ds_config::Paths, agent: ClientSource) -> Option<String> {
+fn fetch_account(paths: &ds_config::Paths, agent: WiredClient) -> Option<String> {
     match agent {
-        ClientSource::ClaudeCode => providers::claude::account(paths),
-        ClientSource::Codex => providers::codex::account(paths),
-        ClientSource::Grok => providers::grok::account(paths),
+        WiredClient::ClaudeCode => providers::claude::account(paths),
+        WiredClient::Codex => providers::codex::account(paths),
+        WiredClient::Grok => providers::grok::account(paths),
         // Qwen Coding Plan is API-key only; Kimi/Hermes have no documented email source.
-        ClientSource::QwenCode
-        | ClientSource::KimiCode
-        | ClientSource::Hermes
-        | ClientSource::DontSpeak
-        | ClientSource::Unknown => None,
+        WiredClient::QwenCode | WiredClient::KimiCode | WiredClient::Hermes => None,
     }
 }
 
 // ── Public API ──────────────────────────────────────────────────────────────
 
-pub fn parse_agent(token: &str) -> ClientSource {
-    ClientSource::parse(token).unwrap_or(ClientSource::Unknown)
+pub fn parse_agent(token: &str) -> Option<WiredClient> {
+    WiredClient::parse(token)
 }
 
 /// Installed agents + cached rows. No network.
@@ -360,20 +353,16 @@ pub fn skeleton() -> UsageDeck {
 
 /// Blocking one-card refresh. Soft = 60s cache; keep last good on empty.
 /// Never prompts (`interactive = false` — MCP/CLI/implicit).
-pub fn refresh_card(agent: ClientSource, force: bool) -> UsageCard {
+pub fn refresh_card(agent: WiredClient, force: bool) -> UsageCard {
     refresh_card_inner(agent, force, false)
 }
 
 /// User-click authorize + force refresh. May ACL-prompt on macOS.
-pub fn authorize_card(agent: ClientSource) -> UsageCard {
+pub fn authorize_card(agent: WiredClient) -> UsageCard {
     refresh_card_inner(agent, true, true)
 }
 
-fn refresh_card_inner(agent: ClientSource, force: bool, interactive: bool) -> UsageCard {
-    // is_client gate stays ahead of Paths::resolve (FFI tests rely on it).
-    if !agent.is_client() {
-        return UsageCard::empty(agent);
-    }
+fn refresh_card_inner(agent: WiredClient, force: bool, interactive: bool) -> UsageCard {
     let Some(paths) = ds_config::Paths::resolve() else {
         return UsageCard::empty(agent);
     };
@@ -400,7 +389,7 @@ fn refresh_card_with<A, F>(
     cache: &Mutex<UsageCache>,
     slot: &Mutex<RefreshSlot>,
     paths: &ds_config::Paths,
-    agent: ClientSource,
+    agent: WiredClient,
     force: bool,
     interactive: bool,
     account: A,
@@ -491,7 +480,7 @@ mod tests {
     #[test]
     fn card_orders_and_dedups_periods() {
         let card = UsageCard::from_result(
-            ClientSource::QwenCode,
+            WiredClient::QwenCode,
             Some("  user@example.com  ".into()),
             Ok(vec![
                 UsageRow::checked(Period::Month, 40.0, 4).unwrap(),
@@ -521,7 +510,7 @@ mod tests {
 
     /// Drop a stub executable where `ClientSpec::present` looks (`~/.local/bin`) — the
     /// presence signal is the resolvable binary, not the client's dot-dir.
-    fn make_present(paths: &ds_config::Paths, client: ClientSource) {
+    fn make_present(paths: &ds_config::Paths, client: WiredClient) {
         let command = client.as_str();
         let bin_dir = paths.home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
@@ -537,27 +526,27 @@ mod tests {
     fn install_gate_matches_wire_registry() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
-        assert!(!client_installed(&paths, ClientSource::ClaudeCode));
-        make_present(&paths, ClientSource::ClaudeCode);
-        assert_eq!(installed_agents(&paths), vec![ClientSource::ClaudeCode]);
+        assert!(!client_installed(&paths, WiredClient::ClaudeCode));
+        make_present(&paths, WiredClient::ClaudeCode);
+        assert_eq!(installed_agents(&paths), vec![WiredClient::ClaudeCode]);
     }
 
     #[test]
     fn installed_agents_follow_the_canonical_client_enum_order() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
-        for &client in ClientSource::CLIENTS {
+        for &client in WiredClient::ALL {
             make_present(&paths, client);
         }
 
-        assert_eq!(installed_agents(&paths), ClientSource::CLIENTS);
+        assert_eq!(installed_agents(&paths), WiredClient::ALL);
     }
 
     #[test]
     fn cache_keeps_last_good_card() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
-        let agent = ClientSource::Grok;
+        let agent = WiredClient::Grok;
         let good = UsageCard {
             agent,
             account: Some("user@x.ai".into()),
@@ -584,7 +573,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
         let good = UsageCard {
-            agent: ClientSource::Codex,
+            agent: WiredClient::Codex,
             account: Some("dev@openai.com".into()),
             rows: vec![UsageRow::checked(Period::Session, 42.0, 1_900_000_000).unwrap()],
             needs_auth: false,
@@ -596,7 +585,7 @@ mod tests {
 
         assert_eq!(
             reloaded
-                .get(&paths, ClientSource::Codex)
+                .get(&paths, WiredClient::Codex)
                 .map(|entry| entry.card),
             Some(good)
         );
@@ -609,7 +598,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
         let good = UsageCard {
-            agent: ClientSource::QwenCode,
+            agent: WiredClient::QwenCode,
             account: None,
             rows: vec![UsageRow::checked(Period::Month, 23.0, 1_900_000_000).unwrap()],
             needs_auth: false,
@@ -622,7 +611,7 @@ mod tests {
             &Mutex::new(UsageCache::default()),
             &Mutex::new(RefreshSlot::default()),
             &paths,
-            ClientSource::QwenCode,
+            WiredClient::QwenCode,
             false,
             false,
             || None,
@@ -637,41 +626,30 @@ mod tests {
     }
 
     #[test]
-    fn cache_load_normalizes_rows_and_drops_non_clients() {
+    fn cache_load_normalizes_rows() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
         let snapshot = CacheFile {
-            cards: vec![
-                CachedCard {
-                    fetched_at_unix: now_unix(),
-                    card: UsageCard {
-                        agent: ClientSource::Codex,
-                        account: None,
-                        rows: vec![
-                            UsageRow {
-                                period: Period::Week,
-                                used_percent: 150.0,
-                                resets_at_unix: 1_900_000_000,
-                            },
-                            UsageRow {
-                                period: Period::Month,
-                                used_percent: 10.0,
-                                resets_at_unix: 0,
-                            },
-                        ],
-                        needs_auth: false,
-                    },
+            cards: vec![CachedCard {
+                fetched_at_unix: now_unix(),
+                card: UsageCard {
+                    agent: WiredClient::Codex,
+                    account: None,
+                    rows: vec![
+                        UsageRow {
+                            period: Period::Week,
+                            used_percent: 150.0,
+                            resets_at_unix: 1_900_000_000,
+                        },
+                        UsageRow {
+                            period: Period::Month,
+                            used_percent: 10.0,
+                            resets_at_unix: 0,
+                        },
+                    ],
+                    needs_auth: false,
                 },
-                CachedCard {
-                    fetched_at_unix: now_unix(),
-                    card: UsageCard {
-                        agent: ClientSource::DontSpeak,
-                        account: None,
-                        rows: vec![UsageRow::checked(Period::Week, 1.0, 1_900_000_000).unwrap()],
-                        needs_auth: false,
-                    },
-                },
-            ],
+            }],
         };
         ds_config::atomic_write_json(
             &cache_path(&paths),
@@ -680,10 +658,9 @@ mod tests {
         .unwrap();
 
         let mut cache = UsageCache::default();
-        let card = cache.get(&paths, ClientSource::Codex).unwrap().card;
+        let card = cache.get(&paths, WiredClient::Codex).unwrap().card;
         assert_eq!(card.rows.len(), 1);
         assert_eq!(card.rows[0].used_percent, 100.0);
-        assert!(cache.get(&paths, ClientSource::DontSpeak).is_none());
     }
 
     #[test]
@@ -711,7 +688,7 @@ mod tests {
                         &cache,
                         &slot,
                         &paths,
-                        ClientSource::ClaudeCode,
+                        WiredClient::ClaudeCode,
                         true,
                         false,
                         || Some("claude@example.com".into()),
@@ -741,7 +718,7 @@ mod tests {
     fn deck_json_uses_cards_and_agent() {
         let deck = UsageDeck {
             cards: vec![UsageCard {
-                agent: ClientSource::ClaudeCode,
+                agent: WiredClient::ClaudeCode,
                 account: Some("me@anthropic.test".into()),
                 rows: vec![UsageRow::checked(Period::Session, 10.0, 1).unwrap()],
                 needs_auth: false,
@@ -779,7 +756,7 @@ mod tests {
             &Mutex::new(UsageCache::default()),
             &Mutex::new(RefreshSlot::default()),
             &paths,
-            ClientSource::ClaudeCode,
+            WiredClient::ClaudeCode,
             true,
             false,
             || None,
@@ -793,7 +770,7 @@ mod tests {
     fn guarded_refresh_keeps_cached_rows_and_never_persists_needs_auth() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
-        let agent = ClientSource::ClaudeCode;
+        let agent = WiredClient::ClaudeCode;
         let good = UsageCard {
             agent,
             account: Some("me@anthropic.test".into()),
@@ -825,14 +802,14 @@ mod tests {
 
     #[test]
     fn only_guarded_keychain_client_credentials_offer_authorize() {
-        let keychain_clients: Vec<_> = ClientSource::CLIENTS
+        let keychain_clients: Vec<_> = WiredClient::ALL
             .iter()
             .copied()
             .filter(|&agent| requires_macos_keychain(agent))
             .collect();
-        assert_eq!(keychain_clients, [ClientSource::ClaudeCode]);
+        assert_eq!(keychain_clients, [WiredClient::ClaudeCode]);
 
-        for agent in ClientSource::CLIENTS {
+        for agent in WiredClient::ALL {
             let guarded = UsageCard::from_result(*agent, None, Err(FetchError::Guarded));
             assert_eq!(
                 guarded.needs_auth,
@@ -850,7 +827,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
 
-        for agent in ClientSource::CLIENTS
+        for agent in WiredClient::ALL
             .iter()
             .copied()
             .filter(|&agent| !requires_macos_keychain(agent))
@@ -903,7 +880,7 @@ mod tests {
             &Mutex::new(UsageCache::default()),
             &finished_late(),
             &paths,
-            ClientSource::ClaudeCode,
+            WiredClient::ClaudeCode,
             true,
             false,
             || None,
@@ -916,7 +893,7 @@ mod tests {
             &Mutex::new(UsageCache::default()),
             &finished_late(),
             &paths,
-            ClientSource::ClaudeCode,
+            WiredClient::ClaudeCode,
             true,
             true,
             || None,

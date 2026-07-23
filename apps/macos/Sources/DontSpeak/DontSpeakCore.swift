@@ -32,7 +32,7 @@ struct Activity: Sendable, Equatable {
     var capsEnabled = false
     var recording = false
     var speaking = false
-    /// Wireable client of the in-flight TTS utterance (`claude`/…); nil when idle.
+    /// Wired client of the in-flight TTS utterance (`claude`/…); nil when unattributed.
     var speakingSource: String? = nil
     /// Playback continues but silenced; menu-bar slash.
     var muted = false

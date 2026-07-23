@@ -16,14 +16,14 @@
 //! (existing k=v idiom), never a fourth positional field:
 //!
 //! ```text
-//! [<epoch>] <LEVEL> <source> <message>                 # client == DontSpeak
-//! [<epoch>] <LEVEL> <source> <message> client=codex    # any other client, incl. unknown
+//! [<epoch>] <LEVEL> <source> <message>                 # no wired client
+//! [<epoch>] <LEVEL> <source> <message> client=codex    # wired-client attribution
 //! ```
 //!
 //! So `parse_unified_line` / `combined_log_json` stay shape-stable; `client=` greps as
-//! "external client caused this"; engine lines skip a redundant `client=dontspeak`. See [`log_from`].
+//! "wired client caused this". See [`log_from`].
 
-use ds_client::ClientSource;
+use ds_client::WiredClient;
 use std::path::{Path, PathBuf};
 
 fn open_append_private(path: &Path) -> std::io::Result<std::fs::File> {
@@ -117,14 +117,22 @@ pub fn open_aux_log(log_file: &Path, file_name: &str) -> Option<std::fs::File> {
 /// Append one unified-log line. `source` = subsystem token. Fail-quiet (never take down hooks/engine).
 /// Attributed to DontSpeak (no `client=`). Use [`log_from`] for a client-caused line.
 pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
-    log_from(log_file, level, source, ClientSource::DontSpeak, msg);
+    write_line(log_file, level, source, None, msg);
 }
 
-/// Client-attributed `log`: non-`DontSpeak` appends ` client=<token>` to the message
-/// (positional fields untouched — UI shape stays byte-compatible). Takes the log PATH so
-/// tests must pass a tempdir; deliberately no cached client-attributed variant (would tempt
-/// real-`$HOME` writes).
-pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSource, msg: &str) {
+/// Client-attributed `log`: appends ` client=<token>` to the message. Takes the log PATH so
+/// tests must pass a tempdir; deliberately no cached variant.
+pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: WiredClient, msg: &str) {
+    write_line(log_file, level, source, Some(client), msg);
+}
+
+fn write_line(
+    log_file: &Path,
+    level: LogLevel,
+    source: &str,
+    client: Option<WiredClient>,
+    msg: &str,
+) {
     use std::io::Write;
     if let Some(dir) = log_file.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -132,11 +140,7 @@ pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: ClientSo
     rotate_if_large(log_file);
     let source = source.replace(['\n', '\r'], " ");
     let msg = msg.replace(['\n', '\r'], " ");
-    // Client as trailing k=v; DontSpeak ⇒ no suffix.
-    let suffix = match client {
-        ClientSource::DontSpeak => String::new(),
-        c => format!(" client={}", c.as_str()),
-    };
+    let suffix = client.map_or_else(String::new, |client| format!(" client={}", client.as_str()));
     // One line, one write_all → atomic append.
     let line = format!(
         "[{}] {} {source} {msg}{suffix}\n",
@@ -387,13 +391,8 @@ mod tests {
 
     #[test]
     fn log_from_appends_the_client_as_a_trailing_kv() {
-        // Non-DontSpeak → ` client=<token>` at end of message; positional fields untouched.
         let dir = tempfile::tempdir().unwrap();
-        for client in ClientSource::CLIENTS
-            .iter()
-            .copied()
-            .chain([ClientSource::Unknown])
-        {
+        for &client in WiredClient::ALL {
             let p = dir.path().join(format!("{}.log", client.as_str()));
             log_from(&p, LogLevel::Info, "engine", client, "greet session=s1");
             let (level, source, msg) = only_line(&p);
@@ -407,21 +406,11 @@ mod tests {
     }
 
     #[test]
-    fn dontspeak_client_renders_no_suffix_and_matches_plain_log() {
-        // Own lines stay compatible with plain `log()` — no `client=dontspeak`.
+    fn plain_log_has_no_client_suffix() {
         let dir = tempfile::tempdir().unwrap();
-        let a = dir.path().join("a.log");
-        let b = dir.path().join("b.log");
-        log(&a, LogLevel::Warn, "config", "bad value key=rate");
-        log_from(
-            &b,
-            LogLevel::Warn,
-            "config",
-            ClientSource::DontSpeak,
-            "bad value key=rate",
-        );
-        assert_eq!(only_line(&a), only_line(&b));
-        assert_eq!(only_line(&a).2, "bad value key=rate", "no client= suffix");
+        let path = dir.path().join("dontspeak.log");
+        log(&path, LogLevel::Warn, "config", "bad value key=rate");
+        assert_eq!(only_line(&path).2, "bad value key=rate");
     }
 
     #[test]

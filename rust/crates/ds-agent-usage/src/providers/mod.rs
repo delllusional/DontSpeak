@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
-use ds_config::ClientSource;
+use ds_config::WiredClient;
 use serde_json::Value;
 
 pub(crate) mod claude;
@@ -147,7 +147,7 @@ fn rfc3339_timestamp(raw: &str) -> Option<i64> {
         .map(|date| date.unix_timestamp())
 }
 
-fn resolve_binary(client: ClientSource, paths: &ds_config::Paths) -> Option<std::path::PathBuf> {
+fn resolve_binary(client: WiredClient, paths: &ds_config::Paths) -> Option<std::path::PathBuf> {
     ds_config::resolve_client_binary(client, paths)
 }
 

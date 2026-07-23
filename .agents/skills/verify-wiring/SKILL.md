@@ -44,7 +44,7 @@ any of them.
    - **MCP:** `mcpServers` / `[mcp_servers.<name>]` / YAML `mcp_servers` shape + file path
      (Claude `~/.claude.json`, Qwen settings, Codex TOML, Grok `~/.grok/config.toml`,
      Kimi Code `~/.kimi-code/mcp.json`, Hermes `~/.hermes/config.yaml`).
-   - **MCP identity:** the canonical [`ClientSource`] name must be a `starts_with`
+   - **MCP identity:** the canonical [`WiredClient`] name must be a `starts_with`
      prefix of `clientInfo.name` from the activity-log
      `mcp initialize clientInfo.name=…` line. Do not add a parallel prefix field.
 

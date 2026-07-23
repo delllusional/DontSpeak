@@ -144,7 +144,7 @@ fn host_short_path(_long: &str) -> Option<String> {
 pub(crate) fn shell_client_command(
     bin: &str,
     verb: &str,
-    client: ds_client::ClientSource,
+    client: ds_client::WiredClient,
     shell_override: ShellOverride,
 ) -> String {
     inline_command(
@@ -177,7 +177,7 @@ pub(crate) fn command_is_ours(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ClientSource;
+    use crate::WiredClient;
 
     fn fake_shorten(long: &str) -> Option<String> {
         Some(long.replace("Alex Smith", "ALEXSM~1"))
@@ -225,7 +225,7 @@ mod tests {
             let (cmd, shell) = inline_command(
                 InlineFlavor::Windows,
                 bin,
-                ["notify", "--client", ClientSource::Codex.as_str()],
+                ["notify", "--client", WiredClient::Codex.as_str()],
                 style,
             );
             assert_eq!(

@@ -21,8 +21,8 @@ use crate::tts_model::{SYSTEM_TTS_PARAMS, de_tts_model, validate_tts_param};
 use ds_log::{LogLevel, log};
 
 use crate::{
-    CancelSpeechScope, ClientSource, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider,
-    SttEngine, TrayKind, TtsEngine, TtsModel, TtsModelDescriptor, TtsParamMap, TtsParamValue,
+    CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Paths, Provider, SttEngine,
+    TrayKind, TtsEngine, TtsModel, TtsModelDescriptor, TtsParamMap, TtsParamValue, WiredClient,
 };
 
 /// Hands-free phrases. START fuzzy; submit/cancel exact. Shelved (STT quality).
@@ -329,7 +329,7 @@ pub struct VoiceConfig {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "de_exclude_clients"
     )]
-    pub exclude_clients: Option<Vec<ClientSource>>,
+    pub exclude_clients: Option<Vec<WiredClient>>,
 
     /// Agents feature gate: Agents tab + `usage` tool. Opt-in because usage
     /// probing may touch the macOS keychain.
@@ -400,7 +400,7 @@ fn default_capture_gain() -> CaptureGain {
     CaptureGain::Auto
 }
 fn default_codex_bin() -> String {
-    ClientSource::Codex.as_str().to_string()
+    WiredClient::Codex.as_str().to_string()
 }
 
 /// Mic make-up gain. `Auto` per-utterance; `Manual(g)` fixed. Wire: `"auto"` or number.
@@ -824,7 +824,7 @@ impl VoiceConfig {
     }
 
     /// Excluded clients (empty when unset). Engine wires everyone else.
-    pub fn excluded_clients(&self) -> Vec<ClientSource> {
+    pub fn excluded_clients(&self) -> Vec<WiredClient> {
         self.exclude_clients.clone().unwrap_or_default()
     }
 }
@@ -949,7 +949,7 @@ pub(crate) mod tests {
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert!(v.codex_app_server_url.is_empty());
-        assert_eq!(v.codex_bin, ClientSource::Codex.as_str());
+        assert_eq!(v.codex_bin, WiredClient::Codex.as_str());
         assert!(v.grok_stream);
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_editors.is_empty());
@@ -1037,7 +1037,7 @@ pub(crate) mod tests {
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert_eq!(v.codex_app_server_url, "");
-        assert_eq!(v.codex_bin, ClientSource::Codex.as_str());
+        assert_eq!(v.codex_bin, WiredClient::Codex.as_str());
         // All four are plain-typed overrides.
         let v: VoiceConfig = serde_json::from_str(
             r#"{"codex_stream":false,"codex_daemon":true,
@@ -1132,7 +1132,7 @@ pub(crate) mod tests {
         // single client ⇒ exactly that one excluded.
         assert_eq!(
             VoiceConfig::default().excluded_clients(),
-            Vec::<ClientSource>::new()
+            Vec::<WiredClient>::new()
         );
         assert_eq!(
             VoiceConfig {
@@ -1140,15 +1140,15 @@ pub(crate) mod tests {
                 ..VoiceConfig::default()
             }
             .excluded_clients(),
-            Vec::<ClientSource>::new()
+            Vec::<WiredClient>::new()
         );
         assert_eq!(
             VoiceConfig {
-                exclude_clients: Some(vec![ClientSource::ClaudeCode]),
+                exclude_clients: Some(vec![WiredClient::ClaudeCode]),
                 ..VoiceConfig::default()
             }
             .excluded_clients(),
-            vec![ClientSource::ClaudeCode]
+            vec![WiredClient::ClaudeCode]
         );
 
         // `de_exclude_clients` (via the config-file deserialize): a present ARRAY keeps known client
@@ -1160,7 +1160,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             wc(r#"{"exclude_clients":["claude","narration_spec","bogus","claude"]}"#),
-            Some(vec![ClientSource::ClaudeCode])
+            Some(vec![WiredClient::ClaudeCode])
         );
         // A non-array value (or a bare string / number) degrades to None = exclude nothing.
         assert_eq!(wc(r#"{"exclude_clients":"claude"}"#), None);
@@ -1174,7 +1174,6 @@ pub(crate) mod tests {
 
     #[test]
     fn exclude_clients_drops_non_client_tokens() {
-        // `is_client()` load-bearing: parse accepts dontspeak/unknown; filter drops them.
         let wc = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
@@ -1188,22 +1187,22 @@ pub(crate) mod tests {
         // …and they're dropped from a mixed list without disturbing the real clients' order.
         let mixed = serde_json::json!({
             "exclude_clients": [
-                ClientSource::Codex.as_str(),
-                ClientSource::DontSpeak.as_str(),
-                ClientSource::ClaudeCode.as_str(),
-                ClientSource::Unknown.as_str()
+                WiredClient::Codex.as_str(),
+                "dontspeak",
+                WiredClient::ClaudeCode.as_str(),
+                "unknown"
             ]
         });
         assert_eq!(
             wc(&mixed.to_string()),
-            Some(vec![ClientSource::Codex, ClientSource::ClaudeCode])
+            Some(vec![WiredClient::Codex, WiredClient::ClaudeCode])
         );
     }
 
     #[test]
     fn exclude_clients_round_trips_through_write_and_load() {
         // None serializes absent (≠ Some([])); tempdir only.
-        for state in [None, Some(vec![]), Some(vec![ClientSource::ClaudeCode])] {
+        for state in [None, Some(vec![]), Some(vec![WiredClient::ClaudeCode])] {
             let dir = tempfile::tempdir().unwrap();
             let paths = Paths::rooted_at(dir.path());
             let cfg = VoiceConfig {
@@ -1774,7 +1773,7 @@ pub(crate) mod tests {
             grok_stream: false,  // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])
-            exclude_clients: Some(vec![ClientSource::ClaudeCode]), // non-default (default is None)
+            exclude_clients: Some(vec![WiredClient::ClaudeCode]), // non-default (default is None)
             agents: true,        // non-default (default is false)
         }
     }

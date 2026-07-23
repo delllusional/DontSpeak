@@ -19,7 +19,7 @@ dontspeak kimi [args...]
 dontspeak hermes [args...]
 ```
 
-Each client has exactly one canonical name; there are no launcher aliases. `ClientSource` owns
+Each client has exactly one canonical name; there are no launcher aliases. `WiredClient` owns
 that name for launch, hooks, IPC, logs, usage, and MCP attribution. Launchers preserve cwd, streams, args, exit
 code; start the DontSpeak host first (except `--help` / `--version`), and inject a fresh
 `DONTSPEAK_SESSION_ID` inherited by that client's hooks and local MCP server. Windows:
@@ -187,7 +187,7 @@ identity. Domain crate `ds-agent-usage`; hosts call `ds-core` FFI only.
 `needs_auth` only when true + `rows[]`); each `UsageRow` has `period`
 (`session` | `week` | `month`), `used_percent` (0…100), `resets_at_unix`.
 
-Card order is `ClientSource::CLIENTS`. Probe only agents with
+Card order is `WiredClient::ALL`. Probe only agents with
 `ClientSpec::present`. At most one row per period; missing periods omitted, never
 shown as `0%`. Require percent + reset timestamp to emit a row. Never serialize
 credentials, provider bodies, or raw error strings.
@@ -232,7 +232,7 @@ non-force tooling refresh is **60s**; the tab always force-loads after skeleton.
 
 ### Cache
 
-One typed in-memory cache keyed by `ClientSource`, atomically mirrored to
+One typed in-memory cache keyed by `WiredClient`, atomically mirrored to
 `agent-usage-cache.json` under the OS cache directory (normalized rows, optional
 account labels, fetch timestamps — never secrets or provider bodies). Empty
 probes never overwrite a good entry. Concurrent refreshes for one agent share a
@@ -255,7 +255,7 @@ random pastel from `ds_random_pastel_wash_json` (new color when speaker becomes
 non-null or changes; frozen until idle). Top-bar speaking stripe and progress
 bars stay brand purple.
 
-Pipe: enqueue keeps `source: ClientSource` on each TTS item → worker claim
+Pipe: enqueue keeps `source: WiredClient` on each TTS item → worker claim
 publishes `PlayingClaim { source, session }` → `tts_running()` exposes
 `(tts_active, Option<source>)` → host matches `speaker == card.agent`. Not
 inferred from session id. Earcons under focus hold do not claim playback.

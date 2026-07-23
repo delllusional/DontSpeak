@@ -84,7 +84,7 @@ char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 // `agents` gate is off. Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_skeleton_json(void);
 
-// Blocking card refresh (`ClientSource` token). Off UI thread. `refresh` skips soft cache.
+// Blocking card refresh (`WiredClient` token). Off UI thread. `refresh` skips soft cache.
 // Empty card while the config `agents` gate is off (keychain guard: no provider probe).
 // Owned `char*`. HANDLE-FREE.
 char *ds_agent_usage_card_json(const char *agent, uint8_t refresh);

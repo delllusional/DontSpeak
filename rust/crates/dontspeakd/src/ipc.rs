@@ -3,21 +3,24 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ds_config::{CancelSpeechScope, ClientSource, Paths, TtsArgPools, VoiceConfig};
+use ds_config::{CancelSpeechScope, Paths, TtsArgPools, VoiceConfig, WiredClient};
 
 use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
-/// Client request log via `log_from` (never `log_cached*` — real $HOME; #26).
-fn log_client(paths: &Paths, client: ClientSource, msg: &str) {
-    ds_log::log_from(
-        &paths.log_file,
-        ds_log::LogLevel::Info,
-        "engine",
-        client,
-        msg,
-    );
+/// Request log with wired-client attribution when known.
+fn log_client(paths: &Paths, client: Option<WiredClient>, msg: &str) {
+    match client {
+        Some(client) => ds_log::log_from(
+            &paths.log_file,
+            ds_log::LogLevel::Info,
+            "engine",
+            client,
+            msg,
+        ),
+        None => ds_log::log(&paths.log_file, ds_log::LogLevel::Info, "engine", msg),
+    }
 }
 
 /// Cancel on MarkActive? Skip voice-submit echoes (`clear_on_input` already applied).
@@ -66,12 +69,12 @@ fn handle_mark_active(
     paths: &Paths,
     sessions: HookSessions,
     synthetic: bool,
-    source: ClientSource,
+    source: Option<WiredClient>,
 ) {
     // Unconditional liveness nudge (+ re-discovery / negative-cache re-arm).
     if let Some(s) = &sessions.logical {
         codex_sessions.nudge(s);
-        if source == ClientSource::Grok {
+        if source == Some(WiredClient::Grok) {
             grok_sessions.nudge(s);
         }
     }
@@ -112,11 +115,10 @@ pub(crate) fn spawn_ipc_server(
         // (stale CLI missing `--client`) silently kills the voice loop. See log_client.
         let log_paths = paths.clone();
         let on_bad_request = move |detail: &str| {
-            ds_log::log_from(
+            ds_log::log(
                 &log_paths.log_file,
                 ds_log::LogLevel::Warn,
                 "engine",
-                ClientSource::Unknown,
                 &format!(
                     "{detail} — caller and engine are out of sync; \
                      reinstall the CLI and restart the app"
@@ -160,7 +162,7 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(s) = &session {
                         codex_sessions.nudge(s);
-                        if source == ClientSource::Grok {
+                        if source == Some(WiredClient::Grok) {
                             grok_sessions.nudge(s);
                         }
                     }
@@ -284,7 +286,7 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(session) = session.as_deref() {
                         ttsq.forget_narration_session(session);
-                        if source == ClientSource::Grok {
+                        if source == Some(WiredClient::Grok) {
                             grok_sessions.forget(session);
                         }
                     }
@@ -607,7 +609,7 @@ mod tests {
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
         ttsq.set_active_session(Some("other".into()));
-        ttsq.enqueue("hi".into(), None, ClientSource::Unknown, Some("a".into()))
+        ttsq.enqueue("hi".into(), None, None, Some("a".into()))
             .unwrap();
 
         handle_mark_active(
@@ -620,7 +622,7 @@ mod tests {
                 queue: Some("a".into()),
             },
             true,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
         );
 
         assert_eq!(
@@ -644,13 +646,8 @@ mod tests {
         let codex_sessions = crate::codex_stream::SessionRegistry::new();
         let grok_sessions = crate::grok_stream::SessionRegistry::new();
 
-        ttsq.enqueue(
-            "hi".into(),
-            None,
-            ClientSource::Unknown,
-            Some("window-a".into()),
-        )
-        .unwrap();
+        ttsq.enqueue("hi".into(), None, None, Some("window-a".into()))
+            .unwrap();
 
         handle_mark_active(
             &ttsq,
@@ -662,7 +659,7 @@ mod tests {
                 queue: Some("window-a".into()),
             },
             false,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
         );
 
         assert_eq!(ttsq.active_session(), Some("window-a".into()));
@@ -691,7 +688,7 @@ mod tests {
                 queue: Some("window-g".into()),
             },
             true,
-            ClientSource::Grok,
+            Some(WiredClient::Grok),
         );
         assert!(
             grok_sessions.contains("g1"),
@@ -709,7 +706,7 @@ mod tests {
                 queue: Some("window-c".into()),
             },
             true,
-            ClientSource::ClaudeCode,
+            Some(WiredClient::ClaudeCode),
         );
         assert!(
             !grok_sessions2.contains("c1"),

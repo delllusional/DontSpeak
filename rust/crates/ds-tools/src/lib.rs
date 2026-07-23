@@ -676,7 +676,7 @@ fn output_schema_for(output: Output) -> Value {
                             "agent": {
                                 "type": "string",
                                 // Registry-driven — new wireable client can't drift out.
-                                "enum": ds_config::ClientSource::CLIENTS
+                                "enum": ds_config::WiredClient::ALL
                                     .iter()
                                     .map(|c| c.as_str())
                                     .collect::<Vec<_>>()
