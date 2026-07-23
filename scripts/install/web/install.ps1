@@ -20,6 +20,8 @@
     DONTSPEAK_ARCHIVE         install an explicit local portable zip instead of downloading
                               latest (development path; the archive must match this machine)
     DONTSPEAK_DRY_RUN=1       resolve + print the plan, download nothing
+    DONTSPEAK_INSTALL_LOCK_WAIT  seconds to wait for a concurrent installer before failing
+                              (default 600)
 #>
 # `irm | iex` runs this text in the CALLER's scope — the preference/StrictMode changes
 # below would leak into the user's interactive session. The & { } wrapper scopes them
@@ -52,6 +54,52 @@ public static extern System.IntPtr SendMessageTimeout(
   [void][DontSpeak.EnvironmentChangeNativeMethods]::SendMessageTimeout(
     [IntPtr]0xffff, 0x001a, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result)
 }
+
+# --- BEGIN destination lock ---
+# Serializes the destructive finalization (recheck → stop → replace → wire) of the install
+# destination across processes; download/extract stay outside it. Issue #198.
+# The HANDLE is the lock: FileShare::None is enforced by the OS and released when the process
+# dies, so an abandoned installer cannot wedge future installs and none of the POSIX installers'
+# liveness/age rules are needed here.
+# The lock FILE stays on disk after release: removing it would let a third process open a fresh
+# file while a waiter still holds the old one (same reason ds-model keeps its .lock files —
+# rust/crates/ds-model/src/download.rs). uninstall.ps1 removes it.
+function Enter-DestinationLock {
+  param(
+    [Parameter(Mandatory = $true)][string]$Destination,
+    [int]$TimeoutSeconds = $(if ($env:DONTSPEAK_INSTALL_LOCK_WAIT) { [int]$env:DONTSPEAK_INSTALL_LOCK_WAIT } else { 600 })
+  )
+  $path = Join-Path (Split-Path -Parent $Destination) ('.' + (Split-Path -Leaf $Destination) + '.ds-install.lock')
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $notified = $false
+  while ($true) {
+    try {
+      return [System.IO.File]::Open($path, [System.IO.FileMode]::OpenOrCreate,
+        [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch [System.IO.IOException] {
+      # Wait ONLY on a sharing/lock violation (32/33) — another installer holds the handle.
+      # Every other IOException subclass (DirectoryNotFoundException, PathTooLongException,
+      # disk failures) is permanent here, so rethrow instead of retrying for the whole timeout
+      # and then reporting it as a concurrent installer. An ACL denial arrives as
+      # UnauthorizedAccessException and is never caught here at all.
+      #
+      # GetBaseException(), NOT $_.Exception: an exception thrown out of a .NET METHOD CALL
+      # reaches the catch wrapped in a MethodInvocationException, whose own HResult is
+      # 0x80131501 — it would never match 32/33, so every wait would abort immediately. The
+      # typed `catch [System.IO.IOException]` still selects this handler because PowerShell
+      # walks inner exceptions when matching, which makes the wrapper invisible until you read
+      # a property off it.
+      $win32 = $_.Exception.GetBaseException().HResult -band 0xFFFF
+      if ($win32 -ne 32 -and $win32 -ne 33) { throw }
+      if ((Get-Date) -ge $deadline) {
+        throw "another DontSpeak installer is still finalizing $Destination (lock: $path)"
+      }
+      if (-not $notified) { Write-Host '==> waiting for another DontSpeak installer to finish'; $notified = $true }
+      Start-Sleep -Milliseconds 500
+    }
+  }
+}
+# --- END destination lock ---
 
 # Release-asset arch token is uname-style everywhere: ARM64 → aarch64, AMD64 → x86_64.
 # Detect the MACHINE, not this process: an x64-emulated shell on Windows-on-ARM reports
@@ -93,6 +141,7 @@ if ($dry) { Write-Host "(dry run) would unzip to %LOCALAPPDATA%\Programs\DontSpe
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("dontspeak-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+$lock = $null
 try {
   $zip = if ($archive) { $archive } else { Join-Path $tmp $zipName }
   if ($archive) { Say "using local archive" }
@@ -131,6 +180,12 @@ try {
   # Per-user location (no elevation). Replace any prior copy.
   $dest = Join-Path $env:LOCALAPPDATA 'Programs\DontSpeak'
   Say "installing to $dest"
+  # The parent must exist before the sibling lock file can be opened (a missing one throws
+  # DirectoryNotFoundException, which Enter-DestinationLock correctly rethrows rather than
+  # retrying). Everything from here to the uninstall-key registration replaces the ONE shared
+  # destination, so it runs under the lock (#198).
+  New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+  $lock = Enter-DestinationLock -Destination $dest
   # Stop every process launched from this install, not unrelated same-named developer
   # builds. Wait for those exact process objects, then retain the delete retry because
   # Windows can release runtime file handles a beat after process exit.
@@ -147,7 +202,6 @@ try {
     try { Remove-Item $dest -Recurse -Force -ErrorAction Stop } catch { Start-Sleep -Milliseconds 300 }
   }
   if (Test-Path $dest) { throw "cannot remove the previous install at $dest (files still in use)" }
-  New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
   try { Move-Item -Path $stagedApp -Destination $dest -ErrorAction Stop }
   catch { Copy-Item -Path $stagedApp -Destination $dest -Recurse -Force }  # TEMP on another volume
 
@@ -265,6 +319,7 @@ try {
   Write-Host "Undo any time:  & '$cli' wire --all --remove"
   Write-Host "Uninstall: Settings > Apps > DontSpeak > Uninstall (or run '$unps')"
 } finally {
+  if ($lock) { $lock.Dispose() }
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 }

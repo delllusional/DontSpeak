@@ -366,3 +366,119 @@ fn macos_installs_share_the_single_per_user_layout() {
         }
     }
 }
+
+/// The POSIX destination lock ships duplicated: `install.sh` arrives through `curl | sh` and
+/// `tarball-install.sh` inside the tarball, so neither can source a shared file. Pin the two
+/// copies equal — a fix applied to one only would leave the other platform racing.
+#[test]
+fn posix_installers_share_one_destination_lock_block() {
+    fn block(rel: &str) -> String {
+        let body = repo_file(rel);
+        let begin = body
+            .find("# ── BEGIN destination lock")
+            .unwrap_or_else(|| panic!("{rel} has no destination-lock BEGIN marker"));
+        let end = body
+            .find("# ── END destination lock")
+            .unwrap_or_else(|| panic!("{rel} has no destination-lock END marker"));
+        assert!(end > begin, "{rel} has its destination-lock markers reversed");
+        body[begin..end].to_string()
+    }
+    let web = block("scripts/install/web/install.sh");
+    let tarball = block("apps/linux/tarball-install.sh");
+    assert!(!web.is_empty(), "the destination-lock block is empty");
+    assert_eq!(
+        web, tarball,
+        "scripts/install/web/install.sh and apps/linux/tarball-install.sh carry different \
+         destination-lock blocks — they must stay byte-identical"
+    );
+}
+
+/// Every platform must take its destination lock BEFORE the first destructive step, and give
+/// it back. An acquire that drifts below the stop/replace steps serializes nothing.
+#[test]
+fn installers_lock_before_replacing_the_destination() {
+    fn precedes(body: &str, first: &str, second: &str, what: &str) {
+        let lock = body
+            .find(first)
+            .unwrap_or_else(|| panic!("{what}: no `{first}`"));
+        let destructive = body
+            .find(second)
+            .unwrap_or_else(|| panic!("{what}: no `{second}`"));
+        assert!(
+            lock < destructive,
+            "{what}: `{first}` must come before `{second}` or the destructive step runs unserialized"
+        );
+    }
+
+    let macos = repo_file("scripts/install/web/install.sh");
+    precedes(&macos, "ds_lock_acquire \"$APP\"", "osascript -e 'quit app", "macOS");
+    precedes(&macos, "ds_lock_acquire \"$APP\"", "rm -rf \"$APP\"", "macOS");
+    assert!(
+        macos.contains("cleanup() { ds_lock_release;"),
+        "macOS: cleanup() must release the destination lock first"
+    );
+
+    let linux = repo_file("apps/linux/tarball-install.sh");
+    precedes(&linux, "ds_lock_acquire \"$BIN/dontspeak\"", "pkill -x ds-gtk", "Linux");
+    precedes(
+        &linux,
+        "ds_lock_acquire \"$BIN/dontspeak\"",
+        "install -m0755 \"$HERE\"/bin/*",
+        "Linux",
+    );
+    assert!(
+        linux.contains("trap ds_lock_release EXIT"),
+        "Linux: the bundled installer must release the destination lock on exit"
+    );
+
+    // The call site, not the function definition — `Enter-DestinationLock` alone also matches
+    // the definition above it, so that pin would survive deleting the call.
+    let windows = repo_file("scripts/install/web/install.ps1");
+    precedes(
+        &windows,
+        "Enter-DestinationLock -Destination $dest",
+        "$installed = @(Get-Process",
+        "Windows",
+    );
+    precedes(
+        &windows,
+        "Enter-DestinationLock -Destination $dest",
+        "Remove-Item $dest",
+        "Windows",
+    );
+    assert!(
+        windows.contains("if ($lock) { $lock.Dispose() }"),
+        "Windows: the finally block must dispose the destination lock handle"
+    );
+
+    // POSIX release DELETES the dir (the Windows file must survive — waiters hold handles to
+    // it). A release that only unlocks would leave every later install force-breaking.
+    assert!(
+        macos.contains("rm -rf \"$DS_LOCK_DIR\" || :"),
+        "the POSIX lock block must delete its dir on release"
+    );
+}
+
+/// A killed installer leaves its lock behind, and Windows never deletes its lock file at all —
+/// so full removal is the uninstaller's job.
+#[test]
+fn uninstallers_remove_the_destination_lock_artifacts() {
+    let posix = repo_file("scripts/install/bundle/uninstall.sh");
+    for needle in [
+        ".DontSpeak.app.ds-install.lock",
+        ".DontSpeak.app.ds-install.lock.breaker",
+        ".dontspeak.ds-install.lock",
+        ".dontspeak.ds-install.lock.breaker",
+    ] {
+        assert!(
+            posix.contains(needle),
+            "scripts/install/bundle/uninstall.sh no longer removes {needle} — an interrupted \
+             install leaves it behind"
+        );
+    }
+    assert!(
+        repo_file("scripts/install/bundle/uninstall.ps1").contains(".ds-install.lock"),
+        "scripts/install/bundle/uninstall.ps1 must remove the destination lock file — the \
+         installer deliberately never deletes it"
+    );
+}

@@ -75,9 +75,18 @@ case "$(uname -s)" in
 
     echo "==> 3. remove the app bundle + installed engine binaries"
     rm -rf "$H/Applications/DontSpeak.app"
+    # An installer killed mid-finalization leaves its destination lock (and, rarer, the
+    # breaker slot that serializes stale-lock removal) behind — see the destination-lock
+    # block in scripts/install/web/install.sh.
+    rm -rf "$H/Applications/.DontSpeak.app.ds-install.lock" \
+      "$H/Applications/.DontSpeak.app.ds-install.lock.breaker"
     # A bundle installed with the DONTSPEAK_APP_DIR override lives outside the standard
     # per-user layout — honor the same override here or that bundle is never removed.
-    [ -n "${DONTSPEAK_APP_DIR:-}" ] && rm -rf "$DONTSPEAK_APP_DIR"
+    if [ -n "${DONTSPEAK_APP_DIR:-}" ]; then
+      rm -rf "$DONTSPEAK_APP_DIR" \
+        "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock" \
+        "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock.breaker"
+    fi
     for b in dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
@@ -146,6 +155,10 @@ case "$(uname -s)" in
 
     echo "==> 3. remove the installed binaries"
     for b in ds-gtk dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
+    # Crash residue from an installer killed mid-finalization (see the destination-lock block
+    # in apps/linux/tarball-install.sh).
+    rm -rf "$INSTALL_DIR/.dontspeak.ds-install.lock" \
+      "$INSTALL_DIR/.dontspeak.ds-install.lock.breaker"
 
     echo "==> 4. remove the .desktop launchers (app menu + autostart) + the app icon"
     rm -f "$APPS_DIR/dontspeak.desktop" \

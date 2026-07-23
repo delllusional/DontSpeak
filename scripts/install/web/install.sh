@@ -20,6 +20,8 @@
 #                             manages its own login item)
 #   DONTSPEAK_INSTALL_DIR  bin dir for CLI launchers + placed uninstaller (default
 #                          ~/.local/bin; macOS app always installs to ~/Applications)
+#   DONTSPEAK_INSTALL_LOCK_WAIT  seconds to wait for a concurrent installer before failing
+#                                (default 600)
 set -eu
 
 REPO="${DONTSPEAK_REPO:-delllusional/DontSpeak}"
@@ -103,6 +105,128 @@ place_uninstaller() {
   say "uninstaller placed: $UNINSTALLER (run it any time to fully remove DontSpeak)"
 }
 
+# ── BEGIN destination lock ───────────────────────────────────────────────────
+# Serializes the destructive finalization (recheck → stop → replace → wire) of ONE install
+# destination across processes; downloads and staging stay outside it (unique per-invocation
+# names, safe in parallel). Issue #198.
+#
+# COPY: byte-identical in scripts/install/web/install.sh and apps/linux/tarball-install.sh
+# (packaging_sync.rs pins the two equal). Both ship standalone — one through `curl | sh`, one
+# inside the tarball — so neither can source a shared file. POSIX sh only: install.sh runs
+# under /bin/sh (dash on Debian/Ubuntu).
+#
+# mkdir is the atomic primitive because no OS-released shell lock exists on both platforms:
+# flock(1) is absent on macOS, shlock(1) on Linux. (The Windows installer gets an OS-released
+# one from an exclusively-shared file handle and needs none of the rules below.) A mkdir lock
+# outlives its owner, so it is breakable two ways:
+#   • the owner was recorded on THIS host and no longer answers `kill -0` → break now;
+#   • otherwise — a foreign host token (a shared $HOME can hold another machine's lock, where
+#     a pid means nothing), an unreadable owner file, or an owner that still answers → break
+#     only once the lock is DS_LOCK_STALE_MIN old.
+# The age cap also covers an owner that answers because its pid was REUSED by an unrelated
+# process, which liveness alone cannot distinguish from a live owner; with no cap such a lock
+# would block installs until that process happened to exit. Real finalization is seconds, so a
+# lock this old means its owner is wedged, and breaking it is no worse than the unserialized
+# behavior this replaces.
+#
+# Every rm below ends in `|| :` because under `set -e` a failing command that ends an if-body,
+# a case-branch or a trap handler exits the shell: a lock another uid owns (rm → EPERM) would
+# otherwise kill the installer outright instead of waiting out its deadline, and a failing
+# release would skip the rest of cleanup and rewrite a successful install's exit status.
+DS_LOCK_DIR=""
+DS_LOCK_OWNED=0
+DS_LOCK_STALE_MIN=60
+
+ds_lock_path() {  # $1 = destination → sibling ".<name>.ds-install.lock"
+  printf '%s/.%s.ds-install.lock' "$(dirname "$1")" "$(basename "$1")"
+}
+
+# 0 = the lock may be broken.
+ds_lock_stale() {
+  ds_lock_owner="$(cat "$DS_LOCK_DIR/owner" 2>/dev/null)" || ds_lock_owner=""
+  ds_lock_pid="${ds_lock_owner%% *}"
+  ds_lock_host="${ds_lock_owner#* }"
+  case "$ds_lock_pid" in
+    ''|*[!0-9]*) : ;;
+    *)
+      if [ "$ds_lock_host" = "$(uname -n)" ] && ! kill -0 "$ds_lock_pid" 2>/dev/null; then
+        return 0
+      fi
+      ;;
+  esac
+  # find exits 0 either way and prints the path only when older, so age is decided by the
+  # output, not the status.
+  [ -n "$(find "$DS_LOCK_DIR" -maxdepth 0 -mmin "+$DS_LOCK_STALE_MIN" 2>/dev/null)" ]
+}
+
+# Breaking is itself serialized with the same atomic mkdir: two waiters that both saw one
+# breakable lock would otherwise race `rm -rf` against each other's fresh `mkdir`. The slot is
+# force-reclaimed after a minute — its own critical section is milliseconds, so an older slot
+# is unambiguously abandoned.
+ds_lock_break() {
+  ds_lock_breaker="$DS_LOCK_DIR.breaker"
+  if ! mkdir "$ds_lock_breaker" 2>/dev/null; then
+    if [ -n "$(find "$ds_lock_breaker" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+      rm -rf "$ds_lock_breaker" || :
+    fi
+    return 0
+  fi
+  # Recheck inside the slot: another breaker may already have removed this lock and a third
+  # process taken a fresh one. Residual, age path only: a lock whose owner is still alive can
+  # be removed if that owner releases and a third process re-acquires between this recheck and
+  # the rm — a sub-millisecond window that first requires the lock to be an hour old.
+  if ds_lock_stale; then rm -rf "$DS_LOCK_DIR" || :; fi
+  rmdir "$ds_lock_breaker" 2>/dev/null || :
+}
+
+# $1 = destination path. Blocks until owned, then records "<pid> <host>". DS_LOCK_DIR is set
+# before ownership so the timeout message can name the lock; release is gated on DS_LOCK_OWNED.
+ds_lock_acquire() {
+  DS_LOCK_DIR="$(ds_lock_path "$1")"
+  mkdir -p "$(dirname "$DS_LOCK_DIR")"
+  ds_lock_waited=0
+  ds_lock_notified=0
+  while :; do
+    if mkdir "$DS_LOCK_DIR" 2>/dev/null; then
+      # Claim first, describe second: killed in between, the dir is still ours to remove
+      # (ds_lock_release reads a missing owner file as our own crash residue).
+      DS_LOCK_OWNED=1
+      printf '%s %s\n' "$$" "$(uname -n)" > "$DS_LOCK_DIR/owner"
+      return 0
+    fi
+    # Only "already taken" means wait. An unwritable parent fails here too, and polling that
+    # for the whole deadline would report a concurrent installer that does not exist.
+    [ -d "$DS_LOCK_DIR" ] || {
+      printf 'ERROR: %s\n' "cannot create the install lock $DS_LOCK_DIR" >&2
+      exit 1
+    }
+    if ds_lock_stale; then ds_lock_break; fi
+    if [ "$ds_lock_notified" = 0 ] && [ "$ds_lock_waited" -ge 2 ]; then
+      printf '==> %s\n' "waiting for another DontSpeak installer to finish"
+      ds_lock_notified=1
+    fi
+    if [ "$ds_lock_waited" -ge "${DONTSPEAK_INSTALL_LOCK_WAIT:-600}" ]; then
+      printf 'ERROR: %s\n' "another DontSpeak installer is still finalizing $1 (lock: $DS_LOCK_DIR)" >&2
+      exit 1
+    fi
+    sleep 1
+    ds_lock_waited=$((ds_lock_waited + 1))
+  done
+}
+
+# Deleting the dir IS the release: a mkdir lock that outlives its owner can only be re-taken
+# by force-breaking it. (The Windows installer is the mirror image — there the file must stay,
+# because waiters hold an open handle to it.) Owner-gated: a lock broken out from under us and
+# re-taken belongs to someone else.
+ds_lock_release() {
+  [ "$DS_LOCK_OWNED" = 1 ] || return 0
+  DS_LOCK_OWNED=0
+  ds_lock_owner="$(cat "$DS_LOCK_DIR/owner" 2>/dev/null)" || ds_lock_owner=""
+  case "$ds_lock_owner" in ''|"$$ "*) rm -rf "$DS_LOCK_DIR" || : ;; esac
+  DS_LOCK_DIR=""
+}
+# ── END destination lock ─────────────────────────────────────────────────────
+
 # Everything below runs from main(), invoked on the LAST line — `curl | sh` executes the
 # stream as it arrives, so a connection drop mid-transfer would otherwise run every
 # complete line received (potentially the destructive clean step) and silently stop. A
@@ -111,7 +235,9 @@ main() {
 
 TMP=$(mktemp -d)
 STAGED=""
-cleanup() { rm -rf "$TMP"; [ -n "$STAGED" ] && rm -rf "$STAGED"; :; }
+# Release first: hand the shared destination to a waiting installer before spending time on
+# this process's own per-invocation cleanup (a staged .app copy is not small).
+cleanup() { ds_lock_release; rm -rf "$TMP"; [ -n "$STAGED" ] && rm -rf "$STAGED"; :; }
 # Signals too: a Ctrl-C mid-download must not leave the mktemp dir behind (POSIX sh
 # doesn't run the EXIT trap on an unhandled signal) — and a signal trap that doesn't
 # exit would RESUME the script after the interrupted command, mid-install. Stop too.
@@ -159,6 +285,10 @@ case "$OS" in
     rm -rf "$STAGED"
     cp -R "$out/DontSpeak.app" "$STAGED" 2>/dev/null \
       || die "cannot write the new app into $HOME/Applications (disk full?)"
+    # Everything below replaces the ONE shared destination — serialize it against a second
+    # installer (#198). Staging above is per-invocation, so it needs no lock. The EXIT/signal
+    # traps armed above already cover the release.
+    ds_lock_acquire "$APP"
     # CLEAN install, not an upgrade-in-place: quit any running instance (app + engine +
     # warm helper), then replace the previous bundle — release and dev installs share
     # this one layout, so there is no other location to probe. Also drop dev/CLI

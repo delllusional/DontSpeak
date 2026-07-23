@@ -87,6 +87,12 @@ Invoke-CleanupStep 'remove uninstall registration' {
   $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DontSpeak'
   if (Test-Path $uninstallKey) { Remove-Item $uninstallKey -Recurse -Force }
 }
+# The installer never deletes its destination lock file (a waiter may still hold a handle to
+# it), so removal is this script's job. Best-effort and OUTSIDE Invoke-CleanupStep: a lock held
+# by a concurrent installer must not turn an uninstall into a reported partial failure.
+$lockFile = Join-Path (Split-Path -Parent $dest) ('.' + (Split-Path -Leaf $dest) + '.ds-install.lock')
+Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+
 # 7. Delete the install dir LAST — from a detached cmd after a short delay, so this running
 #    script's own folder is free to remove once powershell exits.
 Invoke-CleanupStep 'schedule install-directory removal' {
