@@ -67,7 +67,7 @@ fn prefetch_local(url: &str) -> Option<PathBuf> {
     p.is_file().then_some(p)
 }
 
-// Per-dest lock so shared files (ORT, kokoro_frontend) attach instead of double-fetch.
+// Per-dest process-local lock so threads attach instead of double-fetch.
 pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
@@ -79,6 +79,32 @@ pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
         .entry(path.to_path_buf())
         .or_default()
         .clone()
+}
+
+fn destination_lock_path(final_path: &Path) -> std::io::Result<PathBuf> {
+    let dir = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
+    let name = final_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| std::io::Error::other("model path has no UTF-8 file name"))?;
+    Ok(dir.join(format!(".{name}.lock")))
+}
+
+/// Cross-process counterpart to [`file_flight`]. The lock file stays in place because
+/// deleting it after unlock could let a third process lock a new inode while a waiter
+/// still holds the unlinked old one.
+pub(crate) fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
+    let lock_path = destination_lock_path(final_path)?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.lock()?;
+    Ok(lock)
 }
 
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
@@ -124,7 +150,7 @@ pub fn ensure_in_dir(
     Ok(final_path)
 }
 
-/// Explicit dest; serialized by [`file_flight`].
+/// Explicit dest; serialized within and across processes.
 pub(crate) fn ensure_at(
     final_path: &Path,
     spec: &ModelSpec,
@@ -135,8 +161,13 @@ pub(crate) fn ensure_at(
         sweep_orphans_once(&sweep_root);
     }
 
+    let dir = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
+    std::fs::create_dir_all(dir)?;
     let flight = file_flight(final_path);
     let _in_flight = flight.lock().unwrap();
+    let _destination_lock = lock_destination(final_path)?;
 
     if verify_sha256(final_path, &spec.sha256) {
         if let Ok(partial) = resumable_partial_path(final_path) {
@@ -145,10 +176,6 @@ pub(crate) fn ensure_at(
         return Ok(());
     }
 
-    let dir = final_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
-    std::fs::create_dir_all(dir)?;
     let partial = resumable_partial_path(final_path)?;
     let metadata = resumable_metadata_path(&partial);
     let mut state = load_resume_state(&partial, &metadata, spec);
@@ -723,6 +750,117 @@ mod tests {
     use super::*;
     use std::net::{TcpListener, TcpStream};
 
+    const LOCK_CHILD_TARGET: &str = "DS_MODEL_LOCK_CHILD_TARGET";
+    const LOCK_CHILD_SOURCE: &str = "DS_MODEL_LOCK_CHILD_SOURCE";
+    const LOCK_CHILD_READY: &str = "DS_MODEL_LOCK_CHILD_READY";
+    const LOCK_CHILD_RELEASE: &str = "DS_MODEL_LOCK_CHILD_RELEASE";
+    const LOCK_TEST_URL: &str = "https://example.invalid/cross-process-model";
+    const LOCK_TEST_BYTES: &[u8] = b"cross-process-model";
+
+    #[test]
+    fn destination_lock_child() {
+        let Ok(target) = std::env::var(LOCK_CHILD_TARGET) else {
+            return;
+        };
+        let source = PathBuf::from(std::env::var_os(LOCK_CHILD_SOURCE).unwrap());
+        let ready = PathBuf::from(std::env::var_os(LOCK_CHILD_READY).unwrap());
+        let release = PathBuf::from(std::env::var_os(LOCK_CHILD_RELEASE).unwrap());
+        let spec = ModelSpec {
+            file_name: "model.bin".into(),
+            url: LOCK_TEST_URL.into(),
+            sha256: sha256_hex(LOCK_TEST_BYTES),
+        };
+        set_prefetch_source(Some(source));
+        ensure_at(Path::new(&target), &spec, 1, &|_, _| {
+            std::fs::write(&ready, b"locked").unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !release.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parent did not release child download"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        })
+        .unwrap();
+        set_prefetch_source(None);
+    }
+
+    /// Issue #195: a replacement daemon must wait for the old daemon's downloader instead
+    /// of concurrently writing the same deterministic `.part` and `.part.meta` files.
+    #[test]
+    fn destination_lock_serializes_separate_ensure_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("model.bin");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join(prefetch_key(LOCK_TEST_URL)),
+            LOCK_TEST_BYTES,
+        )
+        .unwrap();
+        let ready = dir.path().join("child-ready");
+        let release = dir.path().join("release-child");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("download::tests::destination_lock_child")
+            .arg("--nocapture")
+            .env(LOCK_CHILD_TARGET, &target)
+            .env(LOCK_CHILD_SOURCE, source.path())
+            .env(LOCK_CHILD_READY, &ready)
+            .env(LOCK_CHILD_RELEASE, &release)
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not acquire destination lock"
+            );
+            assert!(child.try_wait().unwrap().is_none(), "child exited early");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let target_for_waiter = target.clone();
+        let spec = ModelSpec {
+            file_name: "model.bin".into(),
+            url: LOCK_TEST_URL.into(),
+            sha256: sha256_hex(LOCK_TEST_BYTES),
+        };
+        let waiter_progress = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let progress = waiter_progress.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            ensure_at(&target_for_waiter, &spec, 1, &|_, _| {
+                progress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+            .unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "second process must not enter while the first owns the destination"
+        );
+
+        std::fs::write(release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("waiter acquires after child exits");
+        waiter.join().unwrap();
+        assert!(verify_sha256(&target, &sha256_hex(LOCK_TEST_BYTES)));
+        assert_eq!(
+            waiter_progress.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the waiter must attach to the finalized file without a second transfer"
+        );
+        let partial = resumable_partial_path(&target).unwrap();
+        assert!(!partial.exists());
+        assert!(!resumable_metadata_path(&partial).exists());
+    }
+
     fn read_request(stream: &mut TcpStream) -> String {
         let mut request = Vec::new();
         let mut buf = [0u8; 1024];
@@ -1173,9 +1311,12 @@ mod tests {
         let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(
             entries.len(),
-            1,
-            "only the atomically persisted final file remains"
+            2,
+            "only the final file and persistent destination lock remain"
         );
+        assert!(destination_lock_path(&final_path).unwrap().is_file());
+        assert!(!resumable_partial_path(&final_path).unwrap().exists());
+        assert!(!resumable_metadata_path(&resumable_partial_path(&final_path).unwrap()).exists());
     }
 
     /// Range support is optional. A `200` response to a Range request is a full body, so the

@@ -115,18 +115,19 @@ fn ensure_distribution(
     label: &str,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
-    let flight = crate::download::file_flight(final_dir);
-    let _in_flight = flight
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if payload_present(final_dir) && marker_matches(final_dir, dist.archive_sha256) {
-        return Ok(final_dir.to_path_buf());
-    }
-
     let parent = final_dir
         .parent()
         .ok_or_else(|| std::io::Error::other("frontend directory has no parent"))?;
     std::fs::create_dir_all(parent)?;
+    let flight = crate::download::file_flight(final_dir);
+    let _in_flight = flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _destination_lock = crate::download::lock_destination(final_dir)?;
+    if payload_present(final_dir) && marker_matches(final_dir, dist.archive_sha256) {
+        return Ok(final_dir.to_path_buf());
+    }
+
     let archive_dir = tempfile::tempdir_in(parent)?;
     let archive_spec = ModelSpec {
         file_name: "frontend.archive".to_string(),

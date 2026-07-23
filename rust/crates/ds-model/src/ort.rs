@@ -416,16 +416,17 @@ fn ensure_onnxruntime_at(
     archive_sha256: &str,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    let flight = crate::download::file_flight(final_path);
-    let _in_flight = flight.lock().unwrap();
-    // Managed extract only here (outer path may be bundled/brew).
-    if is_managed_download_up_to_date(final_path) {
-        return Ok(());
-    }
     let dir = final_path
         .parent()
         .ok_or_else(|| std::io::Error::other("dylib path has no parent"))?;
     std::fs::create_dir_all(dir)?;
+    let flight = crate::download::file_flight(final_path);
+    let _in_flight = flight.lock().unwrap();
+    let _destination_lock = crate::download::lock_destination(final_path)?;
+    // Managed extract only here (outer path may be bundled/brew).
+    if is_managed_download_up_to_date(final_path) {
+        return Ok(());
+    }
 
     // Same retry policy as model files (transient vs permanent).
     let retries = DEFAULT_RETRIES.max(1);
