@@ -10,7 +10,7 @@ public class AgentUsageModelTests
         var deck = AgentUsageModel.DecodeDeck(
             """
             {"cards":[
-              {"agent":"claude_code","account":"me@anthropic.test","rows":[
+              {"agent":"claude","account":"me@anthropic.test","rows":[
                 {"period":"session","used_percent":12,"resets_at_unix":1799990000},
                 {"period":"week","used_percent":25.5,"resets_at_unix":1800000000}
               ]},
@@ -22,7 +22,7 @@ public class AgentUsageModelTests
 
         Assert.NotNull(deck);
         Assert.Equal(2, deck.Cards.Count);
-        Assert.Equal("claude_code", deck.Cards[0].Agent);
+        Assert.Equal("claude", deck.Cards[0].Agent);
         Assert.Equal("me@anthropic.test", deck.Cards[0].Account);
         Assert.Equal("session", deck.Cards[0].Rows[0].Period);
         Assert.Equal(12, deck.Cards[0].Rows[0].UsedPercent);
@@ -56,12 +56,12 @@ public class AgentUsageModelTests
     [Fact]
     public void DecodesNeedsAuthDefaultingFalse()
     {
-        var legacy = AgentUsageModel.DecodeCard("""{"agent":"claude_code","rows":[]}""");
+        var legacy = AgentUsageModel.DecodeCard("""{"agent":"claude","rows":[]}""");
         Assert.NotNull(legacy);
         Assert.False(legacy.NeedsAuth);
 
         var guarded = AgentUsageModel.DecodeCard(
-            """{"agent":"claude_code","rows":[],"needs_auth":true}""");
+            """{"agent":"claude","rows":[],"needs_auth":true}""");
         Assert.NotNull(guarded);
         Assert.True(guarded.NeedsAuth);
     }
@@ -69,8 +69,8 @@ public class AgentUsageModelTests
     [Fact]
     public void EmptyAuthorizationResultReplacesAuthPrompt()
     {
-        var guarded = new UsageCardDto("claude_code", [], NeedsAuth: true);
-        var unauthorized = new UsageCardDto("claude_code", []);
+        var guarded = new UsageCardDto("claude", [], NeedsAuth: true);
+        var unauthorized = new UsageCardDto("claude", []);
 
         Assert.False(AgentUsageModel.Replaces(guarded, unauthorized));
         Assert.True(AgentUsageModel.Replaces(unauthorized, unauthorized));

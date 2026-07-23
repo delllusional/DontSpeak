@@ -382,7 +382,7 @@ mod tests {
         let updated = std::fs::read_to_string(&paths.config_toml).unwrap();
         assert!(updated.contains("custom = \"keep\""));
         assert!(updated.contains("future-client"));
-        assert!(updated.contains("qwen_code"));
+        assert!(updated.contains("qwen"));
         assert!(!updated.contains("\"codex\""));
 
         let malformed = "exclude_clients = [\n";

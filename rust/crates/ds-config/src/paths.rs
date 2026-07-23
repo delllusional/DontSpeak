@@ -15,7 +15,7 @@ pub struct Paths {
     pub settings_json: PathBuf,
     /// Claude Code keybindings — READ-ONLY for `claude_code` STT (`voice:pushToTalk`).
     pub keybindings_json: PathBuf,
-    /// `~/.claude.json` — MCP half of `wire claude_code` (hooks are in `settings_json`).
+    /// `~/.claude.json` — MCP half of `wire claude` (hooks are in `settings_json`).
     pub claude_code_config: PathBuf,
     /// Running `ds-narrate` pid.
     pub narrate_pid: PathBuf,

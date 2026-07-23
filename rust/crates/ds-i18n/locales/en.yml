@@ -27,11 +27,11 @@ usage:
   week: Week
   month: Month
   provider:
-    claude_code: Claude Code
+    claude: Claude Code
     codex: Codex
-    qwen_code: Qwen Code
+    qwen: Qwen Code
     grok: Grok
-    kimi_code: Kimi Code
+    kimi: Kimi Code
     hermes: Hermes Agent
 
 # ──────────────────────────────── TRAY MENU ─────────────────────────────────

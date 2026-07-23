@@ -93,7 +93,8 @@ fn usage_text() -> String {
         let _ = writeln!(
             usage,
             "  dontspeak {} [args…]  launch {}",
-            spec.launch.command, spec.display_name
+            spec.target.as_str(),
+            spec.display_name
         );
     }
     usage.push_str(USAGE_SUFFIX);
@@ -103,11 +104,10 @@ fn usage_text() -> String {
 fn expected_subcommands() -> String {
     let mut names = ds_config::CLIENT_REGISTRY
         .iter()
-        .map(|spec| format!("`{}`", spec.launch.command))
+        .map(|spec| format!("`{}`", spec.target.as_str()))
         .collect::<Vec<_>>();
     names.extend(
-        ["notify", "provide", "wire", "--version", "--help"]
-            .map(|name| format!("`{name}`")),
+        ["notify", "provide", "wire", "--version", "--help"].map(|name| format!("`{name}`")),
     );
     let last = names.pop().expect("fixed subcommands are nonempty");
     format!("{}, or {last}", names.join(", "))
@@ -261,27 +261,23 @@ mod tests {
         let bare = argv(&["dontspeak", "wire"]);
         assert_eq!(resolve_subcommand(&bare), Subcommand::Wire(&[]));
 
-        let with_args = argv(&["dontspeak", "wire", "claude_code", "--remove"]);
+        let with_args = argv(&["dontspeak", "wire", "claude", "--remove"]);
         assert_eq!(
             resolve_subcommand(&with_args),
-            Subcommand::Wire(&["claude_code".to_string(), "--remove".to_string()])
+            Subcommand::Wire(&["claude".to_string(), "--remove".to_string()])
         );
     }
 
     #[test]
-    fn every_registry_launcher_name_dispatches_with_trailing_args() {
+    fn every_registry_launcher_command_dispatches_with_trailing_args() {
         for spec in ds_config::CLIENT_REGISTRY {
-            for name in std::iter::once(spec.launch.command)
-                .chain(std::iter::once(spec.target.as_str()))
-                .chain(spec.launch.aliases.iter().copied())
-            {
-                let argv = argv(&["dontspeak", name, "--version"]);
-                assert_eq!(
-                    resolve_subcommand(&argv),
-                    Subcommand::Launch(spec.target, &argv[2..]),
-                    "{name}"
-                );
-            }
+            let command = spec.target.as_str();
+            let argv = argv(&["dontspeak", command, "--version"]);
+            assert_eq!(
+                resolve_subcommand(&argv),
+                Subcommand::Launch(spec.target, &argv[2..]),
+                "{command}"
+            );
         }
     }
 
@@ -291,7 +287,7 @@ mod tests {
         let usage = usage_text();
         let expected = expected_subcommands();
         for spec in ds_config::CLIENT_REGISTRY {
-            let cmd = spec.launch.command;
+            let cmd = spec.target.as_str();
             assert!(
                 usage.contains(&format!("dontspeak {cmd} ")),
                 "usage is missing the `{cmd}` launcher line"
@@ -390,7 +386,7 @@ mod tests {
                 "notify",
                 "--greet-only",
                 "--client",
-                "qwen_code"
+                "qwen"
             ])),
             ClientSource::QwenCode
         );

@@ -7,8 +7,9 @@ stdin hook JSON. No wrapper scripts. Two subcommands by **contract**, not by eve
   `hook_event_name`.
 - `dontspeak provide` — query; client waits for `hookSpecificOutput` on stdout.
 
-Every verb includes `--client <token>` (`claude_code` | `codex` | `qwen_code` |
-`grok` | `kimi_code` | `hermes`) so IPC/logs know the source (`client=<token>`).
+Every verb includes `--client <name>` (`claude` | `codex` | `qwen` | `grok` | `kimi` |
+`hermes`) so IPC/logs know the source (`client=<name>`). The value is the same canonical
+name used by `dontspeak <name>`.
 Missing/unknown → `unknown`, never fails the hook. MCP identity comes from
 `initialize` `clientInfo.name`.
 

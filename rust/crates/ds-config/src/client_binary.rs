@@ -36,10 +36,13 @@ pub(crate) struct ClientBinarySearch<'a> {
 /// Resolve a registry client using its normal configuration and the live environment captured
 /// by [`Paths::resolve`]. [`Paths::rooted_at`] remains isolated from the host environment.
 pub fn resolve_client_binary(client: ClientSource, paths: &Paths) -> Option<PathBuf> {
+    if !client.is_client() {
+        return None;
+    }
     let configured = if client == ClientSource::Codex {
         VoiceConfig::load(paths).codex_bin
     } else {
-        client.launch_command()?.to_string()
+        client.as_str().to_string()
     };
     resolve_configured_client_binary(client, paths, &configured)
 }
@@ -96,7 +99,10 @@ pub(crate) fn resolve_client_binary_in(
     paths: &Paths,
     search: ClientBinarySearch<'_>,
 ) -> Option<PathBuf> {
-    let canonical = client.launch_command()?;
+    if !client.is_client() {
+        return None;
+    }
+    let canonical = client.as_str();
     let configured = search.configured.trim();
     let name = if configured.is_empty() {
         canonical
@@ -267,7 +273,7 @@ mod tests {
     use super::*;
 
     fn binary_name(client: ClientSource) -> String {
-        let command = client.launch_command().unwrap();
+        let command = client.as_str();
         if cfg!(windows) {
             format!("{command}.exe")
         } else {
@@ -277,7 +283,7 @@ mod tests {
 
     fn isolated_search<'a>(client: ClientSource) -> ClientBinarySearch<'a> {
         ClientBinarySearch {
-            configured: client.launch_command().unwrap(),
+            configured: client.as_str(),
             override_path: None,
             login_path: None,
             path: None,

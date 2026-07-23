@@ -19,7 +19,7 @@ pub(crate) fn run(spec: &ClientSpec, args: &[String]) -> i32 {
         return 1;
     };
     let configured_bin = match spec.launch.mode {
-        LaunchMode::Direct => spec.launch.command,
+        LaunchMode::Direct => spec.target.as_str(),
         LaunchMode::CodexRemote => {
             let cfg = VoiceConfig::load(&paths);
             return run_codex(spec, args, &paths, &cfg.codex_bin);
@@ -89,15 +89,14 @@ fn run_direct(
     if ensure_host && !information_only(args) && !ensure_engine(&paths.engine_sock) {
         eprintln!(
             "dontspeak {}: the DontSpeak host did not become ready; launching without DontSpeak integration",
-            spec.launch.command
+            spec.target.as_str()
         );
     }
-    let Some(bin) =
-        ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)
+    let Some(bin) = ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)
     else {
         eprintln!(
             "dontspeak {}: client executable {configured_bin:?} was not found",
-            spec.launch.command
+            spec.target.as_str()
         );
         return 127;
     };
@@ -106,7 +105,7 @@ fn run_direct(
         Err(error) => {
             eprintln!(
                 "dontspeak {}: could not start {}: {error}",
-                spec.launch.command,
+                spec.target.as_str(),
                 bin.display()
             );
             1

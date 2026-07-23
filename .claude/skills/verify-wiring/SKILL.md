@@ -44,8 +44,9 @@ any of them.
    - **MCP:** `mcpServers` / `[mcp_servers.<name>]` / YAML `mcp_servers` shape + file path
      (Claude `~/.claude.json`, Qwen settings, Codex TOML, Grok `~/.grok/config.toml`,
      Kimi Code `~/.kimi-code/mcp.json`, Hermes `~/.hermes/config.yaml`).
-   - **`mcp_client_prefix`:** `starts_with` on `clientInfo.name` from activity log
-     `mcp initialize clientInfo.name=…` line.
+   - **MCP identity:** the canonical [`ClientSource`] name must be a `starts_with`
+     prefix of `clientInfo.name` from the activity-log
+     `mcp initialize clientInfo.name=…` line. Do not add a parallel prefix field.
 
 3. **Merge shape** (no client needed):
    `./rust/target/debug/dontspeak wire <client> --print-only` matches schema.

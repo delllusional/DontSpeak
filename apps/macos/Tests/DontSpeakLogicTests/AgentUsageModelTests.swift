@@ -5,10 +5,10 @@ import XCTest
 
 final class AgentUsageModelTests: XCTestCase {
     func testDecodesDeckAndCard() throws {
-        let deckJson = #"{"cards":[{"agent":"claude_code","account":"me@anthropic.test","rows":[{"period":"session","used_percent":20.0,"resets_at_unix":1800000000},{"period":"week","used_percent":40.0,"resets_at_unix":1800100000}]}]}"#
+        let deckJson = #"{"cards":[{"agent":"claude","account":"me@anthropic.test","rows":[{"period":"session","used_percent":20.0,"resets_at_unix":1800000000},{"period":"week","used_percent":40.0,"resets_at_unix":1800100000}]}]}"#
         let deck = try XCTUnwrap(UsageDeck.decodeDeck(Data(deckJson.utf8)))
         XCTAssertEqual(deck.cards.count, 1)
-        XCTAssertEqual(deck.cards[0].agent, "claude_code")
+        XCTAssertEqual(deck.cards[0].agent, "claude")
         XCTAssertEqual(deck.cards[0].account, "me@anthropic.test")
         XCTAssertEqual(deck.cards[0].rows.map(\.period), ["session", "week"])
         XCTAssertEqual(deck.cards[0].rows.map(\.remainingLabel), ["", ""])
@@ -23,7 +23,7 @@ final class AgentUsageModelTests: XCTestCase {
 
     /// Unknown period tokens must not fail card decode (peer parity).
     func testDecodesUnknownPeriodAsOpaqueString() throws {
-        let cardJson = #"{"agent":"claude_code","rows":[{"period":"daily","used_percent":15,"resets_at_unix":1800000000}]}"#
+        let cardJson = #"{"agent":"claude","rows":[{"period":"daily","used_percent":15,"resets_at_unix":1800000000}]}"#
         let card = try XCTUnwrap(UsageDeck.decodeCard(Data(cardJson.utf8)))
         XCTAssertEqual(card.rows.first?.period, "daily")
         XCTAssertEqual(card.rows.first?.id, "daily")
@@ -61,11 +61,11 @@ final class AgentUsageModelTests: XCTestCase {
 
     /// needs_auth defaults false; present only when true.
     func testDecodesNeedsAuthDefaultingFalse() throws {
-        let legacy = #"{"agent":"claude_code","rows":[]}"#
+        let legacy = #"{"agent":"claude","rows":[]}"#
         let card = try XCTUnwrap(UsageDeck.decodeCard(Data(legacy.utf8)))
         XCTAssertFalse(card.needsAuth)
 
-        let guarded = #"{"agent":"claude_code","rows":[],"needs_auth":true}"#
+        let guarded = #"{"agent":"claude","rows":[],"needs_auth":true}"#
         let guardedCard = try XCTUnwrap(UsageDeck.decodeCard(Data(guarded.utf8)))
         XCTAssertTrue(guardedCard.needsAuth)
         XCTAssertTrue(guardedCard.withRows([]).needsAuth)
@@ -73,8 +73,8 @@ final class AgentUsageModelTests: XCTestCase {
 
     /// Equality includes needsAuth so auth transitions repaint.
     func testWireEqualityDistinguishesNeedsAuth() {
-        let plain = UsageCard(agent: "claude_code", rows: [])
-        let guarded = UsageCard(agent: "claude_code", rows: [], needsAuth: true)
+        let plain = UsageCard(agent: "claude", rows: [])
+        let guarded = UsageCard(agent: "claude", rows: [], needsAuth: true)
         XCTAssertFalse(plain.hasSameWireValue(as: guarded))
         XCTAssertTrue(guarded.hasSameWireValue(as: guarded))
     }
@@ -89,28 +89,28 @@ final class AgentUsageModelTests: XCTestCase {
 
     /// An empty refresh refreshes a statless card but never blanks a card with rows.
     func testEmptyRefreshOnlyReplacesAStatlessCard() {
-        let statless = card("qwen_code")
-        let withRows = card("qwen_code", rows: 1)
-        XCTAssertTrue(UsagePaint.replaces(painted: statless, with: card("qwen_code")))
-        XCTAssertFalse(UsagePaint.replaces(painted: withRows, with: card("qwen_code")))
-        XCTAssertTrue(UsagePaint.replaces(painted: withRows, with: card("qwen_code", rows: 2)))
+        let statless = card("qwen")
+        let withRows = card("qwen", rows: 1)
+        XCTAssertTrue(UsagePaint.replaces(painted: statless, with: card("qwen")))
+        XCTAssertFalse(UsagePaint.replaces(painted: withRows, with: card("qwen")))
+        XCTAssertTrue(UsagePaint.replaces(painted: withRows, with: card("qwen", rows: 2)))
         XCTAssertTrue(
-            UsagePaint.replaces(painted: withRows, with: card("qwen_code", needsAuth: true)))
+            UsagePaint.replaces(painted: withRows, with: card("qwen", needsAuth: true)))
         // An auth prompt is data too: it must not be overwritten by an empty result.
         XCTAssertFalse(
-            UsagePaint.replaces(painted: card("qwen_code", needsAuth: true), with: card("qwen_code")))
+            UsagePaint.replaces(painted: card("qwen", needsAuth: true), with: card("qwen")))
     }
 
     /// Unpainted agents stay unpainted on an empty result — speech is what materializes them.
     func testEmptyRefreshDoesNotCreateACard() {
-        XCTAssertFalse(UsagePaint.replaces(painted: nil, with: card("qwen_code")))
-        XCTAssertTrue(UsagePaint.replaces(painted: nil, with: card("qwen_code", rows: 1)))
+        XCTAssertFalse(UsagePaint.replaces(painted: nil, with: card("qwen")))
+        XCTAssertTrue(UsagePaint.replaces(painted: nil, with: card("qwen", rows: 1)))
     }
 
     /// A completed authorize attempt resolves the prompt even when the credential is revoked.
     func testEmptyAuthorizationResultReplacesAuthPrompt() {
-        let guarded = card("claude_code", needsAuth: true)
-        let unauthorized = card("claude_code")
+        let guarded = card("claude", needsAuth: true)
+        let unauthorized = card("claude")
 
         XCTAssertTrue(
             UsagePaint.replaces(
@@ -122,21 +122,21 @@ final class AgentUsageModelTests: XCTestCase {
     }
 
     func testMaterializableIsCanonicalOrderedInstalledAndIdempotent() {
-        let canonical = ["claude_code", "codex", "qwen_code"]
+        let canonical = ["claude", "codex", "qwen"]
         XCTAssertEqual(
             UsagePaint.materializable(
-                spoken: ["qwen_code", "claude_code", "grok"],
+                spoken: ["qwen", "claude", "grok"],
                 canonical: canonical,
                 painted: []
             ),
-            ["claude_code", "qwen_code"]
+            ["claude", "qwen"]
         )
         // Already painted → nothing owed; unknown agents never materialize.
         XCTAssertEqual(
             UsagePaint.materializable(
-                spoken: ["qwen_code", "grok"],
+                spoken: ["qwen", "grok"],
                 canonical: canonical,
-                painted: ["qwen_code"]
+                painted: ["qwen"]
             ),
             []
         )

@@ -343,7 +343,7 @@ mod tests {
     /// Issue #11: absent `synthetic` → false.
     #[test]
     fn mark_active_synthetic_defaults_to_false_when_absent_on_the_wire() {
-        let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude_code"}"#;
+        let line = r#"{"cmd":"mark_active","session":"sess-1","source":"claude"}"#;
         let req: Request = serde_json::from_str(line).unwrap();
         assert!(matches!(
             req,
@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn mcp_speak_and_stop_require_a_non_optional_session() {
         for line in [
-            r#"{"cmd":"speak","text":"hi","source":"claude_code"}"#,
-            r#"{"cmd":"stop","source":"claude_code"}"#,
+            r#"{"cmd":"speak","text":"hi","source":"claude"}"#,
+            r#"{"cmd":"stop","source":"claude"}"#,
         ] {
             let err = serde_json::from_str::<Request>(line)
                 .expect_err("MCP queue operations must never decode without a scope");
@@ -396,8 +396,8 @@ mod tests {
     #[test]
     fn mcp_speak_and_stop_reject_an_empty_session() {
         for line in [
-            r#"{"cmd":"speak","text":"hi","session":"  ","source":"claude_code"}"#,
-            r#"{"cmd":"stop","session":"","source":"claude_code"}"#,
+            r#"{"cmd":"speak","text":"hi","session":"  ","source":"claude"}"#,
+            r#"{"cmd":"stop","session":"","source":"claude"}"#,
         ] {
             let err = serde_json::from_str::<Request>(line)
                 .expect_err("MCP queue operations must never decode with an empty scope");
@@ -483,7 +483,7 @@ mod tests {
         // CLI still sending the retired `message_key` decodes the same way (serde ignores
         // unknown fields), so hooks and engine may update out of step.
         let legacy =
-            r#"{"cmd":"speak_narration","text":"hi","message_key":"m1","source":"claude_code"}"#;
+            r#"{"cmd":"speak_narration","text":"hi","message_key":"m1","source":"claude"}"#;
         let old: Request = serde_json::from_str(legacy).unwrap();
         assert!(matches!(
             old,

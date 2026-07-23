@@ -436,7 +436,7 @@ mod tests {
     /// `ClientSpec::present` looks (`~/.local/bin`, one of its unconditional fallback
     /// dirs) — not a dot-dir, which is no longer the presence signal.
     fn make_present(paths: &Paths, client: ClientSource) {
-        let command = ds_config::client_spec(client).unwrap().launch.command;
+        let command = client.as_str();
         let bin_dir = paths.home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let filename = if cfg!(windows) {
@@ -715,11 +715,11 @@ mod tests {
         );
         // InlineShell with the uniform client tail; seconds timeouts; greet-only SessionStart.
         assert!(
-            text.contains(" notify --greet-only --client kimi_code"),
+            text.contains(" notify --greet-only --client kimi"),
             "SessionStart greet-only: {text}"
         );
         assert!(
-            text.contains(" provide --client kimi_code"),
+            text.contains(" provide --client kimi"),
             "provide wired: {text}"
         );
         assert!(text.contains("timeout = 60"), "wrong Stop timeout: {text}");
@@ -986,8 +986,8 @@ mod tests {
         make_all_clients_present(&paths);
 
         assert_eq!(reconcile(&paths), 0);
-        assert!(paths.settings_json.exists(), "claude_code hooks wired");
-        assert!(paths.claude_code_config.exists(), "claude_code mcp wired");
+        assert!(paths.settings_json.exists(), "claude hooks wired");
+        assert!(paths.claude_code_config.exists(), "claude mcp wired");
         assert!(paths.codex_config.exists(), "codex wired");
         assert!(paths.qwen_settings.exists(), "qwen wired");
         assert!(paths.grok_config.exists(), "grok wired");

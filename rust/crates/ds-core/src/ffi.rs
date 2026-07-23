@@ -570,11 +570,11 @@ mod tests {
             USAGE_DECK_EMPTY
         );
         assert_eq!(
-            take_string(agent_usage_card_json_gated("claude_code", true, || false)),
+            take_string(agent_usage_card_json_gated("claude", true, || false)),
             USAGE_CARD_EMPTY
         );
         assert_eq!(
-            take_string(agent_usage_card_authorize_json_gated("claude_code", || {
+            take_string(agent_usage_card_authorize_json_gated("claude", || {
                 false
             })),
             USAGE_CARD_EMPTY

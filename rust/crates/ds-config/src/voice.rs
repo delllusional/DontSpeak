@@ -400,7 +400,7 @@ fn default_capture_gain() -> CaptureGain {
     CaptureGain::Auto
 }
 fn default_codex_bin() -> String {
-    ClientSource::Codex.launch_command().unwrap().to_string()
+    ClientSource::Codex.as_str().to_string()
 }
 
 /// Mic make-up gain. `Auto` per-utterance; `Manual(g)` fixed. Wire: `"auto"` or number.
@@ -949,10 +949,7 @@ pub(crate) mod tests {
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert!(v.codex_app_server_url.is_empty());
-        assert_eq!(
-            v.codex_bin,
-            ClientSource::Codex.launch_command().unwrap()
-        );
+        assert_eq!(v.codex_bin, ClientSource::Codex.as_str());
         assert!(v.grok_stream);
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_editors.is_empty());
@@ -1040,10 +1037,7 @@ pub(crate) mod tests {
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert_eq!(v.codex_app_server_url, "");
-        assert_eq!(
-            v.codex_bin,
-            ClientSource::Codex.launch_command().unwrap()
-        );
+        assert_eq!(v.codex_bin, ClientSource::Codex.as_str());
         // All four are plain-typed overrides.
         let v: VoiceConfig = serde_json::from_str(
             r#"{"codex_stream":false,"codex_daemon":true,
@@ -1165,11 +1159,11 @@ pub(crate) mod tests {
                 .exclude_clients
         };
         assert_eq!(
-            wc(r#"{"exclude_clients":["claude_code","narration_spec","bogus","claude_code"]}"#),
+            wc(r#"{"exclude_clients":["claude","narration_spec","bogus","claude"]}"#),
             Some(vec![ClientSource::ClaudeCode])
         );
         // A non-array value (or a bare string / number) degrades to None = exclude nothing.
-        assert_eq!(wc(r#"{"exclude_clients":"claude_code"}"#), None);
+        assert_eq!(wc(r#"{"exclude_clients":"claude"}"#), None);
         assert_eq!(wc(r#"{"exclude_clients":42}"#), None);
         // Absent ⇒ None via the serde default.
         assert_eq!(wc(r#"{}"#), None);

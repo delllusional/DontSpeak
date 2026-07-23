@@ -50,7 +50,7 @@ impl UsageRow {
 /// One Agents tab card.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCard {
-    /// `claude_code` | `codex` | `qwen_code` | `grok` | `kimi_code` | `hermes`.
+    /// Canonical [`ClientSource`] identity (`claude`, `codex`, `qwen`, `grok`, `kimi`, `hermes`).
     pub agent: ClientSource,
     /// Local login label when present (absent for API-key-only / missing identity).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -522,7 +522,7 @@ mod tests {
     /// Drop a stub executable where `ClientSpec::present` looks (`~/.local/bin`) — the
     /// presence signal is the resolvable binary, not the client's dot-dir.
     fn make_present(paths: &ds_config::Paths, client: ClientSource) {
-        let command = ds_config::client_spec(client).unwrap().launch.command;
+        let command = client.as_str();
         let bin_dir = paths.home.join(".local/bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         let filename = if cfg!(windows) {
@@ -749,7 +749,7 @@ mod tests {
         };
         let json = deck.to_json();
         assert!(json.contains("\"cards\""));
-        assert!(json.contains("\"agent\":\"claude_code\""));
+        assert!(json.contains("\"agent\":\"claude\""));
         assert!(json.contains("\"account\":\"me@anthropic.test\""));
         assert!(json.contains("\"rows\""));
         assert!(!json.contains("\"schema_version\""));
@@ -762,12 +762,11 @@ mod tests {
     #[test]
     fn needs_auth_serde_defaults_false_and_serializes_only_true() {
         // Legacy JSON without the key still parses.
-        let legacy: UsageCard =
-            serde_json::from_str(r#"{"agent":"claude_code","rows":[]}"#).unwrap();
+        let legacy: UsageCard = serde_json::from_str(r#"{"agent":"claude","rows":[]}"#).unwrap();
         assert!(!legacy.needs_auth);
 
         let guarded: UsageCard =
-            serde_json::from_str(r#"{"agent":"claude_code","rows":[],"needs_auth":true}"#).unwrap();
+            serde_json::from_str(r#"{"agent":"claude","rows":[],"needs_auth":true}"#).unwrap();
         assert!(guarded.needs_auth);
         assert!(guarded.to_json().contains("\"needs_auth\":true"));
     }

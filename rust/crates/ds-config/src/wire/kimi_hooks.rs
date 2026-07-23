@@ -190,9 +190,9 @@ mod tests {
         );
         // Witness-seed invariant (Kimi non-streaming; see codex.rs).
         let ss = &our_entries(&doc)[0];
-        assert!(ss.1.ends_with(" notify --greet-only --client kimi_code"));
+        assert!(ss.1.ends_with(" notify --greet-only --client kimi"));
         let stop = &our_entries(&doc)[4];
-        assert!(stop.1.ends_with(" notify --client kimi_code"));
+        assert!(stop.1.ends_with(" notify --client kimi"));
         assert!(!stop.1.contains("--greet-only"));
     }
 

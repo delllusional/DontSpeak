@@ -918,13 +918,13 @@ mod tests {
         let first = std::fs::read_to_string(&cfg).unwrap();
 
         // Flat entries (no [[hooks.<Event>]] groups), SessionStart greet-only with the
-        // uniform `--client kimi_code` tail. toml_edit renders the command as a basic (`"`)
+        // uniform `--client kimi` tail. toml_edit renders the command as a basic (`"`)
         // or literal (`'`) string depending on the resolved path (backslashes on Windows).
         assert!(first.contains("[[hooks]]"), "got {first}");
         assert!(!first.contains("[[hooks."), "flat shape: {first}");
         assert!(
-            first.contains(" notify --greet-only --client kimi_code\"")
-                || first.contains(" notify --greet-only --client kimi_code'"),
+            first.contains(" notify --greet-only --client kimi\"")
+                || first.contains(" notify --greet-only --client kimi'"),
             "got {first}"
         );
 

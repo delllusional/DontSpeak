@@ -162,7 +162,7 @@ public sealed record Activity
     public bool CapsActive, CapsEnabled, Recording, Speaking;
     // Silences voice; playback continues (tray slash + menu checkmark).
     public bool Muted;
-    /// Wireable client of the in-flight TTS utterance (`claude_code`/…); null when idle.
+    /// Wireable client of the in-flight TTS utterance (`claude`/…); null when idle.
     public string? Speaker;
     // Tint tokens: stt/tts or stt_animated/tts_animated. Default ["stt","tts_animated"];
     // [] = never tint. Host fallback only — engine is source of truth.
@@ -497,4 +497,3 @@ internal sealed record DiarizationStatusDto
     [JsonPropertyName("speakers")] public string?[]? Speakers { get; init; }
     [JsonPropertyName("activity_threshold")] public double ActivityThreshold { get; init; }
 }
-

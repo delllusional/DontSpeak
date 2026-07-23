@@ -19,8 +19,8 @@ dontspeak kimi [args...]
 dontspeak hermes [args...]
 ```
 
-Aliases: `claude_code`, `qwen_code`, `kimi-code`. Registry owns names/executables/modes; adding a
-client without a launcher fails tests. Launchers preserve cwd, streams, args, exit
+Each client has exactly one canonical name; there are no launcher aliases. `ClientSource` owns
+that name for launch, hooks, IPC, logs, usage, and MCP attribution. Launchers preserve cwd, streams, args, exit
 code; start the DontSpeak host first (except `--help` / `--version`), and inject a fresh
 `DONTSPEAK_SESSION_ID` inherited by that client's hooks and local MCP server. Windows:
 new terminal after first install for PATH.
@@ -249,7 +249,7 @@ charts, or raw provider errors.
 ### Speaking highlight
 
 While TTS plays, `model_status.activity.speaker` is the wireable client of the
-in-flight utterance (`claude_code` / `codex` / `qwen_code` / `grok` / `kimi_code` /
+in-flight utterance (`claude` / `codex` / `qwen` / `grok` / `kimi` /
 `hermes`; `null` when idle or non-client). Hosts wash that agent’s card with a
 random pastel from `ds_random_pastel_wash_json` (new color when speaker becomes
 non-null or changes; frozen until idle). Top-bar speaking stripe and progress

@@ -1543,7 +1543,7 @@ mod tests {
 
     fn card(needs_auth: bool) -> UsageCard {
         UsageCard {
-            agent: "claude_code".to_string(),
+            agent: "claude".to_string(),
             account: None,
             rows: Vec::new(),
             needs_auth,

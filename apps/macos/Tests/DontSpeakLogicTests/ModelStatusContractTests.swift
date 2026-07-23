@@ -133,7 +133,7 @@ final class ModelStatusContractTests: XCTestCase {
                   "seq": 7,
                   "activity": {
                     "caps": true, "caps_active": true, "recording": false,
-                    "speaking": true, "speaker": "claude_code",
+                    "speaking": true, "speaker": "claude",
                     "voice": "if_sara", "language": "it", "warning": null, "muted": false
                   },
                   "tts": {
@@ -175,7 +175,7 @@ final class ModelStatusContractTests: XCTestCase {
                 """.utf8))
 
         XCTAssertEqual(dto.seq, 7)
-        XCTAssertEqual(dto.activity.speaker, "claude_code")
+        XCTAssertEqual(dto.activity.speaker, "claude")
         XCTAssertEqual(dto.activity.voice, "if_sara")
         XCTAssertEqual(dto.tts.model, .kokoro)
         XCTAssertEqual(dto.tts.lastUtterance?.voice, "if_sara")

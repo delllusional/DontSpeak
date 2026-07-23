@@ -25,12 +25,8 @@ pub enum LaunchMode {
     CodexRemote,
 }
 
-/// Executable + public names — launch surface cannot omit a registry client.
+/// Launch behavior; the command is always the target's canonical identity.
 pub struct LaunchSpec {
-    /// Preferred `dontspeak <name>` / executable.
-    pub command: &'static str,
-    /// Compat names (often the [`ClientSource`] token).
-    pub aliases: &'static [&'static str],
     pub mode: LaunchMode,
 }
 
@@ -101,11 +97,6 @@ pub struct ClientSpec {
     pub display_name: &'static str,
     pub kind: ClientKind,
     pub launch: LaunchSpec,
-    /// MCP `clientInfo.name` prefix after normalize (lowercase, `_`→`-`); `starts_with`
-    /// match via [`client_from_mcp_name`]. TRADE-OFF: foreign prefix share
-    /// (`codex-community-fork`) → misattributed vs alias upkeep. No match → Unknown.
-    /// Raw name logged on every `initialize` (`dontspeak::mcp`).
-    pub mcp_client_prefix: &'static str,
     /// Dir named in the "not detected" skip message.
     pub detect_dir: fn(&Paths) -> &Path,
     pub surfaces: &'static [Surface],
@@ -124,24 +115,6 @@ impl ClientSpec {
     }
 }
 
-const fn launch_command(client: ClientSource) -> &'static str {
-    match client.launch_command() {
-        Some(command) => command,
-        None => panic!("client registry entries must be launchable"),
-    }
-}
-
-const fn mcp_client_prefix(client: ClientSource) -> &'static str {
-    match client.mcp_client_prefix() {
-        Some(prefix) => prefix,
-        None => panic!("client registry entries must have an MCP identity prefix"),
-    }
-}
-
-const fn launch_aliases(client: ClientSource) -> &'static [&'static str] {
-    client.launch_aliases()
-}
-
 /// Order matches [`ClientSource::CLIENTS`] (pinned by test).
 pub const CLIENT_REGISTRY: &[ClientSpec] = &[
     ClientSpec {
@@ -149,12 +122,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Claude Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::ClaudeCode),
-            aliases: launch_aliases(ClientSource::ClaudeCode),
             mode: LaunchMode::Direct,
         },
         // Verified: announces as `claude-code` in `clientInfo.name`.
-        mcp_client_prefix: mcp_client_prefix(ClientSource::ClaudeCode),
         detect_dir: |p| &p.claude_dir,
         surfaces: &[
             Surface {
@@ -190,12 +160,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "OpenAI Codex",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::Codex),
-            aliases: launch_aliases(ClientSource::Codex),
             mode: LaunchMode::CodexRemote,
         },
         // `codex-mcp-client`; prefix covers CLI + VS Code.
-        mcp_client_prefix: mcp_client_prefix(ClientSource::Codex),
         detect_dir: |p| &p.codex_dir,
         // TOML hooks: SessionStart greet-only, UserPromptSubmit notify+provide, Stop.
         // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber.
@@ -242,12 +209,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Qwen Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::QwenCode),
-            aliases: launch_aliases(ClientSource::QwenCode),
             mode: LaunchMode::Direct,
         },
         // Live: `qwen-cli-mcp-client-DontSpeak` and older `qwen-code*` use this prefix.
-        mcp_client_prefix: mcp_client_prefix(ClientSource::QwenCode),
         detect_dir: |p| &p.qwen_dir,
         // JSON hooks, InlineShell (ms). Hooks+MCP share settings.json. Streaming pinned by
         // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`.
@@ -285,12 +249,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Grok",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::Grok),
-            aliases: launch_aliases(ClientSource::Grok),
             mode: LaunchMode::Direct,
         },
         // Live: `grok-shell-DontSpeak` uses this prefix.
-        mcp_client_prefix: mcp_client_prefix(ClientSource::Grok),
         detect_dir: |p| &p.grok_dir,
         // MCP TomlMcp; hooks own file. Bare command dedupes with imported Claude;
         // GROK_HOOK_EVENT vs no-arg MCP. Stop → chat_history; mid-turn = updates.jsonl tail;
@@ -329,11 +290,8 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Kimi Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::KimiCode),
-            aliases: launch_aliases(ClientSource::KimiCode),
             mode: LaunchMode::Direct,
         },
-        mcp_client_prefix: mcp_client_prefix(ClientSource::KimiCode),
         detect_dir: |p| &p.kimi_dir,
         // Flat [[hooks]] only event/matcher/command/timeout; greet-only SessionStart;
         // has SessionEnd+Notification. MCP separate mcp.json. KIMI_CODE_HOME → Paths::resolve.
@@ -371,12 +329,9 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Hermes Agent",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: launch_command(ClientSource::Hermes),
-            aliases: launch_aliases(ClientSource::Hermes),
             mode: LaunchMode::Direct,
         },
         // A generic MCP prefix would match every MCP client; use the launch-command prefix.
-        mcp_client_prefix: mcp_client_prefix(ClientSource::Hermes),
         detect_dir: |p| &p.hermes_dir,
         // Shell hooks + MCP share config.yaml; allowlist is the consent sidecar.
         // Non-streaming: on_session_start greet-only; pre_llm_call notify+provide;
@@ -425,14 +380,11 @@ pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
 }
 
-/// `dontspeak <client>` via command, canonical token, or genuine compatibility aliases
-/// (internal verbs excluded).
+/// `dontspeak <client>` via its single canonical command (internal verbs excluded).
 pub fn client_spec_for_launch(name: &str) -> Option<&'static ClientSpec> {
-    CLIENT_REGISTRY.iter().find(|spec| {
-        spec.launch.command == name
-            || spec.target.as_str() == name
-            || spec.launch.aliases.contains(&name)
-    })
+    CLIENT_REGISTRY
+        .iter()
+        .find(|spec| spec.target.as_str() == name)
 }
 
 /// MCP `clientInfo.name` normalize: trim, lowercase, `_` → `-`.
@@ -440,7 +392,8 @@ fn normalize_mcp_name(name: &str) -> String {
     name.trim().to_ascii_lowercase().replace('_', "-")
 }
 
-/// MCP name → [`ClientSource`] via [`ClientSpec::mcp_client_prefix`]; else Unknown.
+/// MCP name → [`ClientSource`] via the same canonical client identity; else Unknown.
+/// Matching is prefix-based because upstream names add suffixes such as `-code` or `-vscode`.
 pub fn client_from_mcp_name(name: &str) -> ClientSource {
     let n = normalize_mcp_name(name);
     if n.is_empty() {
@@ -448,7 +401,7 @@ pub fn client_from_mcp_name(name: &str) -> ClientSource {
     }
     CLIENT_REGISTRY
         .iter()
-        .find(|s| n.starts_with(s.mcp_client_prefix))
+        .find(|spec| n.starts_with(spec.target.as_str()))
         .map_or(ClientSource::Unknown, |s| s.target)
 }
 
@@ -457,7 +410,7 @@ mod tests {
     use super::*;
 
     fn write_client_stub(dir: &Path, client: ClientSource) {
-        let command = client_spec(client).unwrap().launch.command;
+        let command = client.as_str();
         let filename = if cfg!(windows) {
             format!("{command}.exe")
         } else {
@@ -563,55 +516,48 @@ mod tests {
         assert!(client_spec(ClientSource::Unknown).is_none());
     }
 
-    /// Launcher names unique and resolve to their client.
+    /// Every client has one unique canonical launcher command.
     #[test]
-    fn launcher_names_are_complete_unique_and_resolvable() {
+    fn launcher_commands_are_complete_unique_and_resolvable() {
         let mut names = std::collections::HashSet::new();
         for spec in CLIENT_REGISTRY {
-            assert!(!spec.launch.command.is_empty(), "{}", spec.display_name);
-            let mut client_names = std::collections::HashSet::new();
-            for name in std::iter::once(spec.launch.command)
-                .chain(std::iter::once(spec.target.as_str()))
-                .chain(spec.launch.aliases.iter().copied())
-            {
-                assert!(
-                    !name.is_empty(),
-                    "{}: empty launcher name",
-                    spec.display_name
-                );
-                if client_names.insert(name) {
-                    assert!(
-                        names.insert(name),
-                        "launcher name {name:?} is declared for multiple clients"
-                    );
-                }
-                assert_eq!(
-                    client_spec_for_launch(name).map(|found| found.target),
-                    Some(spec.target),
-                    "{name}"
-                );
-            }
+            let name = spec.target.as_str();
+            assert!(
+                !name.is_empty(),
+                "{}: empty launcher command",
+                spec.display_name
+            );
+            assert!(
+                names.insert(name),
+                "launcher command {name:?} is declared for multiple clients"
+            );
+            assert_eq!(
+                client_spec_for_launch(name).map(|found| found.target),
+                Some(spec.target),
+                "{name}"
+            );
         }
         for internal in ["notify", "provide", "wire"] {
             assert!(client_spec_for_launch(internal).is_none(), "{internal}");
         }
     }
 
-    /// Prefixes nonempty and pre-normalized (else match fails).
+    /// Canonical identities are nonempty and already normalized for MCP prefix matching.
     #[test]
-    fn mcp_client_prefix_is_present_and_already_normalized() {
+    fn canonical_client_identity_is_valid_for_mcp_prefix_matching() {
         for spec in CLIENT_REGISTRY {
+            let identity = spec.target.as_str();
             assert!(
-                !spec.mcp_client_prefix.is_empty(),
+                !identity.is_empty(),
                 "{}: a client with no clientInfo.name prefix can never be identified over MCP",
                 spec.display_name
             );
             assert_eq!(
-                normalize_mcp_name(spec.mcp_client_prefix),
-                spec.mcp_client_prefix,
+                normalize_mcp_name(identity),
+                identity,
                 "{}: prefix {:?} must be written in normalized form",
                 spec.display_name,
-                spec.mcp_client_prefix
+                identity
             );
         }
     }
@@ -621,19 +567,13 @@ mod tests {
         for (name, want) in [
             ("claude-code", ClientSource::ClaudeCode),
             ("codex-mcp-client", ClientSource::Codex),
-            (
-                ClientSource::Codex.launch_command().unwrap(),
-                ClientSource::Codex,
-            ),
+            (ClientSource::Codex.as_str(), ClientSource::Codex),
             ("codex-vscode", ClientSource::Codex),
             ("qwen-code", ClientSource::QwenCode),
             ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
             ("grok-shell-DontSpeak", ClientSource::Grok),
             ("kimi-code", ClientSource::KimiCode),
-            (
-                ClientSource::Hermes.launch_command().unwrap(),
-                ClientSource::Hermes,
-            ),
+            (ClientSource::Hermes.as_str(), ClientSource::Hermes),
             ("hermes-agent-DontSpeak", ClientSource::Hermes),
         ] {
             assert_eq!(client_from_mcp_name(name), want, "{name}");
@@ -650,7 +590,7 @@ mod tests {
         }
     }
 
-    /// Intentional prefix collision (see [`ClientSpec::mcp_client_prefix`]).
+    /// Intentional prefix collision from canonical prefix matching.
     #[test]
     fn prefix_match_accepts_the_foreign_client_collision_tradeoff() {
         assert_eq!(

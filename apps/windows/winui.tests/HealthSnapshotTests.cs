@@ -48,10 +48,10 @@ public class HealthSnapshotTests
     [Fact]
     public void SpeakerIsClearedWhenIdle()
     {
-        var speaking = Parse("""{"activity":{"speaking":true,"speaker":"claude_code"}}""");
-        Assert.Equal("claude_code", speaking.Activity.Speaker);
+        var speaking = Parse("""{"activity":{"speaking":true,"speaker":"claude"}}""");
+        Assert.Equal("claude", speaking.Activity.Speaker);
 
-        var idle = Parse("""{"activity":{"speaking":false,"speaker":"claude_code"}}""");
+        var idle = Parse("""{"activity":{"speaking":false,"speaker":"claude"}}""");
         Assert.Null(idle.Activity.Speaker);
     }
 

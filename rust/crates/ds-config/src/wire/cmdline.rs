@@ -303,7 +303,7 @@ mod tests {
         ));
         // Leading path only — trailing verbs ignored (pre-token groups still heal).
         assert!(command_is_ours(
-            "\"/opt/x y/dontspeak\" notify --greet-only --client qwen_code"
+            "\"/opt/x y/dontspeak\" notify --greet-only --client qwen"
         ));
         assert!(command_is_ours(
             "C:/Users/usr/AppData/Local/Programs/DontSpeak/dontspeak.exe provide --client codex"

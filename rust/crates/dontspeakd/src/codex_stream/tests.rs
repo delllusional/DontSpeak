@@ -358,10 +358,7 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
     std::fs::write(managed.join(name), "x").unwrap();
     let mut paths = Paths::rooted_at(home.path());
     paths.codex_dir = codex_home.path().to_path_buf();
-    assert_eq!(
-        resolve_codex_bin(name, &paths),
-        Some(managed.join(name))
-    );
+    assert_eq!(resolve_codex_bin(name, &paths), Some(managed.join(name)));
     // Not found anywhere → None (the caller warns; nothing is spawned).
     assert_eq!(
         resolve_codex_bin(
@@ -462,10 +459,7 @@ fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
     std::fs::write(&bin, b"test").unwrap();
 
     assert_eq!(
-        resolve_codex_bin(
-            ds_config::ClientSource::Codex.launch_command().unwrap(),
-            &paths,
-        ),
+        resolve_codex_bin(ds_config::ClientSource::Codex.as_str(), &paths),
         Some(bin)
     );
 }
