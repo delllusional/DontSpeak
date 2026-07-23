@@ -32,6 +32,8 @@ mod engine;
 mod grok_stream;
 mod ipc;
 mod status;
+#[cfg(test)]
+mod test_env;
 mod timer;
 
 pub use boot::{EngineError, engine_run};

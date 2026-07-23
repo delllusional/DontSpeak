@@ -634,29 +634,33 @@ mod tests {
         );
     }
 
+    /// Runs in a child process holding the fixture environment — see [`crate::test_env`].
     #[test]
     fn corrupt_parakeet_files_remain_in_the_download_plan() {
-        let _guard = crate::config_gate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let model_dir = tempfile::tempdir().unwrap();
-        for file in [
-            ds_model::PARAKEET_ENCODER_FILE,
-            ds_model::PARAKEET_DECODER_FILE,
-            ds_model::PARAKEET_JOINER_FILE,
-            ds_model::PARAKEET_TOKENS_FILE,
-        ] {
-            std::fs::write(model_dir.path().join(file), b"corrupt but present").unwrap();
-        }
-        let runtime = model_dir.path().join("onnxruntime.dll");
-        std::fs::write(&runtime, b"present runtime").unwrap();
-        // SAFETY: this process-wide mutation is serialized by ENV_LOCK and restored below.
-        unsafe {
-            std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
-            std::env::set_var("ORT_DYLIB_PATH", &runtime);
-        }
+        const TEST: &str = "downloads::tests::corrupt_parakeet_files_remain_in_the_download_plan";
+        let Some(_child) = crate::test_env::child_run() else {
+            let model_dir = tempfile::tempdir().unwrap();
+            for file in [
+                ds_model::PARAKEET_ENCODER_FILE,
+                ds_model::PARAKEET_DECODER_FILE,
+                ds_model::PARAKEET_JOINER_FILE,
+                ds_model::PARAKEET_TOKENS_FILE,
+            ] {
+                std::fs::write(model_dir.path().join(file), b"corrupt but present").unwrap();
+            }
+            let runtime = model_dir.path().join("onnxruntime.dll");
+            std::fs::write(&runtime, b"present runtime").unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "corrupt-files-present",
+                    model_dir: model_dir.path(),
+                    ort_dylib: Some(&runtime),
+                },
+            );
+            return;
+        };
+
         let config = ds_config::VoiceConfig {
             tts_engine: Some(Vec::new()),
             stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
@@ -664,22 +668,8 @@ mod tests {
             ..ds_config::VoiceConfig::default()
         };
 
-        let need = compute_needs(&config);
-
-        // SAFETY: restore the serialized process environment before releasing ENV_LOCK.
-        unsafe {
-            match previous_model_dir {
-                Some(value) => std::env::set_var("DONTSPEAK_MODEL_DIR", value),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-            match previous_ort {
-                Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
-        }
-
         assert!(
-            need.parakeet_model,
+            compute_needs(&config).parakeet_model,
             "checksum-invalid files must be replaced even when every path exists"
         );
     }

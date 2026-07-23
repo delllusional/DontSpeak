@@ -2735,62 +2735,26 @@ mod status_gate_tests {
         assert_eq!(tts.active_listen_generation.load(Ordering::SeqCst), 0);
     }
 
-    /// Points `DONTSPEAK_MODEL_DIR` at a fresh EMPTY tempdir and clears
-    /// `ORT_DYLIB_PATH`/`DONTSPEAK_MLX_DYLIB_PATH` — forces the new Kokoro-presence gate's ONNX
-    /// branch deterministically on every OS and guarantees "not present". Caller must hold
-    /// `crate::config_gate::ENV_LOCK` and restore the returned previous values.
-    fn clear_kokoro_env() -> (
-        tempfile::TempDir,
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-        Option<std::ffi::OsString>,
-    ) {
-        let tmp = tempfile::tempdir().unwrap();
-        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let previous_mlx = std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH");
-        // SAFETY: test-only env mutation; the caller holds `config_gate::ENV_LOCK` (see
-        // this fn's doc) and restores the returned previous values.
-        unsafe {
-            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
-            std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH");
-        }
-        (tmp, prev_model_dir, prev_ort, previous_mlx)
-    }
-
-    fn restore_kokoro_env(
-        prev_model_dir: Option<std::ffi::OsString>,
-        prev_ort: Option<std::ffi::OsString>,
-        previous_mlx: Option<std::ffi::OsString>,
-    ) {
-        // SAFETY: restore the prior values (or clear them) so later tests see the real
-        // env again; the caller still holds `config_gate::ENV_LOCK`.
-        unsafe {
-            match prev_model_dir {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-            match prev_ort {
-                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
-            match previous_mlx {
-                Some(v) => std::env::set_var("DONTSPEAK_MLX_DYLIB_PATH", v),
-                None => std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH"),
-            }
-        }
-    }
-
     #[test]
     fn start_locked_skips_the_spawn_when_kokoro_is_not_present() {
         // The new cheap presence gate: on a fresh install / provider switch, before the
         // Kokoro model has been downloaded, `start_locked` must skip the spawn entirely
         // rather than pay the guaranteed-fail "kokoro model not downloaded" transient.
-        let _guard = crate::config_gate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let (_tmp, prev_model_dir, prev_ort, previous_mlx) = clear_kokoro_env();
+        // An EMPTY model dir with no dylib forces the ONNX branch on every OS.
+        const TEST: &str =
+            "tts::status_gate_tests::start_locked_skips_the_spawn_when_kokoro_is_not_present";
+        let Some(_child) = crate::test_env::child_run() else {
+            let tmp = tempfile::tempdir().unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "empty-model-dir",
+                    model_dir: tmp.path(),
+                    ort_dylib: None,
+                },
+            );
+            return;
+        };
 
         let (tts, gate) = mk();
         tts.set_tts_wanted(true);
@@ -2812,8 +2776,6 @@ mod status_gate_tests {
             seq0,
             "a fresh skip must bump the status-push gate"
         );
-
-        restore_kokoro_env(prev_model_dir, prev_ort, previous_mlx);
     }
 
     #[test]
@@ -2824,22 +2786,30 @@ mod status_gate_tests {
         // "present" (else it would exercise the new skip path instead of ever reaching
         // Command::spawn, on any host whose real ambient model cache happens to be empty
         // OR already populated).
-        let _guard = crate::config_gate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let (tmp, prev_model_dir, prev_ort, previous_mlx) = clear_kokoro_env();
-        // All four KOKORO_FILES: the presence gate also requires the two G2P files.
-        std::fs::write(tmp.path().join(ds_model::KOKORO_ONNX_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_VOICES_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_ENCODER_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::KOKORO_G2P_DECODER_FILE), b"dummy").unwrap();
-        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
-        std::fs::write(&dylib, b"dummy").unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
-        // below via restore_kokoro_env.
-        unsafe {
-            std::env::set_var("ORT_DYLIB_PATH", &dylib);
-        }
+        const TEST: &str = "tts::status_gate_tests::start_against_a_nonexistent_binary_sets_last_error_and_bumps_the_gate";
+        let Some(_child) = crate::test_env::child_run() else {
+            let tmp = tempfile::tempdir().unwrap();
+            // All four KOKORO_FILES: the presence gate also requires the two G2P files.
+            for file in [
+                ds_model::KOKORO_ONNX_FILE,
+                ds_model::KOKORO_VOICES_FILE,
+                ds_model::KOKORO_G2P_ENCODER_FILE,
+                ds_model::KOKORO_G2P_DECODER_FILE,
+            ] {
+                std::fs::write(tmp.path().join(file), b"dummy").unwrap();
+            }
+            let dylib = tmp.path().join("dummy-onnxruntime.dylib");
+            std::fs::write(&dylib, b"dummy").unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "kokoro-files-present",
+                    model_dir: tmp.path(),
+                    ort_dylib: Some(&dylib),
+                },
+            );
+            return;
+        };
 
         let (tts, gate) = mk();
         tts.set_tts_wanted(true);
@@ -2863,8 +2833,6 @@ mod status_gate_tests {
             seq0,
             "a fresh start failure must bump the status-push gate"
         );
-
-        restore_kokoro_env(prev_model_dir, prev_ort, previous_mlx);
     }
 }
 

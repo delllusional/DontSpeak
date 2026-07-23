@@ -680,18 +680,26 @@ mod tests {
 
     /// Exercise the real status serializer with isolated files and an unstarted helper. This
     /// pins the cross-platform wire snapshot without probing the ambient model cache or spawning
-    /// any process.
+    /// any process — the empty model dir arrives from the child environment
+    /// ([`crate::test_env`]).
     #[test]
     fn model_status_json_combines_downloads_runtime_flags_preview_and_stats() {
-        let _env_guard = crate::config_gate::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let previous_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        let previous_ort = std::env::var_os("ORT_DYLIB_PATH");
-        let previous_shim = std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH");
+        const TEST: &str =
+            "status::tests::model_status_json_combines_downloads_runtime_flags_preview_and_stats";
+        let Some(_child) = crate::test_env::child_run() else {
+            let model_dir = tempfile::tempdir().unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "empty-model-dir",
+                    model_dir: model_dir.path(),
+                    ort_dylib: None,
+                },
+            );
+            return;
+        };
 
         let temp = tempfile::tempdir().unwrap();
-        let model_dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(temp.path());
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(
@@ -699,13 +707,6 @@ mod tests {
             "stt_engine_ladder = [\"built_in\"]\ntts_engine_ladder = [\"built_in\"]\ncaps = false\ntray = []\n",
         )
         .unwrap();
-        // SAFETY: process-wide test environment mutation is serialized by ENV_LOCK and restored
-        // before assertions leave this test.
-        unsafe {
-            std::env::set_var("DONTSPEAK_MODEL_DIR", model_dir.path());
-            std::env::remove_var("ORT_DYLIB_PATH");
-            std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH");
-        }
 
         let tts_stats = Arc::new(TtsStats::new());
         tts_stats.record(20.0, 100.0, 5.0);
@@ -775,21 +776,6 @@ mod tests {
         assert_eq!(value["downloads"][0]["target"], "kokoro_model");
         assert_eq!(value["downloads"][0]["done_bytes"], 25);
         assert_eq!(value["downloads"][0]["total_bytes"], 100);
-        // SAFETY: restore the three values while ENV_LOCK is still held.
-        unsafe {
-            match previous_model_dir {
-                Some(value) => std::env::set_var("DONTSPEAK_MODEL_DIR", value),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-            match previous_ort {
-                Some(value) => std::env::set_var("ORT_DYLIB_PATH", value),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
-            match previous_shim {
-                Some(value) => std::env::set_var("DONTSPEAK_MLX_DYLIB_PATH", value),
-                None => std::env::remove_var("DONTSPEAK_MLX_DYLIB_PATH"),
-            }
-        }
 
         let status: ModelStatus = serde_json::from_value(value).unwrap();
         let tts = status.tts.status.as_ref().unwrap();

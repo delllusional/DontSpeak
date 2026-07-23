@@ -365,13 +365,6 @@ pub(crate) fn debug_enabled() -> bool {
     std::env::var("DONTSPEAK_DEBUG").as_deref() == Ok("1")
 }
 
-/// Serializes every `dontspeakd`-crate test (here and in `tts.rs`) that mutates the
-/// process-wide `DONTSPEAK_MODEL_DIR` / `DONTSPEAK_MLX_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars.
-/// ONE shared lock, not a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching
-/// the SAME var can't interleave (`dontspeakd`'s test binary runs multi-threaded by default).
-#[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,45 +395,48 @@ mod tests {
         assert!(!tts_uses_mlx_runtime(Provider::OrtCpu, true));
     }
 
+    /// Both phases run in a child process holding the fixture environment — see
+    /// [`crate::test_env`].
     #[test]
     fn parakeet_onnx_files_present_needs_all_four_plus_dylib() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let prev_model_dir = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        let prev_ort = std::env::var_os("ORT_DYLIB_PATH");
+        const TEST: &str =
+            "config_gate::tests::parakeet_onnx_files_present_needs_all_four_plus_dylib";
+        let Some(child) = crate::test_env::child_run() else {
+            let tmp = tempfile::tempdir().unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "empty",
+                    model_dir: tmp.path(),
+                    ort_dylib: None,
+                },
+            );
 
-        let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK (held above), restored
-        // below before returning.
-        unsafe {
-            std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path());
-            std::env::remove_var("ORT_DYLIB_PATH");
-        }
-        assert!(!parakeet_onnx_files_present());
-
-        std::fs::write(tmp.path().join(ds_model::PARAKEET_ENCODER_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::PARAKEET_DECODER_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::PARAKEET_JOINER_FILE), b"dummy").unwrap();
-        std::fs::write(tmp.path().join(ds_model::PARAKEET_TOKENS_FILE), b"dummy").unwrap();
-        let dylib = tmp.path().join("dummy-onnxruntime.dylib");
-        std::fs::write(&dylib, b"dummy").unwrap();
-        // SAFETY: test-only env mutation, still serialized by ENV_LOCK (held for the
-        // whole test), restored below.
-        unsafe {
-            std::env::set_var("ORT_DYLIB_PATH", &dylib);
-        }
-        assert!(parakeet_onnx_files_present());
-
-        // SAFETY: restore the prior values (or clear them) so later tests see the real
-        // env again.
-        unsafe {
-            match prev_model_dir {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
+            for file in [
+                ds_model::PARAKEET_ENCODER_FILE,
+                ds_model::PARAKEET_DECODER_FILE,
+                ds_model::PARAKEET_JOINER_FILE,
+                ds_model::PARAKEET_TOKENS_FILE,
+            ] {
+                std::fs::write(tmp.path().join(file), b"dummy").unwrap();
             }
-            match prev_ort {
-                Some(v) => std::env::set_var("ORT_DYLIB_PATH", v),
-                None => std::env::remove_var("ORT_DYLIB_PATH"),
-            }
+            let dylib = tmp.path().join("dummy-onnxruntime.dylib");
+            std::fs::write(&dylib, b"dummy").unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "complete",
+                    model_dir: tmp.path(),
+                    ort_dylib: Some(&dylib),
+                },
+            );
+            return;
+        };
+
+        match child.phase() {
+            "empty" => assert!(!parakeet_onnx_files_present()),
+            "complete" => assert!(parakeet_onnx_files_present()),
+            other => panic!("unknown phase: {other}"),
         }
     }
 
