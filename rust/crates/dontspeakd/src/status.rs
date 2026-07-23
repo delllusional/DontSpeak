@@ -1106,7 +1106,10 @@ mod tests {
             None
         );
         assert_eq!(stt_provider_token(None, Some("CUDA")), None);
-        assert_eq!(tts_provider_token(Some(TtsEngine::System), Some("CUDA")), None);
+        assert_eq!(
+            tts_provider_token(Some(TtsEngine::System), Some("CUDA")),
+            None
+        );
         assert_eq!(tts_provider_token(None, Some("CUDA")), None);
     }
 

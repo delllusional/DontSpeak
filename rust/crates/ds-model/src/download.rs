@@ -2112,9 +2112,9 @@ mod tests {
         match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => panic!("flight failed: {err}"),
-            Err(_) => panic!(
-                "with_destination_flight deadlocked on flat asset named orphan-sweep (#214)"
-            ),
+            Err(_) => {
+                panic!("with_destination_flight deadlocked on flat asset named orphan-sweep (#214)")
+            }
         }
         worker.join().unwrap();
     }

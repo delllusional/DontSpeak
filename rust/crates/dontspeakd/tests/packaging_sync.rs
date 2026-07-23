@@ -380,7 +380,10 @@ fn posix_installers_share_one_destination_lock_block() {
         let end = body
             .find("# ── END destination lock")
             .unwrap_or_else(|| panic!("{rel} has no destination-lock END marker"));
-        assert!(end > begin, "{rel} has its destination-lock markers reversed");
+        assert!(
+            end > begin,
+            "{rel} has its destination-lock markers reversed"
+        );
         body[begin..end].to_string()
     }
     let web = block("scripts/install/web/install.sh");
@@ -411,15 +414,30 @@ fn installers_lock_before_replacing_the_destination() {
     }
 
     let macos = repo_file("scripts/install/web/install.sh");
-    precedes(&macos, "ds_lock_acquire \"$APP\"", "osascript -e 'quit app", "macOS");
-    precedes(&macos, "ds_lock_acquire \"$APP\"", "rm -rf \"$APP\"", "macOS");
+    precedes(
+        &macos,
+        "ds_lock_acquire \"$APP\"",
+        "osascript -e 'quit app",
+        "macOS",
+    );
+    precedes(
+        &macos,
+        "ds_lock_acquire \"$APP\"",
+        "rm -rf \"$APP\"",
+        "macOS",
+    );
     assert!(
         macos.contains("cleanup() { ds_lock_release;"),
         "macOS: cleanup() must release the destination lock first"
     );
 
     let linux = repo_file("apps/linux/tarball-install.sh");
-    precedes(&linux, "ds_lock_acquire \"$BIN/dontspeak\"", "pkill -x ds-gtk", "Linux");
+    precedes(
+        &linux,
+        "ds_lock_acquire \"$BIN/dontspeak\"",
+        "pkill -x ds-gtk",
+        "Linux",
+    );
     precedes(
         &linux,
         "ds_lock_acquire \"$BIN/dontspeak\"",
