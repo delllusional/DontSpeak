@@ -53,11 +53,34 @@ pub enum UtteranceWarning {
     VoiceLanguageMismatch,
 }
 
+/// How an utterance ended. The producer's terminal ACK: `speak` hands back an
+/// [`UtteranceStatus::id`], and this says what became of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UtteranceOutcome {
+    /// Playback returned without error.
+    Spoken,
+    /// Synthesis or playback failed; at most a prefix was heard.
+    Failed,
+    /// Stop, barge, or a queue clear ended it early.
+    Cancelled,
+    /// Never reached playback: speech off, or the model stayed unavailable.
+    Dropped,
+}
+
+/// What one utterance resolved to and how it ended. `id` is the handle `speak` returns,
+/// so a producer can correlate what it queued with what was actually said.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UtteranceStatus {
-    pub voice: String,
-    pub language: String,
+    pub id: u64,
+    /// `null` until the play gate resolves one — an utterance dropped before it never has one.
+    pub voice: Option<String>,
+    /// Language the utterance was synthesized in: detected (or explicitly requested) at
+    /// admit, clamped to the live model at play. `null` alongside a `null` voice.
+    pub language: Option<String>,
     pub warning: Option<UtteranceWarning>,
+    /// `null` while the utterance is still in flight.
+    pub outcome: Option<UtteranceOutcome>,
 }
 
 /// Selected TTS engine, its realized provider, and its lifecycle status.
@@ -73,8 +96,9 @@ pub struct TtsStatus {
     pub provider: Option<String>,
     /// `null` when speech is off.
     pub status: Option<EngineStatus>,
-    /// Most recent utterance that reached playback; retained while idle.
-    pub last_utterance: Option<UtteranceStatus>,
+    /// Utterances that have ended, most recent first, capped by the engine. Retained while
+    /// idle so a producer that polls after playback still finds its `speak` handle.
+    pub recent_utterances: Vec<UtteranceStatus>,
 }
 
 /// Selected STT engine, its realized provider, and its lifecycle status.
@@ -111,6 +135,8 @@ pub struct Activity {
     pub speaking: bool,
     /// Wired client for the in-flight TTS utterance. `null` when idle or unattributed.
     pub speaker: Option<ds_client::WiredAgent>,
+    /// `speak` handle of the in-flight utterance. `null` while idle or for a cue.
+    pub utterance_id: Option<u64>,
     /// `null` while idle.
     pub voice: Option<String>,
     /// `null` while idle.
@@ -224,6 +250,7 @@ mod tests {
                 recording: false,
                 speaking: false,
                 speaker: None,
+                utterance_id: None,
                 voice: None,
                 language: None,
                 warning: None,
@@ -235,7 +262,7 @@ mod tests {
                 language: None,
                 provider: None,
                 status: Some(engine_none()),
-                last_utterance: None,
+                recent_utterances: vec![],
             },
             stt: SttStatus {
                 engine: StatusSttEngine::BuiltIn,
@@ -287,7 +314,7 @@ mod tests {
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert_eq!(v["activity"].as_object().unwrap().len(), 9);
+        assert_eq!(v["activity"].as_object().unwrap().len(), 10);
         assert_eq!(v["stats"]["tts"].as_object().unwrap().len(), 10);
         assert_eq!(v["stats"]["tts"]["queued"], 0);
         assert_eq!(v["tts"].as_object().unwrap().len(), 6);
@@ -314,10 +341,11 @@ mod tests {
             v["activity"]["speaker"].is_null(),
             "activity.speaker null when idle"
         );
+        assert!(v["activity"]["utterance_id"].is_null());
         assert!(v["activity"]["voice"].is_null());
         assert!(v["activity"]["language"].is_null());
         assert!(v["activity"]["warning"].is_null());
-        assert!(v["tts"]["last_utterance"].is_null());
+        assert!(v["tts"]["recent_utterances"].as_array().unwrap().is_empty());
         assert!(v["downloads"].as_array().unwrap().is_empty());
         assert_eq!(v["tray"], serde_json::json!(["stt", "tts"]));
         assert_eq!(v["agents"], false);
@@ -372,13 +400,24 @@ mod tests {
         Just(UtteranceWarning::VoiceLanguageMismatch)
     }
 
+    fn utterance_outcome_strategy() -> impl Strategy<Value = UtteranceOutcome> {
+        prop::sample::select(vec![
+            UtteranceOutcome::Spoken,
+            UtteranceOutcome::Failed,
+            UtteranceOutcome::Cancelled,
+            UtteranceOutcome::Dropped,
+        ])
+    }
+
     prop_compose! {
         fn utterance_status_strategy()(
-            voice in short_string(),
-            language in short_string(),
+            id in any::<u64>(),
+            voice in opt_short_string(),
+            language in opt_short_string(),
             warning in prop::option::of(utterance_warning_strategy()),
+            outcome in prop::option::of(utterance_outcome_strategy()),
         ) -> UtteranceStatus {
-            UtteranceStatus { voice, language, warning }
+            UtteranceStatus { id, voice, language, warning, outcome }
         }
     }
 
@@ -449,6 +488,7 @@ mod tests {
             recording in any::<bool>(),
             speaking in any::<bool>(),
             speaker in prop::option::of(wired_client_strategy()),
+            utterance_id in prop::option::of(any::<u64>()),
             voice in opt_short_string(),
             language in opt_short_string(),
             warning in prop::option::of(utterance_warning_strategy()),
@@ -460,6 +500,7 @@ mod tests {
                 recording,
                 speaking,
                 speaker,
+                utterance_id,
                 voice,
                 language,
                 warning,
@@ -489,9 +530,9 @@ mod tests {
             language in opt_short_string(),
             provider in opt_short_string(),
             status in prop::option::of(engine_status_strategy()),
-            last_utterance in prop::option::of(utterance_status_strategy()),
+            recent_utterances in prop::collection::vec(utterance_status_strategy(), 0..4),
         ) -> TtsStatus {
-            TtsStatus { engine, model, language, provider, status, last_utterance }
+            TtsStatus { engine, model, language, provider, status, recent_utterances }
         }
     }
 
@@ -637,6 +678,7 @@ mod tests {
             prop_assert!(v["stats"]["stt"]["transcriptions"].is_u64());
             prop_assert!(v["stats"]["lifetime"]["tts_secs"].is_u64());
             prop_assert!(v["diarization"]["speakers"].is_array());
+            prop_assert!(v["tts"]["recent_utterances"].is_array());
             prop_assert!(v["downloads"].is_array());
 
             let back: ModelStatus = serde_json::from_value(v).unwrap();

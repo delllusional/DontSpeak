@@ -187,6 +187,11 @@ pub enum Request {
 pub enum Response {
     Pong,
     Done,
+    /// `Speak` accepted the text: `id` is the handle its terminal record carries in
+    /// `model_status` (`tts.recent_utterances[].id`).
+    Utterance {
+        id: u64,
+    },
     /// Codex TUI `--remote` after narration subscriber attached.
     CodexStreamReady {
         endpoint: String,
@@ -240,6 +245,7 @@ impl Response {
             self,
             Response::Pong
                 | Response::Done
+                | Response::Utterance { .. }
                 | Response::CodexStreamReady { .. }
                 | Response::Transcript { .. }
                 | Response::Diarization { .. }
@@ -384,6 +390,8 @@ mod tests {
     fn terminal_classification() {
         assert!(Response::Pong.is_terminal());
         assert!(Response::Done.is_terminal());
+        // A non-terminal answer to `Speak` would be drained away and the handle lost.
+        assert!(Response::Utterance { id: 1 }.is_terminal());
         assert!(Response::error("x").is_terminal());
         assert!(
             Response::ModelStatus {

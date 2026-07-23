@@ -16,6 +16,7 @@ final class ModelStatusContractTests: XCTestCase {
             "recording": false,
             "speaking": false,
             "speaker": null,
+            "utterance_id": null,
             "voice": null,
             "language": null,
             "warning": null,
@@ -27,7 +28,7 @@ final class ModelStatusContractTests: XCTestCase {
             "language": null,
             "provider": null,
             "status": {"state": "missing", "progress": 0.0, "error": null},
-            "last_utterance": null
+            "recent_utterances": []
           },
           "stt": {
             "engine": "built_in",
@@ -75,6 +76,7 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertFalse(dto.activity.recording)
         XCTAssertFalse(dto.activity.speaking)
         XCTAssertNil(dto.activity.speaker)
+        XCTAssertNil(dto.activity.utteranceId)
         XCTAssertNil(dto.activity.voice)
         XCTAssertNil(dto.activity.language)
         XCTAssertNil(dto.activity.warning)
@@ -85,7 +87,7 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertNil(dto.tts.language)
         XCTAssertNil(dto.tts.provider)
         XCTAssertEqual(dto.tts.status?.state, "missing")
-        XCTAssertNil(dto.tts.lastUtterance)
+        XCTAssertTrue(dto.tts.recentUtterances.isEmpty)
 
         XCTAssertEqual(dto.stt.engine, "built_in")
         XCTAssertNil(dto.stt.provider)
@@ -133,14 +135,17 @@ final class ModelStatusContractTests: XCTestCase {
                   "seq": 7,
                   "activity": {
                     "caps": true, "caps_active": true, "recording": false,
-                    "speaking": true, "speaker": "claude",
+                    "speaking": true, "speaker": "claude", "utterance_id": 12,
                     "voice": "if_sara", "language": "it", "warning": null, "muted": false
                   },
                   "tts": {
                     "engine": "built_in", "model": "kokoro", "language": "it",
                     "provider": "mlx",
                     "status": {"state": "running", "progress": 0, "error": null},
-                    "last_utterance": {"voice": "if_sara", "language": "it", "warning": null}
+                    "recent_utterances": [{
+                      "id": 11, "voice": "if_sara", "language": "it",
+                      "warning": null, "outcome": "spoken"
+                    }]
                   },
                   "stt": {
                     "engine": "built_in", "provider": "cpu",
@@ -176,9 +181,12 @@ final class ModelStatusContractTests: XCTestCase {
 
         XCTAssertEqual(dto.seq, 7)
         XCTAssertEqual(dto.activity.speaker, "claude")
+        XCTAssertEqual(dto.activity.utteranceId, 12)
         XCTAssertEqual(dto.activity.voice, "if_sara")
         XCTAssertEqual(dto.tts.model, .kokoro)
-        XCTAssertEqual(dto.tts.lastUtterance?.voice, "if_sara")
+        XCTAssertEqual(dto.tts.recentUtterances.first?.id, 11)
+        XCTAssertEqual(dto.tts.recentUtterances.first?.voice, "if_sara")
+        XCTAssertEqual(dto.tts.recentUtterances.first?.outcome, "spoken")
         XCTAssertEqual(dto.downloads.count, 1)
         XCTAssertEqual(dto.downloads[0].doneBytes, 25)
         XCTAssertEqual(dto.downloads[0].startBytes, 5)
@@ -196,14 +204,14 @@ final class ModelStatusContractTests: XCTestCase {
               "seq": 0,
               "activity": {
                 "caps": false, "caps_active": false, "recording": false,
-                "speaking": false, "speaker": null, "voice": null,
-                "language": null, "warning": null, "muted": false
+                "speaking": false, "speaker": null, "utterance_id": null,
+                "voice": null, "language": null, "warning": null, "muted": false
               },
               "tts": {
                 "engine": "built_in", "model": "future_model", "language": "en",
                 "provider": "cpu",
                 "status": {"state": "running", "progress": 0, "error": null},
-                "last_utterance": null
+                "recent_utterances": []
               },
               "stt": {
                 "engine": "built_in", "provider": null,

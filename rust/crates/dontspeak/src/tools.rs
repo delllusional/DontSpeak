@@ -326,10 +326,11 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
                 "tts_active": status.activity.speaking,
                 "queued": status.stats.tts.queued,
                 "muted": status.activity.muted,
+                "utterance_id": status.activity.utterance_id,
                 "voice": status.activity.voice,
                 "detected_language": status.activity.language,
                 "warning": status.activity.warning,
-                "last_utterance": status.tts.last_utterance,
+                "recent_utterances": status.tts.recent_utterances,
                 "tts": status.tts.status,
                 "stt": status.stt.status,
                 "downloads": status.downloads,
@@ -508,6 +509,9 @@ fn call_speak(
             source: client,
         },
     ) {
+        // The handle correlates this call with the `status` entry that carries the resolved
+        // voice, language, and terminal outcome.
+        Ok(Response::Utterance { id }) => Ok(format!("Queued as utterance {id}.")),
         Ok(Response::Done) => Ok("Queued.".into()),
         Ok(Response::Error { message }) => Err(format!("speak failed: {message}")),
         Ok(_) => Err("speak failed: unexpected engine response".into()),
@@ -1042,14 +1046,18 @@ mod status_output {
             "seq": 8,
             "activity": {
                 "caps": true, "caps_active": false, "recording": false,
-                "speaking": true, "speaker": WiredAgent::Codex.as_str(), "voice": "if_sara",
+                "speaking": true, "speaker": WiredAgent::Codex.as_str(),
+                "utterance_id": 12, "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
             "tts": {
                 "engine": "built_in", "model": "kokoro", "language": "auto",
                 "provider": "cpu",
                 "status": { "state": "downloading", "progress": 0.25, "error": null },
-                "last_utterance": { "voice": "if_sara", "language": "it", "warning": null }
+                "recent_utterances": [{
+                    "id": 11, "voice": "if_sara", "language": "it",
+                    "warning": null, "outcome": "spoken"
+                }]
             },
             "stt": {
                 "engine": "off", "provider": null, "status": null, "voice_key": null
@@ -1184,8 +1192,11 @@ mod status_output {
         server.join().unwrap();
 
         assert_eq!(value["state"]["seq"], 8);
+        assert_eq!(value["state"]["utterance_id"], 12);
         assert_eq!(value["state"]["voice"], "if_sara");
         assert_eq!(value["state"]["detected_language"], "it");
+        assert_eq!(value["state"]["recent_utterances"][0]["id"], 11);
+        assert_eq!(value["state"]["recent_utterances"][0]["outcome"], "spoken");
         assert_eq!(value["state"]["tts"]["progress"], 0.25);
         assert_eq!(value["state"]["downloads"][0]["done_bytes"], 25);
         assert_eq!(value["state"]["downloads"][0]["start_bytes"], 5);
@@ -1313,6 +1324,57 @@ mod arg_validation {
         let err =
             call_speakers(&dead_sock(), &json!({ "action": "enroll", "name": "  " })).unwrap_err();
         assert_eq!(err, "manage_speakers: `name` is required for this action");
+    }
+}
+
+#[cfg(test)]
+mod speak_handle {
+    //! `speak` hands back the handle that correlates the call with `status`.
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+
+    fn serve_once(response: Response) -> (tempfile::TempDir, PathBuf, std::thread::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("speak.sock");
+        let listener = ds_ipc::transport::bind(&sock).unwrap();
+        let thread = std::thread::spawn(move || {
+            let mut stream = listener.accept().unwrap().0;
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let mut encoded = serde_json::to_string(&response).unwrap();
+            encoded.push('\n');
+            stream.write_all(encoded.as_bytes()).unwrap();
+        });
+        (dir, sock, thread)
+    }
+
+    fn speak(response: Response) -> Result<String, String> {
+        let (_dir, sock, server) = serve_once(response);
+        let result = call_speak(
+            &sock,
+            &json!({ "text": "Ciao." }),
+            Some(WiredAgent::ClaudeCode),
+            "scope",
+        );
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn an_accepted_utterance_reports_the_handle_status_will_key_its_record_on() {
+        assert_eq!(
+            speak(Response::Utterance { id: 42 }).unwrap(),
+            "Queued as utterance 42."
+        );
+    }
+
+    /// Engines that accepted text without minting a handle (blank after trimming) still
+    /// report acceptance rather than an error.
+    #[test]
+    fn a_handleless_acceptance_still_reports_success() {
+        assert_eq!(speak(Response::Done).unwrap(), "Queued.");
     }
 }
 

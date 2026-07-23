@@ -31,6 +31,9 @@ struct PlayingClaim {
     session: Option<String>,
     /// Speech, not a cue — the in-flight half of the depth the status reports.
     speech: bool,
+    /// Record for this utterance: id from admit, voice/language filled once the play gate
+    /// resolves them, `outcome` only when it is written to [`TtsQueue::utterances`].
+    /// `None` for a cue, which has no utterance to report.
     utterance: Option<ds_status::UtteranceStatus>,
 }
 
@@ -52,6 +55,11 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 
 /// Admission IDs outlive playback (producer retry); SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
+
+/// Terminal utterance records kept for `model_status`. Deep enough that a producer polling
+/// after its own `speak` still finds its handle behind a reply's worth of narration chunks,
+/// shallow enough to ride every status push.
+const RECENT_UTTERANCES_MAX: usize = 16;
 
 #[derive(Default)]
 struct AcceptedNarrations {
@@ -220,6 +228,9 @@ struct Item {
     session: Option<String>,
     /// Batch resume high-water (`PROGRESS`). Record-barge resume sends as `skip`.
     resume_skip: usize,
+    /// Handle `speak` hands back, and the key of this utterance's terminal record.
+    /// `None` for a cue. Survives a requeue so a resumed utterance keeps its handle.
+    utterance_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -228,7 +239,8 @@ pub(crate) struct TtsStatusSample {
     pub speaker: Option<WiredAgent>,
     pub queued: u64,
     pub utterance: Option<ds_status::UtteranceStatus>,
-    pub last_utterance: Option<ds_status::UtteranceStatus>,
+    /// Terminal records, most recent first.
+    pub recent_utterances: Vec<ds_status::UtteranceStatus>,
 }
 
 /// Pending utterances in `q`. Earcons are cues rather than things to say, so they are not
@@ -285,15 +297,29 @@ fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     }
 }
 
+/// Drop what `keep` rejects, returning the handles of the utterances that will never be
+/// spoken — oldest first, so pushing them onto the record ring in order leaves newest first.
+fn discard_items(q: &mut VecDeque<Item>, keep: impl Fn(&Item) -> bool) -> Vec<u64> {
+    let mut discarded = Vec::new();
+    q.retain(|it| {
+        if keep(it) {
+            return true;
+        }
+        discarded.extend(it.utterance_id);
+        false
+    });
+    discarded
+}
+
 /// Drop only exact `target`. Sticky survives MarkActive current-clear; Stop/SessionEnd
 /// also clear the sticky sibling.
-fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) {
-    q.retain(|it| &it.session != target);
+fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) -> Vec<u64> {
+    discard_items(q, |it| &it.session != target)
 }
 
 /// Keep only `keep` + sticky sibling.
-fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) {
-    q.retain(|it| session_is_keep_or_sticky(&it.session, keep));
+fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) -> Vec<u64> {
+    discard_items(q, |it| session_is_keep_or_sticky(&it.session, keep))
 }
 
 /// Untagged, exact, or sticky under `active`.
@@ -378,7 +404,10 @@ pub struct TtsQueue {
     /// Always acquired inside `items`.
     active: Mutex<ActiveSel>,
     playing: Mutex<Option<PlayingClaim>>,
-    last_utterance: Mutex<Option<ds_status::UtteranceStatus>>,
+    /// Monotonic per process; `0` is never issued, so it cannot be confused with a default.
+    next_utterance_id: AtomicU64,
+    /// Terminal records, most recent first, capped at [`RECENT_UTTERANCES_MAX`].
+    utterances: Mutex<VecDeque<ds_status::UtteranceStatus>>,
     tts: Arc<TtsManager>,
     gate: Arc<StatusGate>,
     /// MarkActive de-dups auto-Enter vs real text submit.
@@ -416,7 +445,8 @@ impl TtsQueue {
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
-            last_utterance: Mutex::new(None),
+            next_utterance_id: AtomicU64::new(1),
+            utterances: Mutex::new(VecDeque::new()),
             tts,
             gate,
             mic,
@@ -484,7 +514,8 @@ impl TtsQueue {
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
-            last_utterance: Mutex::new(None),
+            next_utterance_id: AtomicU64::new(1),
+            utterances: Mutex::new(VecDeque::new()),
             tts,
             gate: StatusGate::new(),
             mic,
@@ -499,18 +530,19 @@ impl TtsQueue {
     }
 
     /// Enqueue speech (empty ignored). Optional target args; `source` → `activity.speaker`.
+    /// `Ok(None)` = nothing to say, so no handle exists.
     pub fn enqueue(
         &self,
         text: String,
         tts_args: Option<TtsArgPools>,
         source: Option<WiredAgent>,
         session: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u64>, String> {
         if text.len() > MAX_SPEAK_BYTES {
             return Err(format!("text exceeds the {MAX_SPEAK_BYTES}-byte limit"));
         }
         if text.trim().is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         // MCP Speak / greeting: the chunk is all there is, so it stands on its own text.
         self.enqueue_action(
@@ -532,6 +564,7 @@ impl TtsQueue {
         session: Option<String>,
     ) -> Result<(), String> {
         self.enqueue_action(QueueAction::Earcon(event), source, session)
+            .map(|_| ())
     }
 
     /// Route earcon: ordered queue by default.
@@ -603,12 +636,13 @@ impl TtsQueue {
         self.enqueue_earcon(event, source, session)
     }
 
+    /// `Ok(Some(id))` for admitted speech; `Ok(None)` for a cue, which has no handle.
     fn enqueue_action(
         &self,
         action: QueueAction,
         source: Option<WiredAgent>,
         session: Option<String>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u64>, String> {
         let mut q = self.items.lock().unwrap();
         let is_cue = matches!(&action, QueueAction::Earcon(_));
         let pending_items = q
@@ -665,16 +699,22 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
+        // Issued only past admission, so a rejected enqueue never burns a handle.
+        let utterance_id = action
+            .speech_text()
+            .is_some()
+            .then(|| self.next_utterance_id.fetch_add(1, Ordering::SeqCst));
         let before = speech_depth(&q);
         q.push_back(Item {
             action,
             source,
             session,
             resume_skip: 0,
+            utterance_id,
         });
         self.publish_queue_depth(before, speech_depth(&q));
         self.cv.notify_one();
-        Ok(())
+        Ok(utterance_id)
     }
 
     /// Admit narration by id once. Dup id → Ok even if queue full; rejected first stays retryable.
@@ -718,6 +758,18 @@ impl TtsQueue {
         Ok(())
     }
 
+    /// Fresh in-flight record for a claimed item: the handle is known at admit, the
+    /// resolution only once the play gate runs.
+    fn claimed_utterance(item: &Item) -> Option<ds_status::UtteranceStatus> {
+        item.utterance_id.map(|id| ds_status::UtteranceStatus {
+            id,
+            voice: None,
+            language: None,
+            warning: None,
+            outcome: None,
+        })
+    }
+
     /// Language for one chunk, decided at admit so the queued item carries it. `corpus` is
     /// the turn text the producer sent, used only when the chunk cannot classify itself.
     fn chunk_language(&self, text: &str, corpus: Option<&str>) -> String {
@@ -751,7 +803,7 @@ impl TtsQueue {
             source: item.source,
             session: item.session.clone(),
             speech: item.action.speech_text().is_some(),
-            utterance: None,
+            utterance: Self::claimed_utterance(&item),
         });
         item
     }
@@ -784,9 +836,12 @@ impl TtsQueue {
     pub fn clear(&self) {
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
-        items.clear();
+        let discarded = discard_items(&mut items, |_| false);
         self.publish_queue_depth(before, speech_depth(&items));
         drop(items);
+        // Never while holding `items`: that guard spans helper I/O, and status reads the
+        // record ring.
+        self.record_discarded(&discarded);
         *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
         self.cv.notify_one();
@@ -807,7 +862,7 @@ impl TtsQueue {
         // items → playing same order as worker; prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
-        prune_session(&mut items, &session);
+        let discarded = prune_session(&mut items, &session);
         self.publish_queue_depth(before, speech_depth(&items));
         let cancel_current = self
             .playing
@@ -819,6 +874,7 @@ impl TtsQueue {
             self.hard_cancel_in_flight_locked(&items);
         }
         drop(items);
+        self.record_discarded(&discarded);
         self.cv.notify_one();
     }
 
@@ -849,41 +905,49 @@ impl TtsQueue {
             return;
         };
         if cancel_current {
-            let mut items = self.items.lock().unwrap();
-            let before = speech_depth(&items);
-            // Snapshot `playing` under `items` (the worker's claim order, like the `other`
-            // branch) so a claim can't slip in between the prune and the decision.
-            let playing_is_target = self
-                .playing
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|p| session_belongs_to_real(&p.session, target.as_str()));
-            prune_session(&mut items, &Some(target.clone()));
-            // Voice submit path (not MarkActive): also drop sticky of same terminal.
-            if let Some(sticky) = grok_stop_sticky_sibling(&target) {
-                prune_session(&mut items, &Some(sticky));
+            let mut discarded;
+            {
+                let mut items = self.items.lock().unwrap();
+                let before = speech_depth(&items);
+                // Snapshot `playing` under `items` (the worker's claim order, like the `other`
+                // branch) so a claim can't slip in between the prune and the decision.
+                let playing_is_target = self
+                    .playing
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| session_belongs_to_real(&p.session, target.as_str()));
+                discarded = prune_session(&mut items, &Some(target.clone()));
+                // Voice submit path (not MarkActive): also drop sticky of same terminal.
+                if let Some(sticky) = grok_stop_sticky_sibling(&target) {
+                    discarded.extend(prune_session(&mut items, &Some(sticky)));
+                }
+                self.publish_queue_depth(before, speech_depth(&items));
+                if playing_is_target {
+                    self.hard_cancel_in_flight_locked(&items);
+                }
             }
-            self.publish_queue_depth(before, speech_depth(&items));
-            if playing_is_target {
-                self.hard_cancel_in_flight_locked(&items);
-            }
+            self.record_discarded(&discarded);
         }
         if cancel_other {
-            // Prune + playing snapshot under items (avoid claim race after return).
-            let mut items = self.items.lock().unwrap();
-            let before = speech_depth(&items);
-            let playing_is_other = self
-                .playing
-                .lock()
-                .unwrap()
-                .as_ref()
-                .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
-            retain_only_session(&mut items, &Some(target));
-            self.publish_queue_depth(before, speech_depth(&items));
-            if playing_is_other {
-                self.hard_cancel_in_flight_locked(&items);
+            let discarded;
+            {
+                // Prune + playing snapshot under items (avoid claim race after return).
+                let mut items = self.items.lock().unwrap();
+                let before = speech_depth(&items);
+                let playing_is_other = self
+                    .playing
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
+                discarded = retain_only_session(&mut items, &Some(target));
+                self.publish_queue_depth(before, speech_depth(&items));
+                if playing_is_other {
+                    self.hard_cancel_in_flight_locked(&items);
+                }
             }
+            self.record_discarded(&discarded);
         }
         self.cv.notify_one();
     }
@@ -1026,7 +1090,7 @@ impl TtsQueue {
             speaker: source,
             queued: pending + speaking_utterance,
             utterance: claim.and_then(|claim| claim.utterance),
-            last_utterance: self.last_utterance.lock().unwrap().clone(),
+            recent_utterances: self.utterances.lock().unwrap().iter().cloned().collect(),
         }
     }
 
@@ -1072,13 +1136,63 @@ impl TtsQueue {
     }
 
     /// Publish resolution before the speaking transition so one wake exposes both.
-    fn publish_resolved_utterance(&self, utterance: ds_status::UtteranceStatus) {
+    fn publish_resolved_utterance(
+        &self,
+        voice: &str,
+        language: &str,
+        warning: Option<ds_status::UtteranceWarning>,
+    ) {
         if let Some(claim) = self.playing.lock().unwrap().as_mut()
-            && claim.speech
+            && let Some(utterance) = claim.utterance.as_mut()
         {
-            claim.utterance = Some(utterance.clone());
+            utterance.voice = Some(voice.to_string());
+            utterance.language = Some(language.to_string());
+            utterance.warning = warning;
         }
-        *self.last_utterance.lock().unwrap() = Some(utterance);
+    }
+
+    /// Utterances a barge or session clear threw away before they ever played. Without a
+    /// record, "no entry for my handle" would mean both "still queued" and "silently gone".
+    /// They never reached the play gate, so they carry no voice or language.
+    fn record_discarded(&self, discarded: &[u64]) {
+        if discarded.is_empty() {
+            return;
+        }
+        let mut utterances = self.utterances.lock().unwrap();
+        for id in discarded {
+            utterances.push_front(ds_status::UtteranceStatus {
+                id: *id,
+                voice: None,
+                language: None,
+                warning: None,
+                outcome: Some(ds_status::UtteranceOutcome::Cancelled),
+            });
+        }
+        utterances.truncate(RECENT_UTTERANCES_MAX);
+        drop(utterances);
+        self.gate.bump();
+    }
+
+    /// Close out the claimed utterance: stamp its fate onto the claim's own record and
+    /// publish it. Retries and requeues re-enter the play gate, so this runs once per
+    /// utterance — when the queue is done with the item, not when playback returns. A cue
+    /// has no record and is skipped.
+    fn finish_utterance(&self, outcome: ds_status::UtteranceOutcome) {
+        let Some(mut record) = self
+            .playing
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|claim| claim.utterance.clone())
+        else {
+            return;
+        };
+        record.outcome = Some(outcome);
+        let mut utterances = self.utterances.lock().unwrap();
+        utterances.push_front(record);
+        utterances.truncate(RECENT_UTTERANCES_MAX);
+        drop(utterances);
+        self.gate.bump();
     }
 
     /// Pause flag (cause-agnostic).
@@ -1287,6 +1401,7 @@ impl TtsQueue {
             let _in_flight = InFlightGuard(&self.in_flight);
             let _playing = PlayingGuard(&self.playing);
 
+            let mut played = None;
             match &item.action {
                 QueueAction::Speech {
                     text,
@@ -1296,9 +1411,14 @@ impl TtsQueue {
                     let (outcome, resume_skip) =
                         self.play_speech(&item, gen0, text, language, tts_args.as_deref());
                     item.resume_skip = resume_skip;
-                    if outcome == SpeechOutcome::Requeue {
-                        self.requeue_if_resuming(item, gen0);
-                        continue 'outer;
+                    match outcome {
+                        SpeechOutcome::Requeue => {
+                            self.settle_cancelled(item, gen0);
+                            continue 'outer;
+                        }
+                        // A cancel that landed during playback still cut it short, so the
+                        // shared trailer re-checks the generation before recording this.
+                        SpeechOutcome::Done(outcome) => played = Some(outcome),
                     }
                 }
                 QueueAction::Earcon(event) => {
@@ -1313,7 +1433,9 @@ impl TtsQueue {
                 }
             }
             if self.generation.load(Ordering::SeqCst) != gen0 {
-                self.requeue_if_resuming(item, gen0);
+                self.settle_cancelled(item, gen0);
+            } else if let Some(outcome) = played {
+                self.finish_utterance(outcome);
             }
             self.set_tts_active(false);
         }
@@ -1344,15 +1466,18 @@ impl TtsQueue {
                     GateOutcome::Requeue => return (SpeechOutcome::Requeue, resume_skip),
                     GateOutcome::Drop(reason) => {
                         log::warn!(target: "ttsq", "queued speak could not start: {reason}");
-                        return (SpeechOutcome::Finished, resume_skip);
+                        return (
+                            SpeechOutcome::Done(ds_status::UtteranceOutcome::Dropped),
+                            resume_skip,
+                        );
                     }
                 };
 
-            self.publish_resolved_utterance(ds_status::UtteranceStatus {
-                voice: voice.clone(),
-                language: language.clone(),
-                warning: utterance_warning(engine, model, &voice, &language),
-            });
+            self.publish_resolved_utterance(
+                &voice,
+                &language,
+                utterance_warning(engine, model, &voice, &language),
+            );
             self.set_tts_active(true);
             let result =
                 self.speak_one(engine, text, &voice, &language, rate, &params, resume_skip);
@@ -1361,7 +1486,12 @@ impl TtsQueue {
                 resume_skip = resume_skip.max(self.tts.last_speak_progress());
             }
             match result {
-                Ok(()) => return (SpeechOutcome::Finished, resume_skip),
+                Ok(()) => {
+                    return (
+                        SpeechOutcome::Done(ds_status::UtteranceOutcome::Spoken),
+                        resume_skip,
+                    );
+                }
                 Err(e)
                     if retries_left > 0
                         && should_retry_speak(engine, model_supports_resume, &e) =>
@@ -1376,7 +1506,10 @@ impl TtsQueue {
                 }
                 Err(e) => {
                     log::warn!(target: "ttsq", "queued speak failed: {e}");
-                    return (SpeechOutcome::Finished, resume_skip);
+                    return (
+                        SpeechOutcome::Done(ds_status::UtteranceOutcome::Failed),
+                        resume_skip,
+                    );
                 }
             }
         }
@@ -1666,7 +1799,7 @@ impl TtsQueue {
     /// make a live read see `paused == true` and wrongly resurrect an item the clear had
     /// already cancelled. Falls back to the live flag only if this bump's intent was never
     /// recorded (defensive — every generation-bumping site above records one).
-    fn requeue_if_resuming(&self, item: Item, gen0: u64) {
+    fn requeue_if_resuming(&self, item: Item, gen0: u64) -> bool {
         let requeue = self
             .cancel_kind
             .lock()
@@ -1674,12 +1807,21 @@ impl TtsQueue {
             .remove(&gen0)
             .unwrap_or_else(|| self.is_paused());
         if !should_requeue(requeue, &item.action) {
-            return;
+            return false;
         }
         let mut q = self.items.lock().unwrap();
         let before = speech_depth(&q);
         q.push_front(item);
         self.publish_queue_depth(before, speech_depth(&q));
+        true
+    }
+
+    /// A cancel reached this item. Requeued it is still going to be spoken; dropped it is
+    /// over, and its terminal record says the cancel is why.
+    fn settle_cancelled(&self, item: Item, gen0: u64) {
+        if !self.requeue_if_resuming(item, gen0) {
+            self.finish_utterance(ds_status::UtteranceOutcome::Cancelled);
+        }
     }
 }
 
@@ -1708,7 +1850,8 @@ enum GateOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpeechOutcome {
-    Finished,
+    /// The play gate is finished with this item; the payload is its terminal record's fate.
+    Done(ds_status::UtteranceOutcome),
     Requeue,
 }
 
@@ -2188,6 +2331,7 @@ mod tests {
             source: None,
             session: session.map(str::to_string),
             resume_skip: 0,
+            utterance_id: None,
         }
     }
 
@@ -2383,6 +2527,7 @@ mod tests {
             source: None,
             session: None,
             resume_skip: 0,
+            utterance_id: None,
         }
     }
 
@@ -2807,6 +2952,215 @@ mod tests {
         assert!(!idle.speaking);
         assert_eq!(idle.speaker, None);
         assert_eq!(idle.queued, 0);
+    }
+
+    /// Stand in for the worker's claim so the record tests can drive resolution and fate
+    /// without a live helper child.
+    fn claim_utterance_for_test(q: &TtsQueue, id: u64) {
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: None,
+            session: None,
+            speech: true,
+            utterance: Some(ds_status::UtteranceStatus {
+                id,
+                voice: None,
+                language: None,
+                warning: None,
+                outcome: None,
+            }),
+        });
+    }
+
+    /// The `speak` handle: every admitted utterance gets one, nothing else consumes one.
+    #[test]
+    fn handles_are_issued_per_admitted_utterance_only() {
+        let q = mk_queue();
+        assert_eq!(q.enqueue("one".into(), None, None, None).unwrap(), Some(1));
+        assert_eq!(q.enqueue("two".into(), None, None, None).unwrap(), Some(2));
+        assert_eq!(
+            q.enqueue("   \n".into(), None, None, None).unwrap(),
+            None,
+            "nothing to say ⇒ nothing to correlate"
+        );
+        q.enqueue_earcon(ds_earcon::EarconEvent::ReplyDone, None, None)
+            .unwrap();
+        assert_eq!(
+            q.enqueue("three".into(), None, None, None).unwrap(),
+            Some(3),
+            "blank text and cues must not burn handles"
+        );
+
+        let items = q.items.lock().unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.utterance_id)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(2), None, Some(3)],
+            "each item carries the handle its producer was given"
+        );
+    }
+
+    /// Status answers "what happened to that utterance": the handle at claim, the voice and
+    /// language once the play gate resolves them, the fate once the queue is done with it.
+    #[test]
+    fn an_utterances_record_gains_its_resolution_then_its_outcome() {
+        let q = mk_queue();
+        claim_utterance_for_test(&q, 4);
+        q.set_active_for_test(true);
+
+        let claimed = q.tts_status_sample().utterance.expect("claim carries one");
+        assert_eq!(claimed.id, 4);
+        assert_eq!(claimed.voice, None, "no voice before the play gate");
+
+        q.publish_resolved_utterance(
+            "if_sara",
+            "it",
+            Some(ds_status::UtteranceWarning::VoiceLanguageMismatch),
+        );
+        let resolved = q.tts_status_sample().utterance.unwrap();
+        assert_eq!(resolved.voice.as_deref(), Some("if_sara"));
+        assert_eq!(resolved.language.as_deref(), Some("it"));
+        assert_eq!(
+            resolved.warning,
+            Some(ds_status::UtteranceWarning::VoiceLanguageMismatch)
+        );
+        assert_eq!(resolved.outcome, None, "in flight has no outcome yet");
+        assert!(
+            q.tts_status_sample().recent_utterances.is_empty(),
+            "an in-flight utterance is not a terminal record"
+        );
+
+        q.finish_utterance(ds_status::UtteranceOutcome::Spoken);
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(recent[0].id, 4);
+        assert_eq!(recent[0].voice.as_deref(), Some("if_sara"));
+        assert_eq!(recent[0].outcome, Some(ds_status::UtteranceOutcome::Spoken));
+    }
+
+    /// The failure this surface exists for: speech off or a model that never loaded ends the
+    /// utterance before any voice is picked, and the record has to say so rather than lie.
+    #[test]
+    fn an_utterance_dropped_before_the_play_gate_reports_no_voice() {
+        let q = mk_queue();
+        claim_utterance_for_test(&q, 2);
+        q.finish_utterance(ds_status::UtteranceOutcome::Dropped);
+
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(recent[0].id, 2);
+        assert_eq!(recent[0].voice, None);
+        assert_eq!(recent[0].language, None);
+        assert_eq!(
+            recent[0].outcome,
+            Some(ds_status::UtteranceOutcome::Dropped)
+        );
+    }
+
+    /// A cue has nothing to report, so it must not push an entry a producer could mistake
+    /// for its own utterance.
+    #[test]
+    fn a_finished_cue_records_nothing() {
+        let q = mk_queue();
+        *q.playing.lock().unwrap() = Some(PlayingClaim {
+            source: None,
+            session: None,
+            speech: false,
+            utterance: None,
+        });
+        q.finish_utterance(ds_status::UtteranceOutcome::Spoken);
+        assert!(q.tts_status_sample().recent_utterances.is_empty());
+    }
+
+    #[test]
+    fn the_record_ring_keeps_the_newest_handles_first() {
+        let q = mk_queue();
+        let overflow = RECENT_UTTERANCES_MAX as u64 + 2;
+        for id in 1..=overflow {
+            claim_utterance_for_test(&q, id);
+            q.finish_utterance(ds_status::UtteranceOutcome::Spoken);
+        }
+
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(recent.len(), RECENT_UTTERANCES_MAX);
+        assert_eq!(recent[0].id, overflow, "most recent first");
+        assert_eq!(
+            recent[RECENT_UTTERANCES_MAX - 1].id,
+            3,
+            "the two oldest fell off the end"
+        );
+    }
+
+    /// A barge throws away utterances that never played. They ended, so they get records —
+    /// otherwise a producer polling its handle cannot tell "discarded" from "still queued".
+    #[test]
+    fn a_barge_records_the_queued_utterances_it_threw_away() {
+        let q = mk_queue();
+        let first = q
+            .enqueue("one".into(), None, None, Some("sess".into()))
+            .unwrap();
+        let second = q
+            .enqueue("two".into(), None, None, Some("sess".into()))
+            .unwrap();
+        let other = q
+            .enqueue("keep me".into(), None, None, Some("elsewhere".into()))
+            .unwrap();
+
+        q.clear_session(Some("sess".into()));
+
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(
+            recent.iter().map(|u| u.id).collect::<Vec<_>>(),
+            vec![second.unwrap(), first.unwrap()],
+            "both discarded handles are recorded, most recent first"
+        );
+        assert!(
+            recent.iter().all(
+                |u| u.outcome == Some(ds_status::UtteranceOutcome::Cancelled) && u.voice.is_none()
+            ),
+            "never played ⇒ cancelled with no voice"
+        );
+        assert!(
+            !recent.iter().any(|u| Some(u.id) == other),
+            "another window's queued utterance is untouched"
+        );
+    }
+
+    /// A record-barge requeue is not a terminal outcome — the utterance is still going to be
+    /// spoken, under the same handle. A hard cancel ends it, and the record says why.
+    #[test]
+    fn only_a_cancel_that_drops_the_item_ends_its_utterance() {
+        let q = mk_queue();
+        claim_utterance_for_test(&q, 5);
+        q.record_cancel_kind(1, true);
+        let mut resumed = item("interrupted");
+        resumed.utterance_id = Some(5);
+        q.settle_cancelled(resumed, 1);
+
+        assert!(
+            q.tts_status_sample().recent_utterances.is_empty(),
+            "a resumable utterance has not ended"
+        );
+        assert_eq!(
+            q.items
+                .lock()
+                .unwrap()
+                .front()
+                .and_then(|it| it.utterance_id),
+            Some(5),
+            "the requeued item keeps the handle its producer holds"
+        );
+
+        q.record_cancel_kind(2, false);
+        let mut barged = item("barged");
+        barged.utterance_id = Some(5);
+        q.settle_cancelled(barged, 2);
+
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(recent[0].id, 5);
+        assert_eq!(
+            recent[0].outcome,
+            Some(ds_status::UtteranceOutcome::Cancelled)
+        );
     }
 
     /// Only utterances count: cues share the queue but are not things to say.
@@ -4121,7 +4475,10 @@ mod tests {
 
         let (outcome, resume_skip) = handle.join().expect("speech test thread panicked");
 
-        assert_eq!(outcome, SpeechOutcome::Finished);
+        assert_eq!(
+            outcome,
+            SpeechOutcome::Done(ds_status::UtteranceOutcome::Spoken)
+        );
         assert_eq!(
             resume_skip, 2,
             "progress 2 proves the retry completed on the replacement child"

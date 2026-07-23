@@ -13,6 +13,7 @@ public struct ActivityDTO: Decodable, Sendable, Equatable {
     public var recording: Bool
     public var speaking: Bool
     public var speaker: String?
+    public var utteranceId: UInt64?
     public var voice: String?
     public var language: String?
     public var warning: String?
@@ -24,6 +25,7 @@ public struct ActivityDTO: Decodable, Sendable, Equatable {
         case recording
         case speaking
         case speaker
+        case utteranceId = "utterance_id"
         case voice
         case language
         case warning
@@ -44,9 +46,11 @@ public struct DictationDTO: Decodable, Sendable, Equatable {
 }
 
 public struct UtteranceStatusDTO: Decodable, Sendable, Equatable {
-    public var voice: String
-    public var language: String
+    public var id: UInt64
+    public var voice: String?
+    public var language: String?
     public var warning: String?
+    public var outcome: String?
 }
 
 public struct DownloadStatusDTO: Decodable, Sendable, Equatable {
@@ -71,11 +75,11 @@ public struct TtsStatusDTO: Decodable, Sendable, Equatable {
     public var language: String?
     public var provider: String?
     public var status: EngineStatusDTO?
-    public var lastUtterance: UtteranceStatusDTO?
+    public var recentUtterances: [UtteranceStatusDTO]
 
     enum CodingKeys: String, CodingKey {
         case engine, model, language, provider, status
-        case lastUtterance = "last_utterance"
+        case recentUtterances = "recent_utterances"
     }
 }
 

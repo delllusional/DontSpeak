@@ -30,6 +30,9 @@ Queue text for spoken playback.
 
 Only the target active at playback is applied. Flat `voice`/`language`/`rate` args are not accepted.
 
+Accepted text returns `Queued as utterance <id>.` — the handle `status` keys this utterance's
+record on. Text that is blank after trimming returns a bare `Queued.` (nothing to correlate).
+
 ```json
 {
   "text": "Guten Morgen.",
@@ -74,6 +77,13 @@ Speech config and runtime state.
 With `detail=true`, nested model lifecycle/stats land under `status` (not `models`).
 Pass `seq` back as `since` to long-poll. `timeout_ms` is only valid with `since`.
 Download ETA: `(done_bytes - start_bytes) / elapsed_seconds` once elapsed is nonzero.
+
+What became of an utterance: `state.utterance_id` is the handle being spoken right now, with
+`voice` / `detected_language` / `warning` alongside it. `state.recent_utterances` holds the 16
+most recent ended utterances, newest first — `{id, voice, language, warning, outcome}`, where
+`outcome` is `spoken`, `failed`, `cancelled` (stop, barge, or a queue clear), or `dropped`
+(never reached playback, so `voice` and `language` are null). Poll for the `id` that `speak`
+returned.
 
 ## usage
 

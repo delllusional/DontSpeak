@@ -229,7 +229,9 @@ pub(crate) fn spawn_ipc_server(
                     match speak_tts_args(tts_args)
                         .and_then(|args| ttsq.enqueue(text, args, source, Some(session)))
                     {
-                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        // Blank text is accepted and says nothing, so there is no handle.
+                        Ok(Some(id)) => emit(&ds_ipc::Response::Utterance { id }),
+                        Ok(None) => emit(&ds_ipc::Response::Done),
                         Err(e) => emit(&ds_ipc::Response::error(format!("speak: {e}"))),
                     }
                 }

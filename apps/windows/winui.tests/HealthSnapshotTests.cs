@@ -59,16 +59,19 @@ public class HealthSnapshotTests
     public void StatusMirrorDecodesUtteranceAndDownloadTelemetry()
     {
         var dto = JsonSerializer.Deserialize<ModelStatusDto>("""
-            {"activity":{"voice":"if_sara","language":"it","warning":null},
-             "tts":{"model":null,"last_utterance":{"voice":"if_sara",
-                    "language":"it","warning":null}},
+            {"activity":{"utterance_id":12,"voice":"if_sara","language":"it","warning":null},
+             "tts":{"model":null,"recent_utterances":[{"id":11,"voice":"if_sara",
+                    "language":"it","warning":null,"outcome":"spoken"}]},
              "downloads":[{"target":"kokoro_model","done_bytes":25,"total_bytes":100,
                            "start_bytes":5,"elapsed_seconds":2}]}
             """);
 
-        Assert.Equal("if_sara", dto!.Activity!.Voice);
+        Assert.Equal(12UL, dto!.Activity!.UtteranceId);
+        Assert.Equal("if_sara", dto.Activity.Voice);
         Assert.Equal("it", dto.Activity.Language);
-        Assert.Equal("if_sara", dto.Tts!.LastUtterance!.Voice);
+        Assert.Equal(11UL, dto.Tts!.RecentUtterances![0].Id);
+        Assert.Equal("if_sara", dto.Tts.RecentUtterances[0].Voice);
+        Assert.Equal("spoken", dto.Tts.RecentUtterances[0].Outcome);
         Assert.Equal(25UL, dto.Downloads![0].DoneBytes);
         Assert.Equal(5UL, dto.Downloads[0].StartBytes);
         Assert.Equal(2UL, dto.Downloads[0].ElapsedSeconds);

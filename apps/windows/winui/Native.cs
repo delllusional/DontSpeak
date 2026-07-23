@@ -405,6 +405,7 @@ internal sealed record ActivityDto
     [JsonPropertyName("recording")] public bool Recording { get; init; }
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
     [JsonPropertyName("speaker")] public string? Speaker { get; init; }
+    [JsonPropertyName("utterance_id")] public ulong? UtteranceId { get; init; }
     [JsonPropertyName("voice")] public string? Voice { get; init; }
     [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("warning")] public string? Warning { get; init; }
@@ -413,9 +414,11 @@ internal sealed record ActivityDto
 
 internal sealed record UtteranceStatusDto
 {
+    [JsonPropertyName("id")] public ulong Id { get; init; }
     [JsonPropertyName("voice")] public string? Voice { get; init; }
     [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("warning")] public string? Warning { get; init; }
+    [JsonPropertyName("outcome")] public string? Outcome { get; init; }
 }
 
 internal sealed record DownloadStatusDto
@@ -434,7 +437,7 @@ internal sealed record TtsStatusDto
     [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("provider")] public string? Provider { get; init; }
     [JsonPropertyName("status")] public EngineStatusDto? Status { get; init; }
-    [JsonPropertyName("last_utterance")] public UtteranceStatusDto? LastUtterance { get; init; }
+    [JsonPropertyName("recent_utterances")] public UtteranceStatusDto[]? RecentUtterances { get; init; }
 }
 
 internal sealed record SttStatusDto

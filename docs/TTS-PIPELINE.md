@@ -50,11 +50,13 @@ neither its own evidence nor a corpus is spoken English rather than a coin flip.
 switch between admit and play.
 
 Three delivery routes (by design): hooks (commit HWM on queue accept), MCP (one-shot),
-Codex (in-process). Streaming routes retry rejected work. Status exposes the current and
-most recently resolved voice/language, but no route yet propagates a per-utterance terminal
-playback ACK to the producer. MCP `Speak` chooses the active `tts_args` target at playback,
-so a queued config switch cannot leak one model's voice, language, or parameters into another.
-Named parameter values merge over that target's configured values for the utterance.
+Codex (in-process). Streaming routes retry rejected work. Every admitted utterance gets a
+handle; `speak` returns it and status carries the terminal record (resolved voice/language
+plus `spoken`/`failed`/`cancelled`/`dropped`). Hooks and Codex do not surface the handle to
+their producer, so only MCP has the ACK end to end. MCP `Speak` chooses the active
+`tts_args` target at playback, so a queued config switch cannot leak one model's voice,
+language, or parameters into another. Named parameter values merge over that target's
+configured values for the utterance.
 
 ## Kokoro language frontends
 
@@ -177,8 +179,9 @@ macOS full-duplex: feeder thread + ~2 s VPIO lookahead; mute zeros output at ren
 while draining ring at wall rate (AEC far-end = speakers). Fail: abort feeder before
 clearing ring.
 
-Terminal outcomes are logged but not yet correlated back to narration records; status retains
-resolved voice/language metadata rather than a per-ID outcome history.
+Terminal outcomes are recorded per utterance handle (`tts.recent_utterances`, 16 deep) but not
+correlated back to narration ids: a hook producer holds a narration id, not the handle the
+queue minted for it.
 
 ## Gaps / planned
 

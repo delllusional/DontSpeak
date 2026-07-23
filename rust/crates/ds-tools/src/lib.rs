@@ -673,24 +673,33 @@ fn output_schema_for(output: Output) -> Value {
                         "tts_active": { "type": "boolean" },
                         "queued": { "type": "integer", "minimum": 0 },
                         "muted": { "type": "boolean" },
+                        "utterance_id": { "type": ["integer", "null"], "minimum": 1 },
                         "voice": { "type": ["string", "null"] },
                         "detected_language": { "type": ["string", "null"] },
                         "warning": {
                             "type": ["string", "null"],
                             "enum": ["voice_language_mismatch", null]
                         },
-                        "last_utterance": {
-                            "type": ["object", "null"],
-                            "properties": {
-                                "voice": { "type": "string" },
-                                "language": { "type": "string" },
-                                "warning": {
-                                    "type": ["string", "null"],
-                                    "enum": ["voice_language_mismatch", null]
-                                }
-                            },
-                            "required": ["voice", "language", "warning"],
-                            "additionalProperties": false
+                        "recent_utterances": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "integer", "minimum": 1 },
+                                    "voice": { "type": ["string", "null"] },
+                                    "language": { "type": ["string", "null"] },
+                                    "warning": {
+                                        "type": ["string", "null"],
+                                        "enum": ["voice_language_mismatch", null]
+                                    },
+                                    "outcome": {
+                                        "type": ["string", "null"],
+                                        "enum": ["spoken", "failed", "cancelled", "dropped", null]
+                                    }
+                                },
+                                "required": ["id", "voice", "language", "warning", "outcome"],
+                                "additionalProperties": false
+                            }
                         },
                         "tts": { "type": ["object", "null"] },
                         "stt": { "type": ["object", "null"] },

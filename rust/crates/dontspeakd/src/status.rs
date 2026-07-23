@@ -345,14 +345,15 @@ pub(crate) fn model_status_json(
             recording: dict_recording,
             speaking: tts_sample.speaking,
             speaker: tts_sample.speaker,
+            utterance_id: tts_sample.utterance.as_ref().map(|utterance| utterance.id),
             voice: tts_sample
                 .utterance
                 .as_ref()
-                .map(|utterance| utterance.voice.clone()),
+                .and_then(|utterance| utterance.voice.clone()),
             language: tts_sample
                 .utterance
                 .as_ref()
-                .map(|utterance| utterance.language.clone()),
+                .and_then(|utterance| utterance.language.clone()),
             warning: tts_sample
                 .utterance
                 .as_ref()
@@ -367,7 +368,7 @@ pub(crate) fn model_status_json(
                 .then(|| "auto".to_string()),
             provider: tts_provider_token(resolved_tts, tts.provider().as_deref()),
             status: tts_status,
-            last_utterance: tts_sample.last_utterance,
+            recent_utterances: tts_sample.recent_utterances,
         },
         stt: SttStatus {
             engine: status_stt_engine(resolved_stt),
@@ -756,20 +757,26 @@ mod tests {
         };
 
         let utterance = UtteranceStatus {
-            voice: "af_sarah".to_string(),
-            language: "it".to_string(),
+            id: 7,
+            voice: Some("af_sarah".to_string()),
+            language: Some("it".to_string()),
             warning: Some(UtteranceWarning::VoiceLanguageMismatch),
+            outcome: None,
         };
         let value = model_status_json(&shared, &paths, || TtsStatusSample {
             speaking: true,
             speaker: None,
             queued: 3,
             utterance: Some(utterance.clone()),
-            last_utterance: Some(utterance),
+            recent_utterances: vec![UtteranceStatus {
+                outcome: Some(ds_status::UtteranceOutcome::Spoken),
+                ..utterance
+            }],
         });
         // caps events are logged (see `Engine::record_caps`) but never serialized here.
         assert!(value.get("caps_events").is_none());
         assert_eq!(value["stats"]["tts"]["queued"], 3);
+        assert_eq!(value["activity"]["utterance_id"], 7);
         assert_eq!(value["activity"]["voice"], "af_sarah");
         assert_eq!(value["activity"]["language"], "it");
         assert_eq!(value["activity"]["warning"], "voice_language_mismatch");
@@ -781,7 +788,10 @@ mod tests {
         let tts = status.tts.status.as_ref().unwrap();
         assert_eq!(tts.state, EngineState::Downloading);
         assert_eq!(tts.progress, 0.25);
-        assert_eq!(status.tts.last_utterance.as_ref().unwrap().language, "it");
+        let last = &status.tts.recent_utterances[0];
+        assert_eq!(last.id, 7);
+        assert_eq!(last.language.as_deref(), Some("it"));
+        assert_eq!(last.outcome, Some(ds_status::UtteranceOutcome::Spoken));
         let stt = status.stt.status.as_ref().unwrap();
         assert_eq!(stt.state, EngineState::Failed);
         assert_eq!(stt.error.as_deref(), Some("download failed"));
