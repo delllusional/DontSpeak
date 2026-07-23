@@ -739,14 +739,23 @@ impl TtsManager {
             }
             stdout
         });
+        /// Why the pre-READY wait ended without a READY. Carried OUT of the loop so every
+        /// failure leaves through the one teardown below instead of its own `return`.
+        struct PreReadyFailure {
+            /// [`set_error`](TtsManager::set_error) text — the helper's own `ERR` payload,
+            /// or the generic reason for the transport failures.
+            error: String,
+            log: String,
+        }
+
         let deadline = std::time::Instant::now() + self.ready_handshake_timeout();
-        loop {
+        let failure = loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             match line_rx.recv_timeout(remaining) {
                 Ok(Ok(Some(line))) => {
                     let l = line.trim();
                     if l == proto::READY {
-                        break;
+                        break None;
                     }
                     // STT preloads in PARALLEL, so its terminal can land on either side of
                     // READY — this pre-READY wait loop and the post-READY reader both route
@@ -784,53 +793,62 @@ impl TtsManager {
                         continue;
                     }
                     if let Some(msg) = l.strip_prefix(proto::ERR) {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        // Kill closed the pipe → the handshake thread EOFs; the join is
-                        // bounded (same on every failure arm below).
-                        let _ = handshake.join();
-                        self.set_error(msg.trim());
-                        log::warn!(target: "engine", "TTS warm child failed to load:{msg}");
-                        return;
+                        break Some(PreReadyFailure {
+                            error: msg.trim().to_string(),
+                            log: format!("TTS warm child failed to load:{msg}"),
+                        });
                     }
                     // ignore any other chatter before READY
                 }
                 Ok(Ok(None)) => {
-                    let _ = child.wait();
-                    let _ = handshake.join();
-                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log::warn!(target: "engine", "TTS warm child closed before READY");
-                    return;
+                    break Some(PreReadyFailure {
+                        error: ds_i18n::t("status.engine.reason.tts_failed"),
+                        log: "TTS warm child closed before READY".to_string(),
+                    });
                 }
                 Ok(Err(e)) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = handshake.join();
-                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log::warn!(target: "engine", "TTS warm child read error before READY: {e}");
-                    return;
+                    break Some(PreReadyFailure {
+                        error: ds_i18n::t("status.engine.reason.tts_failed"),
+                        log: format!("TTS warm child read error before READY: {e}"),
+                    });
                 }
                 Err(_) => {
                     // Timeout (or the handshake thread vanished): the child is alive but
-                    // never answered — kill it rather than wait forever. The manager parks
-                    // "not running" with `last_error` set, so `warm_child_heal_action`
-                    // (absent, error=true) resolves to `Nothing` — no automatic retry
-                    // storm; recovery is owned by the download-completion hook, a config
-                    // change, or the next `set_enabled`, exactly like every other start
-                    // failure.
-                    let pid = child.id();
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = handshake.join();
-                    self.set_error(ds_i18n::t("status.engine.reason.tts_failed"));
-                    log::warn!(
-                        target: "engine",
-                        "TTS warm child (pid {pid}) never printed READY within {:?} — killed",
-                        self.ready_handshake_timeout()
-                    );
-                    return;
+                    // never answered — the teardown below kills it rather than waiting
+                    // forever. The manager parks "not running" with `last_error` set, so
+                    // `warm_child_heal_action` (absent, error=true) resolves to `Nothing` —
+                    // no automatic retry storm; recovery is owned by the download-completion
+                    // hook, a config change, or the next `set_enabled`, exactly like every
+                    // other start failure.
+                    break Some(PreReadyFailure {
+                        error: ds_i18n::t("status.engine.reason.tts_failed"),
+                        log: format!(
+                            "TTS warm child (pid {}) never printed READY within {:?} — killed",
+                            child.id(),
+                            self.ready_handshake_timeout()
+                        ),
+                    });
                 }
             }
+        };
+        if let Some(failure) = failure {
+            // ONE teardown for every pre-READY failure. Kill even on EOF: a child that
+            // closed stdout without exiting would block `wait()` — and the `lifecycle`
+            // lock with it. The kill also closes the pipe → the handshake thread EOFs, so
+            // the join is bounded.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = handshake.join();
+            // This child is never installed, so no persistent reader exists to see its EOF
+            // and clear for us. STT preloads in PARALLEL, so a healthy Parakeet reports
+            // STTLOADED (+ STT_PROVIDER) before a failing TTS load lands here — which used
+            // to leave the STT row green, with its realized provider, behind a process that
+            // is gone (issue #213). Clear BEFORE `set_error`, so a waiter woken by the
+            // error bump can't still read the dead child's residency.
+            self.clear_loaded_flags();
+            self.set_error(failure.error);
+            log::warn!(target: "engine", "{}", failure.log);
+            return;
         }
         let stdout = handshake
             .join()
@@ -2141,6 +2159,59 @@ pub(crate) mod wedge_recovery_tests {
             "a successful start clears the parked error"
         );
         mgr.set_enabled(false);
+    }
+
+    /// Issue #213, driven through a REAL (fake) child for each pre-READY failure arm: STT
+    /// preloads on a PARALLEL thread, so `STTLOADED` + `STT_PROVIDER` land before READY
+    /// whenever the TTS half is the one that fails. The failed start must hand back the
+    /// residency it accepted — the child is never installed, so no persistent reader will
+    /// ever see its EOF and clear it, and `warm_child_heal_action` (absent + error)
+    /// resolves to `Nothing`, so a stale green STT row would simply persist.
+    fn pre_ready_failure_clears_residency(mode: &str) {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = mk_mgr_with(
+            &dir,
+            fake_helper_bin(),
+            TtsManagerTestOptions::default()
+                .with_ready_timeout(Duration::from_millis(200))
+                .with_first_spawn_env(&[("DONTSPEAK_FAKE_STT_LOADED_THEN", mode)]),
+        );
+
+        mgr.ensure_started();
+
+        assert!(
+            !mgr.is_running(),
+            "[{mode}] the child must never be installed"
+        );
+        assert!(
+            mgr.last_error().is_some(),
+            "[{mode}] a failed start parks the manager with last_error set"
+        );
+        assert!(
+            !mgr.is_stt_loaded(),
+            "[{mode}] a pre-READY STTLOADED must not outlive the failed start"
+        );
+        assert!(!mgr.is_tts_loaded(), "[{mode}] no child, no TTS residency");
+        assert_eq!(
+            mgr.stt_realized_provider(),
+            None,
+            "[{mode}] the realized STT provider goes with the process that reported it"
+        );
+    }
+
+    #[test]
+    fn a_pre_ready_err_clears_the_residency_flags() {
+        pre_ready_failure_clears_residency("err");
+    }
+
+    #[test]
+    fn a_pre_ready_eof_clears_the_residency_flags() {
+        pre_ready_failure_clears_residency("eof");
+    }
+
+    #[test]
+    fn a_pre_ready_handshake_timeout_clears_the_residency_flags() {
+        pre_ready_failure_clears_residency("hang");
     }
 
     /// Pins the ACTUAL production cue bound directly (no process, no real wait) — so a

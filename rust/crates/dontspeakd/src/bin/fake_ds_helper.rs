@@ -1,22 +1,45 @@
 //! Fake `ds-helper --serve` for `tts::wedge_recovery_tests`. Not packaged; built always
 //! (Cargo can't test-only `[[bin]]`). Never production-spawned.
 //!
-//! READY unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` (pre-READY hang — #59 handshake kill).
-//! `listen` → `PARTIAL wedge-ack` then hang; `speak` → DONE (or exit after
-//! `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS`); `load tts` → TTSLOADED. Parse `op` via JSON
-//! (not substring). EOF exits.
+//! READY unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` (pre-READY hang — #59 handshake kill) or
+//! `DONTSPEAK_FAKE_STT_LOADED_THEN` (STTLOADED + STT_PROVIDER, then `err`/`eof`/`hang`
+//! before READY — #213 residency clearing). `listen` → `PARTIAL wedge-ack` then hang;
+//! `speak` → DONE (or exit after `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS`); `load tts` →
+//! TTSLOADED. Parse `op` via JSON (not substring). EOF exits.
 
 use std::io::{BufRead, Write};
+
+fn hang() -> ! {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}
 
 fn main() {
     if std::env::var_os("DONTSPEAK_FAKE_WEDGE_PRE_READY").is_some() {
         // Pre-READY wedge (see module doc): alive, silent, stdout open.
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
-        }
+        hang();
     }
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
+    // The real helper preloads STT on a PARALLEL thread, so a healthy Parakeet reports
+    // residency BEFORE a TTS load that then fails — the shape issue #213 is about.
+    if let Ok(mode) = std::env::var("DONTSPEAK_FAKE_STT_LOADED_THEN") {
+        let _ = writeln!(out, "{}", ds_helper_proto::STTLOADED);
+        let _ = writeln!(out, "{}MLX", ds_helper_proto::STT_PROVIDER_PREFIX);
+        let _ = out.flush();
+        match mode.as_str() {
+            "err" => {
+                let _ = writeln!(out, "{} fake tts load failure", ds_helper_proto::ERR);
+                let _ = out.flush();
+                std::process::exit(1);
+            }
+            // Exit without READY — the crash shape the host sees as a bare stdout EOF.
+            "eof" => std::process::exit(0),
+            "hang" => hang(),
+            other => panic!("unknown DONTSPEAK_FAKE_STT_LOADED_THEN mode: {other}"),
+        }
+    }
     let close_on_speak_ms = std::env::var("DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
