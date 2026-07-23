@@ -331,8 +331,11 @@ pub(crate) fn model_status_json(
         },
         frac_for(DownloadTarget::DiarizationMlx).max(frac_for(DownloadTarget::SepformerModel)),
     );
-    let diarization_provider =
-        diarization_provider_token(cfg.resolved_diarizer(), diarization_status.state);
+    let diarization_provider = diarization_provider_token(
+        cfg.resolved_diarizer(),
+        cfg.is_diarization_on(),
+        diar_present && shim,
+    );
 
     let status = ModelStatus {
         seq,
@@ -464,16 +467,19 @@ fn tts_provider_token(
     }
 }
 
-/// Realized diarizer token — `None` until the row runs on a backend wired for this
-/// platform. The diarizer loads inside `ds-helper` on demand and reports nothing back,
-/// so `Running` (assets on disk + speaker lock armed) is the strongest realization
-/// signal the engine has. `ensure_mlx_backend` is the sole provider→backend mapping;
-/// without it `resolved_diarizer`'s `Mlx` fallback would claim a backend off macOS.
+/// Realized diarizer token — `None` until a diarization backend can actually run.
+/// The diarizer loads inside `ds-helper` on demand and reports nothing back, so the
+/// engine measures what that load path needs: the config ladder, shim + MLX asset set
+/// (`backend_present`, mirroring [`parakeet_available`]), and `ensure_mlx_backend`, the
+/// sole provider→backend mapping — without which `resolved_diarizer`'s `Mlx` fallback
+/// would claim a backend off macOS. Speaker lock and SepFormer gate the row's `running`,
+/// not the backend: `diarize`/`enroll` serve without either.
 fn diarization_provider_token(
     diarizer: ds_config::DiarizerProvider,
-    state: EngineState,
+    enabled: bool,
+    backend_present: bool,
 ) -> Option<String> {
-    (state == EngineState::Running && ds_stt::diarize::ensure_mlx_backend(diarizer).is_ok())
+    (enabled && backend_present && ds_stt::diarize::ensure_mlx_backend(diarizer).is_ok())
         .then(|| diarizer.as_str().to_string())
 }
 
@@ -1086,28 +1092,24 @@ mod tests {
     }
 
     #[test]
-    fn diarization_provider_is_absent_until_the_row_runs() {
+    fn diarization_provider_names_only_a_usable_backend() {
         // #200: the token was a constant, so the row claimed "mlx" with state "missing".
-        // Only a Running row (assets present + lock armed) has a backend to name.
+        // Config off or shim/assets absent ⇒ nothing loadable ⇒ nothing to name.
         let mlx = ds_config::DiarizerProvider::Mlx;
-        for state in EngineState::ALL {
-            if state == EngineState::Running {
-                continue;
-            }
+        for (enabled, present) in [(false, false), (false, true), (true, false)] {
             assert_eq!(
-                diarization_provider_token(mlx, state),
+                diarization_provider_token(mlx, enabled, present),
                 None,
-                "no realized backend in state {}",
-                state.as_str()
+                "no loadable backend with enabled={enabled} present={present}"
             );
         }
         // Wiring is macOS-only (`ds_stt::diarize::ensure_mlx_backend`), so elsewhere even a
-        // Running row names nothing.
-        let running = diarization_provider_token(mlx, EngineState::Running);
+        // downloaded, enabled diarizer names nothing.
+        let usable = diarization_provider_token(mlx, true, true);
         #[cfg(target_os = "macos")]
-        assert_eq!(running.as_deref(), Some("mlx"));
+        assert_eq!(usable.as_deref(), Some("mlx"));
         #[cfg(not(target_os = "macos"))]
-        assert_eq!(running, None);
+        assert_eq!(usable, None);
     }
 
     #[test]
