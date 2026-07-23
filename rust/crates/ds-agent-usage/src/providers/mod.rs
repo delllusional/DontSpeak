@@ -215,5 +215,4 @@ mod tests {
         assert_ne!(error.kind(), std::io::ErrorKind::PermissionDenied);
         assert!(matches!(FetchError::from(error), FetchError::Io(_)));
     }
-
 }

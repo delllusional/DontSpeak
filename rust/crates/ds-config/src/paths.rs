@@ -65,10 +65,12 @@ pub struct Paths {
     pub hermes_config_yaml: PathBuf,
     /// Hermes first-use consent for shell hooks (`(event, command)` approvals).
     pub hermes_shell_hooks_allowlist: PathBuf,
-    /// `$PATH` captured once at [`Self::resolve`] — the shared client-binary resolver reads this
-    /// instead of `std::env::var_os` so [`Self::rooted_at`] stays env-free and deterministic
-    /// under test (no ambient `$PATH` leaking into a supposedly-isolated check).
+    /// `$PATH` captured once at [`Self::resolve`]. Tests may replace this with a synthetic path.
     pub path_env: Option<OsString>,
+    /// Whether the shared client-binary resolver may consult other ambient install sources.
+    /// Kept separate from [`Self::path_env`] so a synthetic test path does not enable host
+    /// overrides, login-shell PATH, APPDATA, or machine-global directories.
+    pub(crate) live_client_environment: bool,
 }
 
 impl Paths {
@@ -156,10 +158,8 @@ impl Paths {
             hermes_dir,
             home,
             claude_dir,
-            // `Some(empty)` distinguishes a live environment with no PATH from the isolated
-            // `rooted_at` fixture. The shared binary resolver uses that distinction before
-            // consulting login-shell, override, or machine-global install locations.
-            path_env: Some(std::env::var_os("PATH").unwrap_or_default()),
+            path_env: std::env::var_os("PATH"),
+            live_client_environment: true,
         })
     }
 
@@ -206,6 +206,7 @@ impl Paths {
             home,
             claude_dir,
             path_env: None,
+            live_client_environment: false,
         }
     }
 }

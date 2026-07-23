@@ -97,8 +97,8 @@ pub struct ClientSpec {
     pub display_name: &'static str,
     pub kind: ClientKind,
     pub launch: LaunchSpec,
-    /// Dir named in the "not detected" skip message.
-    pub detect_dir: fn(&Paths) -> &Path,
+    /// Client-owned configuration root, reported separately from executable presence.
+    pub client_config_dir: fn(&Paths) -> &Path,
     pub surfaces: &'static [Surface],
     pub docs: &'static [DocRef],
     /// Client version when wiring last verified against [`docs`](Self::docs) (not a floor).
@@ -125,7 +125,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::Direct,
         },
         // Verified: announces as `claude-code` in `clientInfo.name`.
-        detect_dir: |p| &p.claude_dir,
+        client_config_dir: |p| &p.claude_dir,
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeJsonHooks,
@@ -163,7 +163,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::CodexRemote,
         },
         // `codex-mcp-client`; prefix covers CLI + VS Code.
-        detect_dir: |p| &p.codex_dir,
+        client_config_dir: |p| &p.codex_dir,
         // TOML hooks: SessionStart greet-only, UserPromptSubmit notify+provide, Stop.
         // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber.
         // MCP same config.toml. session id = thread id.
@@ -212,7 +212,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::Direct,
         },
         // Live: `qwen-cli-mcp-client-DontSpeak` and older `qwen-code*` use this prefix.
-        detect_dir: |p| &p.qwen_dir,
+        client_config_dir: |p| &p.qwen_dir,
         // JSON hooks, InlineShell (ms). Hooks+MCP share settings.json. Streaming pinned by
         // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`.
         surfaces: &[
@@ -252,7 +252,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::Direct,
         },
         // Live: `grok-shell-DontSpeak` uses this prefix.
-        detect_dir: |p| &p.grok_dir,
+        client_config_dir: |p| &p.grok_dir,
         // MCP TomlMcp; hooks own file. Bare command dedupes with imported Claude;
         // GROK_HOOK_EVENT vs no-arg MCP. Stop → chat_history; mid-turn = updates.jsonl tail;
         // digests → AGENTS.md (#95).
@@ -292,7 +292,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         launch: LaunchSpec {
             mode: LaunchMode::Direct,
         },
-        detect_dir: |p| &p.kimi_dir,
+        client_config_dir: |p| &p.kimi_dir,
         // Flat [[hooks]] only event/matcher/command/timeout; greet-only SessionStart;
         // has SessionEnd+Notification. MCP separate mcp.json. KIMI_CODE_HOME → Paths::resolve.
         surfaces: &[
@@ -332,7 +332,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
             mode: LaunchMode::Direct,
         },
         // A generic MCP prefix would match every MCP client; use the launch-command prefix.
-        detect_dir: |p| &p.hermes_dir,
+        client_config_dir: |p| &p.hermes_dir,
         // Shell hooks + MCP share config.yaml; allowlist is the consent sidecar.
         // Non-streaming: on_session_start greet-only; pre_llm_call notify+provide;
         // post_llm_call Stop; on_session_finalize SessionEnd. HERMES_HOME → Paths::resolve.

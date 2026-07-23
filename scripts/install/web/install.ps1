@@ -260,7 +260,7 @@ try {
   Say "registered uninstall entry (Settings > Apps > DontSpeak)"
 
   Write-Host ""
-  Write-Host "Done. Start a NEW Claude Code session to load the DontSpeak MCP server."
+  Write-Host "Done. Start a NEW session in each installed client to load its DontSpeak MCP server."
   Write-Host "Models download automatically in the background; watch progress in the app."
   Write-Host "Undo any time:  & '$cli' wire --all --remove"
   Write-Host "Uninstall: Settings > Apps > DontSpeak > Uninstall (or run '$unps')"

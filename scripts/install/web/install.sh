@@ -191,7 +191,7 @@ case "$OS" in
 Done. Next:
   • On first launch, grant DontSpeak Accessibility + Microphone
     (System Settings › Privacy & Security) — one grant set, all on DontSpeak.app.
-  • Start a NEW Claude Code session to load the DontSpeak MCP server.
+  • Start a NEW session in each installed client to load its DontSpeak MCP server.
   • Models download automatically in the background; watch progress in the app.
   • Uninstall any time:  $UNINSTALLER
     (or just unwire:  ~/Applications/DontSpeak.app/Contents/Helpers/dontspeak wire --all --remove)
@@ -241,7 +241,7 @@ EOF
     cat <<EOF
 
 Done. Next:
-  • Start a NEW Claude Code session to load the DontSpeak MCP server.
+  • Start a NEW session in each installed client to load its DontSpeak MCP server.
   • Grant /dev/uinput access with the sudo step printed above (synthetic keys / Caps-Lock).
   • Uninstall any time:  $UNINSTALLER
     (or just unwire:  ~/.local/bin/dontspeak wire --all --remove)

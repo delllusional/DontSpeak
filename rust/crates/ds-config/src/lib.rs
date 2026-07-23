@@ -29,7 +29,9 @@ mod wire;
 // Flat public re-export facade — preserves every `ds_config::X` path.
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
-pub use client_binary::{resolve_client_binary, resolve_configured_client_binary};
+pub use client_binary::{
+    resolve_client_binary, resolve_configured_client_binary, resolve_native_client_binary,
+};
 /// Client identity (`ds-client` leaf; re-export avoids cycle with `ds-log`/`ds-ipc`).
 pub use ds_client::ClientSource;
 pub use enums::{

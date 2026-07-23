@@ -31,6 +31,8 @@ pub(crate) struct ClientBinarySearch<'a> {
     app_data: Option<&'a Path>,
     /// Whether machine-global fallback directories may be inspected.
     include_system_dirs: bool,
+    /// On Windows, skip command shims while searching directories for an embeddable binary.
+    native_windows_executable: bool,
 }
 
 /// Resolve a registry client using its normal configuration and the live environment captured
@@ -53,7 +55,27 @@ pub fn resolve_configured_client_binary(
     paths: &Paths,
     configured: &str,
 ) -> Option<PathBuf> {
-    let use_live_environment = paths.path_env.is_some();
+    resolve_configured_client_binary_with_policy(client, paths, configured, false)
+}
+
+/// Resolve an executable suitable for direct process supervision. On Windows this skips npm
+/// command shims during directory search and selects a native `.exe`; explicit override or
+/// configured paths remain authoritative.
+pub fn resolve_native_client_binary(
+    client: ClientSource,
+    paths: &Paths,
+    configured: &str,
+) -> Option<PathBuf> {
+    resolve_configured_client_binary_with_policy(client, paths, configured, true)
+}
+
+fn resolve_configured_client_binary_with_policy(
+    client: ClientSource,
+    paths: &Paths,
+    configured: &str,
+    native_windows_executable: bool,
+) -> Option<PathBuf> {
+    let use_live_environment = paths.live_client_environment;
     let override_path = use_live_environment
         .then(|| client_binary_override(client))
         .flatten();
@@ -78,6 +100,7 @@ pub fn resolve_configured_client_binary(
             path: paths.path_env.as_deref(),
             app_data: app_data.as_deref(),
             include_system_dirs: use_live_environment,
+            native_windows_executable,
         },
     )
 }
@@ -109,21 +132,21 @@ pub(crate) fn resolve_client_binary_in(
     } else {
         configured
     };
+    if let Some(binary) = search.override_path.filter(|candidate| candidate.is_file()) {
+        return Some(binary.to_path_buf());
+    }
     let configured_path = Path::new(name);
     if configured_path.is_absolute() || configured_path.components().count() > 1 {
         return configured_path
             .is_file()
             .then(|| configured_path.to_path_buf());
     }
-    if let Some(binary) = search.override_path.filter(|candidate| candidate.is_file()) {
-        return Some(binary.to_path_buf());
-    }
 
     let mut dirs = Vec::new();
-    if let Some(value) = search.login_path {
+    if let Some(value) = search.path.filter(|value| !value.is_empty()) {
         dirs.extend(std::env::split_paths(value));
     }
-    if let Some(value) = search.path {
+    if let Some(value) = search.login_path.filter(|value| !value.is_empty()) {
         dirs.extend(std::env::split_paths(value));
     }
     dirs.push(paths.home.join(".local/bin"));
@@ -183,13 +206,17 @@ pub(crate) fn resolve_client_binary_in(
     let _ = search.app_data;
 
     dirs.into_iter()
-        .find_map(|dir| executable_in_dir(&dir, name))
+        .find_map(|dir| executable_in_dir(&dir, name, search.native_windows_executable))
 }
 
 #[cfg(windows)]
-fn executable_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+fn executable_in_dir(dir: &Path, name: &str, native_only: bool) -> Option<PathBuf> {
     if Path::new(name).extension().is_some() {
         return dir.join(name).is_file().then(|| dir.join(name));
+    }
+    if native_only {
+        let candidate = dir.join(format!("{name}.exe"));
+        return candidate.is_file().then_some(candidate);
     }
     ["exe", "cmd", "com", "bat"]
         .into_iter()
@@ -198,12 +225,12 @@ fn executable_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(windows))]
-fn executable_in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+fn executable_in_dir(dir: &Path, name: &str, _native_only: bool) -> Option<PathBuf> {
     let candidate = dir.join(name);
     candidate.is_file().then_some(candidate)
 }
 
-/// Login-shell PATH once (GUI apps); searched before the process PATH.
+/// Login-shell PATH once, as a fallback for GUI-launched processes.
 #[cfg(not(windows))]
 fn login_shell_path() -> Option<&'static OsStr> {
     static LOGIN_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
@@ -289,6 +316,7 @@ mod tests {
             path: None,
             app_data: None,
             include_system_dirs: false,
+            native_windows_executable: false,
         }
     }
 
@@ -311,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_override_precedes_login_and_process_paths() {
+    fn explicit_override_precedes_process_and_login_paths() {
         let root = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(root.path());
         let login_dir = root.path().join("login-bin");
@@ -339,7 +367,30 @@ mod tests {
         search.override_path = None;
         assert_eq!(
             resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            Some(process_dir.join(&filename))
+        );
+        std::fs::remove_file(process_dir.join(&filename)).unwrap();
+        assert_eq!(
+            resolve_client_binary_in(ClientSource::Codex, &paths, search),
             Some(login)
+        );
+    }
+
+    #[test]
+    fn environment_override_precedes_an_explicit_configured_path() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(root.path());
+        let configured = root.path().join(binary_name(ClientSource::Codex));
+        let override_path = root.path().join("override-codex");
+        std::fs::write(&configured, b"configured").unwrap();
+        std::fs::write(&override_path, b"override").unwrap();
+
+        let mut search = isolated_search(ClientSource::Codex);
+        search.configured = configured.to_str().unwrap();
+        search.override_path = Some(&override_path);
+        assert_eq!(
+            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            Some(override_path)
         );
     }
 
@@ -363,5 +414,39 @@ mod tests {
                 "{client:?}"
             );
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_codex_search_skips_an_earlier_command_shim() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(root.path());
+        let shim_dir = root.path().join("shim-bin");
+        let roaming = root.path().join("AppData/Roaming");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        std::fs::write(shim_dir.join("codex.cmd"), b"shim").unwrap();
+        let (package, target) = if cfg!(target_arch = "aarch64") {
+            ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
+        } else {
+            ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
+        };
+        let native = roaming
+            .join("npm/node_modules/@openai/codex/node_modules")
+            .join(package)
+            .join("vendor")
+            .join(target)
+            .join("bin/codex.exe");
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"native").unwrap();
+        let process_path = std::env::join_paths([&shim_dir]).unwrap();
+
+        let mut search = isolated_search(ClientSource::Codex);
+        search.path = Some(&process_path);
+        search.app_data = Some(&roaming);
+        search.native_windows_executable = true;
+        assert_eq!(
+            resolve_client_binary_in(ClientSource::Codex, &paths, search),
+            Some(native)
+        );
     }
 }

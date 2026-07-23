@@ -5,33 +5,20 @@ use std::path::Path;
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
-use ds_config::{ClientSpec, Paths, Surface};
+use ds_config::{Paths, Surface};
 
-/// Per-client MCP write target (file + presence gate + labels).
+/// Per-client MCP write target. Presence is gated once by the shared `wire_client` pipeline.
 pub struct Target<'a> {
     pub tool: &'a str,
     pub config: &'a Path,
-    /// Gates real writes so we never scatter config without the client installed.
-    pub present: bool,
-    pub absent_hint: String,
     pub load_hint: &'a str,
 }
 
 /// Build [`Target`] from registry entry + surface.
-pub fn target_for<'a>(
-    spec: &'static ClientSpec,
-    surface: &'static Surface,
-    paths: &'a Paths,
-) -> Target<'a> {
+pub fn target_for<'a>(surface: &'static Surface, paths: &'a Paths) -> Target<'a> {
     Target {
         tool: "wire",
         config: (surface.config_file)(paths),
-        present: spec.present(paths),
-        absent_hint: format!(
-            "{} not detected ({})",
-            spec.display_name,
-            (spec.detect_dir)(paths).display()
-        ),
         load_hint: surface
             .load_hint
             .unwrap_or("reload the client to pick up the server"),
@@ -51,10 +38,6 @@ pub fn apply(
     let tool = target.tool;
     let cfg = target.config;
 
-    if !remove && !print_only && !target.present {
-        eprintln!("{tool}: {}; skipping registration", target.absent_hint);
-        return 0;
-    }
     if remove && !print_only && !cfg.exists() {
         return 0;
     }
@@ -132,10 +115,6 @@ pub fn apply_toml(
     let tool = target.tool;
     let cfg = target.config;
 
-    if !remove && !print_only && !target.present {
-        eprintln!("{tool}: {}; skipping registration", target.absent_hint);
-        return 0;
-    }
     if remove && !print_only && !cfg.exists() {
         return 0;
     }
@@ -208,12 +187,10 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn target(cfg: &Path, present: bool) -> Target<'_> {
+    fn target(cfg: &Path) -> Target<'_> {
         Target {
             tool: "wire-test",
             config: cfg,
-            present,
-            absent_hint: "test client not detected (/x)".into(),
             load_hint: "reload to load the server",
         }
     }
@@ -231,10 +208,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        assert_eq!(
-            apply(&target(&cfg, true), false, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), false, false, &paths, None, None), 0);
         let v = read(&cfg);
         assert!(
             v["mcpServers"]["DontSpeak"]["command"]
@@ -243,10 +217,7 @@ mod tests {
                 .contains("dontspeak")
         );
         assert!(v["mcpServers"]["DontSpeak"].get("args").is_none());
-        assert_eq!(
-            apply(&target(&cfg, true), false, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), false, false, &paths, None, None), 0);
         assert_eq!(read(&cfg)["mcpServers"].as_object().unwrap().len(), 1);
     }
 
@@ -264,10 +235,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(
-            apply(&target(&cfg, true), false, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), false, false, &paths, None, None), 0);
         let v = read(&cfg);
         assert!(v["mcpServers"]["DontSpeak"]["command"].is_string());
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
@@ -288,10 +256,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(
-            apply(&target(&cfg, true), true, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), true, false, &paths, None, None), 0);
         let v = read(&cfg);
         assert!(v["mcpServers"].get("DontSpeak").is_none());
         assert_eq!(v["mcpServers"]["keepme"]["command"], "/usr/bin/keep");
@@ -303,10 +268,7 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "{ this is not json").unwrap();
-        assert_eq!(
-            apply(&target(&cfg, true), false, false, &paths, None, None),
-            1
-        );
+        assert_eq!(apply(&target(&cfg), false, false, &paths, None, None), 1);
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), "{ this is not json");
     }
 
@@ -315,28 +277,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        assert_eq!(
-            apply(&target(&cfg, true), false, true, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), false, true, &paths, None, None), 0);
         assert!(!cfg.exists(), "preview must not create the file");
-    }
-
-    #[test]
-    fn absent_client_skips_without_scattering_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join(".claude.json");
-        let paths = rooted(dir.path());
-        assert_eq!(
-            apply(&target(&cfg, false), false, false, &paths, None, None),
-            0
-        );
-        assert!(!cfg.exists());
-        assert_eq!(
-            apply(&target(&cfg, false), false, true, &paths, None, None),
-            0
-        );
-        assert!(!cfg.exists());
     }
 
     #[test]
@@ -345,10 +287,7 @@ mod tests {
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
         std::fs::write(&cfg, json!({ "mcpServers": {} }).to_string()).unwrap();
-        assert_eq!(
-            apply(&target(&cfg, true), false, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), false, false, &paths, None, None), 0);
         // backup_before_write leaves a timestamped `.bak.<secs>` sibling before the overwrite.
         let has_bak = std::fs::read_dir(dir.path())
             .unwrap()
@@ -365,10 +304,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join(".claude.json");
         let paths = rooted(dir.path());
-        assert_eq!(
-            apply(&target(&cfg, true), true, false, &paths, None, None),
-            0
-        );
+        assert_eq!(apply(&target(&cfg), true, false, &paths, None, None), 0);
         assert!(!cfg.exists());
     }
 
@@ -381,7 +317,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            apply_toml(&target(&cfg), false, false, &paths, None, None),
             0
         );
         let text = std::fs::read_to_string(&cfg).unwrap();
@@ -390,7 +326,7 @@ mod tests {
         assert!(!text.contains("args ="), "stdio entry carries no args key");
         // Re-wire: still exactly one DontSpeak table (idempotent re-point, not a duplicate).
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            apply_toml(&target(&cfg), false, false, &paths, None, None),
             0
         );
         assert_eq!(
@@ -413,7 +349,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            apply_toml(&target(&cfg), false, false, &paths, None, None),
             0
         );
         let text = std::fs::read_to_string(&cfg).unwrap();
@@ -434,7 +370,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            apply_toml(&target(&cfg), true, false, &paths, None, None),
             0
         );
         let text = std::fs::read_to_string(&cfg).unwrap();
@@ -454,7 +390,7 @@ mod tests {
         let bad = "this is not [ valid toml";
         std::fs::write(&cfg, bad).unwrap();
         assert_eq!(
-            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            apply_toml(&target(&cfg), true, false, &paths, None, None),
             1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
@@ -468,7 +404,7 @@ mod tests {
         let bad = "this is not [ valid toml";
         std::fs::write(&cfg, bad).unwrap();
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            apply_toml(&target(&cfg), false, false, &paths, None, None),
             1
         );
         assert_eq!(std::fs::read_to_string(&cfg).unwrap(), bad);
@@ -480,27 +416,10 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, true, &paths, None, None),
+            apply_toml(&target(&cfg), false, true, &paths, None, None),
             0
         );
         assert!(!cfg.exists(), "preview must not create the file");
-    }
-
-    #[test]
-    fn toml_absent_client_skips_without_scattering_a_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.toml");
-        let paths = rooted(dir.path());
-        assert_eq!(
-            apply_toml(&target(&cfg, false), false, false, &paths, None, None),
-            0
-        );
-        assert!(!cfg.exists());
-        assert_eq!(
-            apply_toml(&target(&cfg, false), false, true, &paths, None, None),
-            0
-        );
-        assert!(!cfg.exists());
     }
 
     #[test]
@@ -510,7 +429,7 @@ mod tests {
         let paths = rooted(dir.path());
         std::fs::write(&cfg, "[mcp_servers]\n").unwrap();
         assert_eq!(
-            apply_toml(&target(&cfg, true), false, false, &paths, None, None),
+            apply_toml(&target(&cfg), false, false, &paths, None, None),
             0
         );
         let has_bak = std::fs::read_dir(dir.path())
@@ -529,7 +448,7 @@ mod tests {
         let cfg = dir.path().join("config.toml");
         let paths = rooted(dir.path());
         assert_eq!(
-            apply_toml(&target(&cfg, true), true, false, &paths, None, None),
+            apply_toml(&target(&cfg), true, false, &paths, None, None),
             0
         );
         assert!(!cfg.exists());

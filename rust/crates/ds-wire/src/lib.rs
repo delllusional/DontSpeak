@@ -172,9 +172,8 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
             }
         } else if !spec.present(paths) {
             eprintln!(
-                "wire: {} not detected ({}); skipping",
-                spec.display_name,
-                (spec.detect_dir)(paths).display()
+                "wire: {} executable is not available; skipping",
+                spec.display_name
             );
             return 0;
         }
@@ -272,7 +271,7 @@ fn dispatch_surface(
             hooks::grok_json_hooks((s.config_file)(paths), remove, print_only, paths)
         }
         WireMechanism::JsonMcp => mcp::apply(
-            &mcp::target_for(spec, s, paths),
+            &mcp::target_for(s, paths),
             remove,
             print_only,
             paths,
@@ -280,7 +279,7 @@ fn dispatch_surface(
             capture,
         ),
         WireMechanism::TomlMcp => mcp::apply_toml(
-            &mcp::target_for(spec, s, paths),
+            &mcp::target_for(s, paths),
             remove,
             print_only,
             paths,
@@ -384,14 +383,11 @@ fn print_registry(paths: Option<&Paths>) {
             }
         );
         if let Some(p) = paths {
+            println!("  config:  {}", (spec.client_config_dir)(p).display());
             println!(
-                "  detect:  {} ({})",
-                (spec.detect_dir)(p).display(),
-                if spec.present(p) {
-                    "present"
-                } else {
-                    "absent"
-                }
+                "  command: {} ({})",
+                spec.target.as_str(),
+                if spec.present(p) { "present" } else { "absent" }
             );
             for s in spec.surfaces {
                 let how = match s.mechanism {
