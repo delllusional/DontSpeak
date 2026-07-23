@@ -194,6 +194,14 @@ pub fn is_onnxruntime_dylib_version_ok() -> bool {
 /// [`is_onnxruntime_dylib_version_ok`]). Windows CUDA sets its own GPU dylib after.
 pub fn ensure_ort_dylib() -> Result<PathBuf, String> {
     let path = onnxruntime_dylib_path().ok_or("cannot resolve onnxruntime dylib path")?;
+    // Absent and wrong-version are different failures with different causes (a failed
+    // download vs. a stale extract); one message for both reports a version mismatch
+    // when nothing was ever downloaded, which is where the real failure gets lost.
+    if !path.is_file() {
+        return Err(format!(
+            "onnxruntime dylib was never downloaded — download it in Settings › Models (expected {ONNXRUNTIME_VERSION})"
+        ));
+    }
     if !is_onnxruntime_dylib_version_ok() {
         return Err(format!(
             "onnxruntime dylib is not {ONNXRUNTIME_VERSION} — re-download it in Settings › Models"
