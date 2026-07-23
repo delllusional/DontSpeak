@@ -124,6 +124,15 @@ pub(crate) fn with_destination_flight<T>(
     // `create_dir_all(parent)` does not cover.
     let sweep_root = sweep_root_of(final_path).unwrap_or_else(|| parent.to_path_buf());
     std::fs::create_dir_all(&sweep_root)?;
+    #[cfg(debug_assertions)]
+    {
+        let dest_lock = destination_lock_path(final_path)?;
+        debug_assert_ne!(
+            dest_lock.as_path(),
+            sweep_gate_path(&sweep_root).as_path(),
+            "destination lock and sweep gate must not share a path (see #214)"
+        );
+    }
     let _sweep_flight = enter_sweep_gate(&sweep_root);
     let _sweep_lock = lock_sweep_gate_shared(&sweep_root)?;
     let flight = file_flight(final_path);
@@ -729,11 +738,12 @@ fn download_to_network(
 }
 
 // Orphan `.tmp*` sweep: tempfile's default prefix; Drop skips SIGKILL. Every destination
-// flight registers on its sweep root for its whole run and holds `.orphan-sweep.lock` shared;
+// flight registers on its sweep root for its whole run and holds `.orphan-sweep.gate` shared;
 // the sweep walks only a root with no live flight in this process and no shared lock from
 // another one, so it can never unlink an artifact a live download still needs. Counting rather
 // than `RwLock`: flights nest (frontend install -> `ensure_in_dir`) on one thread, and
 // `RwLock::read` documents a possible panic when the current thread already holds the lock.
+// The gate uses `.gate` (not `.{name}.lock`) so it never collides with a destination lock (#214).
 
 /// Only age ≥ this is swept (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -771,7 +781,8 @@ impl Drop for SweepGateFlight {
 }
 
 fn sweep_gate_path(root: &Path) -> PathBuf {
-    root.join(".orphan-sweep.lock")
+    // Outside the `.{name}.lock` destination-lock namespace (see #214).
+    root.join(".orphan-sweep.gate")
 }
 
 fn lock_sweep_gate_shared(root: &Path) -> std::io::Result<std::fs::File> {
@@ -1573,7 +1584,7 @@ mod tests {
             entries,
             vec![
                 ".model.bin.lock".to_string(),
-                ".orphan-sweep.lock".to_string(),
+                ".orphan-sweep.gate".to_string(),
                 "model.bin".to_string()
             ],
             "only the final file and the two persistent lock files remain"
@@ -2055,6 +2066,57 @@ mod tests {
         worker.join().unwrap();
         assert!(sweep_orphaned_temp_files(root.path()));
         assert!(!owned.exists());
+    }
+
+    /// #214: gate path must sit outside the `.{name}.lock` destination-lock namespace.
+    #[test]
+    fn sweep_gate_is_outside_destination_lock_namespace() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("orphan-sweep");
+        let dest = destination_lock_path(&final_path).unwrap();
+        let gate = sweep_gate_path(root.path());
+        assert_eq!(dest, root.path().join(".orphan-sweep.lock"));
+        assert_eq!(gate, root.path().join(".orphan-sweep.gate"));
+        assert_ne!(
+            dest, gate,
+            "shared-then-exclusive on one path self-deadlocks (#214)"
+        );
+        // Asset named like the gate file still gets a distinct destination lock.
+        let gate_named = root.path().join("orphan-sweep.gate");
+        assert_eq!(
+            destination_lock_path(&gate_named).unwrap(),
+            root.path().join(".orphan-sweep.gate.lock")
+        );
+        assert_ne!(destination_lock_path(&gate_named).unwrap(), gate);
+    }
+
+    /// #214: a flat asset named `orphan-sweep` used to collide gate + destination locks
+    /// (`shared` then `exclusive` on the same path) and hang forever.
+    #[test]
+    fn flat_asset_named_orphan_sweep_enters_flight_without_deadlock() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("orphan-sweep");
+        // Forces parent == sweep_root so the pre-fix collision is actually exercised.
+        // Same fixture contract as `a_flight_defers_the_sweep_of_its_own_root_only` (#204).
+        assert_eq!(
+            sweep_root_of(&target).as_deref(),
+            Some(root.path()),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR"
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = with_destination_flight(&target, |_| Ok(()));
+            let _ = done_tx.send(result);
+        });
+        match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("flight failed: {err}"),
+            Err(_) => panic!(
+                "with_destination_flight deadlocked on flat asset named orphan-sweep (#214)"
+            ),
+        }
+        worker.join().unwrap();
     }
 
     /// #199: another process's orphan sweep must not delete an old-looking temp artifact that a
