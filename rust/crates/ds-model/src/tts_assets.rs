@@ -608,16 +608,29 @@ pub fn run_setup_tts_model_with_progress(
     steps.push(Box::new(|p| {
         crate::ort::ensure_onnxruntime_with_progress(p).map(|_| ())
     }));
-    // A directory set takes its own directory flight for the whole run, so a concurrent
-    // `models remove` of the same model is excluded at the granularity it deletes at
-    // (per-file flights alone would let a removal unlink between two files). Kokoro's
-    // "directory" is the model root, which removal never locks as a unit — its per-file
-    // flights already line up.
-    match set.dir_name {
-        Some(_) => with_destination_flight(&dir, |_| run_download_set(progress, total, steps))?,
-        None => run_download_set(progress, total, steps)?,
-    }
+    run_tts_download_set(set, &dir, progress, total, steps)?;
     Ok(dir)
+}
+
+/// Run a set's steps under the exclusion that set needs.
+///
+/// A directory set takes its own directory flight for the whole run, so a concurrent
+/// `models remove` of the same model is excluded at the granularity it deletes at (per-file
+/// flights alone would let a removal unlink the directory between two files). A flat set's
+/// files ARE files of the model root, which removal locks one at a time, so its per-file
+/// flights already line up. Split out from [`run_setup_tts_model_with_progress`] so the
+/// exclusion is reachable from a test without a live download.
+fn run_tts_download_set(
+    set: &TtsOrtAssetSet,
+    dir: &Path,
+    progress: &dyn Fn(u64, u64),
+    total: u64,
+    steps: Vec<DownloadStep>,
+) -> std::io::Result<()> {
+    match set.dir_name {
+        Some(_) => with_destination_flight(dir, |_| run_download_set(progress, total, steps)),
+        None => run_download_set(progress, total, steps),
+    }
 }
 
 #[cfg(test)]
@@ -754,6 +767,64 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// #208 class: the directory-set installer holds its model directory's flight for the whole
+    /// run, so a `models remove` of the same model cannot unlink the directory between two of
+    /// the installer's per-file steps. Drives the installer's own exclusion seam with a step
+    /// that parks instead of downloading — the real steps fetch pinned URLs and cannot be
+    /// pointed at a mock.
+    #[test]
+    fn a_directory_set_install_blocks_a_concurrent_removal_of_the_same_model() {
+        let root = tempfile::tempdir().unwrap();
+        let set = tts_ort_asset_set(TtsModel::Chatterbox);
+        let dir = tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        assert!(
+            crate::download::sweep_root_of(&dir)
+                .is_some_and(|resolved| resolved.starts_with(root.path())),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("weights.onnx"), b"installed bytes").unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let steps: Vec<DownloadStep> = vec![Box::new(move |_p| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("main thread releases the install");
+            Ok(())
+        })];
+        let install_dir = dir.clone();
+        let installer = std::thread::spawn(move || {
+            run_tts_download_set(set, &install_dir, &|_, _| {}, 1, steps).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the installer enters the set flight");
+
+        let removal_root = root.path().to_path_buf();
+        let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+        let remover = std::thread::spawn(move || {
+            removed_tx
+                .send(crate::inventory::remove_at(&removal_root, "chatterbox").unwrap())
+                .unwrap();
+        });
+        assert!(
+            removed_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "removal must not delete a directory the set installer is writing"
+        );
+
+        release_tx.send(()).unwrap();
+        installer.join().unwrap();
+        removed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the removal completes once the install releases");
+        remover.join().unwrap();
+        assert!(!dir.exists());
     }
 
     #[test]

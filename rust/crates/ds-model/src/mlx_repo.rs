@@ -1232,6 +1232,85 @@ mod tests {
         TEST_TARGET_DIR.with(|target| *target.borrow_mut() = None);
     }
 
+    /// #208 class: the set installer holds a flight over every planned repo dir for its whole
+    /// run, so a `models remove` of the same model cannot unlink a repo between two of its
+    /// files. The fixture repo is pointed at the directory `remove_at` derives for Kokoro's
+    /// MLX set, and the rendezvous sits in the aggregate progress callback — inside the flight.
+    #[test]
+    fn a_repo_set_install_blocks_a_concurrent_removal_of_the_same_model() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        const BODY: &[u8] = b"freshly downloaded mlx weights";
+        const REV: &str = "abc1270000000000000000000000000000000000";
+        const REPO_ID: &str = "test-org/kokoro-mlx";
+        let server = httpmock::MockServer::start();
+        let blob = server.mock(|when, then| {
+            when.method(httpmock::Method::GET)
+                .path(format!("/{REPO_ID}/resolve/{REV}/weights.safetensors"));
+            then.status(200).body(BODY);
+        });
+
+        let root = tempfile::tempdir().unwrap();
+        let target = repo_dir_under(root.path(), &KOKORO_MLX);
+        assert!(
+            crate::download::sweep_root_of(&target)
+                .is_some_and(|resolved| resolved.starts_with(root.path())),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
+        );
+        let files = fixture_files(vec![fixture_file("weights.safetensors", BODY)]);
+        let repo: &'static MlxRepo = Box::leak(Box::new(fixture_repo(
+            "kokoro-mlx",
+            REPO_ID,
+            REV,
+            files,
+            test_target,
+        )));
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let base = server.base_url();
+        let install_target = target.clone();
+        let installer = std::thread::spawn(move || {
+            TEST_TARGET_DIR.with(|slot| *slot.borrow_mut() = Some(install_target));
+            let announced = AtomicBool::new(false);
+            ensure_mlx_repos_at(&base, &[repo], &|_done, _total| {
+                if !announced.swap(true, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("main thread releases the install");
+                }
+            })
+            .expect("the fixture set downloads");
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the installer enters the set flight");
+
+        let removal_root = root.path().to_path_buf();
+        let (removed_tx, removed_rx) = std::sync::mpsc::channel();
+        let remover = std::thread::spawn(move || {
+            removed_tx
+                .send(crate::inventory::remove_at(&removal_root, "kokoro").unwrap())
+                .unwrap();
+        });
+        assert!(
+            removed_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "removal must not delete a repo dir the set installer is writing"
+        );
+
+        release_tx.send(()).unwrap();
+        installer.join().unwrap();
+        removed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the removal completes once the install releases");
+        remover.join().unwrap();
+        blob.assert();
+        assert!(!target.exists());
+    }
+
     #[test]
     fn completed_repo_keeps_its_marker_when_a_sibling_fails() {
         const GOOD: &[u8] = b"good repository";

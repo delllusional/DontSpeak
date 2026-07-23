@@ -129,6 +129,10 @@ Removal takes every on-disk variant of one model (ONNX and MLX). It is refused w
   ``models: `chatterbox` is downloading right now — try again when it finishes``
 - the id is a shared asset (`onnxruntime`, `kokoro_frontend`, `cuda`) —
   ``models: `onnxruntime` is shared by every model and cannot be removed``
+- the running engine does not list the id at all —
+  ``models: unknown model `<id>` — the running engine may be older than this CLI``. The
+  schema already rejects unknown ids, so this only appears when the CLI is newer than the
+  engine ([BUILD-DEPLOY.md](BUILD-DEPLOY.md) — rebuild the engine).
 
 Shared assets are listed with their sizes but never removed; `removable` is also false
 while a download is in flight, where `reason` stays null (live download state belongs to
@@ -141,6 +145,12 @@ Partial failure is surfaced, not repaired: the response is an MCP error
 reads `installed:false` with non-zero `bytes`, and re-running `models remove <id>` is the
 recovery. On Windows a model whose files the running engine still has open can fail to
 remove — stop speaking/listening or restart the app, then retry.
+
+`engine unavailable: <io error>` does NOT mean nothing was deleted. A removal that starts
+while the same model begins downloading waits on that download's destination lock, and the
+client gives up after 120 s while the engine keeps going and completes the delete. Call
+`models` again to see what is actually on disk; a repeat `remove` answering
+`removed.bytes: 0` means the model is already gone, not that it was never there.
 
 ## diarize
 

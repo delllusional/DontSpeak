@@ -28,9 +28,14 @@ fn active_targets(downloads: &DownloadProg) -> Vec<DownloadTarget> {
 /// `None` ⇒ the removal may proceed.
 fn refusal(cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<String> {
     let Some(targets) = ds_model::removal_targets(id) else {
-        return Some(format!(
-            "models: `{id}` is shared by every model and cannot be removed"
-        ));
+        // The tool schema already rejects both, so reaching here means the CLI and the engine
+        // disagree about the model list — name that, instead of telling the user a model this
+        // build has never heard of is "shared by every model".
+        return Some(if ds_model::is_known_asset(id) {
+            format!("models: `{id}` is shared by every model and cannot be removed")
+        } else {
+            format!("models: unknown model `{id}` — the running engine may be older than this CLI")
+        });
     };
     if ds_model::asset_in_use(cfg, id) {
         // Distinct texts: on Windows and Linux the STT ladder resolves to built_in by
@@ -169,10 +174,10 @@ mod tests {
     }
 
     #[test]
-    fn shared_and_unknown_ids_are_refused_engine_side_too() {
+    fn shared_ids_are_refused_engine_side_too() {
         let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
         let models = tempfile::tempdir().unwrap();
-        for id in ["onnxruntime", "kokoro_frontend", "cuda", "bogus"] {
+        for id in ["onnxruntime", "kokoro_frontend", "cuda"] {
             let message = error_of(respond(&paths, &downloads(&[]), models.path(), Some(id)));
             assert_eq!(
                 message,
@@ -181,11 +186,38 @@ mod tests {
         }
     }
 
+    /// An id this engine does not list is version skew, not a shared asset: a CLI updated
+    /// ahead of the app-hosted engine advertises the new token in its schema, and the stale
+    /// engine must point at itself rather than at a shared-asset rule that does not apply.
+    #[test]
+    fn an_unlisted_id_names_the_engine_as_the_stale_side() {
+        let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
+        let models = tempfile::tempdir().unwrap();
+        let message = error_of(respond(
+            &paths,
+            &downloads(&[]),
+            models.path(),
+            Some("future_model"),
+        ));
+        assert_eq!(
+            message,
+            "models: unknown model `future_model` — the running engine may be older than this CLI"
+        );
+    }
+
     #[test]
     fn a_successful_removal_reports_the_reclaimed_bytes_and_flips_the_row() {
         let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
         let models = tempfile::tempdir().unwrap();
         let dir = models.path().join("qwen3-tts");
+        // This is the one test here that enters a destination flight, which resolves its sweep
+        // root from the ambient `DONTSPEAK_MODEL_DIR`: a value covering `TMPDIR` would put the
+        // gate in the real cache (#204).
+        assert!(
+            ds_model::sweep_root_of(&dir)
+                .is_some_and(|resolved| resolved.starts_with(models.path())),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
+        );
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("talker_cache.onnx"), b"weights on disk").unwrap();
 

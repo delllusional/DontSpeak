@@ -160,14 +160,23 @@ pub fn removal_targets(id: &str) -> Option<&'static [DownloadTarget]> {
     row(id).filter(|row| row.removable).map(|row| row.targets)
 }
 
-/// Kokoro's ONNX weights: the flat set minus the shared text-frontend files, so the G2P
-/// graphs stay with `kokoro_frontend` and are never deleted with the model.
-fn kokoro_weight_files() -> Vec<&'static str> {
+/// Does this build list `id` at all? Separates the two reasons [`removal_targets`] answers
+/// `None`, so an id a NEWER CLI knows and this engine does not is reported as version skew
+/// instead of as a shared asset.
+pub fn is_known_asset(id: &str) -> bool {
+    row(id).is_some()
+}
+
+/// A flat set's own ONNX weights: THAT model's files minus the shared text-frontend files, so
+/// the G2P graphs stay with `kokoro_frontend` and are never deleted with the model. Derived
+/// from the model passed in, never from Kokoro — a second `dir_name: None` set must resolve to
+/// its own weights, not to Kokoro's.
+fn flat_weight_files(model: TtsModel) -> Vec<&'static str> {
     let frontend: HashSet<String> = crate::spec::kokoro_frontend_files()
         .into_iter()
         .map(|file| file.file_name)
         .collect();
-    crate::tts_assets::tts_ort_asset_set(TtsModel::Kokoro)
+    crate::tts_assets::tts_ort_asset_set(model)
         .files
         .iter()
         .map(|file| file.file_name)
@@ -187,9 +196,6 @@ const KOKORO_G2P_FILES: [&str; 2] = [
     crate::spec::KOKORO_G2P_DECODER_FILE,
 ];
 
-/// Directory holding the CUDA execution-provider runtime, relative to the model root.
-const CUDA_DIR_NAME: &str = "cuda";
-
 fn mlx_dirs_under(root: &Path, repos: &[&'static crate::mlx_repo::MlxRepo]) -> Vec<PathBuf> {
     repos
         .iter()
@@ -203,7 +209,7 @@ pub fn owned_paths_under(root: &Path, target: DownloadTarget) -> Vec<PathBuf> {
     let onnx_tts = |model: TtsModel| -> Vec<PathBuf> {
         match crate::tts_assets::tts_ort_asset_set(model).dir_name {
             Some(_) => vec![crate::tts_assets::tts_model_dir_under(root, model)],
-            None => kokoro_weight_files()
+            None => flat_weight_files(model)
                 .into_iter()
                 .map(|name| root.join(name))
                 .collect(),
@@ -235,7 +241,7 @@ pub fn owned_paths_under(root: &Path, target: DownloadTarget) -> Vec<PathBuf> {
             paths
         }
         DownloadTarget::Onnxruntime => crate::ort::onnxruntime_paths_under(root),
-        DownloadTarget::Cuda => vec![root.join(CUDA_DIR_NAME)],
+        DownloadTarget::Cuda => vec![crate::ort::cuda_runtime_dir_under(root)],
         // Unlisted: diarization is hidden (#77), and `Models` is an installer group.
         DownloadTarget::DiarizationMlx
         | DownloadTarget::SepformerModel
@@ -303,7 +309,7 @@ fn variant_installed(root: &Path, target: DownloadTarget) -> bool {
                     .is_file()
         }
         DownloadTarget::Onnxruntime => root.join(crate::ort::onnxruntime_dylib_file()).is_file(),
-        DownloadTarget::Cuda => root.join(CUDA_DIR_NAME).is_dir(),
+        DownloadTarget::Cuda => crate::ort::cuda_runtime_dir_under(root).is_dir(),
         DownloadTarget::DiarizationMlx
         | DownloadTarget::SepformerModel
         | DownloadTarget::Models => false,
@@ -538,7 +544,7 @@ mod tests {
     fn owned_paths_are_root_relative_and_split_the_frontend_from_kokoro() {
         let root = Path::new("/models");
         assert_eq!(
-            kokoro_weight_files(),
+            flat_weight_files(TtsModel::Kokoro),
             vec![
                 crate::spec::KOKORO_ONNX_FILE,
                 crate::spec::KOKORO_VOICES_FILE
@@ -595,6 +601,24 @@ mod tests {
                 .contains(&root.join(crate::ort::onnxruntime_dylib_file()))
         );
         assert!(owned_paths_under(root, DownloadTarget::DiarizationMlx).is_empty());
+    }
+
+    /// A second flat (`dir_name: None`) set must own ITS files. Kokoro is the only flat set
+    /// today, so this calls the helper for a subdirectory model to pin that the derivation
+    /// follows the argument — a Kokoro-hardcoded helper would make the new model's removal
+    /// delete `kokoro-v1.0-fp32.onnx` and `voices-v1.0.bin`.
+    #[test]
+    fn flat_weights_are_derived_from_the_model_passed_in() {
+        let qwen: Vec<&'static str> = crate::tts_assets::tts_ort_asset_set(TtsModel::Qwen)
+            .files
+            .iter()
+            .map(|file| file.file_name)
+            .collect();
+        assert_eq!(flat_weight_files(TtsModel::Qwen), qwen);
+        assert_ne!(
+            flat_weight_files(TtsModel::Qwen),
+            flat_weight_files(TtsModel::Kokoro)
+        );
     }
 
     #[test]

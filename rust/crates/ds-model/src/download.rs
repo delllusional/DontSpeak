@@ -143,16 +143,23 @@ pub(crate) fn with_destination_flight<T>(
     operation(parent)
 }
 
+/// Acquisition order for [`with_destination_flights`]: sorted so two processes locking
+/// overlapping sets always acquire in the same order and cannot deadlock, deduped because
+/// nesting a flight inside itself blocks on its own destination lock forever.
+fn ordered_flight_paths(paths: &[PathBuf]) -> Vec<&Path> {
+    let mut ordered: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+    ordered.sort_unstable();
+    ordered.dedup();
+    ordered
+}
+
 /// [`with_destination_flight`] over several destinations at once (a multi-directory asset,
-/// or a set installer covering every directory it writes). Sorted + deduped so two processes
-/// locking overlapping sets always acquire in the same order and cannot deadlock.
+/// or a set installer covering every directory it writes), in [`ordered_flight_paths`] order.
 pub(crate) fn with_destination_flights<T>(
     paths: &[PathBuf],
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let mut ordered: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
-    ordered.sort_unstable();
-    ordered.dedup();
+    let ordered = ordered_flight_paths(paths);
     fn recurse<T>(
         rest: &[&Path],
         operation: impl FnOnce() -> std::io::Result<T>,
@@ -393,9 +400,10 @@ fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<P
 
 /// Single resolution of a destination's sweep root, so the flight that registers on the
 /// gate and the sweep that claims it can never disagree about which root that is.
-/// `pub(crate)` so flight-entering tests in other modules can assert their fixture is not
-/// shadowed by an ambient `DONTSPEAK_MODEL_DIR` (#204).
-pub(crate) fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
+/// Public so flight-entering tests — here, in `inventory`, and in the engine's `models`
+/// backend — can assert their fixture is not shadowed by an ambient `DONTSPEAK_MODEL_DIR`,
+/// which would move the gate into the real cache (#204).
+pub fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
     orphan_sweep_root(final_path, ds_config::model_dir())
 }
 
@@ -2139,6 +2147,47 @@ mod tests {
             Err(_) => {
                 panic!("with_destination_flight deadlocked on flat asset named orphan-sweep (#214)")
             }
+        }
+        worker.join().unwrap();
+    }
+
+    /// Sort: two set installers whose planned directories overlap must take the locks in the
+    /// same order or they deadlock against each other. Dedup: `with_destination_flight` is not
+    /// reentrant, so a repeated path would have the inner call wait on the outer one's own
+    /// destination lock forever.
+    #[test]
+    fn multi_destination_flights_are_sorted_and_deduped() {
+        let paths: Vec<PathBuf> = ["/models/mlx/b", "/models/a", "/models/mlx/b", "/models/a"]
+            .iter()
+            .map(PathBuf::from)
+            .collect();
+        assert_eq!(
+            ordered_flight_paths(&paths),
+            vec![Path::new("/models/a"), Path::new("/models/mlx/b")]
+        );
+        assert!(ordered_flight_paths(&[]).is_empty());
+    }
+
+    /// The dedup above is load-bearing, not cosmetic: without it this hangs the download thread.
+    #[test]
+    fn a_repeated_destination_enters_its_flight_once() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("repo-dir");
+        assert_eq!(
+            sweep_root_of(&target).as_deref(),
+            Some(root.path()),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
+        );
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let paths = vec![target.clone(), target];
+            let _ = done_tx.send(with_destination_flights(&paths, || Ok(())));
+        });
+        match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => panic!("flights failed: {err}"),
+            Err(_) => panic!("with_destination_flights self-deadlocked on a duplicate path"),
         }
         worker.join().unwrap();
     }

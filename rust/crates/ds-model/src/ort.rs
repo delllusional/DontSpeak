@@ -497,14 +497,24 @@ fn ensure_onnxruntime_at(
 ))]
 pub(crate) use crate::urls::CUDA_WHEELS;
 
-/// The dir (under `model_dir()`) holding the GPU CUDA runtime libs — kept separate from the
-/// CPU runtime so the two never clash.
+/// Directory name of the GPU CUDA runtime under the model root — kept separate from the CPU
+/// runtime so the two never clash. Ungated: the root-parameterized inventory reports the
+/// directory on every host, while installing it is gated to the platforms with pinned wheels.
+pub(crate) const CUDA_DIR_NAME: &str = "cuda";
+
+/// Root-relative form of [`cuda_runtime_dir`], so `inventory` never carries its own copy of
+/// the directory name.
+pub(crate) fn cuda_runtime_dir_under(root: &Path) -> PathBuf {
+    root.join(CUDA_DIR_NAME)
+}
+
+/// The dir (under `model_dir()`) holding the GPU CUDA runtime libs.
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
 ))]
 pub fn cuda_runtime_dir() -> Option<PathBuf> {
-    model_path("cuda")
+    model_path(CUDA_DIR_NAME)
 }
 
 #[cfg(all(
@@ -744,6 +754,21 @@ pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Drift guard: the ambient CUDA runtime dir and the root-relative form `inventory` walks
+    /// must stay the same directory. A rename applied to only one of them makes the `cuda` row
+    /// report `installed:false, bytes:0` for a runtime that is on disk.
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn cuda_runtime_dir_is_the_root_relative_dir_under_the_model_root() {
+        assert_eq!(
+            cuda_runtime_dir(),
+            ds_config::model_dir().map(|root| cuda_runtime_dir_under(&root))
+        );
+    }
 
     #[test]
     fn onnxruntime_dylib_file_name_is_per_os() {

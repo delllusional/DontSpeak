@@ -56,11 +56,12 @@ pub mod urls;
 // Flat facade — stable `ds_model::<item>` paths.
 pub use download::{
     ensure_in_dir, ensure_with_progress, is_permanent_error, prefetch_key, set_prefetch_source,
-    url_basename,
+    sweep_root_of, url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use inventory::{
-    Asset, AssetKind, Variant, asset_in_use, inventory_json, removal_targets, remove_at, scan_at,
+    Asset, AssetKind, Variant, asset_in_use, inventory_json, is_known_asset, removal_targets,
+    remove_at, scan_at,
 };
 pub use kokoro_frontend::{
     ensure_espeak_loader_with_progress, espeak_library_path, espeak_root_dir,
