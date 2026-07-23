@@ -115,42 +115,35 @@ fn ensure_distribution(
     label: &str,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<PathBuf> {
-    let parent = final_dir
-        .parent()
-        .ok_or_else(|| std::io::Error::other("frontend directory has no parent"))?;
-    std::fs::create_dir_all(parent)?;
-    let flight = crate::download::file_flight(final_dir);
-    let _in_flight = flight
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _destination_lock = crate::download::lock_destination(final_dir)?;
-    if payload_present(final_dir) && marker_matches(final_dir, dist.archive_sha256) {
-        return Ok(final_dir.to_path_buf());
-    }
+    crate::download::with_destination_flight(final_dir, |parent| {
+        if payload_present(final_dir) && marker_matches(final_dir, dist.archive_sha256) {
+            return Ok(final_dir.to_path_buf());
+        }
 
-    let archive_dir = tempfile::tempdir_in(parent)?;
-    let archive_spec = ModelSpec {
-        file_name: "frontend.archive".to_string(),
-        url: dist.url.to_string(),
-        sha256: dist.archive_sha256.to_string(),
-    };
-    let archive = ensure_in_dir(archive_dir.path(), &archive_spec, progress)?;
-    let staging = tempfile::tempdir_in(parent)?;
-    let staged = staging.path().join("payload");
-    std::fs::create_dir(&staged)?;
-    extract(&archive, &staged)?;
-    if !payload_present(&staged) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{label} archive is missing required files"),
-        ));
-    }
-    if final_dir.exists() {
-        std::fs::remove_dir_all(final_dir)?;
-    }
-    std::fs::rename(&staged, final_dir)?;
-    std::fs::write(final_dir.join(COMPLETE_MARKER), dist.archive_sha256)?;
-    Ok(final_dir.to_path_buf())
+        let archive_dir = tempfile::tempdir_in(parent)?;
+        let archive_spec = ModelSpec {
+            file_name: "frontend.archive".to_string(),
+            url: dist.url.to_string(),
+            sha256: dist.archive_sha256.to_string(),
+        };
+        let archive = ensure_in_dir(archive_dir.path(), &archive_spec, progress)?;
+        let staging = tempfile::tempdir_in(parent)?;
+        let staged = staging.path().join("payload");
+        std::fs::create_dir(&staged)?;
+        extract(&archive, &staged)?;
+        if !payload_present(&staged) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{label} archive is missing required files"),
+            ));
+        }
+        if final_dir.exists() {
+            std::fs::remove_dir_all(final_dir)?;
+        }
+        std::fs::rename(&staged, final_dir)?;
+        std::fs::write(final_dir.join(COMPLETE_MARKER), dist.archive_sha256)?;
+        Ok(final_dir.to_path_buf())
+    })
 }
 
 pub fn ensure_espeak_loader_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::Result<PathBuf> {

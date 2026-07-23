@@ -408,67 +408,62 @@ pub fn ensure_onnxruntime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io:
     Ok(final_path)
 }
 
-/// Testable core of [`ensure_onnxruntime_with_progress`]. `file_flight` so parallel
-/// Kokoro/Parakeet setups attach to one in-flight extract.
+/// Testable core of [`ensure_onnxruntime_with_progress`]. The destination flight lets
+/// parallel Kokoro/Parakeet setups attach to one in-flight extract.
 fn ensure_onnxruntime_at(
     final_path: &Path,
     url: &str,
     archive_sha256: &str,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    let dir = final_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("dylib path has no parent"))?;
-    std::fs::create_dir_all(dir)?;
-    let flight = crate::download::file_flight(final_path);
-    let _in_flight = flight.lock().unwrap();
-    let _destination_lock = crate::download::lock_destination(final_path)?;
-    // Managed extract only here (outer path may be bundled/brew).
-    if is_managed_download_up_to_date(final_path) {
-        return Ok(());
-    }
+    crate::download::with_destination_flight(final_path, |dir| {
+        // Managed extract only here (outer path may be bundled/brew).
+        if is_managed_download_up_to_date(final_path) {
+            return Ok(());
+        }
 
-    // Same retry policy as model files (transient vs permanent).
-    let retries = DEFAULT_RETRIES.max(1);
-    let tmp_tgz = tempfile::NamedTempFile::new_in(dir)?;
-    let mut state = DownloadState::default();
-    let mut last_err: Option<std::io::Error> = None;
-    for attempt in 0..retries {
-        let result = (|| -> std::io::Result<()> {
-            download_to_with_state(url, tmp_tgz.path(), progress, &mut state)?;
-            if !verify_sha256(tmp_tgz.path(), archive_sha256) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "onnxruntime archive sha256 mismatch",
-                ));
-            }
-            extract_runtime_member(tmp_tgz.path(), final_path)?;
-            // Best-effort marker; write fail only causes a later re-fetch.
-            let _ = std::fs::write(version_marker_path(final_path), ONNXRUNTIME_VERSION);
-            Ok(())
-        })();
-        match result {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                if is_permanent_error(&e) {
+        // Same retry policy as model files (transient vs permanent).
+        let retries = DEFAULT_RETRIES.max(1);
+        let tmp_tgz = tempfile::NamedTempFile::new_in(dir)?;
+        let mut state = DownloadState::default();
+        let mut last_err: Option<std::io::Error> = None;
+        for attempt in 0..retries {
+            let result = (|| -> std::io::Result<()> {
+                download_to_with_state(url, tmp_tgz.path(), progress, &mut state)?;
+                if !verify_sha256(tmp_tgz.path(), archive_sha256) {
                     return Err(std::io::Error::new(
-                        e.kind(),
-                        format!("permanent onnxruntime download failure (not retried): {e}"),
+                        std::io::ErrorKind::InvalidData,
+                        "onnxruntime archive sha256 mismatch",
                     ));
                 }
-                last_err = Some(std::io::Error::new(
-                    e.kind(),
-                    format!("onnxruntime attempt {} of {retries}: {e}", attempt + 1),
-                ));
-                if attempt + 1 < retries {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        500 * (attempt as u64 + 1),
+                extract_runtime_member(tmp_tgz.path(), final_path)?;
+                // Best-effort marker; write fail only causes a later re-fetch.
+                let _ = std::fs::write(version_marker_path(final_path), ONNXRUNTIME_VERSION);
+                Ok(())
+            })();
+            match result {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    if is_permanent_error(&e) {
+                        return Err(std::io::Error::new(
+                            e.kind(),
+                            format!("permanent onnxruntime download failure (not retried): {e}"),
+                        ));
+                    }
+                    last_err = Some(std::io::Error::new(
+                        e.kind(),
+                        format!("onnxruntime attempt {} of {retries}: {e}", attempt + 1),
                     ));
+                    if attempt + 1 < retries {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            500 * (attempt as u64 + 1),
+                        ));
+                    }
                 }
             }
         }
-    }
-    Err(last_err.unwrap_or_else(|| std::io::Error::other("onnxruntime download failed")))
+        Err(last_err.unwrap_or_else(|| std::io::Error::other("onnxruntime download failed")))
+    })
 }
 
 // ── CUDA GPU runtime (download-on-demand) — Windows + Linux x86_64 ────────────
@@ -670,58 +665,63 @@ pub fn ensure_cuda_runtime_with_progress(progress: &dyn Fn(u64, u64)) -> std::io
     if is_cuda_runtime_present() {
         return Ok(dir);
     }
-    std::fs::create_dir_all(&dir)?;
-    let total: u64 = crate::urls::CUDA_WHEEL_SIZES.iter().sum();
-    // One step per wheel through `run_download_set` (bounded parallel pool). Each extracted DLL/SO
-    // lands via an atomic temp→rename, so concurrent workers never expose a torn file. The pinned
-    // wheels carry disjoint basenames; a cross-wheel name clash would be last-writer-wins here (a
-    // benign redistributable duplicate), not corruption.
-    let steps: Vec<crate::setup::DownloadStep> = CUDA_WHEELS
-        .iter()
-        .map(|&(url, sha)| -> crate::setup::DownloadStep {
-            let dir = dir.clone();
-            Box::new(move |p: &dyn Fn(u64, u64)| -> std::io::Result<()> {
-                let retries = DEFAULT_RETRIES.max(1);
-                let tmp = tempfile::NamedTempFile::new_in(&dir)?;
-                let mut state = DownloadState::default();
-                let mut last_err: Option<std::io::Error> = None;
-                for attempt in 0..retries {
-                    let r = (|| -> std::io::Result<()> {
-                        download_to_with_state(url, tmp.path(), p, &mut state)?;
-                        if !verify_sha256(tmp.path(), sha) {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                "cuda wheel sha256 mismatch",
-                            ));
-                        }
-                        extract_libs(tmp.path(), &dir)
-                    })();
-                    match r {
-                        Ok(()) => return Ok(()),
-                        Err(e) => {
-                            if is_permanent_error(&e) {
+    crate::download::with_destination_flight(&dir, |_| {
+        if is_cuda_runtime_present() {
+            return Ok(dir.clone());
+        }
+        std::fs::create_dir_all(&dir)?;
+        let total: u64 = crate::urls::CUDA_WHEEL_SIZES.iter().sum();
+        // One step per wheel through `run_download_set` (bounded parallel pool). Each extracted
+        // DLL/SO lands via an atomic temp→rename, so concurrent workers never expose a torn file.
+        // The pinned wheels carry disjoint basenames; a cross-wheel name clash would be
+        // last-writer-wins here (a benign redistributable duplicate), not corruption.
+        let steps: Vec<crate::setup::DownloadStep> = CUDA_WHEELS
+            .iter()
+            .map(|&(url, sha)| -> crate::setup::DownloadStep {
+                let dir = dir.clone();
+                Box::new(move |p: &dyn Fn(u64, u64)| -> std::io::Result<()> {
+                    let retries = DEFAULT_RETRIES.max(1);
+                    let tmp = tempfile::NamedTempFile::new_in(&dir)?;
+                    let mut state = DownloadState::default();
+                    let mut last_err: Option<std::io::Error> = None;
+                    for attempt in 0..retries {
+                        let r = (|| -> std::io::Result<()> {
+                            download_to_with_state(url, tmp.path(), p, &mut state)?;
+                            if !verify_sha256(tmp.path(), sha) {
                                 return Err(std::io::Error::new(
-                                    e.kind(),
-                                    format!("permanent cuda runtime download failure: {e}"),
+                                    std::io::ErrorKind::InvalidData,
+                                    "cuda wheel sha256 mismatch",
                                 ));
                             }
-                            last_err = Some(e);
-                            if attempt + 1 < retries {
-                                std::thread::sleep(std::time::Duration::from_millis(
-                                    500 * (attempt as u64 + 1),
-                                ));
+                            extract_libs(tmp.path(), &dir)
+                        })();
+                        match r {
+                            Ok(()) => return Ok(()),
+                            Err(e) => {
+                                if is_permanent_error(&e) {
+                                    return Err(std::io::Error::new(
+                                        e.kind(),
+                                        format!("permanent cuda runtime download failure: {e}"),
+                                    ));
+                                }
+                                last_err = Some(e);
+                                if attempt + 1 < retries {
+                                    std::thread::sleep(std::time::Duration::from_millis(
+                                        500 * (attempt as u64 + 1),
+                                    ));
+                                }
                             }
                         }
                     }
-                }
-                Err(last_err
-                    .unwrap_or_else(|| std::io::Error::other("cuda runtime download failed")))
+                    Err(last_err
+                        .unwrap_or_else(|| std::io::Error::other("cuda runtime download failed")))
+                })
             })
-        })
-        .collect();
-    crate::setup::run_download_set(progress, total, steps)?;
-    std::fs::write(cuda_version_marker(&dir), cuda_version_fingerprint())?;
-    Ok(dir)
+            .collect();
+        crate::setup::run_download_set(progress, total, steps)?;
+        std::fs::write(cuda_version_marker(&dir), cuda_version_fingerprint())?;
+        Ok(dir.clone())
+    })
 }
 
 #[cfg(test)]

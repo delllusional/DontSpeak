@@ -68,7 +68,7 @@ fn prefetch_local(url: &str) -> Option<PathBuf> {
 }
 
 // Per-dest process-local lock so threads attach instead of double-fetch.
-pub(crate) fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+fn file_flight(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
     static FLIGHTS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -95,7 +95,7 @@ fn destination_lock_path(final_path: &Path) -> std::io::Result<PathBuf> {
 /// Cross-process counterpart to [`file_flight`]. The lock file stays in place because
 /// deleting it after unlock could let a third process lock a new inode while a waiter
 /// still holds the unlinked old one.
-pub(crate) fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
+fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
     let lock_path = destination_lock_path(final_path)?;
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -105,6 +105,24 @@ pub(crate) fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::Fi
         .open(lock_path)?;
     lock.lock()?;
     Ok(lock)
+}
+
+/// Run one persistent-destination operation under the shared process-local and
+/// cross-process locks. The operation must recheck destination readiness after entry.
+pub(crate) fn with_destination_flight<T>(
+    final_path: &Path,
+    operation: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
+    std::fs::create_dir_all(parent)?;
+    let flight = file_flight(final_path);
+    let _in_flight = flight
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _destination_lock = lock_destination(final_path)?;
+    operation(parent)
 }
 
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
@@ -160,15 +178,17 @@ pub(crate) fn ensure_at(
     if let Some(sweep_root) = orphan_sweep_root(final_path, ds_config::model_dir()) {
         sweep_orphans_once(&sweep_root);
     }
+    with_destination_flight(final_path, |_| {
+        ensure_at_locked(final_path, spec, retries, progress)
+    })
+}
 
-    let dir = final_path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
-    std::fs::create_dir_all(dir)?;
-    let flight = file_flight(final_path);
-    let _in_flight = flight.lock().unwrap();
-    let _destination_lock = lock_destination(final_path)?;
-
+fn ensure_at_locked(
+    final_path: &Path,
+    spec: &ModelSpec,
+    retries: u32,
+    progress: &dyn Fn(u64, u64),
+) -> std::io::Result<()> {
     if verify_sha256(final_path, &spec.sha256) {
         if let Ok(partial) = resumable_partial_path(final_path) {
             remove_resume_files(&partial, &resumable_metadata_path(&partial));
@@ -694,7 +714,7 @@ fn download_to_network(
 }
 
 // Orphan `.tmp*` sweep: tempfile default prefix; Drop skips SIGKILL. Once per process
-// from ensure_at (covers nested MLX/CUDA dirs under model_dir).
+// from ensure_at for flat and nested model files under model_dir.
 
 /// Only age ≥ this is swept (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -756,6 +776,9 @@ mod tests {
     const LOCK_CHILD_RELEASE: &str = "DS_MODEL_LOCK_CHILD_RELEASE";
     const LOCK_TEST_URL: &str = "https://example.invalid/cross-process-model";
     const LOCK_TEST_BYTES: &[u8] = b"cross-process-model";
+    const DIR_LOCK_CHILD_TARGET: &str = "DS_MODEL_DIR_LOCK_CHILD_TARGET";
+    const DIR_LOCK_CHILD_READY: &str = "DS_MODEL_DIR_LOCK_CHILD_READY";
+    const DIR_LOCK_CHILD_RELEASE: &str = "DS_MODEL_DIR_LOCK_CHILD_RELEASE";
 
     #[test]
     fn destination_lock_child() {
@@ -784,6 +807,30 @@ mod tests {
         })
         .unwrap();
         set_prefetch_source(None);
+    }
+
+    #[test]
+    fn directory_destination_lock_child() {
+        let Ok(target) = std::env::var(DIR_LOCK_CHILD_TARGET) else {
+            return;
+        };
+        let target = PathBuf::from(target);
+        let ready = PathBuf::from(std::env::var_os(DIR_LOCK_CHILD_READY).unwrap());
+        let release = PathBuf::from(std::env::var_os(DIR_LOCK_CHILD_RELEASE).unwrap());
+        with_destination_flight(&target, |_| {
+            std::fs::write(&ready, b"locked")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !release.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parent did not release directory installer"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            std::fs::create_dir(&target)?;
+            std::fs::write(target.join(".complete"), b"ready")
+        })
+        .unwrap();
     }
 
     /// Issue #195: a replacement daemon must wait for the old daemon's downloader instead
@@ -859,6 +906,62 @@ mod tests {
         let partial = resumable_partial_path(&target).unwrap();
         assert!(!partial.exists());
         assert!(!resumable_metadata_path(&partial).exists());
+    }
+
+    #[test]
+    fn destination_flight_serializes_directory_installers_across_processes() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("runtime");
+        let ready = root.path().join("child-ready");
+        let release = root.path().join("release-child");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("download::tests::directory_destination_lock_child")
+            .arg("--nocapture")
+            .env(DIR_LOCK_CHILD_TARGET, &target)
+            .env(DIR_LOCK_CHILD_READY, &ready)
+            .env(DIR_LOCK_CHILD_RELEASE, &release)
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not acquire directory destination lock"
+            );
+            assert!(child.try_wait().unwrap().is_none(), "child exited early");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let target_for_waiter = target.clone();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            with_destination_flight(&target_for_waiter, |_| {
+                assert_eq!(
+                    std::fs::read(target_for_waiter.join(".complete")).unwrap(),
+                    b"ready",
+                    "the waiter must recheck the finalized directory after locking"
+                );
+                acquired_tx.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "second process must not enter while the first owns the directory destination"
+        );
+
+        std::fs::write(release, b"release").unwrap();
+        assert!(child.wait().unwrap().success());
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("waiter acquires after child exits");
+        waiter.join().unwrap();
+        assert!(root.path().join(".runtime.lock").is_file());
     }
 
     fn read_request(stream: &mut TcpStream) -> String {
