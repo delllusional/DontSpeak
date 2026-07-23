@@ -109,6 +109,9 @@ fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
 
 /// Run one persistent-destination operation under the shared process-local and
 /// cross-process locks. The operation must recheck destination readiness after entry.
+/// The flight also holds its sweep root's gate for its whole run, so no orphan sweep can
+/// reclaim a temp artifact the operation still owns; resolving that root reads ambient
+/// `DONTSPEAK_MODEL_DIR`/HOME via [`sweep_root_of`].
 pub(crate) fn with_destination_flight<T>(
     final_path: &Path,
     operation: impl FnOnce(&Path) -> std::io::Result<T>,
@@ -117,6 +120,12 @@ pub(crate) fn with_destination_flight<T>(
         .parent()
         .ok_or_else(|| std::io::Error::other("model path has no parent"))?;
     std::fs::create_dir_all(parent)?;
+    // The sweep root can be `final_path` itself (a directory destination), which
+    // `create_dir_all(parent)` does not cover.
+    let sweep_root = sweep_root_of(final_path).unwrap_or_else(|| parent.to_path_buf());
+    std::fs::create_dir_all(&sweep_root)?;
+    let _sweep_flight = enter_sweep_gate(&sweep_root);
+    let _sweep_lock = lock_sweep_gate_shared(&sweep_root)?;
     let flight = file_flight(final_path);
     let _in_flight = flight
         .lock()
@@ -175,8 +184,8 @@ pub(crate) fn ensure_at(
     retries: u32,
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
-    if let Some(sweep_root) = orphan_sweep_root(final_path, ds_config::model_dir()) {
-        sweep_orphans_once(&sweep_root);
+    if let Some(sweep_root) = sweep_root_of(final_path) {
+        sweep_orphans_once(&ORPHAN_SWEEP_DONE, &sweep_root);
     }
     with_destination_flight(final_path, |_| {
         ensure_at_locked(final_path, spec, retries, progress)
@@ -349,6 +358,12 @@ fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<P
             .filter(|root| final_path.starts_with(root))
             .unwrap_or(parent),
     )
+}
+
+/// Single resolution of a destination's sweep root, so the flight that registers on the
+/// gate and the sweep that claims it can never disagree about which root that is.
+fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
+    orphan_sweep_root(final_path, ds_config::model_dir())
 }
 
 /// 4xx → permanent `NotFound`; other non-success → transient `TimedOut`.
@@ -713,21 +728,112 @@ fn download_to_network(
     }
 }
 
-// Orphan `.tmp*` sweep: tempfile default prefix; Drop skips SIGKILL. Once per process
-// from ensure_at for flat and nested model files under model_dir.
+// Orphan `.tmp*` sweep: tempfile's default prefix; Drop skips SIGKILL. Every destination
+// flight registers on its sweep root for its whole run and holds `.orphan-sweep.lock` shared;
+// the sweep walks only a root with no live flight in this process and no shared lock from
+// another one, so it can never unlink an artifact a live download still needs. Counting rather
+// than `RwLock`: flights nest (frontend install -> `ensure_in_dir`) on one thread, and
+// `RwLock::read` documents a possible panic when the current thread already holds the lock.
 
 /// Only age ≥ this is swept (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
-static ORPHAN_SWEEP_ONCE: std::sync::Once = std::sync::Once::new();
-
-fn sweep_orphans_once(dir: &Path) {
-    ORPHAN_SWEEP_ONCE.call_once(|| sweep_orphaned_temp_files(dir));
+fn sweep_gate(root: &Path) -> std::sync::Arc<std::sync::Mutex<usize>> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<usize>>>>> = OnceLock::new();
+    GATES
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .entry(root.to_path_buf())
+        .or_default()
+        .clone()
 }
 
-/// Recursive best-effort remove of `.tmp*` older than [`MIN_ORPHAN_AGE`].
-pub(crate) fn sweep_orphaned_temp_files(dir: &Path) {
-    sweep_orphaned_temp_entries(dir, MIN_ORPHAN_AGE);
+/// Registers a live flight on `root` until dropped.
+struct SweepGateFlight(std::sync::Arc<std::sync::Mutex<usize>>);
+
+fn enter_sweep_gate(root: &Path) -> SweepGateFlight {
+    let gate = sweep_gate(root);
+    *gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+    SweepGateFlight(gate)
+}
+
+impl Drop for SweepGateFlight {
+    fn drop(&mut self) {
+        let mut count = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *count = count.saturating_sub(1);
+    }
+}
+
+fn sweep_gate_path(root: &Path) -> PathBuf {
+    root.join(".orphan-sweep.lock")
+}
+
+fn lock_sweep_gate_shared(root: &Path) -> std::io::Result<std::fs::File> {
+    let lock = open_sweep_gate_file(root)?;
+    lock.lock_shared()?;
+    Ok(lock)
+}
+
+/// Always a fresh handle: nothing clones or dups it, which is what keeps a nested flight's
+/// second shared lock inside the case `File::lock_shared` documents as compatible.
+fn open_sweep_gate_file(root: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(sweep_gate_path(root))
+}
+
+static ORPHAN_SWEEP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// One completed walk per attempt that observed `done` unset. A skipped attempt (missing root,
+/// live flight, lock failure) does not latch, so the next `ensure_at` retries instead of losing
+/// the process's only attempt. `done` is a parameter rather than a read of the static so a test
+/// can drive the latch on its own flag: the static is latched by whichever `ensure_at` test the
+/// parallel `ds-model` binary happens to run first. The flag is global while the gate is
+/// per-root: production has exactly one model root, and a second root only appears when
+/// `model_dir()` is `None` or a destination sits outside it.
+fn sweep_orphans_once(done: &std::sync::atomic::AtomicBool, root: &Path) {
+    use std::sync::atomic::Ordering;
+    if done.load(Ordering::Relaxed) {
+        return;
+    }
+    if sweep_orphaned_temp_files(root) {
+        done.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Recursive best-effort remove of `.tmp*` older than [`MIN_ORPHAN_AGE`], under an exclusive
+/// claim on the sweep gate. Returns whether the walk ran.
+pub(crate) fn sweep_orphaned_temp_files(root: &Path) -> bool {
+    if !root.is_dir() {
+        return false;
+    }
+    let gate = sweep_gate(root);
+    // Poisoned = acquirable but a past holder panicked; only contention skips.
+    let in_flight = match gate.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return false,
+    };
+    if *in_flight > 0 {
+        return false;
+    }
+    let Ok(lock) = open_sweep_gate_file(root) else {
+        return false;
+    };
+    if lock.try_lock().is_err() {
+        return false;
+    }
+    sweep_orphaned_temp_entries(root, MIN_ORPHAN_AGE);
+    true
 }
 
 fn sweep_orphaned_temp_entries(dir: &Path, min_age: std::time::Duration) {
@@ -779,6 +885,23 @@ mod tests {
     const DIR_LOCK_CHILD_TARGET: &str = "DS_MODEL_DIR_LOCK_CHILD_TARGET";
     const DIR_LOCK_CHILD_READY: &str = "DS_MODEL_DIR_LOCK_CHILD_READY";
     const DIR_LOCK_CHILD_RELEASE: &str = "DS_MODEL_DIR_LOCK_CHILD_RELEASE";
+    const SWEEP_CHILD_ROOT: &str = "DS_MODEL_SWEEP_CHILD_ROOT";
+    const SWEEP_CHILD_READY: &str = "DS_MODEL_SWEEP_CHILD_READY";
+    const SWEEP_CHILD_RELEASE: &str = "DS_MODEL_SWEEP_CHILD_RELEASE";
+
+    /// A `.tmp*` artifact aged past [`MIN_ORPHAN_AGE`], with its handle closed — an open
+    /// handle would fail `remove_file` on Windows and pass a sweep test vacuously.
+    fn aged_orphan(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, b"an abandoned partial").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - 2 * MIN_ORPHAN_AGE)
+            .unwrap();
+        path
+    }
 
     #[test]
     fn destination_lock_child() {
@@ -829,6 +952,35 @@ mod tests {
             }
             std::fs::create_dir(&target)?;
             std::fs::write(target.join(".complete"), b"ready")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn active_temp_sweep_child() {
+        let Some(root) = std::env::var_os(SWEEP_CHILD_ROOT) else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let ready = PathBuf::from(std::env::var_os(SWEEP_CHILD_READY).unwrap());
+        let release = PathBuf::from(std::env::var_os(SWEEP_CHILD_RELEASE).unwrap());
+        with_destination_flight(&root.join("model.bin"), |_| {
+            let active = root.join(".tmpACTIVE");
+            std::fs::write(&active, b"an archive this process is still verifying")?;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&active)?
+                .set_modified(std::time::SystemTime::now() - 2 * MIN_ORPHAN_AGE)?;
+            std::fs::write(&ready, b"holding")?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !release.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "parent did not release the sweep child"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Ok(())
         })
         .unwrap();
     }
@@ -1411,13 +1563,21 @@ mod tests {
         server.join().unwrap();
 
         assert_eq!(std::fs::read(&final_path).unwrap(), body);
-        let entries: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        let mut entries: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        entries.sort();
         assert_eq!(
-            entries.len(),
-            2,
-            "only the final file and persistent destination lock remain"
+            entries,
+            vec![
+                ".model.bin.lock".to_string(),
+                ".orphan-sweep.lock".to_string(),
+                "model.bin".to_string()
+            ],
+            "only the final file and the two persistent lock files remain"
         );
-        assert!(destination_lock_path(&final_path).unwrap().is_file());
         assert!(!resumable_partial_path(&final_path).unwrap().exists());
         assert!(!resumable_metadata_path(&resumable_partial_path(&final_path).unwrap()).exists());
     }
@@ -1783,7 +1943,10 @@ mod tests {
             .set_modified(old_time)
             .unwrap();
 
-        sweep_orphaned_temp_files(dir.path());
+        assert!(
+            sweep_orphaned_temp_files(dir.path()),
+            "an uncontended sweep must run"
+        );
 
         assert!(!old_tmp.exists(), "an old orphaned temp file must be swept");
         assert!(
@@ -1814,6 +1977,212 @@ mod tests {
         assert!(
             !staging_path.exists(),
             "an abandoned tempfile staging tree must be reclaimed in full"
+        );
+    }
+
+    /// The process-local half of the gate defers the sweep on its own — no file lock involved.
+    /// It is the half that still holds where `flock` is emulated by per-process POSIX locks.
+    #[test]
+    fn a_process_local_flight_defers_the_sweep() {
+        let root = tempfile::tempdir().unwrap();
+        let orphan = aged_orphan(root.path(), ".tmpINPROC");
+        let flight = enter_sweep_gate(root.path());
+        assert!(
+            !sweep_orphaned_temp_files(root.path()),
+            "a live flight must defer the sweep"
+        );
+        assert!(orphan.is_file(), "a deferred sweep deletes nothing");
+        drop(flight);
+        assert!(
+            sweep_orphaned_temp_files(root.path()),
+            "the walk runs once the flight ends"
+        );
+        assert!(
+            !orphan.exists(),
+            "the orphan is reclaimed at the next quiet moment"
+        );
+    }
+
+    /// #199: `with_destination_flight` must register on the gate for its whole run, and the gate
+    /// must be keyed per sweep root so an unrelated root still gets cleaned.
+    #[test]
+    fn a_flight_defers_the_sweep_of_its_own_root_only() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let target = root.path().join("model.bin");
+        // Guards this fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`; it pins the
+        // main thread's resolution only, since the worker re-resolves inside the flight (#204).
+        assert_eq!(
+            sweep_root_of(&target).as_deref(),
+            Some(root.path()),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR"
+        );
+        let owned = aged_orphan(root.path(), ".tmpOWNED");
+        let unrelated = aged_orphan(other.path(), ".tmpUNRELATED");
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            with_destination_flight(&target, |_| {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("main thread releases the flight");
+                Ok(())
+            })
+            .unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the worker enters the flight");
+
+        // The guard must stay a temporary: held across the sweep below it would make the
+        // assertion pass through `try_lock` contention instead of the in-flight count.
+        assert_eq!(
+            *sweep_gate(root.path()).lock().unwrap(),
+            1,
+            "with_destination_flight must register on the process-local gate"
+        );
+        assert!(!sweep_orphaned_temp_files(root.path()));
+        assert!(owned.is_file(), "the sweep must spare a root a flight owns");
+        assert!(
+            sweep_orphaned_temp_files(other.path()),
+            "the gate is keyed per sweep root, not global"
+        );
+        assert!(!unrelated.exists());
+
+        release_tx.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(sweep_orphaned_temp_files(root.path()));
+        assert!(!owned.exists());
+    }
+
+    /// #199: another process's orphan sweep must not delete an old-looking temp artifact that a
+    /// live download still owns.
+    #[test]
+    fn sweep_spares_a_temp_artifact_an_active_process_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let ready = root.path().join("child-ready");
+        let release = root.path().join("release-child");
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("download::tests::active_temp_sweep_child")
+            .arg("--nocapture")
+            .env(SWEEP_CHILD_ROOT, root.path())
+            .env(SWEEP_CHILD_READY, &ready)
+            .env(SWEEP_CHILD_RELEASE, &release)
+            .env_remove("DONTSPEAK_MODEL_DIR")
+            .spawn()
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not enter the destination flight"
+            );
+            assert!(child.try_wait().unwrap().is_none(), "child exited early");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        assert!(
+            !sweep_orphaned_temp_files(root.path()),
+            "a sweep must skip a root another process is downloading into"
+        );
+        assert!(
+            root.path().join(".tmpACTIVE").is_file(),
+            "the active temp survives another process's sweep"
+        );
+
+        std::fs::write(&release, b"go").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(sweep_orphaned_temp_files(root.path()));
+        assert!(
+            !root.path().join(".tmpACTIVE").exists(),
+            "the gate defers cleanup rather than disabling it"
+        );
+    }
+
+    /// The shared half must not serialize unrelated downloads: two destinations under one sweep
+    /// root run their flights concurrently. An exclusive root lock fails this in bounded time.
+    #[test]
+    fn flights_for_different_destinations_run_concurrently_under_one_root() {
+        let root = tempfile::tempdir().unwrap();
+        let (a_tx, a_rx) = std::sync::mpsc::channel();
+        let (b_tx, b_rx) = std::sync::mpsc::channel();
+
+        let a_target = root.path().join("a.bin");
+        let a = std::thread::spawn(move || {
+            with_destination_flight(&a_target, |_| {
+                a_tx.send(()).unwrap();
+                Ok(b_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok())
+            })
+            .unwrap()
+        });
+        let b_target = root.path().join("b.bin");
+        let b = std::thread::spawn(move || {
+            with_destination_flight(&b_target, |_| {
+                b_tx.send(()).unwrap();
+                Ok(a_rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok())
+            })
+            .unwrap()
+        });
+
+        assert!(a.join().unwrap(), "flight A must observe B inside its run");
+        assert!(b.join().unwrap(), "flight B must observe A inside its run");
+    }
+
+    /// #199: a sweep that did not walk must not burn the process's one attempt. Driven through a
+    /// local flag — the production static is latched by whichever `ensure_at` test runs first.
+    #[test]
+    fn a_skipped_sweep_does_not_latch_the_once_guard() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = AtomicBool::new(false);
+
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("not-created-yet");
+        sweep_orphans_once(&done, &missing);
+        assert!(
+            !done.load(Ordering::Relaxed),
+            "a model root that does not exist yet must not burn the process's only sweep"
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let orphan = aged_orphan(root.path(), ".tmpRETRY");
+        let flight = enter_sweep_gate(root.path());
+        sweep_orphans_once(&done, root.path());
+        assert!(
+            !done.load(Ordering::Relaxed),
+            "a sweep deferred by a live flight must not burn the process's only sweep"
+        );
+        assert!(orphan.is_file());
+
+        drop(flight);
+        sweep_orphans_once(&done, root.path());
+        assert!(
+            done.load(Ordering::Relaxed),
+            "the retry runs the walk and latches"
+        );
+        assert!(!orphan.exists(), "the retried sweep reclaims the orphan");
+    }
+
+    /// The latch is real: one completed walk per process, not one per `ensure_at`.
+    #[test]
+    fn a_completed_sweep_latches_the_once_guard() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let done = AtomicBool::new(false);
+        let root = tempfile::tempdir().unwrap();
+
+        let first = aged_orphan(root.path(), ".tmpFIRST");
+        sweep_orphans_once(&done, root.path());
+        assert!(done.load(Ordering::Relaxed), "a completed walk latches");
+        assert!(!first.exists());
+
+        let second = aged_orphan(root.path(), ".tmpSECOND");
+        sweep_orphans_once(&done, root.path());
+        assert!(
+            second.is_file(),
+            "the latch suppresses a second walk in the same process"
         );
     }
 
