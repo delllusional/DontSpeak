@@ -4,7 +4,7 @@
 //! endpoint via `--remote`. A host that never comes up degrades the integration for this launch
 //! only — never gates the wrapped client; thin passthrough, not a health check.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use ds_config::{ClientSpec, LaunchMode, Paths, VoiceConfig};
@@ -92,7 +92,9 @@ fn run_direct(
             spec.launch.command
         );
     }
-    let Some(bin) = resolve_client_bin(configured_bin, spec.launch.command, paths) else {
+    let Some(bin) =
+        ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)
+    else {
         eprintln!(
             "dontspeak {}: client executable {configured_bin:?} was not found",
             spec.launch.command
@@ -204,76 +206,10 @@ fn first_codex_positional(args: &[String]) -> Option<&str> {
     None
 }
 
-fn resolve_client_bin(configured: &str, command: &str, paths: &Paths) -> Option<PathBuf> {
-    #[cfg(not(windows))]
-    let _ = command;
-    let configured_path = Path::new(configured);
-    if configured_path.is_absolute() || configured_path.components().count() > 1 {
-        return configured_path
-            .is_file()
-            .then(|| configured_path.to_path_buf());
-    }
-    let mut dirs = std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
-        .unwrap_or_default();
-    dirs.extend([
-        paths.home.join(".local/bin"),
-        paths.home.join(".grok/bin"),
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-    ]);
-    #[cfg(windows)]
-    {
-        let roaming = std::env::var_os("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| paths.home.join("AppData/Roaming"));
-        dirs.push(roaming.join("npm"));
-        if command == "codex" {
-            let target = if cfg!(target_arch = "aarch64") {
-                "aarch64-pc-windows-msvc"
-            } else {
-                "x86_64-pc-windows-msvc"
-            };
-            dirs.push(
-                roaming
-                    .join("npm/node_modules/@openai/codex/node_modules")
-                    .join(if cfg!(target_arch = "aarch64") {
-                        "@openai/codex-win32-arm64"
-                    } else {
-                        "@openai/codex-win32-x64"
-                    })
-                    .join("vendor")
-                    .join(target)
-                    .join("bin"),
-            );
-        }
-    }
-    resolve_in_dirs(configured, &dirs)
-}
-
-fn resolve_in_dirs(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
-    for dir in dirs {
-        #[cfg(windows)]
-        for suffix in [".exe", ".com", ".cmd", ".bat", ""] {
-            let candidate = dir.join(format!("{name}{suffix}"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-        #[cfg(not(windows))]
-        {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ds_config::ClientSource;
     use std::ffi::OsString;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -314,23 +250,6 @@ mod tests {
     }
 
     #[test]
-    fn executable_resolution_obeys_directory_order_and_platform_suffixes() {
-        let first = tempfile::tempdir().unwrap();
-        let second = tempfile::tempdir().unwrap();
-        #[cfg(windows)]
-        let filename = "agent.cmd";
-        #[cfg(not(windows))]
-        let filename = "agent";
-        std::fs::write(second.path().join(filename), "fixture").unwrap();
-        let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
-        let expected = second.path().join(filename);
-        assert_eq!(
-            resolve_in_dirs("agent", &dirs).as_deref(),
-            Some(expected.as_path())
-        );
-    }
-
-    #[test]
     fn client_command_preserves_program_and_argument_boundaries() {
         let values = args(&["prompt with spaces", "--flag", "value", ""]);
         let command = client_command(Path::new("client-bin"), &values);
@@ -356,15 +275,18 @@ mod tests {
     fn direct_launch_propagates_exit_status_and_missing_binary_is_127() {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(temp.path());
-        let spec = ds_config::client_spec_for_launch("codex").unwrap();
+        let spec = ds_config::client_spec(ClientSource::Codex).unwrap();
 
         #[cfg(windows)]
         let (shell, shell_args) = (
-            PathBuf::from(std::env::var_os("COMSPEC").expect("COMSPEC")),
+            std::path::PathBuf::from(std::env::var_os("COMSPEC").expect("COMSPEC")),
             args(&["/C", "exit 23"]),
         );
         #[cfg(not(windows))]
-        let (shell, shell_args) = (PathBuf::from("/bin/sh"), args(&["-c", "exit 23"]));
+        let (shell, shell_args) = (
+            std::path::PathBuf::from("/bin/sh"),
+            args(&["-c", "exit 23"]),
+        );
 
         assert_eq!(
             run_direct(spec, &shell_args, &paths, shell.to_str().unwrap(), false,),

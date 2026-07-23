@@ -438,7 +438,7 @@ hooks:
         let (cmd, shell) = inline_command(
             InlineFlavor::Windows,
             bin,
-            ["notify", "--client", "hermes"],
+            ["notify", "--client", ClientSource::Hermes.as_str()],
             ShellOverride::Unsupported,
         );
         assert_eq!(

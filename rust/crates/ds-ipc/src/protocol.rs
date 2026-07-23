@@ -419,9 +419,11 @@ mod tests {
                 ..
             }
         ));
-        let req: Request =
-            serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
-                .unwrap();
+        let line = format!(
+            r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
+            ClientSource::Codex.as_str()
+        );
+        let req: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(
             req,
             Request::Earcon {
@@ -448,9 +450,11 @@ mod tests {
             } if session == "sess-1"
         ));
 
-        let old: Request =
-            serde_json::from_str(r#"{"cmd":"earcon","event":"reply_done","source":"codex"}"#)
-                .unwrap();
+        let line = format!(
+            r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
+            ClientSource::Codex.as_str()
+        );
+        let old: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(old, Request::Earcon { session: None, .. }));
     }
 

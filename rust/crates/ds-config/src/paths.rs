@@ -1,6 +1,6 @@
 //! Well-known paths from `$HOME` + per-OS data/model dirs.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use directories::BaseDirs;
@@ -35,15 +35,15 @@ pub struct Paths {
     pub config_toml: PathBuf,
     /// Enrolled voiceprints — see [`crate::speakers`].
     pub speakers_json: PathBuf,
-    /// `~/.codex` — presence-gate for `wire codex`.
+    /// `~/.codex` — Codex config and managed-install root.
     pub codex_dir: PathBuf,
     /// Codex hooks file.
     pub codex_config: PathBuf,
-    /// `~/.qwen` — presence-gate for `wire qwen_code`.
+    /// `~/.qwen` — Qwen Code config root.
     pub qwen_dir: PathBuf,
     /// Qwen hooks + MCP (one file).
     pub qwen_settings: PathBuf,
-    /// `~/.grok` — presence-gate for `wire grok`.
+    /// `~/.grok` — Grok config and client-binary root.
     pub grok_dir: PathBuf,
     /// Grok MCP entry.
     pub grok_config: PathBuf,
@@ -51,7 +51,7 @@ pub struct Paths {
     pub grok_hooks_json: PathBuf,
     /// Grok global rules; managed narrate section (hook stdout ignored — issue #95).
     pub grok_agents_md: PathBuf,
-    /// `~/.kimi-code` — presence-gate for `wire kimi_code`.
+    /// `~/.kimi-code` — Kimi Code config root.
     pub kimi_dir: PathBuf,
     /// Kimi Code hooks file (flat `[[hooks]]` array-of-tables).
     pub kimi_config_toml: PathBuf,
@@ -59,12 +59,16 @@ pub struct Paths {
     pub kimi_mcp_json: PathBuf,
     /// Kimi Code OAuth credentials (usage stats; read-only).
     pub kimi_credentials_json: PathBuf,
-    /// `~/.hermes` — presence-gate for `wire hermes`.
+    /// `~/.hermes` — Hermes config root.
     pub hermes_dir: PathBuf,
     /// Hermes shell hooks + MCP (`hooks:` / `mcp_servers.DontSpeak` in config.yaml).
     pub hermes_config_yaml: PathBuf,
     /// Hermes first-use consent for shell hooks (`(event, command)` approvals).
     pub hermes_shell_hooks_allowlist: PathBuf,
+    /// `$PATH` captured once at [`Self::resolve`] — the shared client-binary resolver reads this
+    /// instead of `std::env::var_os` so [`Self::rooted_at`] stays env-free and deterministic
+    /// under test (no ambient `$PATH` leaking into a supposedly-isolated check).
+    pub path_env: Option<OsString>,
 }
 
 impl Paths {
@@ -152,6 +156,10 @@ impl Paths {
             hermes_dir,
             home,
             claude_dir,
+            // `Some(empty)` distinguishes a live environment with no PATH from the isolated
+            // `rooted_at` fixture. The shared binary resolver uses that distinction before
+            // consulting login-shell, override, or machine-global install locations.
+            path_env: Some(std::env::var_os("PATH").unwrap_or_default()),
         })
     }
 
@@ -197,6 +205,7 @@ impl Paths {
             hermes_dir,
             home,
             claude_dir,
+            path_env: None,
         }
     }
 }

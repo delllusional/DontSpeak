@@ -181,15 +181,10 @@ mod tests {
 
     #[test]
     fn earcon_request_derives_session_from_each_hook_dialect() {
-        for payload in [
-            r#"{"session_id":"claude-session"}"#,
-            r#"{"sessionId":"grok-session"}"#,
+        for (payload, expected) in [
+            (r#"{"session_id":"claude-session"}"#, "claude-session"),
+            (r#"{"sessionId":"grok-session"}"#, "grok-session"),
         ] {
-            let expected = if payload.contains("claude") {
-                "claude-session"
-            } else {
-                "grok-session"
-            };
             assert!(matches!(
                 earcon_request(
                     payload,

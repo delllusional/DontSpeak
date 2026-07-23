@@ -26,7 +26,7 @@ pub fn target_for<'a>(
     Target {
         tool: "wire",
         config: (surface.config_file)(paths),
-        present: (spec.present)(paths),
+        present: spec.present(paths),
         absent_hint: format!(
             "{} not detected ({})",
             spec.display_name,

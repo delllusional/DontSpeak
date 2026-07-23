@@ -400,7 +400,7 @@ fn default_capture_gain() -> CaptureGain {
     CaptureGain::Auto
 }
 fn default_codex_bin() -> String {
-    "codex".to_string()
+    ClientSource::Codex.launch_command().unwrap().to_string()
 }
 
 /// Mic make-up gain. `Auto` per-utterance; `Manual(g)` fixed. Wire: `"auto"` or number.
@@ -949,7 +949,10 @@ pub(crate) mod tests {
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert!(v.codex_app_server_url.is_empty());
-        assert_eq!(v.codex_bin, "codex");
+        assert_eq!(
+            v.codex_bin,
+            ClientSource::Codex.launch_command().unwrap()
+        );
         assert!(v.grok_stream);
         assert!(v.extra_terminals.is_empty());
         assert!(v.extra_editors.is_empty());
@@ -1032,12 +1035,15 @@ pub(crate) mod tests {
     fn codex_stream_defaults_and_overrides() {
         // Defaults: the subscriber is ON (inert without ~/.codex + a running app-server),
         // lazy app-server start is OFF (no surprise spawns), endpoint = the default unix
-        // control socket, binary = bare "codex".
+        // control socket, binary = the canonical Codex launch command.
         let v: VoiceConfig = serde_json::from_str("{}").unwrap();
         assert!(v.codex_stream);
         assert!(!v.codex_daemon);
         assert_eq!(v.codex_app_server_url, "");
-        assert_eq!(v.codex_bin, "codex");
+        assert_eq!(
+            v.codex_bin,
+            ClientSource::Codex.launch_command().unwrap()
+        );
         // All four are plain-typed overrides.
         let v: VoiceConfig = serde_json::from_str(
             r#"{"codex_stream":false,"codex_daemon":true,
@@ -1186,8 +1192,16 @@ pub(crate) mod tests {
             "neither `dontspeak` nor `unknown` may enter the excluded-CLIENT set"
         );
         // …and they're dropped from a mixed list without disturbing the real clients' order.
+        let mixed = serde_json::json!({
+            "exclude_clients": [
+                ClientSource::Codex.as_str(),
+                ClientSource::DontSpeak.as_str(),
+                ClientSource::ClaudeCode.as_str(),
+                ClientSource::Unknown.as_str()
+            ]
+        });
         assert_eq!(
-            wc(r#"{"exclude_clients":["codex","dontspeak","claude_code","unknown"]}"#),
+            wc(&mixed.to_string()),
             Some(vec![ClientSource::Codex, ClientSource::ClaudeCode])
         );
     }
@@ -1762,7 +1776,7 @@ pub(crate) mod tests {
             codex_stream: false, // non-default (default is true)
             codex_daemon: true,  // non-default (default is false)
             codex_app_server_url: "ws://127.0.0.1:4550".into(), // non-default (default is empty)
-            codex_bin: "/opt/codex/bin/codex".into(), // non-default (default is "codex")
+            codex_bin: "/opt/codex/bin/codex".into(), // non-default launch command
             grok_stream: false,  // non-default (default is true)
             extra_terminals: vec!["myterm".into()], // non-default (default is [])
             extra_editors: vec!["myeditor.exe".into()], // non-default (default is [])

@@ -4,6 +4,7 @@
 
 use std::path::Path;
 
+use crate::client_binary::resolve_client_binary;
 use crate::paths::Paths;
 use ds_client::ClientSource;
 
@@ -105,18 +106,40 @@ pub struct ClientSpec {
     /// (`codex-community-fork`) → misattributed vs alias upkeep. No match → Unknown.
     /// Raw name logged on every `initialize` (`dontspeak::mcp`).
     pub mcp_client_prefix: &'static str,
-    /// Presence probe for gated clients.
-    pub present: fn(&Paths) -> bool,
     /// Dir named in the "not detected" skip message.
     pub detect_dir: fn(&Paths) -> &Path,
-    /// `false` only Claude Code: wire always (hooks create `~/.claude` for MCP gate).
-    pub gate_on_presence: bool,
     pub surfaces: &'static [Surface],
     pub docs: &'static [DocRef],
     /// Client version when wiring last verified against [`docs`](Self::docs) (not a floor).
     pub verified_client_version: &'static str,
     /// ISO date of that verification (`YYYY-MM-DD`).
     pub verified_on: &'static str,
+}
+
+impl ClientSpec {
+    /// Presence uses the same configured-binary resolver as launch and usage. A dot-dir can
+    /// outlive uninstall, while a resolvable executable reflects the current installation.
+    pub fn present(&self, paths: &Paths) -> bool {
+        resolve_client_binary(self.target, paths).is_some()
+    }
+}
+
+const fn launch_command(client: ClientSource) -> &'static str {
+    match client.launch_command() {
+        Some(command) => command,
+        None => panic!("client registry entries must be launchable"),
+    }
+}
+
+const fn mcp_client_prefix(client: ClientSource) -> &'static str {
+    match client.mcp_client_prefix() {
+        Some(prefix) => prefix,
+        None => panic!("client registry entries must have an MCP identity prefix"),
+    }
+}
+
+const fn launch_aliases(client: ClientSource) -> &'static [&'static str] {
+    client.launch_aliases()
 }
 
 /// Order matches [`ClientSource::CLIENTS`] (pinned by test).
@@ -126,15 +149,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Claude Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "claude",
-            aliases: &["claude_code"],
+            command: launch_command(ClientSource::ClaudeCode),
+            aliases: launch_aliases(ClientSource::ClaudeCode),
             mode: LaunchMode::Direct,
         },
         // Verified: announces as `claude-code` in `clientInfo.name`.
-        mcp_client_prefix: "claude",
-        present: |p| p.claude_dir.exists(),
+        mcp_client_prefix: mcp_client_prefix(ClientSource::ClaudeCode),
         detect_dir: |p| &p.claude_dir,
-        gate_on_presence: false,
         surfaces: &[
             Surface {
                 mechanism: WireMechanism::ClaudeJsonHooks,
@@ -169,15 +190,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "OpenAI Codex",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "codex",
-            aliases: &[],
+            command: launch_command(ClientSource::Codex),
+            aliases: launch_aliases(ClientSource::Codex),
             mode: LaunchMode::CodexRemote,
         },
         // `codex-mcp-client`; prefix covers CLI + VS Code.
-        mcp_client_prefix: "codex",
-        present: |p| p.codex_dir.exists(),
+        mcp_client_prefix: mcp_client_prefix(ClientSource::Codex),
         detect_dir: |p| &p.codex_dir,
-        gate_on_presence: true,
         // TOML hooks: SessionStart greet-only, UserPromptSubmit notify+provide, Stop.
         // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber.
         // MCP same config.toml. session id = thread id.
@@ -223,15 +242,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Qwen Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "qwen",
-            aliases: &["qwen_code"],
+            command: launch_command(ClientSource::QwenCode),
+            aliases: launch_aliases(ClientSource::QwenCode),
             mode: LaunchMode::Direct,
         },
-        // Live: `qwen-cli-mcp-client-DontSpeak` (and older `qwen-code*`) → prefix "qwen".
-        mcp_client_prefix: "qwen",
-        present: |p| p.qwen_dir.exists(),
+        // Live: `qwen-cli-mcp-client-DontSpeak` and older `qwen-code*` use this prefix.
+        mcp_client_prefix: mcp_client_prefix(ClientSource::QwenCode),
         detect_dir: |p| &p.qwen_dir,
-        gate_on_presence: true,
         // JSON hooks, InlineShell (ms). Hooks+MCP share settings.json. Streaming pinned by
         // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`.
         surfaces: &[
@@ -268,15 +285,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Grok",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "grok",
-            aliases: &[],
+            command: launch_command(ClientSource::Grok),
+            aliases: launch_aliases(ClientSource::Grok),
             mode: LaunchMode::Direct,
         },
-        // Live: `grok-shell-DontSpeak` → prefix "grok".
-        mcp_client_prefix: "grok",
-        present: |p| p.grok_dir.exists(),
+        // Live: `grok-shell-DontSpeak` uses this prefix.
+        mcp_client_prefix: mcp_client_prefix(ClientSource::Grok),
         detect_dir: |p| &p.grok_dir,
-        gate_on_presence: true,
         // MCP TomlMcp; hooks own file. Bare command dedupes with imported Claude;
         // GROK_HOOK_EVENT vs no-arg MCP. Stop → chat_history; mid-turn = updates.jsonl tail;
         // digests → AGENTS.md (#95).
@@ -314,14 +329,12 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Kimi Code",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "kimi",
-            aliases: &["kimi-code"],
+            command: launch_command(ClientSource::KimiCode),
+            aliases: launch_aliases(ClientSource::KimiCode),
             mode: LaunchMode::Direct,
         },
-        mcp_client_prefix: "kimi",
-        present: |p| p.kimi_dir.exists(),
+        mcp_client_prefix: mcp_client_prefix(ClientSource::KimiCode),
         detect_dir: |p| &p.kimi_dir,
-        gate_on_presence: true,
         // Flat [[hooks]] only event/matcher/command/timeout; greet-only SessionStart;
         // has SessionEnd+Notification. MCP separate mcp.json. KIMI_CODE_HOME → Paths::resolve.
         surfaces: &[
@@ -358,15 +371,13 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         display_name: "Hermes Agent",
         kind: ClientKind::TerminalCli,
         launch: LaunchSpec {
-            command: "hermes",
-            aliases: &[],
+            command: launch_command(ClientSource::Hermes),
+            aliases: launch_aliases(ClientSource::Hermes),
             mode: LaunchMode::Direct,
         },
-        // Never `"mcp"` — would match every MCP client. Prefix `"hermes"` only.
-        mcp_client_prefix: "hermes",
-        present: |p| p.hermes_dir.exists(),
+        // A generic MCP prefix would match every MCP client; use the launch-command prefix.
+        mcp_client_prefix: mcp_client_prefix(ClientSource::Hermes),
         detect_dir: |p| &p.hermes_dir,
-        gate_on_presence: true,
         // Shell hooks + MCP share config.yaml; allowlist is the consent sidecar.
         // Non-streaming: on_session_start greet-only; pre_llm_call notify+provide;
         // post_llm_call Stop; on_session_finalize SessionEnd. HERMES_HOME → Paths::resolve.
@@ -414,11 +425,14 @@ pub fn client_spec(target: ClientSource) -> Option<&'static ClientSpec> {
     CLIENT_REGISTRY.iter().find(|s| s.target == target)
 }
 
-/// `dontspeak <client>` via command + aliases (internal verbs excluded).
+/// `dontspeak <client>` via command, canonical token, or genuine compatibility aliases
+/// (internal verbs excluded).
 pub fn client_spec_for_launch(name: &str) -> Option<&'static ClientSpec> {
-    CLIENT_REGISTRY
-        .iter()
-        .find(|spec| spec.launch.command == name || spec.launch.aliases.contains(&name))
+    CLIENT_REGISTRY.iter().find(|spec| {
+        spec.launch.command == name
+            || spec.target.as_str() == name
+            || spec.launch.aliases.contains(&name)
+    })
 }
 
 /// MCP `clientInfo.name` normalize: trim, lowercase, `_` → `-`.
@@ -441,6 +455,51 @@ pub fn client_from_mcp_name(name: &str) -> ClientSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_client_stub(dir: &Path, client: ClientSource) {
+        let command = client_spec(client).unwrap().launch.command;
+        let filename = if cfg!(windows) {
+            format!("{command}.exe")
+        } else {
+            command.to_string()
+        };
+        std::fs::write(dir.join(filename), b"fixture").unwrap();
+    }
+
+    /// A leftover dot-dir with no matching binary must not read as installed — the
+    /// exact real-world case this presence check exists to reject.
+    #[test]
+    fn presence_is_the_binary_not_a_leftover_dot_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(root.path());
+        std::fs::create_dir_all(&paths.grok_dir).unwrap();
+
+        assert!(!client_spec(ClientSource::Grok).unwrap().present(&paths));
+    }
+
+    #[test]
+    fn presence_finds_the_binary_on_a_synthetic_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(root.path());
+        let bin_dir = root.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        write_client_stub(&bin_dir, ClientSource::Grok);
+        paths.path_env = Some(std::env::join_paths([&bin_dir]).unwrap());
+
+        assert!(client_spec(ClientSource::Grok).unwrap().present(&paths));
+    }
+
+    /// Fallback dirs are checked even with no `$PATH` at all (GUI-launched hosts).
+    #[test]
+    fn presence_falls_back_to_the_home_local_bin_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(root.path());
+        let bin_dir = root.path().join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        write_client_stub(&bin_dir, ClientSource::Codex);
+
+        assert!(client_spec(ClientSource::Codex).unwrap().present(&paths));
+    }
 
     /// Same set/order as [`ClientSource::CLIENTS`].
     #[test]
@@ -510,18 +569,22 @@ mod tests {
         let mut names = std::collections::HashSet::new();
         for spec in CLIENT_REGISTRY {
             assert!(!spec.launch.command.is_empty(), "{}", spec.display_name);
-            for name in
-                std::iter::once(spec.launch.command).chain(spec.launch.aliases.iter().copied())
+            let mut client_names = std::collections::HashSet::new();
+            for name in std::iter::once(spec.launch.command)
+                .chain(std::iter::once(spec.target.as_str()))
+                .chain(spec.launch.aliases.iter().copied())
             {
                 assert!(
                     !name.is_empty(),
                     "{}: empty launcher name",
                     spec.display_name
                 );
-                assert!(
-                    names.insert(name),
-                    "launcher name {name:?} is declared more than once"
-                );
+                if client_names.insert(name) {
+                    assert!(
+                        names.insert(name),
+                        "launcher name {name:?} is declared for multiple clients"
+                    );
+                }
                 assert_eq!(
                     client_spec_for_launch(name).map(|found| found.target),
                     Some(spec.target),
@@ -558,13 +621,19 @@ mod tests {
         for (name, want) in [
             ("claude-code", ClientSource::ClaudeCode),
             ("codex-mcp-client", ClientSource::Codex),
-            ("codex", ClientSource::Codex),
+            (
+                ClientSource::Codex.launch_command().unwrap(),
+                ClientSource::Codex,
+            ),
             ("codex-vscode", ClientSource::Codex),
             ("qwen-code", ClientSource::QwenCode),
             ("qwen-cli-mcp-client-DontSpeak", ClientSource::QwenCode),
             ("grok-shell-DontSpeak", ClientSource::Grok),
             ("kimi-code", ClientSource::KimiCode),
-            ("hermes", ClientSource::Hermes),
+            (
+                ClientSource::Hermes.launch_command().unwrap(),
+                ClientSource::Hermes,
+            ),
             ("hermes-agent-DontSpeak", ClientSource::Hermes),
         ] {
             assert_eq!(client_from_mcp_name(name), want, "{name}");

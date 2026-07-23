@@ -177,6 +177,7 @@ pub(crate) fn command_is_ours(cmd: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ClientSource;
 
     fn fake_shorten(long: &str) -> Option<String> {
         Some(long.replace("Alex Smith", "ALEXSM~1"))
@@ -224,7 +225,7 @@ mod tests {
             let (cmd, shell) = inline_command(
                 InlineFlavor::Windows,
                 bin,
-                ["notify", "--client", "codex"],
+                ["notify", "--client", ClientSource::Codex.as_str()],
                 style,
             );
             assert_eq!(

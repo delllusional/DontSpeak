@@ -13,7 +13,7 @@ const FIVE_HOUR_SECONDS: i64 = FIVE_HOUR_MINUTES * 60;
 const WEEK_SECONDS: i64 = WEEK_MINUTES * 60;
 
 pub(crate) fn fetch(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
-    let binary = resolve_binary("codex", paths).ok_or_else(|| {
+    let binary = resolve_binary(ds_config::ClientSource::Codex, paths).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "Codex CLI unavailable")
     })?;
     let result = rpc::call(rpc::Request {
@@ -100,7 +100,7 @@ mod tests {
     fn maps_five_hour_and_weekly_from_duration() {
         let windows = parse(&serde_json::json!({
             "rateLimits": {
-                "limitId": "codex",
+                "limitId": ds_config::ClientSource::Codex.as_str(),
                 "primary": {
                     "usedPercent": 12,
                     "resetsAt": 1_800_000_000,

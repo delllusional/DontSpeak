@@ -445,88 +445,9 @@ fn unix_start_kind(bin: &Path, codex_home: &Path) -> UnixStartKind {
     }
 }
 
-/// Resolve the codex binary: an absolute config path is used as-is; a bare name is
-/// searched on PATH, then the common install dirs (a GUI-launched app has a minimal
-/// PATH), including the standalone managed install under the codex home — the SAME
-/// `$CODEX_HOME`-or-`paths.codex_dir` resolution [`control_socket_path`] uses, so the
-/// binary lookup and the socket can't disagree about where codex lives. On Windows it
-/// additionally resolves npm's nested native payload, never a shell shim.
-fn resolve_codex_bin(
-    cfg_bin: &str,
-    home: &Path,
-    codex_home: &Path,
-    roaming_app_data: Option<&Path>,
-) -> Option<PathBuf> {
-    #[cfg(not(windows))]
-    let _ = roaming_app_data;
-    let p = Path::new(cfg_bin);
-    if p.is_absolute() {
-        return p.is_file().then(|| p.to_path_buf());
-    }
-    if let Some(path_var) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path_var) {
-            #[cfg(windows)]
-            if p.extension().is_none() {
-                let candidate = dir.join(format!("{cfg_bin}.exe"));
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-                // npm installs extensionless / cmd / PowerShell shims beside the native
-                // payload. `Command` needs the real executable for a hidden GUI launch.
-                continue;
-            }
-            let candidate = dir.join(cfg_bin);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    let fallbacks = vec![
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        home.join(".local/bin"),
-        codex_home.join("packages/standalone/current"),
-    ];
-    #[cfg(windows)]
-    let fallbacks = {
-        let mut fallbacks = fallbacks;
-        let target = if cfg!(target_arch = "aarch64") {
-            "aarch64-pc-windows-msvc"
-        } else {
-            "x86_64-pc-windows-msvc"
-        };
-        let roaming = roaming_app_data
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| home.join("AppData/Roaming"));
-        fallbacks.push(
-            roaming
-                .join("npm/node_modules/@openai/codex/node_modules")
-                .join(if cfg!(target_arch = "aarch64") {
-                    "@openai/codex-win32-arm64"
-                } else {
-                    "@openai/codex-win32-x64"
-                })
-                .join("vendor")
-                .join(target)
-                .join("bin"),
-        );
-        fallbacks
-    };
-    for dir in fallbacks {
-        #[cfg(windows)]
-        if p.extension().is_none() {
-            let candidate = dir.join(format!("{cfg_bin}.exe"));
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            continue;
-        }
-        let candidate = dir.join(cfg_bin);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+/// Codex uses the same binary resolver as presence, launch wrappers, and usage probes.
+fn resolve_codex_bin(cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
+    ds_config::resolve_configured_client_binary(ds_config::ClientSource::Codex, paths, cfg_bin)
 }
 
 fn direct_app_server_command(bin: &Path, listen: &str) -> std::process::Command {
@@ -1457,12 +1378,9 @@ fn supervise(
                         connect_error.kind(),
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
                     );
-                    let codex_home = std::env::var_os("CODEX_HOME")
-                        .filter(|s| !s.is_empty())
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| paths.codex_dir.clone());
+                    let codex_home = &paths.codex_dir;
                     let bin = if force_start {
-                        resolve_codex_bin(&cfg.codex_bin, &paths.home, &codex_home, None)
+                        resolve_codex_bin(&cfg.codex_bin, paths)
                     } else {
                         None
                     };
@@ -1496,7 +1414,7 @@ fn supervise(
                         && let Some(bin) = bin
                     {
                         last_server_start = Some(Instant::now());
-                        match unix_start_kind(&bin, &codex_home) {
+                        match unix_start_kind(&bin, codex_home) {
                             UnixStartKind::ManagedDaemon => start_daemon(&bin),
                             UnixStartKind::OwnedServer => {
                                 match start_unix_app_server(&bin, &sock) {
@@ -1579,17 +1497,7 @@ fn supervise(
                 Err(connect_error) => {
                     #[cfg(windows)]
                     if force_start && owned_server.is_none() && can_auto_start_tcp(&host) {
-                        let codex_home = std::env::var_os("CODEX_HOME")
-                            .filter(|s| !s.is_empty())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| paths.codex_dir.clone());
-                        let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
-                        let bin = resolve_codex_bin(
-                            &cfg.codex_bin,
-                            &paths.home,
-                            &codex_home,
-                            roaming.as_deref(),
-                        );
+                        let bin = resolve_codex_bin(&cfg.codex_bin, paths);
                         if let Some(bin) = bin {
                             warned_bin_unresolvable = false;
                             let throttled = last_server_start

@@ -19,6 +19,13 @@ pub enum ClientSource {
     Unknown,
 }
 
+struct ClientNames {
+    token: &'static str,
+    launch_command: Option<&'static str>,
+    launch_aliases: &'static [&'static str],
+    mcp_client_prefix: Option<&'static str>,
+}
+
 impl ClientSource {
     /// Wireable clients in token order (registry drift-tested).
     pub const CLIENTS: &'static [ClientSource] = &[
@@ -30,33 +37,87 @@ impl ClientSource {
         ClientSource::Hermes,
     ];
 
-    /// Case/whitespace tolerant; `None` → call sites use Unknown.
-    pub fn parse(s: &str) -> Option<Self> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "claude_code" => Some(ClientSource::ClaudeCode),
-            "codex" => Some(ClientSource::Codex),
-            "qwen_code" => Some(ClientSource::QwenCode),
-            "grok" => Some(ClientSource::Grok),
-            "kimi_code" => Some(ClientSource::KimiCode),
-            "hermes" => Some(ClientSource::Hermes),
-            "dontspeak" => Some(ClientSource::DontSpeak),
-            "unknown" => Some(ClientSource::Unknown),
-            _ => None,
+    const fn names(self) -> ClientNames {
+        match self {
+            ClientSource::ClaudeCode => ClientNames {
+                token: "claude_code",
+                launch_command: Some("claude"),
+                launch_aliases: &[],
+                mcp_client_prefix: Some("claude-code"),
+            },
+            ClientSource::Codex => ClientNames {
+                token: "codex",
+                launch_command: Some("codex"),
+                launch_aliases: &[],
+                mcp_client_prefix: Some("codex"),
+            },
+            ClientSource::QwenCode => ClientNames {
+                token: "qwen_code",
+                launch_command: Some("qwen"),
+                launch_aliases: &[],
+                mcp_client_prefix: Some("qwen"),
+            },
+            ClientSource::Grok => ClientNames {
+                token: "grok",
+                launch_command: Some("grok"),
+                launch_aliases: &[],
+                mcp_client_prefix: Some("grok"),
+            },
+            ClientSource::KimiCode => ClientNames {
+                token: "kimi_code",
+                launch_command: Some("kimi"),
+                launch_aliases: &["kimi-code"],
+                mcp_client_prefix: Some("kimi-code"),
+            },
+            ClientSource::Hermes => ClientNames {
+                token: "hermes",
+                launch_command: Some("hermes"),
+                launch_aliases: &[],
+                mcp_client_prefix: Some("hermes"),
+            },
+            ClientSource::DontSpeak => ClientNames {
+                token: "dontspeak",
+                launch_command: None,
+                launch_aliases: &[],
+                mcp_client_prefix: None,
+            },
+            ClientSource::Unknown => ClientNames {
+                token: "unknown",
+                launch_command: None,
+                launch_aliases: &[],
+                mcp_client_prefix: None,
+            },
         }
     }
 
+    /// Canonical executable for wireable clients.
+    pub const fn launch_command(self) -> Option<&'static str> {
+        self.names().launch_command
+    }
+
+    /// Genuine compatibility spellings for the launcher surface.
+    pub const fn launch_aliases(self) -> &'static [&'static str] {
+        self.names().launch_aliases
+    }
+
+    /// Normalized MCP `clientInfo.name` prefix for wireable clients.
+    pub const fn mcp_client_prefix(self) -> Option<&'static str> {
+        self.names().mcp_client_prefix
+    }
+
+    /// Case/whitespace tolerant; `None` → call sites use Unknown.
+    pub fn parse(s: &str) -> Option<Self> {
+        let token = s.trim();
+        Self::CLIENTS
+            .iter()
+            .copied()
+            .chain([Self::DontSpeak, Self::Unknown])
+            .find(|client| token.eq_ignore_ascii_case(client.as_str()))
+    }
+
     /// Canonical token (hooks, IPC, log `client=`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ClientSource::ClaudeCode => "claude_code",
-            ClientSource::Codex => "codex",
-            ClientSource::QwenCode => "qwen_code",
-            ClientSource::Grok => "grok",
-            ClientSource::KimiCode => "kimi_code",
-            ClientSource::Hermes => "hermes",
-            ClientSource::DontSpeak => "dontspeak",
-            ClientSource::Unknown => "unknown",
-        }
+    pub const fn as_str(self) -> &'static str {
+        self.names().token
     }
 
     pub fn is_client(self) -> bool {
@@ -84,16 +145,11 @@ mod tests {
 
     #[test]
     fn every_variant_round_trips_parse_serde_and_display() {
-        for c in [
-            ClientSource::ClaudeCode,
-            ClientSource::Codex,
-            ClientSource::QwenCode,
-            ClientSource::Grok,
-            ClientSource::KimiCode,
-            ClientSource::Hermes,
-            ClientSource::DontSpeak,
-            ClientSource::Unknown,
-        ] {
+        for c in ClientSource::CLIENTS
+            .iter()
+            .copied()
+            .chain([ClientSource::DontSpeak, ClientSource::Unknown])
+        {
             assert_eq!(ClientSource::parse(c.as_str()), Some(c), "{c:?}");
             let s = serde_json::to_string(&c).unwrap();
             assert_eq!(s, format!("\"{}\"", c.as_str()), "{c:?}");
@@ -114,24 +170,22 @@ mod tests {
 
     #[test]
     fn clients_is_the_wireable_subset_and_is_client_gates_on_it() {
-        assert_eq!(
-            ClientSource::CLIENTS,
-            &[
-                ClientSource::ClaudeCode,
-                ClientSource::Codex,
-                ClientSource::QwenCode,
-                ClientSource::Grok,
-                ClientSource::KimiCode,
-                ClientSource::Hermes,
-            ]
-        );
         for &c in ClientSource::CLIENTS {
             assert!(c.is_client(), "{c:?} is wire-able");
+            assert!(c.launch_command().is_some(), "{c:?} is launchable");
+            assert!(
+                c.mcp_client_prefix().is_some(),
+                "{c:?} is identifiable over MCP"
+            );
         }
         // DontSpeak must never count as a client (`exclude_clients = ["dontspeak"]`);
         // Unknown is not wire-able either. Default fails open to Unknown.
         assert!(!ClientSource::DontSpeak.is_client());
         assert!(!ClientSource::Unknown.is_client());
+        assert_eq!(ClientSource::DontSpeak.launch_command(), None);
+        assert_eq!(ClientSource::Unknown.launch_command(), None);
+        assert_eq!(ClientSource::DontSpeak.mcp_client_prefix(), None);
+        assert_eq!(ClientSource::Unknown.mcp_client_prefix(), None);
         assert_eq!(ClientSource::default(), ClientSource::Unknown);
     }
 

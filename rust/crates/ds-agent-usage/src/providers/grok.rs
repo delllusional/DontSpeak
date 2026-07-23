@@ -78,7 +78,7 @@ fn sanitize_error_message(error: &std::io::Error) -> String {
 }
 
 fn fetch_cli(paths: &ds_config::Paths) -> std::io::Result<Vec<UsageRow>> {
-    let binary = resolve_binary("grok", paths)
+    let binary = resolve_binary(ds_config::ClientSource::Grok, paths)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Grok CLI unavailable"))?;
     let result = rpc::call(rpc::Request {
         binary: &binary,

@@ -946,7 +946,7 @@ mod usage_output {
             value,
             json!({
                 "cards": [{
-                    "agent": "codex",
+                    "agent": ClientSource::Codex.as_str(),
                     "account": "dev@example.com",
                     "rows": [{
                         "period": "week",
@@ -1041,7 +1041,7 @@ mod status_output {
             "seq": 8,
             "activity": {
                 "caps": true, "caps_active": false, "recording": false,
-                "speaking": true, "speaker": "codex", "voice": "if_sara",
+                "speaking": true, "speaker": ClientSource::Codex.as_str(), "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
             "tts": {

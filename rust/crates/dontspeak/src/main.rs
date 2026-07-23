@@ -67,17 +67,14 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
     }
 }
 
-const USAGE: &str = "\
+const USAGE_PREFIX: &str = "\
 dontspeak — local voice layer (MCP + hooks + client launchers)
 
 Usage:
   dontspeak                 stdio MCP server (or Grok hook when GROK_HOOK_EVENT is set)
-  dontspeak claude [args…]  launch Claude Code (starts host if needed)
-  dontspeak codex  [args…]  launch Codex
-  dontspeak qwen   [args…]  launch Qwen Code
-  dontspeak grok   [args…]  launch Grok
-  dontspeak kimi   [args…]  launch Kimi Code
-  dontspeak hermes [args…]  launch Hermes Agent
+";
+
+const USAGE_SUFFIX: &str = "\
   dontspeak wire   [args…]  wire/unwire client hooks + MCP
   dontspeak notify          command-hook executor (stdin JSON)
   dontspeak provide         query-hook executor (stdin JSON)
@@ -88,9 +85,33 @@ Usage:
 Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
 
-/// Unknown-subcommand hint fragment — separate so registry-drift test asserts every launcher.
-const EXPECTED_SUBCOMMANDS: &str = "`claude`, `codex`, `qwen`, `grok`, `kimi`, `hermes`, `notify`, \
-     `provide`, `wire`, `--version`, or `--help`";
+fn usage_text() -> String {
+    use std::fmt::Write as _;
+
+    let mut usage = USAGE_PREFIX.to_string();
+    for spec in ds_config::CLIENT_REGISTRY {
+        let _ = writeln!(
+            usage,
+            "  dontspeak {} [args…]  launch {}",
+            spec.launch.command, spec.display_name
+        );
+    }
+    usage.push_str(USAGE_SUFFIX);
+    usage
+}
+
+fn expected_subcommands() -> String {
+    let mut names = ds_config::CLIENT_REGISTRY
+        .iter()
+        .map(|spec| format!("`{}`", spec.launch.command))
+        .collect::<Vec<_>>();
+    names.extend(
+        ["notify", "provide", "wire", "--version", "--help"]
+            .map(|name| format!("`{name}`")),
+    );
+    let last = names.pop().expect("fixed subcommands are nonempty");
+    format!("{}, or {last}", names.join(", "))
+}
 
 /// Detach every role except `Launch` (only Launch needs the console for the interactive child).
 fn should_detach_console(subcommand: &Subcommand) -> bool {
@@ -169,7 +190,7 @@ fn main() {
             std::process::exit(0);
         }
         Subcommand::Help => {
-            print!("{USAGE}");
+            print!("{}", usage_text());
             std::process::exit(0);
         }
         Subcommand::Status => {
@@ -181,8 +202,9 @@ fn main() {
         }
         // Unrecognized argv\[1\] must not fall through to MCP (blocks on stdin forever).
         Subcommand::Unknown(sub) => {
+            let expected = expected_subcommands();
             let msg = format!(
-                "dontspeak: unknown subcommand {sub:?}; expected {EXPECTED_SUBCOMMANDS} \
+                "dontspeak: unknown subcommand {sub:?}; expected {expected} \
                  (run with no arguments for the stdio MCP server)"
             );
             eprintln!("{msg}");
@@ -249,8 +271,9 @@ mod tests {
     #[test]
     fn every_registry_launcher_name_dispatches_with_trailing_args() {
         for spec in ds_config::CLIENT_REGISTRY {
-            for name in
-                std::iter::once(spec.launch.command).chain(spec.launch.aliases.iter().copied())
+            for name in std::iter::once(spec.launch.command)
+                .chain(std::iter::once(spec.target.as_str()))
+                .chain(spec.launch.aliases.iter().copied())
             {
                 let argv = argv(&["dontspeak", name, "--version"]);
                 assert_eq!(
@@ -262,17 +285,19 @@ mod tests {
         }
     }
 
-    /// Drift gate: new registry client without updating USAGE / unknown-hint is undiscoverable.
+    /// Help and the unknown hint are rendered from the registry, with no parallel client list.
     #[test]
     fn usage_and_unknown_hint_list_every_registry_launcher() {
+        let usage = usage_text();
+        let expected = expected_subcommands();
         for spec in ds_config::CLIENT_REGISTRY {
             let cmd = spec.launch.command;
             assert!(
-                USAGE.contains(&format!("dontspeak {cmd} ")),
-                "USAGE is missing the `{cmd}` launcher line"
+                usage.contains(&format!("dontspeak {cmd} ")),
+                "usage is missing the `{cmd}` launcher line"
             );
             assert!(
-                EXPECTED_SUBCOMMANDS.contains(&format!("`{cmd}`")),
+                expected.contains(&format!("`{cmd}`")),
                 "unknown-subcommand hint is missing `{cmd}`"
             );
         }
@@ -354,14 +379,8 @@ mod tests {
 
     #[test]
     fn client_token_is_parsed_from_argv() {
-        for (tok, want) in [
-            ("claude_code", ClientSource::ClaudeCode),
-            ("codex", ClientSource::Codex),
-            ("qwen_code", ClientSource::QwenCode),
-            ("grok", ClientSource::Grok),
-            ("kimi_code", ClientSource::KimiCode),
-            ("hermes", ClientSource::Hermes),
-        ] {
+        for &want in ClientSource::CLIENTS {
+            let tok = want.as_str();
             let argv = argv(&["dontspeak", "notify", "--client", tok]);
             assert_eq!(client_from_argv(&argv), want, "{tok}");
         }
@@ -398,9 +417,10 @@ mod tests {
 
     #[test]
     fn client_flag_does_not_disturb_subcommand_dispatch() {
-        let notify = argv(&["dontspeak", "notify", "--client", "codex"]);
+        let client = ClientSource::Codex.as_str();
+        let notify = argv(&["dontspeak", "notify", "--client", client]);
         assert_eq!(resolve_subcommand(&notify), Subcommand::Notify);
-        let provide = argv(&["dontspeak", "provide", "--client", "codex"]);
+        let provide = argv(&["dontspeak", "provide", "--client", client]);
         assert_eq!(resolve_subcommand(&provide), Subcommand::Provide);
     }
 }

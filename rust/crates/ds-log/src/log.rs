@@ -389,21 +389,20 @@ mod tests {
     fn log_from_appends_the_client_as_a_trailing_kv() {
         // Non-DontSpeak → ` client=<token>` at end of message; positional fields untouched.
         let dir = tempfile::tempdir().unwrap();
-        for (client, want) in [
-            (
-                ClientSource::ClaudeCode,
-                "greet session=s1 client=claude_code",
-            ),
-            (ClientSource::Codex, "greet session=s1 client=codex"),
-            (ClientSource::QwenCode, "greet session=s1 client=qwen_code"),
-            (ClientSource::Grok, "greet session=s1 client=grok"),
-            (ClientSource::Unknown, "greet session=s1 client=unknown"),
-        ] {
+        for client in ClientSource::CLIENTS
+            .iter()
+            .copied()
+            .chain([ClientSource::Unknown])
+        {
             let p = dir.path().join(format!("{}.log", client.as_str()));
             log_from(&p, LogLevel::Info, "engine", client, "greet session=s1");
             let (level, source, msg) = only_line(&p);
             assert_eq!((level.as_str(), source.as_str()), ("INFO", "engine"));
-            assert_eq!(msg, want, "{client:?}");
+            assert_eq!(
+                msg,
+                format!("greet session=s1 client={}", client.as_str()),
+                "{client:?}"
+            );
         }
     }
 

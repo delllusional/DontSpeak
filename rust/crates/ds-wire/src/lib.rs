@@ -154,14 +154,13 @@ pub fn reconcile(paths: &Paths) -> i32 {
 }
 
 /// All surfaces run even if one fails (worst code wins) so `--remove` cannot leave dangling MCP.
-/// Order matters for `claude_code` (hooks create `~/.claude` that MCP presence then sees).
 fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bool) -> i32 {
     let spec = ds_config::client_spec(client).expect(
         "wire_client only called with CLIENTS members (run gates on client_spec; \
          --all / reconcile iterate CLIENTS)",
     );
 
-    if !print_only && spec.gate_on_presence {
+    if !print_only {
         if remove {
             // No config files ⇒ nothing to strip; don't scatter on remove.
             if !spec
@@ -171,7 +170,7 @@ fn wire_client(client: ClientSource, paths: &Paths, remove: bool, print_only: bo
             {
                 return 0;
             }
-        } else if !(spec.present)(paths) {
+        } else if !spec.present(paths) {
             eprintln!(
                 "wire: {} not detected ({}); skipping",
                 spec.display_name,
@@ -388,7 +387,7 @@ fn print_registry(paths: Option<&Paths>) {
             println!(
                 "  detect:  {} ({})",
                 (spec.detect_dir)(p).display(),
-                if (spec.present)(p) {
+                if spec.present(p) {
                     "present"
                 } else {
                     "absent"
@@ -433,16 +432,33 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Satisfy a client's presence gate: drop a stub executable where
+    /// `ClientSpec::present` looks (`~/.local/bin`, one of its unconditional fallback
+    /// dirs) — not a dot-dir, which is no longer the presence signal.
+    fn make_present(paths: &Paths, client: ClientSource) {
+        let command = ds_config::client_spec(client).unwrap().launch.command;
+        let bin_dir = paths.home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let filename = if cfg!(windows) {
+            format!("{command}.exe")
+        } else {
+            command.to_string()
+        };
+        std::fs::write(bin_dir.join(filename), b"fixture").unwrap();
+    }
+
     /// Guard hits before `Paths::resolve()` (no $HOME I/O).
     /// `dontspeak` parses as ClientSource but has no client_spec → "unknown client".
     #[test]
     fn missing_or_invalid_client_selection_is_a_hard_error() {
+        let codex = ClientSource::Codex.as_str();
+        let claude = ClientSource::ClaudeCode.as_str();
         for argv in [
             &[][..],
             &["not_a_real_client"][..],
             &["dontspeak"][..],
             &["unknown"][..],
-            &["codex", "claude_code"][..],
+            &[codex, claude][..],
         ] {
             assert_eq!(run(&args(argv)), 1, "{argv:?}");
         }
@@ -464,15 +480,16 @@ mod tests {
 
     #[test]
     fn unknown_flags_and_conflicting_modes_are_hard_errors_before_io() {
+        let codex = ClientSource::Codex.as_str();
         assert_eq!(run(&args(&["--not-a-real-flag"])), 1);
-        assert_eq!(run(&args(&["codex", "--remvoe"])), 1);
+        assert_eq!(run(&args(&[codex, "--remvoe"])), 1);
         assert_eq!(run(&args(&["--reconcile", "--print-only"])), 1);
         assert_eq!(run(&args(&["--reconcile", "--remove"])), 1);
-        assert_eq!(run(&args(&["--all", "codex"])), 1);
+        assert_eq!(run(&args(&["--all", codex])), 1);
     }
 
     #[test]
-    fn wire_client_skips_absent_gated_client() {
+    fn wire_client_skips_absent_client() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
@@ -492,7 +509,7 @@ mod tests {
     fn wire_client_qwen_code_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.qwen_dir).unwrap(); // satisfy Qwen's presence gate
+        make_present(&paths, ClientSource::QwenCode);
 
         assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
         let v: serde_json::Value =
@@ -529,7 +546,7 @@ mod tests {
     fn wire_client_codex_wires_hooks_and_mcp_into_one_file_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        make_present(&paths, ClientSource::Codex);
 
         assert_eq!(wire_client(ClientSource::Codex, &paths, false, false), 0);
         let text = std::fs::read_to_string(&paths.codex_config).unwrap();
@@ -557,7 +574,7 @@ mod tests {
     fn wire_surfaces_print_only_codex_shows_the_union_of_both_surfaces() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap(); // satisfy Codex's presence gate
+        make_present(&paths, ClientSource::Codex);
 
         let spec = ds_config::client_spec(ClientSource::Codex).unwrap();
         let results = wire_surfaces_print_only(spec, &paths, false);
@@ -594,7 +611,7 @@ mod tests {
     fn wire_surfaces_print_only_qwen_shows_the_union_of_both_surfaces() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.qwen_dir).unwrap(); // satisfy Qwen's presence gate
+        make_present(&paths, ClientSource::QwenCode);
 
         let spec = ds_config::client_spec(ClientSource::QwenCode).unwrap();
         let results = wire_surfaces_print_only(spec, &paths, false);
@@ -625,7 +642,7 @@ mod tests {
     fn wire_client_grok_wires_both_surfaces_then_removes_both() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.grok_dir).unwrap();
+        make_present(&paths, ClientSource::Grok);
 
         assert_eq!(wire_client(ClientSource::Grok, &paths, false, false), 0);
         let text = std::fs::read_to_string(&paths.grok_config).unwrap();
@@ -674,7 +691,7 @@ mod tests {
     fn wire_client_kimi_code_wires_both_surfaces_then_removes_both_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.kimi_dir).unwrap();
+        make_present(&paths, ClientSource::KimiCode);
 
         assert_eq!(wire_client(ClientSource::KimiCode, &paths, false, false), 0);
 
@@ -763,7 +780,7 @@ mod tests {
     fn wire_client_hermes_wires_all_surfaces_then_removes_and_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.hermes_dir).unwrap();
+        make_present(&paths, ClientSource::Hermes);
 
         assert_eq!(wire_client(ClientSource::Hermes, &paths, false, false), 0);
 
@@ -837,7 +854,8 @@ mod tests {
     fn malformed_shared_configs_are_unchanged_hard_errors_for_every_surface() {
         let qwen_dir = tempfile::tempdir().unwrap();
         let qwen = Paths::rooted_at(qwen_dir.path());
-        std::fs::create_dir_all(&qwen.qwen_dir).unwrap();
+        make_present(&qwen, ClientSource::QwenCode);
+        std::fs::create_dir_all(&qwen.qwen_dir).unwrap(); // parent for the file written below
         let bad_json = b"{ not json";
         std::fs::write(&qwen.qwen_settings, bad_json).unwrap();
         assert_eq!(wire_client(ClientSource::QwenCode, &qwen, false, false), 1);
@@ -845,7 +863,8 @@ mod tests {
 
         let codex_dir = tempfile::tempdir().unwrap();
         let codex = Paths::rooted_at(codex_dir.path());
-        std::fs::create_dir_all(&codex.codex_dir).unwrap();
+        make_present(&codex, ClientSource::Codex);
+        std::fs::create_dir_all(&codex.codex_dir).unwrap(); // parent for the file written below
         let bad_toml = b"hooks = [not valid toml";
         std::fs::write(&codex.codex_config, bad_toml).unwrap();
         assert_eq!(wire_client(ClientSource::Codex, &codex, false, false), 1);
@@ -853,7 +872,8 @@ mod tests {
 
         let hermes_dir = tempfile::tempdir().unwrap();
         let hermes = Paths::rooted_at(hermes_dir.path());
-        std::fs::create_dir_all(&hermes.hermes_dir).unwrap();
+        make_present(&hermes, ClientSource::Hermes);
+        std::fs::create_dir_all(&hermes.hermes_dir).unwrap(); // parent for the file written below
         let bad_yaml = b"hooks: [\n  - :\n";
         std::fs::write(&hermes.hermes_config_yaml, bad_yaml).unwrap();
         assert_eq!(wire_client(ClientSource::Hermes, &hermes, false, false), 1);
@@ -865,7 +885,7 @@ mod tests {
     fn wire_surfaces_print_only_hermes_shows_hooks_and_mcp_union() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.hermes_dir).unwrap();
+        make_present(&paths, ClientSource::Hermes);
 
         let spec = ds_config::client_spec(ClientSource::Hermes).unwrap();
         let results = wire_surfaces_print_only(spec, &paths, false);
@@ -911,25 +931,26 @@ mod tests {
         n
     }
 
-    fn make_all_client_dirs(paths: &Paths) {
-        for d in [
-            &paths.claude_dir,
-            &paths.codex_dir,
-            &paths.qwen_dir,
-            &paths.grok_dir,
-            &paths.kimi_dir,
-            &paths.hermes_dir,
-        ] {
-            std::fs::create_dir_all(d).unwrap();
+    fn make_all_clients_present(paths: &Paths) {
+        for &client in ClientSource::CLIENTS {
+            make_present(paths, client);
         }
     }
 
-    /// Gated clients absent ⇒ skip without scattering (Claude Code is ungated and may write).
+    /// Absent clients are skipped without scattering configuration files.
     #[test]
-    fn reconcile_skips_absent_gated_clients_without_scattering() {
+    fn reconcile_skips_absent_clients_without_scattering() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         assert_eq!(reconcile(&paths), 0);
+        assert!(
+            !paths.settings_json.exists(),
+            "claude code not installed → hooks skipped"
+        );
+        assert!(
+            !paths.claude_code_config.exists(),
+            "claude code not installed → mcp skipped"
+        );
         assert!(
             !paths.codex_config.exists(),
             "codex not installed → skipped"
@@ -962,7 +983,7 @@ mod tests {
     fn reconcile_absent_key_wires_all_supported_clients() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_all_client_dirs(&paths);
+        make_all_clients_present(&paths);
 
         assert_eq!(reconcile(&paths), 0);
         assert!(paths.settings_json.exists(), "claude_code hooks wired");
@@ -984,7 +1005,7 @@ mod tests {
     fn reconcile_strips_a_client_dropped_from_the_desired_set() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+        make_present(&paths, ClientSource::QwenCode);
 
         // Pre-wire Qwen (as a prior reconcile / installer would have).
         assert_eq!(wire_client(ClientSource::QwenCode, &paths, false, false), 0);
@@ -1016,7 +1037,7 @@ mod tests {
     fn manual_wire_selection_survives_boot_reconcile_in_both_directions() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+        make_present(&paths, ClientSource::QwenCode);
 
         assert_eq!(
             wire_selected(&[ClientSource::QwenCode], &paths, false, false),
@@ -1048,7 +1069,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
         std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(&paths.qwen_dir).unwrap();
+        make_present(&paths, ClientSource::QwenCode);
         let malformed = "exclude_clients = [\n";
         std::fs::write(&paths.config_toml, malformed).unwrap();
 
@@ -1068,7 +1089,7 @@ mod tests {
     fn reconcile_is_idempotent_and_creates_no_new_backups() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        make_all_client_dirs(&paths);
+        make_all_clients_present(&paths);
 
         assert_eq!(reconcile(&paths), 0);
         // Fresh configs were CREATED (not overwritten), so the first pass leaves no backup.

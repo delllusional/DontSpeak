@@ -286,7 +286,7 @@ fn cached_card(
 // ── Install gate (wire registry) ────────────────────────────────────────────
 
 fn client_installed(paths: &ds_config::Paths, client: ClientSource) -> bool {
-    ds_config::client_spec(client).is_some_and(|spec| (spec.present)(paths))
+    ds_config::client_spec(client).is_some_and(|spec| spec.present(paths))
 }
 
 fn installed_agents(paths: &ds_config::Paths) -> Vec<ClientSource> {
@@ -519,12 +519,26 @@ mod tests {
         assert!(capped.ends_with('…'));
     }
 
+    /// Drop a stub executable where `ClientSpec::present` looks (`~/.local/bin`) — the
+    /// presence signal is the resolvable binary, not the client's dot-dir.
+    fn make_present(paths: &ds_config::Paths, client: ClientSource) {
+        let command = ds_config::client_spec(client).unwrap().launch.command;
+        let bin_dir = paths.home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let filename = if cfg!(windows) {
+            format!("{command}.exe")
+        } else {
+            command.to_string()
+        };
+        std::fs::write(bin_dir.join(filename), b"fixture").unwrap();
+    }
+
     #[test]
     fn install_gate_matches_wire_registry() {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
         assert!(!client_installed(&paths, ClientSource::ClaudeCode));
-        std::fs::create_dir_all(&paths.claude_dir).unwrap();
+        make_present(&paths, ClientSource::ClaudeCode);
         assert_eq!(installed_agents(&paths), vec![ClientSource::ClaudeCode]);
     }
 
@@ -533,8 +547,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = ds_config::Paths::rooted_at(root.path());
         for &client in ClientSource::CLIENTS {
-            let spec = ds_config::client_spec(client).unwrap();
-            std::fs::create_dir_all((spec.detect_dir)(&paths)).unwrap();
+            make_present(&paths, client);
         }
 
         assert_eq!(installed_agents(&paths), ClientSource::CLIENTS);

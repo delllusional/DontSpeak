@@ -356,8 +356,10 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
     let managed = codex_home.path().join("packages/standalone/current");
     std::fs::create_dir_all(&managed).unwrap();
     std::fs::write(managed.join(name), "x").unwrap();
+    let mut paths = Paths::rooted_at(home.path());
+    paths.codex_dir = codex_home.path().to_path_buf();
     assert_eq!(
-        resolve_codex_bin(name, home.path(), codex_home.path(), None),
+        resolve_codex_bin(name, &paths),
         Some(managed.join(name))
     );
     // Not found anywhere → None (the caller warns; nothing is spawned).
@@ -368,9 +370,7 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
             } else {
                 "ds-test-n0t-there"
             },
-            home.path(),
-            codex_home.path(),
-            None
+            &paths,
         ),
         None
     );
@@ -440,8 +440,8 @@ fn owned_unix_app_server_stops_its_process_group_on_drop() {
 #[test]
 fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
     let home = tempfile::tempdir().unwrap();
-    let codex_home = tempfile::tempdir().unwrap();
-    let roaming = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted_at(home.path());
+    let roaming = paths.home.join("AppData/Roaming");
     let package = if cfg!(target_arch = "aarch64") {
         "@openai/codex-win32-arm64"
     } else {
@@ -453,7 +453,6 @@ fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
         "x86_64-pc-windows-msvc"
     };
     let bin = roaming
-        .path()
         .join("npm/node_modules/@openai/codex/node_modules")
         .join(package)
         .join("vendor")
@@ -464,10 +463,8 @@ fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
 
     assert_eq!(
         resolve_codex_bin(
-            "codex",
-            home.path(),
-            codex_home.path(),
-            Some(roaming.path())
+            ds_config::ClientSource::Codex.launch_command().unwrap(),
+            &paths,
         ),
         Some(bin)
     );

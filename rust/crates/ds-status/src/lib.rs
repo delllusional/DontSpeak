@@ -426,16 +426,16 @@ mod tests {
     }
 
     fn client_source_strategy() -> impl Strategy<Value = ds_client::ClientSource> {
-        prop::sample::select(vec![
-            ds_client::ClientSource::ClaudeCode,
-            ds_client::ClientSource::Codex,
-            ds_client::ClientSource::QwenCode,
-            ds_client::ClientSource::Grok,
-            ds_client::ClientSource::KimiCode,
-            ds_client::ClientSource::Hermes,
-            ds_client::ClientSource::DontSpeak,
-            ds_client::ClientSource::Unknown,
-        ])
+        prop::sample::select(
+            ds_client::ClientSource::CLIENTS
+                .iter()
+                .copied()
+                .chain([
+                    ds_client::ClientSource::DontSpeak,
+                    ds_client::ClientSource::Unknown,
+                ])
+                .collect::<Vec<_>>(),
+        )
     }
 
     prop_compose! {
