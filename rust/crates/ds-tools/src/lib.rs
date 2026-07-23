@@ -1095,20 +1095,23 @@ mod tests {
         );
     }
 
+    const MCP_TOOLS_DOC: &str = include_str!("../../../../docs/MCP-TOOLS.md");
+
+    /// Normalize whitespace (doc wraps), strip backticks, and unescape markdown
+    /// table pipes (`\|` → `|`) before comparing.
+    fn normalize(s: &str) -> String {
+        s.replace('`', "")
+            .replace("\\|", "|")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// DRIFT GUARD: hand-written `docs/MCP-TOOLS.md` must track catalog names +
     /// tool/param descriptions (`descriptions.rs` is the single source).
     #[test]
     fn mcp_tools_doc_matches_catalog_descriptions() {
-        // Normalize whitespace (doc wraps), strip backticks, and unescape
-        // markdown table pipes (`\|` → `|`) before comparing.
-        fn normalize(s: &str) -> String {
-            s.replace('`', "")
-                .replace("\\|", "|")
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        let doc = normalize(include_str!("../../../../docs/MCP-TOOLS.md"));
+        let doc = normalize(MCP_TOOLS_DOC);
         for t in TOOLS {
             assert!(
                 doc.contains(t.name),
@@ -1130,6 +1133,32 @@ mod tests {
                     param.description
                 );
             }
+        }
+    }
+
+    /// DRIFT GUARD: the doc's annotation summary named `listen`/`diarize` read-only
+    /// (issue #221) because the description guard above compares prose only. Pin the
+    /// hint lists to the catalog, in catalog order.
+    #[test]
+    fn mcp_tools_doc_matches_catalog_annotations() {
+        fn claim(label: &str, hint: fn(&Annotations) -> bool) -> String {
+            let names: Vec<&str> = TOOLS
+                .iter()
+                .filter(|t| is_visible(t, true) && hint(&t.annotations))
+                .map(|t| t.name)
+                .collect();
+            format!("{label}: {}.", names.join(", "))
+        }
+        let doc = normalize(MCP_TOOLS_DOC);
+        for claim in [
+            claim("Read-only", |a| a.read_only),
+            claim("Idempotent", |a| a.idempotent),
+            claim("Open-world", |a| a.open_world),
+        ] {
+            assert!(
+                doc.contains(&claim),
+                "docs/MCP-TOOLS.md must claim `{claim}`"
+            );
         }
     }
 

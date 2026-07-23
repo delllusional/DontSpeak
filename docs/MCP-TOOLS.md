@@ -12,11 +12,11 @@ Manual: `dontspeak wire <client>` / `wire --reconcile`.
 `diarize`, `manage_speakers`, and four diarization `set_config` params are implemented
 but hidden (issue #77, `DIARIZATION_ENABLED`).
 
-Annotations: `usage` queries provider APIs (`openWorldHint=true`); the rest are local
-only. Read-only: `status`, `usage`, `voices`, `listen`, `diarize`. Idempotent:
-`stop`, `mute`, `set_config`. `status`, `usage`, and `voices`: `structuredContent` +
-same JSON in text. Stdio: 1 JSON-RPC line ≤1 MiB; max 8 concurrent; cancel stops
-`listen`.
+Annotations. Read-only: `status`, `usage`, `voices`. Idempotent: `stop`, `mute`,
+`status`, `usage`, `voices`, `set_config`. Open-world: `usage`. Only that one reaches
+provider APIs; the rest are local only. `status`, `usage`, and `voices`:
+`structuredContent` + same JSON in text. Stdio: 1 JSON-RPC line ≤1 MiB; max 8
+concurrent; cancel stops `listen`.
 
 ## speak
 
