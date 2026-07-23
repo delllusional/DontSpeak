@@ -80,7 +80,8 @@ pub struct TtsStatus {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SttStatus {
     pub engine: StatusSttEngine,
-    /// `null` for system/claude_code/off engines.
+    /// `null` for system/claude_code/off engines, and for built_in until a child
+    /// reports a realized backend.
     pub provider: Option<String>,
     /// `null` when dictation is off.
     pub status: Option<EngineStatus>,
