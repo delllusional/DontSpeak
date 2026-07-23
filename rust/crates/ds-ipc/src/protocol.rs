@@ -38,7 +38,11 @@ where
 pub enum Request {
     Ping,
     /// Codex app-server ready after narration subscriber attaches (TUI race).
-    EnsureCodexStream,
+    EnsureCodexStream {
+        /// Executable path already resolved by the launcher.
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        codex_bin: String,
+    },
     /// Global mute; speech drains silently, cues suppressed.
     SetMuted {
         on: bool,
@@ -232,7 +236,9 @@ mod tests {
     fn request_roundtrips_through_json_lines() {
         let cases = [
             Request::Ping,
-            Request::EnsureCodexStream,
+            Request::EnsureCodexStream {
+                codex_bin: "/opt/codex/bin/codex".into(),
+            },
             Request::Diarize { seconds: 10 },
             Request::Enroll {
                 name: "Alex".into(),

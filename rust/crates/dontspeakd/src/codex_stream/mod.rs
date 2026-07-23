@@ -28,6 +28,7 @@ struct RegInner {
     sessions: HashMap<String, Instant>,
     epoch: u64,
     launch_waiters: usize,
+    launcher_bin: Option<PathBuf>,
     launch_error_seq: u64,
     launch_error: Option<String>,
     connected_endpoint: Option<String>,
@@ -40,6 +41,7 @@ impl SessionRegistry {
                 sessions: HashMap::new(),
                 epoch: 0,
                 launch_waiters: 0,
+                launcher_bin: None,
                 launch_error_seq: 0,
                 launch_error: None,
                 connected_endpoint: None,
@@ -66,15 +68,20 @@ impl SessionRegistry {
     }
 
     /// Block one `dontspeak codex` caller until the observer has initialized against an
-    /// app-server. The waiter itself is the supervisor's on-demand start signal; no
-    /// preference is persisted and concurrent callers collapse onto the same connection.
-    pub(crate) fn ensure_remote(&self, timeout: Duration) -> Result<String, String> {
+    /// app-server. The waiter itself is the supervisor's on-demand start signal; its resolved
+    /// binary remains available for reconnects and concurrent callers share one connection.
+    pub(crate) fn ensure_remote(
+        &self,
+        launcher_bin: PathBuf,
+        timeout: Duration,
+    ) -> Result<String, String> {
         let deadline = Instant::now() + timeout;
         let mut g = self.inner.lock().unwrap();
         if let Some(endpoint) = &g.connected_endpoint {
             return Ok(endpoint.clone());
         }
         let seen_error = g.launch_error_seq;
+        g.launcher_bin = Some(launcher_bin);
         g.launch_waiters += 1;
         g.epoch += 1;
         self.cv.notify_all();
@@ -105,6 +112,10 @@ impl SessionRegistry {
 
     fn launch_requested(&self) -> bool {
         self.inner.lock().unwrap().launch_waiters > 0
+    }
+
+    fn launcher_bin(&self) -> Option<PathBuf> {
+        self.inner.lock().unwrap().launcher_bin.clone()
     }
 
     fn launch_ready(&self, endpoint: String) {
@@ -448,6 +459,13 @@ fn unix_start_kind(bin: &Path, codex_home: &Path) -> UnixStartKind {
 /// Codex uses the same binary resolver as presence, launch wrappers, and usage probes.
 fn resolve_codex_bin(cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
     ds_config::resolve_native_client_binary(ds_config::WiredAgent::Codex, paths, cfg_bin)
+}
+
+fn resolve_launch_bin(registry: &SessionRegistry, cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
+    registry
+        .launcher_bin()
+        .filter(|candidate| candidate.is_file())
+        .or_else(|| resolve_codex_bin(cfg_bin, paths))
 }
 
 fn direct_app_server_command(bin: &Path, listen: &str) -> std::process::Command {
@@ -1380,7 +1398,7 @@ fn supervise(
                     );
                     let codex_home = &paths.codex_dir;
                     let bin = if force_start {
-                        resolve_codex_bin(&cfg.codex_bin, paths)
+                        resolve_launch_bin(registry, &cfg.codex_bin, paths)
                     } else {
                         None
                     };
@@ -1497,7 +1515,7 @@ fn supervise(
                 Err(connect_error) => {
                     #[cfg(windows)]
                     if force_start && owned_server.is_none() && can_auto_start_tcp(&host) {
-                        let bin = resolve_codex_bin(&cfg.codex_bin, paths);
+                        let bin = resolve_launch_bin(registry, &cfg.codex_bin, paths);
                         if let Some(bin) = bin {
                             warned_bin_unresolvable = false;
                             let throttled = last_server_start

@@ -129,8 +129,10 @@ pub(crate) fn spawn_ipc_server(
         let handler = move |req: ds_ipc::Request, emit: &mut dyn FnMut(&ds_ipc::Response)| {
             match req {
                 ds_ipc::Request::Ping => emit(&ds_ipc::Response::Pong),
-                ds_ipc::Request::EnsureCodexStream => {
-                    match codex_sessions.ensure_remote(std::time::Duration::from_secs(20)) {
+                ds_ipc::Request::EnsureCodexStream { codex_bin } => {
+                    match codex_sessions
+                        .ensure_remote(codex_bin.into(), std::time::Duration::from_secs(20))
+                    {
                         Ok(endpoint) => emit(&ds_ipc::Response::CodexStreamReady { endpoint }),
                         Err(message) => emit(&ds_ipc::Response::error(message)),
                     }

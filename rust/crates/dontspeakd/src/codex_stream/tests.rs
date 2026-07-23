@@ -374,6 +374,30 @@ fn resolve_codex_bin_managed_install_honors_codex_home() {
 }
 
 #[test]
+fn launcher_binary_wins_when_engine_discovery_cannot_find_codex() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::rooted_at(home.path());
+    let launcher_bin = home.path().join("launcher-only-codex");
+    std::fs::write(&launcher_bin, b"fixture").unwrap();
+    let reg = SessionRegistry::new();
+    let waiter = reg.clone();
+    let expected = launcher_bin.clone();
+    let thread =
+        std::thread::spawn(move || waiter.ensure_remote(launcher_bin, Duration::from_secs(2)));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while !reg.launch_requested() && Instant::now() < deadline {
+        std::thread::yield_now();
+    }
+
+    assert_eq!(
+        resolve_launch_bin(&reg, "codex-not-visible-to-engine", &paths),
+        Some(expected)
+    );
+    reg.launch_failed("test complete");
+    assert_eq!(thread.join().unwrap().unwrap_err(), "test complete");
+}
+
+#[test]
 fn unix_start_kind_uses_owned_server_for_homebrew_and_managed_daemon_for_standalone() {
     let codex_home = tempfile::tempdir().unwrap();
     let standalone = codex_home.path().join("packages/standalone/current/codex");
@@ -519,7 +543,10 @@ fn registry_nudges_wake_snapshot_and_prune() {
 fn launcher_waits_for_an_attached_endpoint_and_reuses_it() {
     let reg = SessionRegistry::new();
     let waiter = reg.clone();
-    let thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+    let launcher_bin = PathBuf::from("/launcher/codex");
+    let expected_bin = launcher_bin.clone();
+    let thread =
+        std::thread::spawn(move || waiter.ensure_remote(launcher_bin, Duration::from_secs(2)));
 
     let deadline = Instant::now() + Duration::from_secs(1);
     while !reg.launch_requested() && Instant::now() < deadline {
@@ -529,22 +556,29 @@ fn launcher_waits_for_an_attached_endpoint_and_reuses_it() {
         reg.launch_requested(),
         "the waiting launcher must wake the supervisor"
     );
+    assert_eq!(reg.launcher_bin(), Some(expected_bin));
     reg.launch_ready("ws://127.0.0.1:4500".to_string());
     assert_eq!(thread.join().unwrap().unwrap(), "ws://127.0.0.1:4500");
     assert_eq!(
-        reg.ensure_remote(Duration::ZERO).unwrap(),
+        reg.ensure_remote(PathBuf::from("/other/codex"), Duration::ZERO)
+            .unwrap(),
         "ws://127.0.0.1:4500",
         "a second launcher reuses the initialized observer"
     );
     reg.launch_detached();
-    assert!(reg.ensure_remote(Duration::ZERO).is_err());
+    assert!(
+        reg.ensure_remote(PathBuf::from("/launcher/codex"), Duration::ZERO)
+            .is_err()
+    );
 }
 
 #[test]
 fn launcher_receives_a_supervisor_failure_without_waiting_for_timeout() {
     let reg = SessionRegistry::new();
     let waiter = reg.clone();
-    let thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+    let thread = std::thread::spawn(move || {
+        waiter.ensure_remote(PathBuf::from("/launcher/codex"), Duration::from_secs(2))
+    });
     let deadline = Instant::now() + Duration::from_secs(1);
     while !reg.launch_requested() && Instant::now() < deadline {
         std::thread::yield_now();
@@ -572,7 +606,9 @@ fn launcher_interrupts_an_in_flight_background_retry_wait() {
     started_rx.recv().unwrap();
     std::thread::sleep(Duration::from_millis(50));
     let waiter = reg.clone();
-    let launch_thread = std::thread::spawn(move || waiter.ensure_remote(Duration::from_secs(2)));
+    let launch_thread = std::thread::spawn(move || {
+        waiter.ensure_remote(PathBuf::from("/launcher/codex"), Duration::from_secs(2))
+    });
     let deadline = Instant::now() + Duration::from_secs(1);
     while !reg.launch_requested() && Instant::now() < deadline {
         std::thread::yield_now();

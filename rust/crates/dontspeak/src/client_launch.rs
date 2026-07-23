@@ -29,35 +29,46 @@ pub(crate) fn run(spec: &ClientSpec, args: &[String]) -> i32 {
 }
 
 fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: &str) -> i32 {
+    let Some(bin) = ds_config::resolve_configured_client_binary(spec.target, paths, configured_bin)
+    else {
+        eprintln!(
+            "dontspeak {}: client executable {configured_bin:?} was not found",
+            spec.target.as_str()
+        );
+        return 127;
+    };
     match codex_invocation(args) {
-        CodexInvocation::Direct => run_direct(spec, args, paths, configured_bin, false),
+        CodexInvocation::Direct => run_resolved(spec, args, &bin),
         CodexInvocation::CustomRemote => {
             eprintln!(
                 "dontspeak codex: `--remote` is managed by DontSpeak; use `codex` directly for a custom remote endpoint"
             );
             2
         }
-        CodexInvocation::Narrated => match prepare_codex_stream(paths) {
+        CodexInvocation::Narrated => match prepare_codex_stream(paths, &bin) {
             Some(endpoint) => {
                 let mut remote_args = vec!["--remote".to_string(), endpoint];
                 remote_args.extend_from_slice(args);
-                run_direct(spec, &remote_args, paths, configured_bin, false)
+                run_resolved(spec, &remote_args, &bin)
             }
             // Host/engine failure never blocks Codex — Stop-only narration, same as bare `codex`.
-            None => run_direct(spec, args, paths, configured_bin, false),
+            None => run_resolved(spec, args, &bin),
         },
     }
 }
 
 /// Best-effort Codex narration prep; failure does not block launch.
-fn prepare_codex_stream(paths: &Paths) -> Option<String> {
+fn prepare_codex_stream(paths: &Paths, codex_bin: &Path) -> Option<String> {
     if !ensure_engine(&paths.engine_sock) {
         eprintln!(
             "dontspeak codex: the DontSpeak host did not become ready; launching without narration"
         );
         return None;
     }
-    match ds_ipc::request(&paths.engine_sock, &Request::EnsureCodexStream) {
+    let request = Request::EnsureCodexStream {
+        codex_bin: codex_bin.to_string_lossy().into_owned(),
+    };
+    match ds_ipc::request(&paths.engine_sock, &request) {
         Ok(Response::CodexStreamReady { endpoint }) => Some(endpoint),
         Ok(Response::Error { message }) => {
             eprintln!("dontspeak codex: {message}; launching without narration");
@@ -100,7 +111,11 @@ fn run_direct(
         );
         return 127;
     };
-    match client_command(&bin, args, spec.target).status() {
+    run_resolved(spec, args, &bin)
+}
+
+fn run_resolved(spec: &ClientSpec, args: &[String], bin: &Path) -> i32 {
+    match client_command(bin, args, spec.target).status() {
         Ok(status) => status.code().unwrap_or(1),
         Err(error) => {
             eprintln!(
