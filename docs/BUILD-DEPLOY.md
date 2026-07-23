@@ -43,8 +43,10 @@ Use `build-linux` flow 2 (`install.sh` then `install-gui.sh`).
   `install.sh`. Re-wire only if the hook set changed. **Exception:** IPC schema
   change → lockstep below.
 - **Engine or helper** (`dontspeakd`, `ds-tts`/`ds-stt`, queue/synth, IPC handlers):
-  rebuild host app + relaunch. CLI-only does not update engine or bundled helper.
-  macOS `bundle.sh`; Windows `build-portable.ps1`; Linux `install-gui.sh`.
+  deploy the changed runtime and relaunch its host. macOS: `bundle.sh` for both, or
+  the helper-only copy + codesign below. Windows: `build-portable.ps1`. Linux:
+  `apps/linux/install-gui.sh` for the engine; `scripts/install/local/install.sh` for
+  the helper.
 - **Wiring shapers** (`ds-config::wire::*`, `ds-wire`): host app also links this and
   runs `ds_wire::reconcile` at boot — stale host rewrites old wiring. Rebuild host
   too, not just CLI.
@@ -97,7 +99,8 @@ Copy-Item rust\target\release-ffi\ds_core.dll "$dest\ds_core.dll" -Force
 Start-Process "$dest\ds-winui.exe"
 ```
 
-**Linux:** `apps/linux/install-gui.sh`
+**Linux:** `scripts/install/local/install.sh` rebuilds and installs `ds-helper`;
+`apps/linux/install-gui.sh` rebuilds only the host.
 
 ### Symptom → diagnosis
 
