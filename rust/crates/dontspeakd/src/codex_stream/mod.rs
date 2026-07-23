@@ -461,6 +461,13 @@ fn resolve_codex_bin(cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
     ds_config::resolve_native_client_binary(ds_config::WiredAgent::Codex, paths, cfg_bin)
 }
 
+fn codex_present(paths: &Paths, registry: &SessionRegistry) -> bool {
+    ds_config::client_spec(ds_config::WiredAgent::Codex).present(paths)
+        || registry
+            .launcher_bin()
+            .is_some_and(|candidate| candidate.is_file())
+}
+
 fn resolve_launch_bin(registry: &SessionRegistry, cfg_bin: &str, paths: &Paths) -> Option<PathBuf> {
     registry
         .launcher_bin()
@@ -887,7 +894,7 @@ fn run_attached<S: Read + Write>(
         if now.duration_since(last_cfg) >= tun.cfg_refresh {
             last_cfg = now;
             cfg = VoiceConfig::load(paths);
-            if !cfg.codex_stream || !paths.codex_dir.exists() {
+            if !cfg.codex_stream || !codex_present(paths, registry) {
                 // Orderly stand-down: detach from every thread so the server can unload.
                 for thread_id in resumed.keys() {
                     let id = ws.next_id();
@@ -1222,8 +1229,8 @@ fn should_park_supervisor(
 const SERVER_START_MIN_GAP: Duration = Duration::from_secs(60);
 
 /// Spawn the supervisor beside the engine's other background threads. Self-gating: it
-/// parks (cheap condvar wait) while `codex_stream` is off, `~/.codex` is absent, or no
-/// session has been registered — so on a codex-less machine it costs one parked thread.
+/// parks (cheap condvar wait) while `codex_stream` is off, Codex is unavailable, or no session
+/// has been registered — so on a codex-less machine it costs one parked thread.
 pub(crate) fn spawn_supervisor(
     paths: Paths,
     running: Arc<AtomicBool>,
@@ -1318,6 +1325,7 @@ fn supervise(
         let cfg = VoiceConfig::load(paths);
         let (sessions, cur_epoch) = registry.snapshot();
         let launch_requested = registry.launch_requested();
+        let codex_present = codex_present(paths, registry);
         if launch_requested && !cfg.codex_stream {
             registry.launch_failed(
                 "Codex streaming is disabled; enable `codex_stream` in DontSpeak config",
@@ -1325,8 +1333,11 @@ fn supervise(
             epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_millis(100));
             continue;
         }
-        if launch_requested && !paths.codex_dir.exists() {
-            registry.launch_failed("Codex is not installed or its config directory is missing");
+        if launch_requested && !codex_present {
+            registry.launch_failed(format!(
+                "Codex executable {:?} was not found; set codex_bin to its full path",
+                cfg.codex_bin
+            ));
             epoch = registry.wait_change(cur_epoch.max(epoch), Duration::from_millis(100));
             continue;
         }
@@ -1344,7 +1355,7 @@ fn supervise(
         // Without auto-start, preserve the cheap no-session park.
         if should_park_supervisor(
             cfg.codex_stream,
-            paths.codex_dir.exists(),
+            codex_present,
             !sessions.is_empty(),
             force_start,
         ) {

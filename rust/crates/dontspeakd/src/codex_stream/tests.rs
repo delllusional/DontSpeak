@@ -5,6 +5,13 @@
 
 use super::*;
 
+fn install_codex_fixture(paths: &Paths) {
+    let bin_dir = paths.home.join(".local/bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let filename = if cfg!(windows) { "codex.exe" } else { "codex" };
+    std::fs::write(bin_dir.join(filename), b"fixture").unwrap();
+}
+
 #[test]
 fn pending_resume_suppresses_duplicate_resolution_work() {
     let now = Instant::now();
@@ -389,6 +396,10 @@ fn launcher_binary_wins_when_engine_discovery_cannot_find_codex() {
         std::thread::yield_now();
     }
 
+    assert!(
+        codex_present(&paths, &reg),
+        "the resolved launcher handoff is valid installation evidence"
+    );
     assert_eq!(
         resolve_launch_bin(&reg, "codex-not-visible-to-engine", &paths),
         Some(expected)
@@ -843,7 +854,7 @@ mod attached {
     fn attach_streams_narration_and_a_reconnect_replay_never_double_speaks() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap(); // gate: codex present
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
         let addr = listener.local_addr().unwrap();
 
@@ -913,7 +924,7 @@ mod attached {
     fn loaded_list_timeout_retries_on_the_same_connection() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let registry = SessionRegistry::new();
@@ -962,7 +973,7 @@ mod attached {
     fn resume_timeout_retries_on_the_same_connection() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
         let registry = SessionRegistry::new();
@@ -1020,7 +1031,7 @@ mod attached {
         // another tool) is never resumed; its notifications are ignored.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1077,7 +1088,7 @@ mod attached {
         // trio is deleted and the session evicted from the registry.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1129,7 +1140,7 @@ mod attached {
         // session, and the next batch (or Stop) would re-speak the whole reply.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1175,11 +1186,12 @@ mod attached {
     }
 
     #[test]
-    fn run_attached_stands_down_when_gated_off() {
-        // codex_dir ABSENT ⇒ the cfg-refresh tick detaches cleanly (Disabled), so a
-        // mid-session `~/.codex` removal (or codex_stream=false) parks the supervisor.
+    fn run_attached_rejects_a_stale_codex_dir_without_a_binary() {
+        // A stale config directory without a binary must not keep narration attached after
+        // Codex is uninstalled.
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths::rooted_at(dir.path()); // note: no codex_dir created
+        let paths = Paths::rooted_at(dir.path());
+        std::fs::create_dir_all(&paths.codex_dir).unwrap();
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -1207,7 +1219,7 @@ mod attached {
     fn endpoint_config_change_detaches_for_immediate_reconnect() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
-        std::fs::create_dir_all(&paths.codex_dir).unwrap();
+        install_codex_fixture(&paths);
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         std::fs::write(
             &paths.config_toml,
