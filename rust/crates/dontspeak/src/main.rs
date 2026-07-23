@@ -392,14 +392,12 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_malformed_or_non_client_token_is_absent() {
+    fn a_missing_malformed_or_unwired_token_is_absent() {
         // Hooks degrade — never hard-error.
         for argv_ in [
             vec!["dontspeak", "notify"],
             vec!["dontspeak", "notify", "--client"],
             vec!["dontspeak", "notify", "--client", "gemini"],
-            vec!["dontspeak", "notify", "--client", "dontspeak"],
-            vec!["dontspeak", "notify", "--client", "unknown"],
             vec!["dontspeak", "notify", "--client", ""],
         ] {
             assert_eq!(client_from_argv(&argv(&argv_)), None, "{argv_:?}");

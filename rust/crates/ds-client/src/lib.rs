@@ -37,7 +37,7 @@ impl WiredAgent {
         }
     }
 
-    /// Case/whitespace tolerant; non-client tokens return `None`.
+    /// Case/whitespace tolerant; unwired tokens return `None`.
     pub fn parse(s: &str) -> Option<Self> {
         let token = s.trim();
         Self::ALL
@@ -84,8 +84,6 @@ mod tests {
             Some(WiredAgent::ClaudeCode)
         );
         assert_eq!(WiredAgent::parse("gemini_cli"), None);
-        assert_eq!(WiredAgent::parse("dontspeak"), None);
-        assert_eq!(WiredAgent::parse("unknown"), None);
         assert_eq!(WiredAgent::parse(""), None);
     }
 
@@ -102,13 +100,8 @@ mod tests {
     }
 
     #[test]
-    fn non_client_tokens_fail_deserialization() {
-        for token in [r#""gemini_cli""#, r#""dontspeak""#, r#""unknown""#] {
-            assert!(
-                serde_json::from_str::<WiredAgent>(token).is_err(),
-                "{token}"
-            );
-        }
+    fn non_agent_token_fails_deserialization() {
+        assert!(serde_json::from_str::<WiredAgent>(r#""gemini_cli""#).is_err());
     }
 
     #[test]

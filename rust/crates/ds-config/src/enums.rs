@@ -466,7 +466,7 @@ macro_rules! fail_open_vec {
 }
 
 /// Fail-open `exclude_clients`: array → known clients (deduped); non-array/`None` → wire all;
-/// `Some([])` = none. Pinned by `exclude_clients_drops_non_client_tokens`.
+/// `Some([])` = none. Pinned by `exclude_clients_drops_unwired_tokens`.
 pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<WiredAgent>>, D::Error>
 where
     D: Deserializer<'de>,

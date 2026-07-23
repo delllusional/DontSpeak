@@ -1173,24 +1173,23 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exclude_clients_drops_non_client_tokens() {
+    fn exclude_clients_drops_unwired_tokens() {
         let wc = |j: &str| {
             serde_json::from_str::<VoiceConfig>(j)
                 .unwrap()
                 .exclude_clients
         };
         assert_eq!(
-            wc(r#"{"exclude_clients":["dontspeak","unknown"]}"#),
+            wc(r#"{"exclude_clients":["not_a_wired_agent"]}"#),
             Some(vec![]),
-            "neither `dontspeak` nor `unknown` may enter the excluded-CLIENT set"
+            "unwired tokens must not enter the excluded-agent set"
         );
-        // …and they're dropped from a mixed list without disturbing the real clients' order.
+        // …and they're dropped from a mixed list without disturbing the wired agents' order.
         let mixed = serde_json::json!({
             "exclude_clients": [
                 WiredAgent::Codex.as_str(),
-                "dontspeak",
+                "not_a_wired_agent",
                 WiredAgent::ClaudeCode.as_str(),
-                "unknown"
             ]
         });
         assert_eq!(

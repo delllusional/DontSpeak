@@ -445,13 +445,7 @@ mod tests {
     fn missing_or_invalid_client_selection_is_a_hard_error() {
         let codex = WiredAgent::Codex.as_str();
         let claude = WiredAgent::ClaudeCode.as_str();
-        for argv in [
-            &[][..],
-            &["not_a_real_client"][..],
-            &["dontspeak"][..],
-            &["unknown"][..],
-            &[codex, claude][..],
-        ] {
+        for argv in [&[][..], &["not_a_real_client"][..], &[codex, claude][..]] {
             assert_eq!(run(&args(argv)), 1, "{argv:?}");
         }
     }
