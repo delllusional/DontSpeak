@@ -3,7 +3,7 @@
 //! Declared FIRST in `lib.rs` so `fail_open_de!`, `serialize_as_str!`, `strict_de!` are
 //! textually in scope (`#[macro_use]`).
 
-use ds_client::WiredClient;
+use ds_client::WiredAgent;
 use serde::{Deserialize, Deserializer};
 
 // Scalar engine enums: fail-open `de_*` (typo/absent → default). Set/ladder fields are
@@ -443,7 +443,7 @@ impl NarrateKind {
     }
 }
 
-// `WiredClient` lives in `ds-client` (cycle avoidance); re-exported from `lib.rs`.
+// `WiredAgent` lives in `ds-client` (cycle avoidance); re-exported from `lib.rs`.
 
 /// Parse enum-token array in order (drop unknown/dup). `None` = non-array (field fallback).
 macro_rules! fail_open_vec {
@@ -467,12 +467,12 @@ macro_rules! fail_open_vec {
 
 /// Fail-open `exclude_clients`: array → known clients (deduped); non-array/`None` → wire all;
 /// `Some([])` = none. Pinned by `exclude_clients_drops_non_client_tokens`.
-pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<WiredClient>>, D::Error>
+pub(crate) fn de_exclude_clients<'de, D>(d: D) -> Result<Option<Vec<WiredAgent>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
-    Ok(fail_open_vec!(&v, WiredClient, WiredClient::parse))
+    Ok(fail_open_vec!(&v, WiredAgent, WiredAgent::parse))
 }
 
 // Macros: fail-open / serialize-as-token / strict (textually scoped — see module doc).
@@ -527,7 +527,7 @@ serialize_as_str!(TrayKind);
 serialize_as_str!(CancelSpeechScope);
 serialize_as_str!(DiarizerProvider);
 serialize_as_str!(NarrateKind);
-// `WiredClient` Serialize lives in `ds-client` (no macro there).
+// `WiredAgent` Serialize lives in `ds-client` (no macro there).
 
 /// Strict Deserialize: unknown → error (`set_config` only; VoiceConfig uses fail-open `de_*`).
 macro_rules! strict_de {

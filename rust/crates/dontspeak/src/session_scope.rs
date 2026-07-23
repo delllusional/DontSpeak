@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ds_config::WiredClient;
+use ds_config::WiredAgent;
 
 pub(crate) const DONTSPEAK_SESSION_ID: &str = "DONTSPEAK_SESSION_ID";
 
@@ -19,7 +19,7 @@ const TERMINAL_IDS: &[&str] = &[
 static GENERATED_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Identity inherited by the wrapped client and every hook/MCP child it starts.
-pub(crate) fn new_launcher_session(client: WiredClient) -> String {
+pub(crate) fn new_launcher_session(client: WiredAgent) -> String {
     generated("launch", Some(client))
 }
 
@@ -30,7 +30,7 @@ pub(crate) fn ambient() -> Option<String> {
 
 /// MCP operations are always scoped. Clients without an ambient contract get a
 /// process-lifetime identity, which preserves isolation between stdio servers.
-pub(crate) fn for_mcp(client: Option<WiredClient>) -> String {
+pub(crate) fn for_mcp(client: Option<WiredAgent>) -> String {
     ambient().unwrap_or_else(|| generated("mcp", client))
 }
 
@@ -58,14 +58,14 @@ fn tagged(kind: &str, name: &str, value: &str) -> String {
     format!("dontspeak:{kind}:{name}:{value}")
 }
 
-fn generated(kind: &str, client: Option<WiredClient>) -> String {
+fn generated(kind: &str, client: Option<WiredAgent>) -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
     let sequence = GENERATED_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!(
         "dontspeak:{kind}:{}:{}:{nanos}:{sequence}",
-        client.map_or("unwired", WiredClient::as_str),
+        client.map_or("unwired", WiredAgent::as_str),
         std::process::id()
     )
 }
@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn generated_mcp_scopes_are_nonempty_and_unique() {
-        let first = generated("mcp", Some(WiredClient::Grok));
-        let second = generated("mcp", Some(WiredClient::Grok));
+        let first = generated("mcp", Some(WiredAgent::Grok));
+        let second = generated("mcp", Some(WiredAgent::Grok));
         assert!(!first.is_empty());
         assert_ne!(first, second);
     }

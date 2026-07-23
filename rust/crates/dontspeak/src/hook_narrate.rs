@@ -13,13 +13,13 @@
 //!
 //! [`barge_session`] (SessionEnd): queue-scoped barge (missing queue identity → global).
 
-use ds_config::{NarrateKind, Paths, VoiceConfig, WiredClient};
+use ds_config::{NarrateKind, Paths, VoiceConfig, WiredAgent};
 use ds_narrate::{BatchPayload, StreamBatch};
 use serde::Deserialize;
 use std::borrow::Cow;
 
 /// SessionEnd: barge this session only (no id → global).
-pub fn barge_session(paths: &Paths, payload: &str, client: WiredClient) {
+pub fn barge_session(paths: &Paths, payload: &str, client: WiredAgent) {
     let logical_session = crate::hook_core::session_id_from_payload(payload);
     let queue_session = crate::session_scope::for_hook(payload);
     let _ = ds_ipc::request(
@@ -32,7 +32,7 @@ pub fn barge_session(paths: &Paths, payload: &str, client: WiredClient) {
     );
     // Grok digests use sticky tag so MarkActive cannot prune them; SessionEnd barges it too
     // (SessionEnd reclaims forget_narration_session state; Stop alone does not).
-    if client == WiredClient::Grok {
+    if client == WiredAgent::Grok {
         let sticky = queue_session
             .as_deref()
             .map(grok_stop_session_tag)
@@ -128,7 +128,7 @@ impl TranscriptEntry {
 
 impl StopHook {
     /// Direct field, else Grok/Kimi/Hermes fallbacks.
-    fn last_assistant_text(&self, client: WiredClient, paths: &Paths) -> Option<Cow<'_, str>> {
+    fn last_assistant_text(&self, client: WiredAgent, paths: &Paths) -> Option<Cow<'_, str>> {
         if let Some(t) = self
             .last_assistant_message
             .as_deref()
@@ -136,7 +136,7 @@ impl StopHook {
         {
             return Some(Cow::Borrowed(t));
         }
-        if client == WiredClient::Hermes {
+        if client == WiredAgent::Hermes {
             return self
                 .extra
                 .as_ref()
@@ -144,7 +144,7 @@ impl StopHook {
                 .filter(|s| !s.trim().is_empty())
                 .map(Cow::Borrowed);
         }
-        if client == WiredClient::Grok {
+        if client == WiredAgent::Grok {
             let session = self
                 .session_id
                 .as_deref()
@@ -155,7 +155,7 @@ impl StopHook {
             return select_grok_stop_text(self, paths, session, true)
                 .map(|(text, _fp)| Cow::Owned(text));
         }
-        if client == WiredClient::KimiCode {
+        if client == WiredAgent::KimiCode {
             return resolve_kimi_wire_path(self, paths)
                 .and_then(|path| kimi_last_turn_text(&path))
                 .map(Cow::Owned);
@@ -721,7 +721,7 @@ pub(crate) use ds_narrate::stop_utterances;
 
 /// Stop: voice final reply once when not already streamed. Returns `Some(session)` for
 /// Grok sticky reply_done; `None` → payload session.
-pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<Option<String>> {
+pub fn speak_reply(paths: &Paths, payload: &str, client: WiredAgent) -> Option<Option<String>> {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
     let short_on = cfg.narrates(NarrateKind::Shorts);
@@ -746,7 +746,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<
         }) {
             log::warn!(target: "hook", "narration rejected: {message}");
         }
-        if client == WiredClient::Grok {
+        if client == WiredAgent::Grok {
             let key = hook
                 .prompt_id
                 .as_deref()
@@ -783,7 +783,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<
         Option<String>,
         Option<GrokStopSelection>,
         Option<u64>,
-    ) = if client == WiredClient::Grok {
+    ) = if client == WiredAgent::Grok {
         if streamed {
             (None, None, None)
         } else if let Some(direct) = hook
@@ -821,7 +821,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<
         streamed,
     );
     // Sticky tag: MarkActive cannot prune digests (ding-only race); barge_session clears.
-    let admit_session = if client == WiredClient::Grok {
+    let admit_session = if client == WiredAgent::Grok {
         queue_session
             .as_deref()
             .map(grok_stop_session_tag)
@@ -829,7 +829,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<
     } else {
         queue_session
     };
-    if client == WiredClient::Grok {
+    if client == WiredAgent::Grok {
         let path_disp = grok_selection
             .as_ref()
             .map(|s| s.path.display().to_string());
@@ -917,7 +917,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredClient) -> Option<
         store_last_spoken_fingerprint(paths, fingerprint_session, fp);
     }
     // Grok: reply_done under sticky session so digests play before the ding.
-    if client == WiredClient::Grok {
+    if client == WiredAgent::Grok {
         Some(admit_session)
     } else {
         None
@@ -979,7 +979,7 @@ fn batch_from_hook(hook: &MessageDisplayHook) -> StreamBatch {
 
 /// MessageDisplay: narrate streamed batch. Gates on `narrate` + not-mid-recording (not focus);
 /// session-tagged; engine holds background terminals. Fire-and-forget.
-pub fn message_display(paths: &Paths, payload: &str, client: WiredClient) {
+pub fn message_display(paths: &Paths, payload: &str, client: WiredAgent) {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
     let short_on = cfg.narrates(NarrateKind::Shorts);
@@ -1010,7 +1010,7 @@ pub fn message_display(paths: &Paths, payload: &str, client: WiredClient) {
 fn admit_narration(
     paths: &Paths,
     session: Option<String>,
-    client: WiredClient,
+    client: WiredAgent,
     utterance: &ds_narrate::NarrationUtterance,
 ) -> Result<(), String> {
     match ds_ipc::request(
@@ -1283,7 +1283,7 @@ mod tests {
         barge_session(
             &paths,
             &format!(r#"{{"session_id":"{session}"}}"#),
-            WiredClient::ClaudeCode,
+            WiredAgent::ClaudeCode,
         );
         assert!(!path.exists(), "state file removed");
         assert!(!path.with_extension("lock").exists(), "lock removed");
@@ -1305,7 +1305,7 @@ mod tests {
             Some("> Hi.\n\nDetail.")
         );
         assert_eq!(
-            hook.last_assistant_text(WiredClient::Grok, &paths)
+            hook.last_assistant_text(WiredAgent::Grok, &paths)
                 .as_deref(),
             Some("> Hi.\n\nDetail.")
         );
@@ -1325,13 +1325,10 @@ mod tests {
             hook.last_assistant_message.is_none(),
             "Grok Stop carries no last* text"
         );
-        assert!(
-            hook.last_assistant_text(WiredClient::Grok, &paths)
-                .is_none()
-        );
+        assert!(hook.last_assistant_text(WiredAgent::Grok, &paths).is_none());
         assert!(
             stop_utterances(
-                hook.last_assistant_text(WiredClient::Grok, &paths)
+                hook.last_assistant_text(WiredAgent::Grok, &paths)
                     .as_deref(),
                 true,
                 false,
@@ -1360,7 +1357,7 @@ mod tests {
         );
         let hook: StopHook = serde_json::from_str(&payload).expect("parses with transcriptPath");
         let text = hook
-            .last_assistant_text(WiredClient::Grok, &paths)
+            .last_assistant_text(WiredAgent::Grok, &paths)
             .expect("extracted from transcript");
         assert!(text.contains("> Point one."));
         assert!(text.contains("> And the question?"));
@@ -1398,7 +1395,7 @@ mod tests {
             ..StopHook::default()
         };
         let text = hook
-            .last_assistant_text(WiredClient::Grok, &paths)
+            .last_assistant_text(WiredAgent::Grok, &paths)
             .expect("cwd+session fallback must open chat_history.jsonl");
         assert!(text.contains("> Resolved via cwd fallback."));
     }
@@ -1776,7 +1773,7 @@ mod tests {
             .unwrap();
         });
 
-        speak_reply(&paths, &payload, WiredClient::Grok);
+        speak_reply(&paths, &payload, WiredAgent::Grok);
         server.join().unwrap();
         assert_eq!(load_last_spoken_fingerprint(&paths, "-"), Some(expected));
         assert!(
@@ -1852,7 +1849,7 @@ mod tests {
 
         let paths = Paths::rooted_at(dir.path());
         assert!(
-            hook.last_assistant_text(WiredClient::ClaudeCode, &paths)
+            hook.last_assistant_text(WiredAgent::ClaudeCode, &paths)
                 .is_none(),
             "non-Grok hook payloads must not cause arbitrary transcript reads"
         );
@@ -1892,7 +1889,7 @@ mod tests {
         let resolved = resolve_grok_transcript_path(&hook, &paths).expect("resolve");
         assert_eq!(resolved, chat);
         let text = hook
-            .last_assistant_text(WiredClient::Grok, &paths)
+            .last_assistant_text(WiredAgent::Grok, &paths)
             .expect("digests from chat_history");
         assert!(text.contains("> From chat_history not updates."));
     }
@@ -1968,7 +1965,7 @@ mod tests {
         })
         .to_string();
         // Engine sock absent → admit fails soft; finalize still runs deliver_batch path.
-        let _ = speak_reply(&paths, &payload, WiredClient::Grok);
+        let _ = speak_reply(&paths, &payload, WiredAgent::Grok);
         assert!(
             ds_narrate::witness_exists(&paths, session),
             "witness must remain so stop_utterances stay silent"
@@ -2147,7 +2144,7 @@ mod tests {
             ..StopHook::default()
         };
         assert_eq!(
-            hook.last_assistant_text(WiredClient::KimiCode, &paths)
+            hook.last_assistant_text(WiredAgent::KimiCode, &paths)
                 .as_deref(),
             Some("First. Second.")
         );
@@ -2170,7 +2167,7 @@ mod tests {
             ..StopHook::default()
         };
         assert_eq!(
-            hook.last_assistant_text(WiredClient::KimiCode, &paths)
+            hook.last_assistant_text(WiredAgent::KimiCode, &paths)
                 .as_deref(),
             Some("First. Second.")
         );
@@ -2198,10 +2195,7 @@ mod tests {
             cwd: Some("C:\\Users\\usr".into()),
             ..StopHook::default()
         };
-        assert_eq!(
-            hook.last_assistant_text(WiredClient::KimiCode, &paths),
-            None
-        );
+        assert_eq!(hook.last_assistant_text(WiredAgent::KimiCode, &paths), None);
     }
 
     #[test]
@@ -2216,7 +2210,7 @@ mod tests {
             ..StopHook::default()
         };
         assert_eq!(
-            hook.last_assistant_text(WiredClient::Hermes, &paths)
+            hook.last_assistant_text(WiredAgent::Hermes, &paths)
                 .as_deref(),
             Some("Hermes final reply.")
         );
@@ -2228,9 +2222,9 @@ mod tests {
             }),
             ..StopHook::default()
         };
-        assert_eq!(empty.last_assistant_text(WiredClient::Hermes, &paths), None);
+        assert_eq!(empty.last_assistant_text(WiredAgent::Hermes, &paths), None);
         assert_eq!(
-            StopHook::default().last_assistant_text(WiredClient::Hermes, &paths),
+            StopHook::default().last_assistant_text(WiredAgent::Hermes, &paths),
             None
         );
     }
@@ -2247,7 +2241,7 @@ mod tests {
             ..StopHook::default()
         };
         assert_eq!(
-            hook.last_assistant_text(WiredClient::KimiCode, &paths)
+            hook.last_assistant_text(WiredAgent::KimiCode, &paths)
                 .as_deref(),
             Some("First. Second.")
         );

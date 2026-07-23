@@ -12,11 +12,11 @@
 
 use super::cmdline::{ShellOverride, command_is_ours, shell_client_command};
 use super::yaml_doc;
-use ds_client::WiredClient;
+use ds_client::WiredAgent;
 use serde_json::{Map, Value, json};
 
 /// No `shell`/`args` → inlined verbs + `--client`; spaced bin → 8.3.
-fn hermes_command(bin: &str, verb: &str, client: WiredClient) -> String {
+fn hermes_command(bin: &str, verb: &str, client: WiredAgent) -> String {
     shell_client_command(bin, verb, client, ShellOverride::Unsupported)
 }
 
@@ -63,7 +63,7 @@ fn hermes_entry(command: &str, timeout: i64) -> Value {
     json!({ "command": command, "timeout": timeout })
 }
 
-fn desired_entries(bin: &str, client: WiredClient) -> Vec<(String, String, i64)> {
+fn desired_entries(bin: &str, client: WiredAgent) -> Vec<(String, String, i64)> {
     HERMES_HOOKS
         .iter()
         .flat_map(|(event, verbs)| {
@@ -79,7 +79,7 @@ fn desired_entries(bin: &str, client: WiredClient) -> Vec<(String, String, i64)>
 }
 
 /// Exact `(event, command)` pairs wired into `hooks:` — single SoT for allowlist too.
-pub fn desired_hook_commands(bin: &str, client: WiredClient) -> Vec<(String, String)> {
+pub fn desired_hook_commands(bin: &str, client: WiredAgent) -> Vec<(String, String)> {
     desired_entries(bin, client)
         .into_iter()
         .map(|(event, command, _)| (event, command))
@@ -87,11 +87,7 @@ pub fn desired_hook_commands(bin: &str, client: WiredClient) -> Vec<(String, Str
 }
 
 /// Additive + idempotent + REPLACE-OURS. User entries never touched. Comment loss on re-emit.
-pub fn merge_hermes_hooks(
-    existing: &str,
-    bin: &str,
-    client: WiredClient,
-) -> Result<String, String> {
+pub fn merge_hermes_hooks(existing: &str, bin: &str, client: WiredAgent) -> Result<String, String> {
     let mut root = parse_yaml(existing)?;
     if !root.is_object() {
         return Err(unmergeable_shape("root"));
@@ -229,11 +225,11 @@ mod tests {
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
     fn merged(existing: &str) -> String {
-        merge_hermes_hooks(existing, BIN, WiredClient::Hermes).expect("merge ok")
+        merge_hermes_hooks(existing, BIN, WiredAgent::Hermes).expect("merge ok")
     }
 
     fn cmd(verb: &str) -> String {
-        hermes_command(BIN, verb, WiredClient::Hermes)
+        hermes_command(BIN, verb, WiredAgent::Hermes)
     }
 
     fn parse(s: &str) -> Value {
@@ -272,7 +268,7 @@ mod tests {
     }
 
     fn expected() -> Vec<(String, String, i64)> {
-        desired_entries(BIN, WiredClient::Hermes)
+        desired_entries(BIN, WiredAgent::Hermes)
     }
 
     #[test]
@@ -360,12 +356,12 @@ hooks:
     fn rewire_heals_a_changed_binary_path_by_replacing_stale_entries() {
         let first = merged("");
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second = merge_hermes_hooks(&first, new_bin, WiredClient::Hermes).expect("merge ok");
+        let second = merge_hermes_hooks(&first, new_bin, WiredAgent::Hermes).expect("merge ok");
         assert!(!second.contains(BIN), "stale bin path healed away");
         assert!(second.contains(new_bin), "re-wire re-points the command");
         assert_eq!(
             our_entries(&parse(&second)),
-            desired_entries(new_bin, WiredClient::Hermes),
+            desired_entries(new_bin, WiredAgent::Hermes),
             "stale entries replaced, not duplicated"
         );
     }
@@ -420,14 +416,14 @@ hooks:
     #[test]
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks: oops\n";
-        let err = merge_hermes_hooks(bad, BIN, WiredClient::Hermes).unwrap_err();
+        let err = merge_hermes_hooks(bad, BIN, WiredAgent::Hermes).unwrap_err();
         assert!(err.contains("unexpected `hooks` shape"), "{err}");
     }
 
     #[test]
     fn parse_error_surfaces() {
         let bad = "hooks: [\n  - :\n";
-        let err = merge_hermes_hooks(bad, BIN, WiredClient::Hermes).unwrap_err();
+        let err = merge_hermes_hooks(bad, BIN, WiredAgent::Hermes).unwrap_err();
         assert!(err.contains("not valid YAML"), "{err}");
     }
 
@@ -438,7 +434,7 @@ hooks:
         let (cmd, shell) = inline_command(
             InlineFlavor::Windows,
             bin,
-            ["notify", "--client", WiredClient::Hermes.as_str()],
+            ["notify", "--client", WiredAgent::Hermes.as_str()],
             ShellOverride::Unsupported,
         );
         assert_eq!(

@@ -53,7 +53,7 @@ fn usage_rows(credentials: &Value) -> Result<Vec<UsageRow>, FetchError> {
                 "Claude OAuth token unavailable",
             )
         })?;
-    let client = ds_config::client_spec(ds_config::WiredClient::ClaudeCode);
+    let client = ds_config::client_spec(ds_config::WiredAgent::ClaudeCode);
     let user_agent = format!("claude-code/{}", client.verified_client_version);
     let json = send_json(
         request(ds_http::Method::GET, USAGE_URL)?

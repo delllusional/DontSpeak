@@ -7,7 +7,7 @@ use std::io::{self, Write};
 use serde_json::{Map, Value};
 
 use crate::voice::{read_config_table, write_config_table};
-use crate::{Paths, VoiceConfig, WiredClient};
+use crate::{Paths, VoiceConfig, WiredAgent};
 
 /// Insert `dontspeak` from serde Serialize (field single source). Pure; non-object → `{}`.
 /// IPC via [`voice_to_value`]; config file via [`write_settings`].
@@ -57,7 +57,7 @@ pub fn write_settings(paths: &Paths, voice: &VoiceConfig) -> io::Result<()> {
 /// Persist manual wire/unwire intent without fail-open parsing the rest of `config.toml`.
 pub fn set_clients_excluded(
     paths: &Paths,
-    clients: &[WiredClient],
+    clients: &[WiredAgent],
     excluded: bool,
 ) -> Result<(), String> {
     let existing = match std::fs::read_to_string(&paths.config_toml) {
@@ -99,12 +99,12 @@ pub fn set_clients_excluded(
         if excluded {
             if !array
                 .iter()
-                .any(|value| value.as_str().and_then(WiredClient::parse) == Some(*client))
+                .any(|value| value.as_str().and_then(WiredAgent::parse) == Some(*client))
             {
                 array.push(token);
             }
         } else {
-            array.retain(|value| value.as_str().and_then(WiredClient::parse) != Some(*client));
+            array.retain(|value| value.as_str().and_then(WiredAgent::parse) != Some(*client));
         }
     }
 
@@ -377,8 +377,8 @@ mod tests {
         )
         .unwrap();
 
-        set_clients_excluded(&paths, &[WiredClient::QwenCode], true).unwrap();
-        set_clients_excluded(&paths, &[WiredClient::Codex], false).unwrap();
+        set_clients_excluded(&paths, &[WiredAgent::QwenCode], true).unwrap();
+        set_clients_excluded(&paths, &[WiredAgent::Codex], false).unwrap();
         let updated = std::fs::read_to_string(&paths.config_toml).unwrap();
         assert!(updated.contains("custom = \"keep\""));
         assert!(updated.contains("future-client"));
@@ -387,7 +387,7 @@ mod tests {
 
         let malformed = "exclude_clients = [\n";
         std::fs::write(&paths.config_toml, malformed).unwrap();
-        assert!(set_clients_excluded(&paths, &[WiredClient::Codex], true).is_err());
+        assert!(set_clients_excluded(&paths, &[WiredAgent::Codex], true).is_err());
         assert_eq!(
             std::fs::read_to_string(&paths.config_toml).unwrap(),
             malformed

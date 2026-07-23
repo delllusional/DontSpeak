@@ -767,7 +767,7 @@ struct MountedUsageCard {
 struct UsagePage {
     root: gtk::Box,
     list: gtk::Box,
-    /// WiredClient::ALL order from the skeleton deck.
+    /// WiredAgent::ALL order from the skeleton deck.
     canonical_agents: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
     latest: std::rc::Rc<std::cell::RefCell<Vec<UsageCard>>>,
     /// Last card seen per agent, painted or not — source for a card materialized

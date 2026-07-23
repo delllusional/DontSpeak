@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use ds_config::{WiredClient, client_from_mcp_name};
+use ds_config::{WiredAgent, client_from_mcp_name};
 use serde_json::{Map, Value, json};
 
 use crate::engine_launch::ensure_engine;
@@ -25,7 +25,7 @@ type Executor = dyn Fn(
         Option<Value>,
         &Value,
         Option<&PathBuf>,
-        Option<WiredClient>,
+        Option<WiredAgent>,
         String,
         Arc<AtomicBool>,
         bool,
@@ -75,7 +75,7 @@ struct Session {
 }
 
 struct Identity {
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     queue_session: String,
 }
 
@@ -91,7 +91,7 @@ enum Route {
     ToolCall {
         id: RequestId,
         message: Value,
-        client: Option<WiredClient>,
+        client: Option<WiredAgent>,
         queue_session: String,
         agents: bool,
     },
@@ -525,7 +525,7 @@ fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Sessi
     session.lifecycle = Lifecycle::Initialized;
     log(&format!(
         "initialize clientInfo.name={raw:?} client={}",
-        client.map_or("unwired", WiredClient::as_str)
+        client.map_or("unwired", WiredAgent::as_str)
     ));
     Route::Reply(ok(Some(id.value()), initialize(message)))
 }
@@ -637,7 +637,7 @@ fn validate_initialize(params: Option<&Map<String, Value>>) -> Result<(), String
     Ok(())
 }
 
-fn client_from_initialize(message: &Value) -> (Option<WiredClient>, String) {
+fn client_from_initialize(message: &Value) -> (Option<WiredAgent>, String) {
     let raw = message["params"]["clientInfo"]["name"]
         .as_str()
         .unwrap_or_default()
@@ -1247,7 +1247,7 @@ mod tests {
         );
         assert_eq!(
             client_from_initialize(&message),
-            (Some(WiredClient::ClaudeCode), "claude-code".to_string())
+            (Some(WiredAgent::ClaudeCode), "claude-code".to_string())
         );
     }
 

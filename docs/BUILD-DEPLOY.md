@@ -54,8 +54,9 @@ Use `build-linux` flow 2 (`install.sh` then `install-gui.sh`).
 `ds-ipc` `Request` is strict both ways: unknown or missing required fields error. No
 negotiated version. CLI and engine are one deployable despite two install routes.
 
-Example: required `source: WiredClient` on every client request. Partial reinstall →
-engine rejects greet/speak/etc. with ``missing field `source` ``. Hooks discard the
+Example: every request requires a `source` field containing a wired-agent token or
+`null`. Partial reinstall → engine rejects greet/speak/etc. with
+``missing field `source` ``. Hooks discard the
 reply and exit 0 — voice goes quiet with no terminal error. Activity log:
 
 ```

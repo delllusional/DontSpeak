@@ -3,14 +3,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use ds_config::{CancelSpeechScope, Paths, TtsArgPools, VoiceConfig, WiredClient};
+use ds_config::{CancelSpeechScope, Paths, TtsArgPools, VoiceConfig, WiredAgent};
 
 use crate::status::{EngineShared, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
 /// Request log with wired-client attribution when known.
-fn log_client(paths: &Paths, client: Option<WiredClient>, msg: &str) {
+fn log_client(paths: &Paths, client: Option<WiredAgent>, msg: &str) {
     match client {
         Some(client) => ds_log::log_from(
             &paths.log_file,
@@ -69,12 +69,12 @@ fn handle_mark_active(
     paths: &Paths,
     sessions: HookSessions,
     synthetic: bool,
-    source: Option<WiredClient>,
+    source: Option<WiredAgent>,
 ) {
     // Unconditional liveness nudge (+ re-discovery / negative-cache re-arm).
     if let Some(s) = &sessions.logical {
         codex_sessions.nudge(s);
-        if source == Some(WiredClient::Grok) {
+        if source == Some(WiredAgent::Grok) {
             grok_sessions.nudge(s);
         }
     }
@@ -162,7 +162,7 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(s) = &session {
                         codex_sessions.nudge(s);
-                        if source == Some(WiredClient::Grok) {
+                        if source == Some(WiredAgent::Grok) {
                             grok_sessions.nudge(s);
                         }
                     }
@@ -286,7 +286,7 @@ pub(crate) fn spawn_ipc_server(
                     );
                     if let Some(session) = session.as_deref() {
                         ttsq.forget_narration_session(session);
-                        if source == Some(WiredClient::Grok) {
+                        if source == Some(WiredAgent::Grok) {
                             grok_sessions.forget(session);
                         }
                     }
@@ -622,7 +622,7 @@ mod tests {
                 queue: Some("a".into()),
             },
             true,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
         );
 
         assert_eq!(
@@ -659,7 +659,7 @@ mod tests {
                 queue: Some("window-a".into()),
             },
             false,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
         );
 
         assert_eq!(ttsq.active_session(), Some("window-a".into()));
@@ -688,7 +688,7 @@ mod tests {
                 queue: Some("window-g".into()),
             },
             true,
-            Some(WiredClient::Grok),
+            Some(WiredAgent::Grok),
         );
         assert!(
             grok_sessions.contains("g1"),
@@ -706,7 +706,7 @@ mod tests {
                 queue: Some("window-c".into()),
             },
             true,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
         );
         assert!(
             !grok_sessions2.contains("c1"),

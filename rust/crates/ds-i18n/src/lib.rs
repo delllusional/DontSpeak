@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn every_wireable_client_has_a_usage_provider_label() {
         set_locale("en");
-        for c in ds_client::WiredClient::ALL {
+        for c in ds_client::WiredAgent::ALL {
             let key = format!("usage.provider.{}", c.as_str());
             assert_ne!(t(&key), key, "missing en.yml entry for {key}");
         }

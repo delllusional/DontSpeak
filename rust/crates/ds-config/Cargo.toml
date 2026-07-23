@@ -29,10 +29,10 @@ tempfile = { workspace = true }
 ds-log = { workspace = true }
 # Path-resolution diagnostics via the log facade (ds_log sink).
 log = { workspace = true }
-# The ONE client-identity enum (`WiredClient`, formerly this crate's `WireTarget`): the
+# The closed wired-agent identity enum (`WiredAgent`, formerly this crate's `WireTarget`): the
 # registry's `target`, `exclude_clients`' element type, and the `--client` token the hook
 # wiring stamps. Re-exported flat from lib.rs, so downstream crates keep saying
-# `ds_config::WiredClient`.
+# `ds_config::WiredAgent`.
 ds-client = { workspace = true }
 # Hermes Agent config.yaml (hooks + mcp_servers). Already in the workspace lock via
 # rust-i18n; comment loss on re-emit is accepted (no format-preserving YAML editor).

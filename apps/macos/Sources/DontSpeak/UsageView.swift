@@ -8,7 +8,7 @@ import SwiftUI
 struct UsageView: View {
     @Environment(Core.self) private var core
     @State private var cards: [UsageCard] = []
-    /// WiredClient::ALL order from the skeleton deck.
+    /// WiredAgent::ALL order from the skeleton deck.
     @State private var canonicalAgents: [String] = []
     /// Last card seen per agent, painted or not — the source for a card
     /// materialized by speech (keeps its account label).

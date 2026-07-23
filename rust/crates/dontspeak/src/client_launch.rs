@@ -113,7 +113,7 @@ fn run_direct(
     }
 }
 
-fn client_command(bin: &Path, args: &[String], client: ds_config::WiredClient) -> Command {
+fn client_command(bin: &Path, args: &[String], client: ds_config::WiredAgent) -> Command {
     let mut command = Command::new(bin);
     command.args(args).env(
         crate::session_scope::DONTSPEAK_SESSION_ID,
@@ -208,7 +208,7 @@ fn first_codex_positional(args: &[String]) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ds_config::WiredClient;
+    use ds_config::WiredAgent;
     use std::ffi::OsString;
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -254,7 +254,7 @@ mod tests {
         let command = client_command(
             Path::new("client-bin"),
             &values,
-            ds_config::WiredClient::Codex,
+            ds_config::WiredAgent::Codex,
         );
 
         assert_eq!(command.get_program(), "client-bin");
@@ -278,7 +278,7 @@ mod tests {
     fn direct_launch_propagates_exit_status_and_missing_binary_is_127() {
         let temp = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(temp.path());
-        let spec = ds_config::client_spec(WiredClient::Codex);
+        let spec = ds_config::client_spec(WiredAgent::Codex);
 
         #[cfg(windows)]
         let (shell, shell_args) = (

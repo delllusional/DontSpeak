@@ -107,7 +107,7 @@ pub struct Activity {
     pub recording: bool,
     pub speaking: bool,
     /// Wired client for the in-flight TTS utterance. `null` when idle or unattributed.
-    pub speaker: Option<ds_client::WiredClient>,
+    pub speaker: Option<ds_client::WiredAgent>,
     /// `null` while idle.
     pub voice: Option<String>,
     /// `null` while idle.
@@ -424,8 +424,8 @@ mod tests {
         prop::sample::select(StatusTrayKind::ALL.to_vec())
     }
 
-    fn wired_client_strategy() -> impl Strategy<Value = ds_client::WiredClient> {
-        prop::sample::select(ds_client::WiredClient::ALL.to_vec())
+    fn wired_client_strategy() -> impl Strategy<Value = ds_client::WiredAgent> {
+        prop::sample::select(ds_client::WiredAgent::ALL.to_vec())
     }
 
     prop_compose! {

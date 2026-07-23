@@ -11,7 +11,7 @@ description = "Workspace-wide unified activity log for DontSpeak (one leveled, s
 
 [dependencies]
 serde_json = { workspace = true }
-# The client-identity enum: `log_from` takes a `WiredClient` and renders it as the line's
+# The client-identity enum: `log_from` takes a `WiredAgent` and renders it as the line's
 # trailing `client=<token>` k=v. ds-client is a leaf (serde only) that sits BELOW this crate
 # precisely so ds-log can take a client without depending on ds-config (which depends on
 # ds-log — that edge would be a cycle).

@@ -33,7 +33,7 @@ pub use client_binary::{
     resolve_client_binary, resolve_configured_client_binary, resolve_native_client_binary,
 };
 /// Wired-client identity (`ds-client` leaf; re-export avoids cycle with `ds-log`/`ds-ipc`).
-pub use ds_client::WiredClient;
+pub use ds_client::WiredAgent;
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,
     SttEngine, TrayKind, TtsEngine, de_opt_pref_stt_engine, de_opt_pref_tts_engine,

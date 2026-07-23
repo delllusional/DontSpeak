@@ -3,7 +3,7 @@
 //!
 //! Config as `serde_json::Value` (`ds_config` voice_to/from_value) — no VoiceConfig mirror.
 
-use ds_client::WiredClient;
+use ds_client::WiredAgent;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,11 +18,11 @@ where
     Ok(value)
 }
 
-fn deserialize_client_source<'de, D>(deserializer: D) -> Result<Option<WiredClient>, D::Error>
+fn deserialize_client_source<'de, D>(deserializer: D) -> Result<Option<WiredAgent>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Option::<WiredClient>::deserialize(deserializer)
+    Option::<WiredAgent>::deserialize(deserializer)
 }
 
 /// Client → engine (`#[serde(tag = "cmd")]`, snake_case).
@@ -52,7 +52,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_session: Option<String>,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// UserPromptSubmit: mark active terminal; other sessions held.
     MarkActive {
@@ -65,7 +65,7 @@ pub enum Request {
         #[serde(default)]
         synthetic: bool,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// MCP speak (reply; survives record-barge when resume policy set).
     Speak {
@@ -76,7 +76,7 @@ pub enum Request {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session: String,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// Mid-turn narration (barge/skip drops first); sentence-split on warm child.
     SpeakNarration {
@@ -93,14 +93,14 @@ pub enum Request {
         narration_id: Option<String>,
         /// Required for uniform source contract (engine skips logging this variant).
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// MCP barge-in, scoped to its stdio/window identity.
     Stop {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session: String,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// Per-window stop; agent voice assignment survives.
     SessionEnd {
@@ -109,7 +109,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queue_session: Option<String>,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// Stream Listening/partials → terminal Transcript.
     TestRecognitionStart,
@@ -150,7 +150,7 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session: Option<String>,
         #[serde(deserialize_with = "deserialize_client_source")]
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
     },
     /// macOS System STT TCC + capability before persisting `stt_engine=system`.
     AuthorizeSystemStt,
@@ -248,47 +248,47 @@ mod tests {
                     "kokoro": { "voice": "af_sarah", "language": "en", "rate": 1.5 }
                 })),
                 session: "sess-1".into(),
-                source: Some(WiredClient::ClaudeCode),
+                source: Some(WiredAgent::ClaudeCode),
             },
             Request::SpeakNarration {
                 text: "working on it".into(),
                 detection_text: Some("full turn so far for language".into()),
                 session: None,
                 narration_id: Some("narration-1".into()),
-                source: Some(WiredClient::QwenCode),
+                source: Some(WiredAgent::QwenCode),
             },
             Request::SpeakNarration {
                 text: "legacy digest only".into(),
                 detection_text: None,
                 session: Some("sess-1".into()),
                 narration_id: None,
-                source: Some(WiredClient::ClaudeCode),
+                source: Some(WiredAgent::ClaudeCode),
             },
             Request::Stop {
                 session: "sess-1".into(),
-                source: Some(WiredClient::ClaudeCode),
+                source: Some(WiredAgent::ClaudeCode),
             },
             Request::MarkActive {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
                 synthetic: false,
-                source: Some(WiredClient::Codex),
+                source: Some(WiredAgent::Codex),
             },
             Request::MarkActive {
                 session: None,
                 queue_session: None,
                 synthetic: true,
-                source: Some(WiredClient::ClaudeCode),
+                source: Some(WiredAgent::ClaudeCode),
             },
             Request::GreetSession {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
-                source: Some(WiredClient::Grok),
+                source: Some(WiredAgent::Grok),
             },
             Request::SessionEnd {
                 session: Some("sess-1".into()),
                 queue_session: Some("window-1".into()),
-                source: Some(WiredClient::QwenCode),
+                source: Some(WiredAgent::QwenCode),
             },
             Request::TestRecognitionStart,
             Request::ModelStatus,
@@ -300,7 +300,7 @@ mod tests {
             Request::Earcon {
                 event: ds_earcon::EarconEvent::ReplyDone,
                 session: Some("sess-1".into()),
-                source: Some(WiredClient::Grok),
+                source: Some(WiredAgent::Grok),
             },
         ];
         for req in cases {
@@ -364,7 +364,7 @@ mod tests {
             Request::MarkActive {
                 session: Some(ref s),
                 synthetic: false,
-                source: Some(WiredClient::ClaudeCode),
+                source: Some(WiredAgent::ClaudeCode),
                 ..
             } if s == "sess-1"
         ));
@@ -433,13 +433,13 @@ mod tests {
         );
         let line = format!(
             r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
-            WiredClient::Codex.as_str()
+            WiredAgent::Codex.as_str()
         );
         let req: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(
             req,
             Request::Earcon {
-                source: Some(WiredClient::Codex),
+                source: Some(WiredAgent::Codex),
                 ..
             }
         ));
@@ -450,7 +450,7 @@ mod tests {
         let with_session = Request::Earcon {
             event: ds_earcon::EarconEvent::NeedsInput,
             session: Some("sess-1".into()),
-            source: Some(WiredClient::ClaudeCode),
+            source: Some(WiredAgent::ClaudeCode),
         };
         let line = serde_json::to_string(&with_session).unwrap();
         assert!(line.contains(r#""session":"sess-1""#));
@@ -464,7 +464,7 @@ mod tests {
 
         let line = format!(
             r#"{{"cmd":"earcon","event":"reply_done","source":"{}"}}"#,
-            WiredClient::Codex.as_str()
+            WiredAgent::Codex.as_str()
         );
         let old: Request = serde_json::from_str(&line).unwrap();
         assert!(matches!(old, Request::Earcon { session: None, .. }));
@@ -477,7 +477,7 @@ mod tests {
             detection_text: Some("full so-far corpus".into()),
             session: Some("sess-1".into()),
             narration_id: Some("n1".into()),
-            source: Some(WiredClient::Codex),
+            source: Some(WiredAgent::Codex),
         };
         let line = serde_json::to_string(&with_fields).unwrap();
         assert!(line.contains(r#""detection_text":"full so-far corpus""#));
@@ -511,7 +511,7 @@ mod tests {
             detection_text: None,
             session: None,
             narration_id: None,
-            source: Some(WiredClient::ClaudeCode),
+            source: Some(WiredAgent::ClaudeCode),
         };
         let bare_line = serde_json::to_string(&bare).unwrap();
         assert!(!bare_line.contains("detection_text"));

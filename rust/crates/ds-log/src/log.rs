@@ -23,7 +23,7 @@
 //! So `parse_unified_line` / `combined_log_json` stay shape-stable; `client=` greps as
 //! "wired client caused this". See [`log_from`].
 
-use ds_client::WiredClient;
+use ds_client::WiredAgent;
 use std::path::{Path, PathBuf};
 
 fn open_append_private(path: &Path) -> std::io::Result<std::fs::File> {
@@ -122,7 +122,7 @@ pub fn log(log_file: &Path, level: LogLevel, source: &str, msg: &str) {
 
 /// Client-attributed `log`: appends ` client=<token>` to the message. Takes the log PATH so
 /// tests must pass a tempdir; deliberately no cached variant.
-pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: WiredClient, msg: &str) {
+pub fn log_from(log_file: &Path, level: LogLevel, source: &str, client: WiredAgent, msg: &str) {
     write_line(log_file, level, source, Some(client), msg);
 }
 
@@ -130,7 +130,7 @@ fn write_line(
     log_file: &Path,
     level: LogLevel,
     source: &str,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     msg: &str,
 ) {
     use std::io::Write;
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn log_from_appends_the_client_as_a_trailing_kv() {
         let dir = tempfile::tempdir().unwrap();
-        for &client in WiredClient::ALL {
+        for &client in WiredAgent::ALL {
             let p = dir.path().join(format!("{}.log", client.as_str()));
             log_from(&p, LogLevel::Info, "engine", client, "greet session=s1");
             let (level, source, msg) = only_line(&p);

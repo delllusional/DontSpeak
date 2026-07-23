@@ -18,7 +18,7 @@ binary over `dontspeak.sock` (NDJSON); they never load models. Design:
 ```
 rust/crates/
   ds-config/       # paths, config.toml, wire registry/shapers, config enums
-  ds-client/       # WiredClient enum (leaf: wiring, hooks, IPC, MCP, logs)
+  ds-client/       # WiredAgent enum (leaf: wiring, hooks, IPC, MCP, logs)
   ds-log/          # unified activity log
   ds-earcon/       # OS sound introspection + cue resolution
   ds-ipc/          # NDJSON RPC (server=engine; fuzz workspace under fuzz/)

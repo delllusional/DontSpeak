@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use ds_config::{Paths, TtsArgPools, VoiceConfig, WiredClient};
+use ds_config::{Paths, TtsArgPools, VoiceConfig, WiredAgent};
 
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
@@ -27,7 +27,7 @@ impl Drop for HealingGuard {
 /// In-flight claim. `session: None` = untagged/global.
 #[derive(Clone, Debug)]
 struct PlayingClaim {
-    source: Option<WiredClient>,
+    source: Option<WiredAgent>,
     session: Option<String>,
     /// Speech, not a cue — the in-flight half of the depth the status reports.
     speech: bool,
@@ -151,9 +151,9 @@ fn apply_tts_arg_params(
 /// Load is counted only among agents holding a voice for the SAME language, so spreading
 /// voices across agents stays independent per language.
 fn pick_agent_voice(
-    assignments: &HashMap<(Option<WiredClient>, String), String>,
+    assignments: &HashMap<(Option<WiredAgent>, String), String>,
     pool: &[String],
-    agent: &(Option<WiredClient>, String),
+    agent: &(Option<WiredAgent>, String),
     roll: &mut dyn FnMut(usize) -> usize,
 ) -> String {
     if let Some(v) = assignments.get(agent)
@@ -215,7 +215,7 @@ impl QueueAction {
 struct Item {
     action: QueueAction,
     /// Producer → `activity.speaker` while in flight.
-    source: Option<WiredClient>,
+    source: Option<WiredAgent>,
     /// Session tag (`None` = global). Voice keys off `source`.
     session: Option<String>,
     /// Batch resume high-water (`PROGRESS`). Record-barge resume sends as `skip`.
@@ -225,7 +225,7 @@ struct Item {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TtsStatusSample {
     pub speaking: bool,
-    pub speaker: Option<WiredClient>,
+    pub speaker: Option<WiredAgent>,
     pub queued: u64,
     pub utterance: Option<ds_status::UtteranceStatus>,
     pub last_utterance: Option<ds_status::UtteranceStatus>,
@@ -372,7 +372,7 @@ pub struct TtsQueue {
     /// Lazy pool roll; SessionEnd keeps assignment. Keyed per language so an agent holds one
     /// voice per language it speaks instead of flapping when a reply switches language.
     /// Bounded by wired-client cardinality plus one unwired bucket × languages spoken.
-    agent_voices: Mutex<HashMap<(Option<WiredClient>, String), String>>,
+    agent_voices: Mutex<HashMap<(Option<WiredAgent>, String), String>>,
     /// `say -v ?` enumeration, read once per process for System language matching.
     system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
     /// Always acquired inside `items`.
@@ -503,7 +503,7 @@ impl TtsQueue {
         &self,
         text: String,
         tts_args: Option<TtsArgPools>,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         session: Option<String>,
     ) -> Result<(), String> {
         if text.len() > MAX_SPEAK_BYTES {
@@ -528,7 +528,7 @@ impl TtsQueue {
     pub fn enqueue_earcon(
         &self,
         event: ds_earcon::EarconEvent,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         session: Option<String>,
     ) -> Result<(), String> {
         self.enqueue_action(QueueAction::Earcon(event), source, session)
@@ -548,7 +548,7 @@ impl TtsQueue {
     pub fn dispatch_earcon(
         self: &Arc<Self>,
         event: ds_earcon::EarconEvent,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         session: Option<String>,
     ) -> Result<(), String> {
         // reply_done never bypasses — skip hold-state snapshot.
@@ -606,7 +606,7 @@ impl TtsQueue {
     fn enqueue_action(
         &self,
         action: QueueAction,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         session: Option<String>,
     ) -> Result<(), String> {
         let mut q = self.items.lock().unwrap();
@@ -682,7 +682,7 @@ impl TtsQueue {
     pub fn enqueue_narration(
         &self,
         text: String,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         session: Option<String>,
         narration_id: Option<String>,
         detection_text: Option<String>,
@@ -1141,7 +1141,7 @@ impl TtsQueue {
     /// Get-or-assign agent voice ([`pick_agent_voice`]). Pool non-empty.
     fn assign_agent_voice(
         &self,
-        agent: Option<WiredClient>,
+        agent: Option<WiredAgent>,
         language: &str,
         pool: &[String],
     ) -> String {
@@ -1165,7 +1165,7 @@ impl TtsQueue {
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         language: Option<&str>,
     ) -> Option<(ds_config::TtsEngine, String)> {
         let engine = cfg.resolved_tts()?;
@@ -1208,7 +1208,7 @@ impl TtsQueue {
     fn pick_for_language<'a>(
         &self,
         catalog: impl FnOnce() -> ds_tts::enumerate::VoiceCatalog<'a>,
-        source: Option<WiredClient>,
+        source: Option<WiredAgent>,
         language: Option<&str>,
         pool: &[String],
     ) -> String {
@@ -1230,7 +1230,7 @@ impl TtsQueue {
     }
 
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
-    pub fn greet_session(&self, source: Option<WiredClient>, session: Option<String>) {
+    pub fn greet_session(&self, source: Option<WiredAgent>, session: Option<String>) {
         let cfg = self.config.lock().unwrap().clone();
         if !cfg.greet {
             return;
@@ -2014,7 +2014,7 @@ mod tests {
     }
 
     /// Assignment key for `agent` speaking English.
-    fn key(agent: WiredClient) -> (Option<WiredClient>, String) {
+    fn key(agent: WiredAgent) -> (Option<WiredAgent>, String) {
         (Some(agent), "en".to_string())
     }
 
@@ -2024,7 +2024,7 @@ mod tests {
         let a = HashMap::new();
         for (roll, expect) in [(0, "af_sarah"), (1, "am_adam"), (2, "bf_emma")] {
             assert_eq!(
-                pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| roll),
+                pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |_| roll),
                 expect
             );
         }
@@ -2040,9 +2040,9 @@ mod tests {
             let p = pool();
             let mut a = HashMap::new();
             for agent in [
-                WiredClient::ClaudeCode,
-                WiredClient::Codex,
-                WiredClient::QwenCode,
+                WiredAgent::ClaudeCode,
+                WiredAgent::Codex,
+                WiredAgent::QwenCode,
             ] {
                 let v = pick_agent_voice(&a, &p, &key(agent), &mut roll);
                 assert!(
@@ -2060,15 +2060,15 @@ mod tests {
         // (new windows, later replies) return the SAME voice, whatever the roll says.
         let p = pool();
         let mut a = HashMap::new();
-        let first = pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 1);
-        a.insert(key(WiredClient::ClaudeCode), first.clone());
-        a.insert(key(WiredClient::Codex), "am_adam".into());
+        let first = pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |_| 1);
+        a.insert(key(WiredAgent::ClaudeCode), first.clone());
+        a.insert(key(WiredAgent::Codex), "am_adam".into());
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |_| 0),
             first
         );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |n| n - 1),
+            pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |n| n - 1),
             first
         );
     }
@@ -2081,19 +2081,19 @@ mod tests {
         let p = pool();
         let mut a = HashMap::new();
         a.insert(
-            (Some(WiredClient::Codex), "it".to_string()),
+            (Some(WiredAgent::Codex), "it".to_string()),
             "af_sarah".into(),
         );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |_| 0),
             "af_sarah"
         );
         a.insert(
-            (Some(WiredClient::Codex), "en".to_string()),
+            (Some(WiredAgent::Codex), "en".to_string()),
             "af_sarah".into(),
         );
         assert_eq!(
-            pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |_| 0),
             "am_adam"
         );
     }
@@ -2105,10 +2105,10 @@ mod tests {
         let p = vec!["af_sarah".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
         for agent in [
-            WiredClient::ClaudeCode,
-            WiredClient::Codex,
-            WiredClient::QwenCode,
-            WiredClient::Grok,
+            WiredAgent::ClaudeCode,
+            WiredAgent::Codex,
+            WiredAgent::QwenCode,
+            WiredAgent::Grok,
         ] {
             let v = pick_agent_voice(&a, &p, &key(agent), &mut |_| 0);
             a.insert(key(agent), v);
@@ -2129,10 +2129,10 @@ mod tests {
         // the roll ranges over the free set only, so index 0 is not pool[0] here.
         let p = vec!["af_nicole".to_string(), "am_adam".to_string()];
         let mut a = HashMap::new();
-        a.insert(key(WiredClient::ClaudeCode), "af_sarah".to_string()); // stale (old pool)
-        a.insert(key(WiredClient::Codex), "af_nicole".to_string()); // valid, holds af_nicole
+        a.insert(key(WiredAgent::ClaudeCode), "af_sarah".to_string()); // stale (old pool)
+        a.insert(key(WiredAgent::Codex), "af_nicole".to_string()); // valid, holds af_nicole
         let mut seen_n = usize::MAX;
-        let v = pick_agent_voice(&a, &p, &key(WiredClient::ClaudeCode), &mut |n| {
+        let v = pick_agent_voice(&a, &p, &key(WiredAgent::ClaudeCode), &mut |n| {
             seen_n = n;
             0
         });
@@ -2145,7 +2145,7 @@ mod tests {
         let picks: Vec<String> = (0..2)
             .map(|_| {
                 let mut rng = fastrand::Rng::with_seed(7);
-                pick_agent_voice(&empty, &pool(), &key(WiredClient::Grok), &mut |n| {
+                pick_agent_voice(&empty, &pool(), &key(WiredAgent::Grok), &mut |n| {
                     rng.usize(..n)
                 })
             })
@@ -2161,17 +2161,17 @@ mod tests {
         // from the CURRENT pool chosen instead — otherwise the agent keeps using a
         // voice the user dropped ("Sarah introduces herself as Nicole").
         let mut a = HashMap::new();
-        a.insert(key(WiredClient::ClaudeCode), "af_sarah".to_string()); // old default
+        a.insert(key(WiredAgent::ClaudeCode), "af_sarah".to_string()); // old default
         let new_pool = vec!["af_nicole".to_string()]; // user switched to Nicole-only
-        let v = pick_agent_voice(&a, &new_pool, &key(WiredClient::ClaudeCode), &mut |_| 0);
+        let v = pick_agent_voice(&a, &new_pool, &key(WiredAgent::ClaudeCode), &mut |_| 0);
         assert_eq!(
             v, "af_nicole",
             "a voice no longer in the pool must not be reused"
         );
         // And once re-recorded, the fresh pick is stable.
-        a.insert(key(WiredClient::ClaudeCode), v);
+        a.insert(key(WiredAgent::ClaudeCode), v);
         assert_eq!(
-            pick_agent_voice(&a, &new_pool, &key(WiredClient::ClaudeCode), &mut |_| 0),
+            pick_agent_voice(&a, &new_pool, &key(WiredAgent::ClaudeCode), &mut |_| 0),
             "af_nicole"
         );
     }
@@ -2750,7 +2750,7 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
-    /// In-flight claim carries the producer's `WiredClient` so `activity.speaker`
+    /// In-flight claim carries the producer's `WiredAgent` so `activity.speaker`
     /// can highlight the matching Usage card. Non-client producers stay null.
     #[test]
     fn tts_status_sample_exposes_wireable_playing_source_only() {
@@ -2763,7 +2763,7 @@ mod tests {
         q.enqueue(
             "hello".into(),
             None,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("sess".into()),
         )
         .unwrap();
@@ -2775,7 +2775,7 @@ mod tests {
         // Nothing waiting, but the claimed utterance is still outstanding → 1.
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
-        assert_eq!(speaking.speaker, Some(WiredClient::ClaudeCode));
+        assert_eq!(speaking.speaker, Some(WiredAgent::ClaudeCode));
         assert_eq!(speaking.queued, 1);
 
         // Unwired producers must not light a Usage card.
@@ -2792,14 +2792,14 @@ mod tests {
 
         // GreetSession-style path: wired-client attribution lights the matching card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
-            source: Some(WiredClient::Grok),
+            source: Some(WiredAgent::Grok),
             session: Some("open".into()),
             speech: true,
             utterance: None,
         });
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
-        assert_eq!(speaking.speaker, Some(WiredClient::Grok));
+        assert_eq!(speaking.speaker, Some(WiredAgent::Grok));
         assert_eq!(speaking.queued, 1);
 
         q.set_active_for_test(false);
@@ -2837,7 +2837,7 @@ mod tests {
         q.enqueue(
             "spoken".into(),
             None,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("sess".into()),
         )
         .unwrap();
@@ -2871,7 +2871,7 @@ mod tests {
         q.enqueue(
             "waiting".into(),
             None,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -2901,7 +2901,7 @@ mod tests {
         q.enqueue(
             "   ".into(),
             None,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -2910,7 +2910,7 @@ mod tests {
             .enqueue(
                 "x".repeat(MAX_SPEAK_BYTES + 1),
                 None,
-                Some(WiredClient::ClaudeCode),
+                Some(WiredAgent::ClaudeCode),
                 Some("a".into()),
             )
             .unwrap_err();
@@ -2975,7 +2975,7 @@ mod tests {
         q.enqueue(
             "pending".into(),
             None,
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("a".into()),
         )
         .unwrap();
@@ -4496,7 +4496,7 @@ mod tests {
     fn end_session_barges_the_window_but_keeps_the_agent_assignment() {
         let q = mk_queue();
         q.agent_voices.lock().unwrap().insert(
-            (Some(WiredClient::ClaudeCode), String::new()),
+            (Some(WiredAgent::ClaudeCode), String::new()),
             "af_sarah".to_string(),
         );
         q.edit_items_for_test(|q| q.extend([narr(Some("other")), narr(Some("s1"))]));
@@ -4529,7 +4529,7 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(Some(WiredClient::ClaudeCode), String::new())),
+                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
             Some(&"af_sarah".to_string())
         );
     }
@@ -4539,23 +4539,23 @@ mod tests {
         let q = mk_queue();
         let pool = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
-        let v1 = q.assign_agent_voice(Some(WiredClient::ClaudeCode), "en", &pool);
+        let v1 = q.assign_agent_voice(Some(WiredAgent::ClaudeCode), "en", &pool);
         assert!(pool.contains(&v1), "the pick comes from the pool");
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(Some(WiredClient::ClaudeCode), "en".to_string())),
+                .get(&(Some(WiredAgent::ClaudeCode), "en".to_string())),
             Some(&v1)
         );
         // The same agent reuses its recorded pick.
         assert_eq!(
-            q.assign_agent_voice(Some(WiredClient::ClaudeCode), "en", &pool),
+            q.assign_agent_voice(Some(WiredAgent::ClaudeCode), "en", &pool),
             v1
         );
         // A different agent picks among the remaining free voices — with one voice left,
         // that's deterministic: the other one.
-        let v2 = q.assign_agent_voice(Some(WiredClient::Codex), "en", &pool);
+        let v2 = q.assign_agent_voice(Some(WiredAgent::Codex), "en", &pool);
         assert!(pool.contains(&v2));
         assert_ne!(v2, v1, "a free voice remains, so agents must not share");
     }
@@ -4586,7 +4586,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None),
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), None),
             Some((ds_config::TtsEngine::System, "Ava (Premium)".to_string()))
         );
     }
@@ -4601,14 +4601,14 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None),
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), None),
             Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
         );
         assert_eq!(
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(Some(WiredClient::ClaudeCode), String::new())),
+                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
             Some(&"default".to_string())
         );
     }
@@ -4629,7 +4629,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (engine, voice) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None)
+            .resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), None)
             .expect("Kokoro is usable on this build");
         assert_eq!(engine, ds_config::TtsEngine::BuiltIn);
         assert!(cfg.tts_voices.kokoro.contains(&voice));
@@ -4638,18 +4638,18 @@ mod tests {
             q.agent_voices
                 .lock()
                 .unwrap()
-                .get(&(Some(WiredClient::ClaudeCode), String::new())),
+                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
             Some(&voice)
         );
         // Every later resolution for the same agent — any window, any request — reuses it.
         let (_, again) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), None)
+            .resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), None)
             .expect("Kokoro again");
         assert_eq!(again, voice);
         assert_eq!(q.agent_voices.lock().unwrap().len(), 1);
         // A second agent claims the remaining free voice — no sharing while one is free.
         let (_, other) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::Codex), None)
+            .resolve_engine_voice(&cfg, Some(WiredAgent::Codex), None)
             .expect("Kokoro for Codex");
         assert_ne!(other, voice);
     }
@@ -4674,23 +4674,23 @@ mod tests {
             ..VoiceConfig::default()
         };
         let (_, italian) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("it"))
+            .resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("it"))
             .expect("Kokoro is usable on this build");
         assert_eq!(italian, "if_sara");
 
         let (_, english) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
+            .resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("en"))
             .expect("Kokoro again");
         assert!(["af_sarah", "bf_emma"].contains(&english.as_str()));
 
         // Both assignments coexist: switching language back must not re-roll the other.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("it"))
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("it"))
                 .map(|(_, v)| v),
             Some(italian)
         );
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("en"))
                 .map(|(_, v)| v),
             Some(english)
         );
@@ -4727,18 +4727,18 @@ mod tests {
         };
         // The pool owns no German, so the choice is made among the catalog's German voices.
         let (_, german) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("de"))
+            .resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("de"))
             .expect("System is usable on this build");
         assert!(["Anna", "Otto"].contains(&german.as_str()));
         // Borrowed voices are sticky too: the roll happens once per agent and language.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("de"))
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("de"))
                 .map(|(_, v)| v),
             Some(german)
         );
         // The configured pool still serves the language it does own.
         assert_eq!(
-            q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some("en"))
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("en"))
                 .map(|(_, v)| v),
             Some("Samantha".to_string())
         );
@@ -4757,7 +4757,7 @@ mod tests {
         };
         for language in ["en", "it", "ja"] {
             assert_eq!(
-                q.resolve_engine_voice(&cfg, Some(WiredClient::ClaudeCode), Some(language)),
+                q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some(language)),
                 Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
             );
         }
@@ -4778,7 +4778,7 @@ mod tests {
             ..VoiceConfig::default()
         };
         assert_eq!(
-            q.resolve_engine_voice(&empty_pool, Some(WiredClient::ClaudeCode), None),
+            q.resolve_engine_voice(&empty_pool, Some(WiredAgent::ClaudeCode), None),
             None
         );
         assert!(q.agent_voices.lock().unwrap().is_empty());
@@ -4823,13 +4823,13 @@ mod tests {
         };
         *q.config.lock().unwrap() = cfg.clone();
 
-        q.greet_session(Some(WiredClient::Codex), Some("sess-1".to_string()));
+        q.greet_session(Some(WiredAgent::Codex), Some("sess-1".to_string()));
 
         let claimed = q
             .agent_voices
             .lock()
             .unwrap()
-            .get(&(Some(WiredClient::Codex), String::new()))
+            .get(&(Some(WiredAgent::Codex), String::new()))
             .cloned()
             .expect("greeting claims the agent voice at open");
         // The queued greeting carries the claimed voice as its per-item override.
@@ -4851,7 +4851,7 @@ mod tests {
         }
         // A later reply (any session of the same agent) speaks the same voice.
         let (_, later) = q
-            .resolve_engine_voice(&cfg, Some(WiredClient::Codex), None)
+            .resolve_engine_voice(&cfg, Some(WiredAgent::Codex), None)
             .expect("Kokoro later reply");
         assert_eq!(later, claimed);
     }
@@ -4885,7 +4885,7 @@ mod tests {
         for (i, quote) in [IT_QUOTE, EN_QUOTE].iter().enumerate() {
             q.enqueue_narration(
                 (*quote).into(),
-                Some(WiredClient::ClaudeCode),
+                Some(WiredAgent::ClaudeCode),
                 Some("sess".into()),
                 Some(format!("n{i}")),
                 Some(corpus.clone()),
@@ -4902,7 +4902,7 @@ mod tests {
         // Short FR/PT false-friend digest inside an English turn.
         q.enqueue_narration(
             "Bon courage.".into(),
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("sess".into()),
             Some("n1".into()),
             Some(EN_DETECTION.into()),
@@ -4911,7 +4911,7 @@ mod tests {
         // Same digest with no corpus behind it: English, never a coin flip.
         q.enqueue_narration(
             "Bon courage.".into(),
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             Some("sess".into()),
             Some("n2".into()),
             None,
@@ -4953,7 +4953,7 @@ mod tests {
         let admit = |session: &str, id: &str| {
             q.enqueue_narration(
                 "a".into(),
-                Some(WiredClient::Grok),
+                Some(WiredAgent::Grok),
                 Some(session.into()),
                 Some(id.into()),
                 None,

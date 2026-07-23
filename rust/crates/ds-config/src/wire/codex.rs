@@ -9,12 +9,12 @@
 //! "Ours" = basename `dontspeak` ([`command_is_ours`]), not substring.
 
 use super::cmdline::{ShellOverride, command_is_ours, host_inline_flavor, inline_command};
-use ds_client::WiredClient;
+use ds_client::WiredAgent;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item as TomlItem, Table as TomlTable, value};
 
 /// Host dialect into plain `command` (not `command`/`command_windows` split — wire runs on
 /// this machine; spaced path → 8.3, no `shell` field). Trailing `--client <token>`.
-fn codex_command(bin: &str, verb: &str, client: WiredClient) -> String {
+fn codex_command(bin: &str, verb: &str, client: WiredAgent) -> String {
     inline_command(
         host_inline_flavor(),
         bin,
@@ -239,7 +239,7 @@ fn group_to_inline(group: &TomlTable) -> toml_edit::Value {
 pub fn merge_codex_hooks(
     existing: &str,
     bin: &str,
-    client: WiredClient,
+    client: WiredAgent,
 ) -> Result<String, CodexMergeError> {
     let mut doc: DocumentMut = if existing.trim().is_empty() {
         DocumentMut::new()
@@ -304,14 +304,14 @@ mod tests {
     const BIN: &str = "/home/u/.local/bin/dontspeak";
 
     fn merged(existing: &str) -> String {
-        merge_codex_hooks(existing, BIN, WiredClient::Codex).expect("merge ok")
+        merge_codex_hooks(existing, BIN, WiredAgent::Codex).expect("merge ok")
     }
 
     /// The command string Codex should carry for `verb` on THIS host — including the uniform
     /// `--client codex` tail every wired verb now carries. (The dialect itself is pinned
     /// per-flavor by `wire::cmdline`'s tests; these pin Codex's structure.)
     fn cmd(verb: &str) -> String {
-        codex_command(BIN, verb, WiredClient::Codex)
+        codex_command(BIN, verb, WiredAgent::Codex)
     }
 
     /// EVERY inner command string wired on `event` in a parsed doc, in order — asserting
@@ -512,7 +512,7 @@ mod tests {
         // upgrade) produced byte-identical output, leaving every hook pointed at a dead path.
         let first = merged("");
         let new_bin = "/opt/dontspeak/bin/dontspeak";
-        let second = merge_codex_hooks(&first, new_bin, WiredClient::Codex).expect("merge ok");
+        let second = merge_codex_hooks(&first, new_bin, WiredAgent::Codex).expect("merge ok");
         assert!(
             !second.contains(BIN),
             "stale bin path healed away, not left stale"
@@ -710,7 +710,7 @@ mod tests {
     fn unmergeable_scalar_hooks_errors() {
         let bad = "hooks = \"oops\"\n";
         assert!(matches!(
-            merge_codex_hooks(bad, BIN, WiredClient::Codex),
+            merge_codex_hooks(bad, BIN, WiredAgent::Codex),
             Err(CodexMergeError::UnmergeableShape(_))
         ));
     }
@@ -719,7 +719,7 @@ mod tests {
     fn parse_error_surfaces() {
         let bad = "this is = = not toml\n";
         assert!(matches!(
-            merge_codex_hooks(bad, BIN, WiredClient::Codex),
+            merge_codex_hooks(bad, BIN, WiredAgent::Codex),
             Err(CodexMergeError::Parse(_))
         ));
     }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use ds_config::{Paths, TtsEngine, TtsModel, VoiceConfig, WiredClient};
+use ds_config::{Paths, TtsEngine, TtsModel, VoiceConfig, WiredAgent};
 use ds_ipc::{Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ pub(crate) fn tools_call(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
 ) -> Value {
     tools_call_cancellable(
         id,
@@ -61,7 +61,7 @@ pub(crate) fn tools_call_validated(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     queue_session: &str,
     cancelled: Arc<AtomicBool>,
     agents: bool,
@@ -84,7 +84,7 @@ pub(crate) fn tools_call_cancellable(
     id: Option<Value>,
     msg: &Value,
     sock: Option<&PathBuf>,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     queue_session: &str,
     cancelled: Arc<AtomicBool>,
 ) -> Value {
@@ -496,7 +496,7 @@ fn call_set_config(paths: &Paths, args: &Value) -> Result<String, String> {
 fn call_speak(
     sock: &Path,
     args: &Value,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     queue_session: &str,
 ) -> Result<String, String> {
     let a: SpeakArgs = serde_json::from_value(args.clone())
@@ -527,7 +527,7 @@ fn call_speak(
 
 fn call_stop(
     sock: &Path,
-    client: Option<WiredClient>,
+    client: Option<WiredAgent>,
     queue_session: &str,
 ) -> Result<String, String> {
     let response = ds_ipc::request(
@@ -924,7 +924,7 @@ mod usage_output {
                 assert!(refresh);
                 Ok(Some(UsageDeck {
                     cards: vec![UsageCard {
-                        agent: WiredClient::Codex,
+                        agent: WiredAgent::Codex,
                         account: Some("dev@example.com".into()),
                         rows: vec![UsageRow {
                             period: Period::Week,
@@ -950,7 +950,7 @@ mod usage_output {
             value,
             json!({
                 "cards": [{
-                    "agent": WiredClient::Codex.as_str(),
+                    "agent": WiredAgent::Codex.as_str(),
                     "account": "dev@example.com",
                     "rows": [{
                         "period": "week",
@@ -966,7 +966,7 @@ mod usage_output {
     fn usage_sends_the_refresh_flag_to_a_reachable_engine() {
         let deck = serde_json::to_value(UsageDeck {
             cards: vec![UsageCard {
-                agent: WiredClient::ClaudeCode,
+                agent: WiredAgent::ClaudeCode,
                 account: None,
                 rows: Vec::new(),
                 needs_auth: true,
@@ -992,7 +992,7 @@ mod usage_output {
             |_| {
                 Ok(Some(UsageDeck {
                     cards: vec![UsageCard {
-                        agent: WiredClient::ClaudeCode,
+                        agent: WiredAgent::ClaudeCode,
                         account: None,
                         rows: Vec::new(),
                         needs_auth: true,
@@ -1045,7 +1045,7 @@ mod status_output {
             "seq": 8,
             "activity": {
                 "caps": true, "caps_active": false, "recording": false,
-                "speaking": true, "speaker": WiredClient::Codex.as_str(), "voice": "if_sara",
+                "speaking": true, "speaker": WiredAgent::Codex.as_str(), "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
             "tts": {
@@ -1234,7 +1234,7 @@ mod arg_validation {
         let err = call_speak(
             &dead_sock(),
             &json!({}),
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             "scope",
         )
         .unwrap_err();
@@ -1243,7 +1243,7 @@ mod arg_validation {
         let err = call_speak(
             &dead_sock(),
             &json!({ "text": "   " }),
-            Some(WiredClient::ClaudeCode),
+            Some(WiredAgent::ClaudeCode),
             "scope",
         )
         .unwrap_err();
@@ -1339,13 +1339,13 @@ mod engine_unavailable {
                 call_speak(
                     &sock,
                     &json!({ "text": "hello" }),
-                    Some(WiredClient::ClaudeCode),
+                    Some(WiredAgent::ClaudeCode),
                     "scope",
                 ),
             ),
             (
                 "stop",
-                call_stop(&sock, Some(WiredClient::ClaudeCode), "scope"),
+                call_stop(&sock, Some(WiredAgent::ClaudeCode), "scope"),
             ),
             ("mute", call_mute(&sock, &json!({ "on": true }))),
             ("diarize", call_diarize(&sock, &json!({}))),

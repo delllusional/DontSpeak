@@ -158,7 +158,7 @@ fn agent_usage_skeleton_json_gated(agents: bool) -> *mut c_char {
     to_cstring(ds_agent_usage::skeleton().to_json())
 }
 
-/// Blocking card refresh (`WiredClient` token). Off UI thread. `refresh` skips soft cache.
+/// Blocking card refresh (`WiredAgent` token). Off UI thread. `refresh` skips soft cache.
 /// Empty card while the config `agents` gate is off (keychain guard: no provider probe).
 /// Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
