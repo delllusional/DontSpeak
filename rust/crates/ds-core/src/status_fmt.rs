@@ -162,9 +162,13 @@ fn duration_live_no_seconds(secs: f64) -> String {
 }
 
 /// Runtime label for a provider token. ONE mapping (was duplicated in Swift + C#).
+/// Empty token = no backend realized yet → the shared `—` placeholder, so a null
+/// `provider` renders identically on every host instead of vanishing (issue #205).
 pub fn runtime_label(provider: &str) -> String {
     use ds_config::Provider;
-    let key = if provider == Provider::Mlx.as_str() {
+    let key = if provider.is_empty() {
+        "common.dash"
+    } else if provider == Provider::Mlx.as_str() {
         "status.engine.mlx"
     } else if provider == Provider::OrtCoreMl.as_str() {
         "status.engine.coreml"
@@ -333,6 +337,7 @@ mod tests {
         assert_eq!(runtime_label("mlx"), "MLX Audio");
         assert_eq!(runtime_label("coreml"), "ORT Core ML");
         assert_eq!(runtime_label("whatever"), "whatever");
+        assert_eq!(runtime_label(""), "—"); // no backend realized yet → dash (issue #205)
     }
 
     #[test]

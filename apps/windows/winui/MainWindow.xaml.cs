@@ -852,11 +852,12 @@ public sealed partial class MainWindow : Window
         }
 
         // Shared formatter returns "" when ready — empty note means show stats (all platforms).
-        // Runtime line only when ready (avoids stale "ORT CPU" under Downloading N%).
+        // Runtime line only when not downloading (avoids stale "ORT CPU"); empty provider dashes
+        // until a backend is realized rather than collapsing the row (#205 cross-host parity).
         bool ttsSystem = s.TtsEngine.Engine == "system";
         var ttsInfo = s.TtsEngine.Status;
         bool ttsTrouble = !string.IsNullOrEmpty(ttsInfo.Word);
-        TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble && s.TtsEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
+        TtsRuntimeRow.Visibility = (!ttsSystem && !ttsTrouble) ? Visibility.Visible : Visibility.Collapsed;
         if (!ttsSystem) TtsRuntimeText.Text = Native.RuntimeLabel(s.TtsEngine.Provider);
         TtsSystemSettingsRow.Visibility = Visibility.Collapsed;
         if (ttsTrouble)
@@ -880,7 +881,7 @@ public sealed partial class MainWindow : Window
         bool sttBuiltIn = s.SttEngine.Engine == "built_in";
         var sttInfo = s.SttEngine.Status;
         bool sttTrouble = !string.IsNullOrEmpty(sttInfo.Word);
-        SttRuntimeRow.Visibility = (sttBuiltIn && !sttTrouble && s.SttEngine.Provider.Length > 0) ? Visibility.Visible : Visibility.Collapsed;
+        SttRuntimeRow.Visibility = (sttBuiltIn && !sttTrouble) ? Visibility.Visible : Visibility.Collapsed;
         if (sttBuiltIn) SttRuntimeText.Text = Native.RuntimeLabel(s.SttEngine.Provider);
         if (sttTrouble)
             ShowMsg(SttStatsMsg, SttStatsGrid, sttInfo.Word);

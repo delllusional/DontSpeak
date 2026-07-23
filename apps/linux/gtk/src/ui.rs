@@ -460,11 +460,9 @@ pub fn update(w: &Widgets, snap: &Snapshot) {
         .set_text(&crate::ffi::duration_live(s.stats.lifetime.stt_secs as f64));
 }
 
+/// Provider token → label; empty/None dashes via the shared `runtime_label` (#205 parity).
 fn runtime_text(provider: Option<&str>) -> String {
-    match provider {
-        Some(p) if !p.is_empty() => crate::ffi::runtime_label(p),
-        _ => t("common.dash"),
-    }
+    crate::ffi::runtime_label(provider.unwrap_or(""))
 }
 
 /// Failures row only when count > 0 (peer parity).

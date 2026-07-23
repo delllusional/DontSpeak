@@ -434,9 +434,8 @@ private struct TtsStatsContent: View {
             .onTapGesture { core.openSpokenContentSettings() }
             .linkCursor()
         } else {
-            if let prov = core.tts.provider {
-                LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
-            }
+            // Row stays; empty provider dashes until a backend is realized (#205 cross-host parity).
+            LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(core.tts.provider ?? ""))
             let s = core.stats.tts
             if s.utterances == 0 {
                 glassHint("status.no_data")
@@ -461,8 +460,9 @@ private struct TtsStatsContent: View {
 private struct SttStatsContent: View {
     @Environment(Core.self) private var core
     var body: some View {
-        if core.stt.engine == "built_in", let prov = core.stt.provider {
-            LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
+        // Row stays; empty provider dashes until a backend is realized (#205 cross-host parity).
+        if core.stt.engine == "built_in" {
+            LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(core.stt.provider ?? ""))
         }
         // Claude Code: show synthesized key, not local RTF.
         let s = core.stats.stt
