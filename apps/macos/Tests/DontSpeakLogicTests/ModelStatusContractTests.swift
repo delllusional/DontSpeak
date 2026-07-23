@@ -38,7 +38,7 @@ final class ModelStatusContractTests: XCTestCase {
           "diarization": {
             "status": {"state": "missing", "progress": 0.0, "error": null},
             "enabled": false,
-            "provider": "mlx",
+            "provider": null,
             "speakers": [],
             "activity_threshold": 0.5
           },
@@ -94,7 +94,7 @@ final class ModelStatusContractTests: XCTestCase {
 
         XCTAssertEqual(dto.diarization.status.state, "missing")
         XCTAssertFalse(dto.diarization.enabled)
-        XCTAssertEqual(dto.diarization.provider, "mlx")
+        XCTAssertNil(dto.diarization.provider)
         XCTAssertEqual(dto.diarization.speakers, [])
         XCTAssertEqual(dto.diarization.activityThreshold, 0.5)
 
@@ -184,6 +184,8 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertEqual(dto.downloads[0].startBytes, 5)
         XCTAssertEqual(dto.downloads[0].elapsedSeconds, 2)
         XCTAssertEqual(dto.diarization.speakers, ["Alex"])
+        // Realized backend: a running row names its provider.
+        XCTAssertEqual(dto.diarization.provider, "mlx")
         XCTAssertTrue(dto.agents)
         XCTAssertEqual(dto.stats.tts.queued, 4)
     }

@@ -331,6 +331,8 @@ pub(crate) fn model_status_json(
         },
         frac_for(DownloadTarget::DiarizationMlx).max(frac_for(DownloadTarget::SepformerModel)),
     );
+    let diarization_provider =
+        diarization_provider_token(cfg.resolved_diarizer(), diarization_status.state);
 
     let status = ModelStatus {
         seq,
@@ -373,8 +375,7 @@ pub(crate) fn model_status_json(
         diarization: DiarizationStatus {
             status: diarization_status,
             enabled: cfg.is_diarization_on(),
-            // Realized compute token hosts pass to `ds_runtime_label`.
-            provider: ds_config::Provider::Mlx.as_str().to_string(),
+            provider: diarization_provider,
             speakers: ds_config::SpeakerStore::load(&paths.speakers_json).names(),
             activity_threshold: cfg.activity_threshold as f64,
         },
@@ -461,6 +462,19 @@ fn tts_provider_token(
         }
         _ => None,
     }
+}
+
+/// Realized diarizer token — `None` until the row runs on a backend wired for this
+/// platform. The diarizer loads inside `ds-helper` on demand and reports nothing back,
+/// so `Running` (assets on disk + speaker lock armed) is the strongest realization
+/// signal the engine has. `ensure_mlx_backend` is the sole provider→backend mapping;
+/// without it `resolved_diarizer`'s `Mlx` fallback would claim a backend off macOS.
+fn diarization_provider_token(
+    diarizer: ds_config::DiarizerProvider,
+    state: EngineState,
+) -> Option<String> {
+    (state == EngineState::Running && ds_stt::diarize::ensure_mlx_backend(diarizer).is_ok())
+        .then(|| diarizer.as_str().to_string())
 }
 
 fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
@@ -633,10 +647,10 @@ pub(crate) fn dictation_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineShared, StatusGate, active_download_statuses, combined_error, dictation_local_stt,
-        dictation_state, engine_state, model_status_json, realized_provider_token,
-        row_download_frac, row_downloading, status_tts_model, stt_provider_token,
-        tts_provider_token,
+        EngineShared, StatusGate, active_download_statuses, combined_error,
+        diarization_provider_token, dictation_local_stt, dictation_state, engine_state,
+        model_status_json, realized_provider_token, row_download_frac, row_downloading,
+        status_tts_model, stt_provider_token, tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -1069,6 +1083,31 @@ mod tests {
         assert_eq!(stt_provider_token(None, "CUDA"), None);
         assert_eq!(tts_provider_token(Some(TtsEngine::System), "CUDA"), None);
         assert_eq!(tts_provider_token(None, "CUDA"), None);
+    }
+
+    #[test]
+    fn diarization_provider_is_absent_until_the_row_runs() {
+        // #200: the token was a constant, so the row claimed "mlx" with state "missing".
+        // Only a Running row (assets present + lock armed) has a backend to name.
+        let mlx = ds_config::DiarizerProvider::Mlx;
+        for state in EngineState::ALL {
+            if state == EngineState::Running {
+                continue;
+            }
+            assert_eq!(
+                diarization_provider_token(mlx, state),
+                None,
+                "no realized backend in state {}",
+                state.as_str()
+            );
+        }
+        // Wiring is macOS-only (`ds_stt::diarize::ensure_mlx_backend`), so elsewhere even a
+        // Running row names nothing.
+        let running = diarization_provider_token(mlx, EngineState::Running);
+        #[cfg(target_os = "macos")]
+        assert_eq!(running.as_deref(), Some("mlx"));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(running, None);
     }
 
     #[test]

@@ -93,7 +93,8 @@ pub struct SttStatus {
 pub struct DiarizationStatus {
     pub status: EngineStatus,
     pub enabled: bool,
-    pub provider: String,
+    /// `null` until a diarization backend is realized.
+    pub provider: Option<String>,
     pub speakers: Vec<String>,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub activity_threshold: f64,
@@ -243,7 +244,7 @@ mod tests {
             diarization: DiarizationStatus {
                 status: engine_none(),
                 enabled: false,
-                provider: "mlx".to_string(),
+                provider: None,
                 speakers: vec![],
                 activity_threshold: 0.5,
             },
@@ -304,6 +305,7 @@ mod tests {
         assert!(v["tts"]["language"].is_null());
         assert!(v["tts"]["provider"].is_null());
         assert!(v["stt"]["provider"].is_null());
+        assert!(v["diarization"]["provider"].is_null());
         assert!(v["stt"]["voice_key"].is_null());
         assert_eq!(v["dictation"]["state"], "hidden");
         assert!(
@@ -506,7 +508,7 @@ mod tests {
         fn diarization_status_strategy()(
             status in engine_status_strategy(),
             enabled in any::<bool>(),
-            provider in short_string(),
+            provider in opt_short_string(),
             speakers in short_string_vec(),
             activity_threshold in unit_f64(),
         ) -> DiarizationStatus {
@@ -626,6 +628,7 @@ mod tests {
             prop_assert!(v["diarization"]["status"]["state"].is_string());
             prop_assert!(v["tts"].get("provider").is_some());
             prop_assert!(v["stt"].get("provider").is_some());
+            prop_assert!(v["diarization"].get("provider").is_some());
             prop_assert!(v["stt"].get("voice_key").is_some());
             prop_assert!(v["seq"].is_u64());
             prop_assert!(v["stats"]["tts"]["rtf_avg"].is_f64());

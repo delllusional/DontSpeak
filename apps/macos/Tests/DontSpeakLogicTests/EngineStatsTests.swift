@@ -22,7 +22,7 @@ final class EngineStatsTests: XCTestCase {
             from: Data(
                 """
                 {"status":{"state":"idle","progress":0,"error":null},
-                 "enabled":true,"provider":"mlx","speakers":["alex"],
+                 "enabled":true,"provider":null,"speakers":["alex"],
                  "activity_threshold":0.6,"future_detail":true}
                 """.utf8))
 
@@ -37,7 +37,7 @@ final class EngineStatsTests: XCTestCase {
         XCTAssertTrue(diarization.enabled)
         XCTAssertEqual(diarization.speakers, ["alex"])
         XCTAssertEqual(diarization.activityThreshold, 0.6)
-        XCTAssertEqual(diarization.provider, "mlx")
+        XCTAssertNil(diarization.provider)
         XCTAssertEqual(s.lifetime.ttsSecs, 100)
         XCTAssertEqual(s.lifetime.sttSecs, 50)
     }

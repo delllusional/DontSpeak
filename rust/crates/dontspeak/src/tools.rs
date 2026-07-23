@@ -1059,7 +1059,7 @@ mod status_output {
             },
             "diarization": {
                 "status": { "state": "missing", "progress": 0.0, "error": null },
-                "enabled": false, "provider": "mlx", "speakers": [],
+                "enabled": false, "provider": null, "speakers": [],
                 "activity_threshold": 0.5
             },
             "dictation": { "state": "hidden", "text": "", "can_paste": true },

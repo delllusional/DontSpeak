@@ -169,6 +169,18 @@ public class HealthSnapshotTests
     }
 
     [Fact]
+    public void DiarizationWithoutARealizedBackendHidesTheRuntimeRow()
+    {
+        var s = Parse("""
+            {"diarization":{"status":{"state":"missing","progress":0.0,"error":null},
+             "enabled":true,"provider":null,"speakers":["Alex"],"activity_threshold":0.5}}
+            """);
+        Assert.Equal(EngineState.Missing, s.Diarization.Status.State);
+        // Empty runtime is what MainWindow keys the row's visibility off.
+        Assert.Equal("", s.Diarization.Runtime);
+    }
+
+    [Fact]
     public void StatsBlocksMapIntoTheSnapshotGroups()
     {
         var s = Parse("""

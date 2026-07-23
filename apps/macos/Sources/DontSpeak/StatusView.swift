@@ -495,8 +495,8 @@ private struct DiarStatsContent: View {
         } else if s.speakers.isEmpty {
             glassHint("status.diarization_no_speakers")
         } else {
-            if !s.provider.isEmpty {
-                LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(s.provider))
+            if let prov = s.provider {
+                LabeledContent(L.t("status.engine.role_runtime"), value: runtimeLabel(prov))
             }
             LabeledContent(
                 L.t("status.diarization_enrolled"),

@@ -59,7 +59,7 @@ struct SttEngine: Sendable, Equatable {
 struct Diarization: Sendable, Equatable {
     var status: EngineStatus = .missing
     var enabled = false
-    var provider = ""
+    var provider: String? = nil
     var speakers: [String] = []
     var activityThreshold = 0.5
 }

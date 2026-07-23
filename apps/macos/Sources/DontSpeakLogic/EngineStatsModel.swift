@@ -74,7 +74,8 @@ public struct EngineStatusDTO: Decodable, Sendable, Equatable {
 public struct DiarizationStatusDTO: Decodable, Sendable, Equatable {
     public var status: EngineStatusDTO
     public var enabled: Bool
-    public var provider: String
+    /// `nil` until a diarization backend is realized.
+    public var provider: String?
     public var speakers: [String]
     public var activityThreshold: Double
 
