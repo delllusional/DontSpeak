@@ -112,6 +112,10 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
   check `.gitattributes` before any `{ git = ..., rev = ... }`.
 - **No hardcoded UI strings.** New user-facing text → `ds-i18n` catalog
   (`rust/crates/ds-i18n/locales/en.yml`) via FFI — [docs/LOCALIZATION.md](docs/LOCALIZATION.md).
+- **ASCII-only `.sh` / `.ps1`.** They carry no BOM, so the console decodes them by its
+  own codepage: Windows PowerShell 5.1 turned every em dash in installer output into
+  mojibake. Plain `--`, `->`, `...`. `node scripts/ci/check-shell-ascii.mjs` gates it at
+  release.
 - **Tests never touch live resources.** Tempdir, loopback mocks, fake children only —
   not real config/cache/logs, hardware, credentials, audio, or network. `#[ignore]` is
   not an escape hatch. HTTP callers (`ds-model` downloads, update-check) take a base URL

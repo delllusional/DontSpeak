@@ -128,7 +128,8 @@ done
 
 ## 3 — What runs (`release.yml`)
 
-1. **check** — tag == Cargo version; also picks the macOS slices and the MLX test gate
+1. **check** — tag == Cargo version; `.sh`/`.ps1` ASCII-only
+   (`scripts/ci/check-shell-ascii.mjs`); also picks the macOS slices and the MLX test gate
 2. **tests** — full OS matrix + hygiene (fmt both + rustdoc). Runs ALONGSIDE the builds,
    which wait on `check` only; **publish** is what requires it
 3. **builds** (parallel): Windows portable zips (unsigned); macOS signed/notarized if

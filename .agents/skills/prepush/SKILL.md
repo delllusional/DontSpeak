@@ -63,7 +63,7 @@ impossible, stop and report.
 
 1. **Script tests**
    ```bash
-   node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+   node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/check-shell-ascii.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
    python3 scripts/release/release-stats.test.py
    node scripts/agents/run-bash.mjs apps/macos/bundle-lib.test.sh
    ```
@@ -139,7 +139,7 @@ push.
 
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
-node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
+node --test scripts/agents/agent-attribution.test.mjs scripts/agents/run-bash.test.mjs scripts/agents/task-worktree.test.mjs scripts/ci/check-shell-ascii.test.mjs scripts/ci/merge-crate-coverage.test.js scripts/install/web/install.test.mjs
 python3 scripts/release/release-stats.test.py
 node scripts/agents/run-bash.mjs apps/macos/bundle-lib.test.sh
 cd rust && cargo clippy --workspace --all-targets --keep-going --locked -- -D warnings

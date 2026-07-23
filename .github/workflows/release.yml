@@ -90,6 +90,14 @@ jobs:
           echo "rust/Cargo.toml version=$ver  apps/linux/gtk/Cargo.toml version=$gtk_ver"
           [ "$ver" = "$gtk_ver" ] || { echo "::error::apps/linux/gtk/Cargo.toml version ($gtk_ver) != rust/Cargo.toml version ($ver) — bump it to match"; exit 1; }
 
+      # install.ps1 / install.sh are published release assets and the uninstallers are
+      # copied into every archive, so their bytes reach user machines verbatim. None of
+      # them carries a BOM: Windows PowerShell 5.1 decodes a .ps1 with the machine's ANSI
+      # codepage, and any non-ASCII character in installer output arrives as mojibake.
+      # Release-only, like the rustfmt/rustdoc hygiene gate in ci.yml.
+      - name: Installer and packaging scripts are ASCII-only
+        run: node scripts/ci/check-shell-ascii.mjs
+
       # Downstream selectors, decided once in the job every other job already waits on.
       - name: Plan the macOS matrix + the MLX test gate
         id: plan
