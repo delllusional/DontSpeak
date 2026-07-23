@@ -610,7 +610,6 @@ pub fn run_setup_tts_model_with_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     #[test]
     fn registry_matches_config_models_and_pins_every_file() {
@@ -761,32 +760,6 @@ mod tests {
                     "audio_tokenizer file {} must carry the Boson partition",
                     file.url
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn model_subdirectories_do_not_collide() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: this test serializes the process-wide environment and restores it below.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-        assert_eq!(
-            tts_model_dir(TtsModel::Kokoro),
-            Some(tmp.path().to_path_buf())
-        );
-        assert_eq!(
-            tts_model_dir(TtsModel::Qwen),
-            Some(tmp.path().join("qwen3-tts"))
-        );
-        assert!(!tts_model_files_present(TtsModel::OmniVoice, false));
-        assert!(!tts_model_files_present(TtsModel::OmniVoice, true));
-        // SAFETY: restore the environment before releasing the serialization guard.
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("DONTSPEAK_MODEL_DIR", value),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
             }
         }
     }

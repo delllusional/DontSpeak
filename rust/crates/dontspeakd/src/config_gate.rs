@@ -366,10 +366,9 @@ pub(crate) fn debug_enabled() -> bool {
 }
 
 /// Serializes every `dontspeakd`-crate test (here and in `tts.rs`) that mutates the
-/// process-wide `DONTSPEAK_MODEL_DIR` / `DONTSPEAK_MLX_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars —
-/// mirrors `ds-model/src/spec.rs`'s own `ENV_LOCK` idiom (`spec.rs:326`). ONE shared lock, not
-/// a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching the SAME var can't
-/// interleave (`dontspeakd`'s test binary runs multi-threaded by default).
+/// process-wide `DONTSPEAK_MODEL_DIR` / `DONTSPEAK_MLX_DYLIB_PATH` / `ORT_DYLIB_PATH` env vars.
+/// ONE shared lock, not a per-file one, so a `config_gate.rs` test and a `tts.rs` test touching
+/// the SAME var can't interleave (`dontspeakd`'s test binary runs multi-threaded by default).
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

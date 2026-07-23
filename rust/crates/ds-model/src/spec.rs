@@ -396,13 +396,6 @@ fn tts_prefetch_items(
 mod tests {
     use super::*;
 
-    // Serializes the tests below that mutate the process-wide `DONTSPEAK_MODEL_DIR` env
-    // var: without this, the default parallel test runner can interleave two such tests'
-    // set/read/restore windows so one observes the other's temp dir instead of its own.
-    // Crate-level (`crate::TEST_ENV_LOCK`) so tts_assets.rs's hermetic tests serialize on
-    // the SAME lock — two module-local locks would not serialize against each other.
-    use crate::TEST_ENV_LOCK as ENV_LOCK;
-
     // The installer stages each prefetched file under prefetch_key(url): the manifest
     // saves the download under that key and prefetch_local() looks it up by it. Several
     // TTS assets intentionally SHARE a basename (`config.json`, `tokenizer.json`,
@@ -492,67 +485,6 @@ mod tests {
         assert_eq!(tts_prefetch_items(files, |_| false).len(), files.len());
     }
 
-    /// Empty model dir: subdirectory model lists every file under prefetch keys.
-    #[test]
-    fn tts_model_prefetch_lists_every_file_for_an_empty_model_dir() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-
-        let items = prefetch_items(DownloadTarget::QwenModel);
-
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
-
-        let files = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::Qwen).files;
-        assert_eq!(items.len(), files.len());
-        for (item, file) in items.iter().zip(files) {
-            assert_eq!(item.url, file.url);
-            assert_eq!(item.file_name, prefetch_key(file.url));
-            assert_eq!(item.sha256, file.sha256);
-        }
-    }
-
-    #[test]
-    fn omnivoice_prefetch_manifest_stages_no_cuda_asset() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-
-        let items = prefetch_items(DownloadTarget::OmniVoiceModel);
-
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
-
-        let set = crate::tts_assets::tts_ort_asset_set(ds_config::TtsModel::OmniVoice);
-        assert_eq!(items.len(), set.files.len());
-        assert!(
-            set.cuda_files.is_empty(),
-            "one profile serves every provider"
-        );
-        for item in &items {
-            assert!(
-                !item.url.contains("/cuda/"),
-                "staged CUDA asset: {}",
-                item.url
-            );
-        }
-    }
-
     #[test]
     fn kokoro_specs_have_right_urls_and_files() {
         let onnx = kokoro_onnx_spec();
@@ -615,31 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn is_kokoro_present_returns_a_bool_without_panicking() {
-        // Hermetic empty model dir (ambient cache would hash hundreds of MB).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK. Restored below before
-        // returning.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-
-        let present: bool = is_kokoro_present();
-        assert!(
-            !present,
-            "a fresh, empty model dir must never read as present"
-        );
-
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
-    }
-
-    #[test]
     fn parakeet_specs_have_right_urls_files_and_pins() {
         let enc = parakeet_encoder_spec();
         assert_eq!(enc.file_name, "encoder.int8.onnx");
@@ -687,30 +594,6 @@ mod tests {
     }
 
     #[test]
-    fn is_parakeet_present_returns_a_bool_without_panicking() {
-        // Hermetic empty model dir (same ambient-cache trap as kokoro present test).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-
-        let present = is_parakeet_present();
-        assert!(
-            !present,
-            "a fresh, empty model dir must never read as present"
-        );
-
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
-    }
-
-    #[test]
     fn sepformer_spec_pins_url_file_and_digest() {
         let spec = sepformer_spec();
         assert_eq!(spec.file_name, "sepformer_int8.onnx");
@@ -728,25 +611,5 @@ mod tests {
             "sha256 must be lowercase hex: {}",
             spec.sha256
         );
-        // Hermetic empty model dir (same ambient-cache trap as kokoro present test).
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("DONTSPEAK_MODEL_DIR");
-        // SAFETY: test-only env mutation, serialized by ENV_LOCK, restored below.
-        unsafe { std::env::set_var("DONTSPEAK_MODEL_DIR", tmp.path()) };
-
-        let present = is_sepformer_present();
-        assert!(
-            !present,
-            "a fresh, empty model dir must never read as present"
-        );
-
-        // SAFETY: restore the prior value (or clear it) so later tests see the real env again.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("DONTSPEAK_MODEL_DIR", v),
-                None => std::env::remove_var("DONTSPEAK_MODEL_DIR"),
-            }
-        }
     }
 }

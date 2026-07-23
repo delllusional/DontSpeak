@@ -99,13 +99,6 @@ pub use ort::{
     is_cuda_driver_present, is_cuda_runtime_present,
 };
 
-/// Serializes every in-crate test that mutates the process-wide `DONTSPEAK_MODEL_DIR` /
-/// `ORT_DYLIB_PATH` env vars. ONE crate-level lock — a second module-local lock would NOT
-/// serialize against this one, reintroducing the interleaving race the parallel test
-/// runner makes possible (spec.rs and tts_assets.rs tests share it).
-#[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Resolve a file name to its full path under [`ds_config::model_dir`].
 /// `None` only if the per-OS data dir cannot be resolved.
 pub fn model_path(file_name: &str) -> Option<PathBuf> {
