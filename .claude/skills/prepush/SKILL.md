@@ -1,6 +1,6 @@
 ---
 name: prepush
-description: On feature branches, run only fast local hygiene, push, and monitor CI's script, clippy, and Rust-test gates. Run the full gates locally only for a direct main push or when explicitly requested. Use when asked to push, prepush, check CI, or verify a change before main.
+description: On feature branches, run only fast local hygiene, push, monitor CI, then immediately fast-forward a green exact head onto main without local retesting. Run full gates locally only for a direct unverified main push or when explicitly requested. Use when asked to push, prepush, check CI, or land.
 ---
 
 # DontSpeak — prepush
@@ -51,6 +51,14 @@ If the branch has no pull request yet, use `gh run list --branch <branch>` and
 report the push as complete while required CI is still pending unless the user
 explicitly asks not to wait.
 
+When every applicable non-release check for the exact current head is green, land
+it immediately using [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md):
+update the dedicated `main` worktree with `git pull --ff-only`, require
+`origin/main` to be an ancestor of the recorded feature SHA, run `git merge
+--ff-only <feature-sha>` there, and push `main` without force. Do not re-run local
+checks, cherry-pick, rebase, or create a merge commit. If fast-forward is
+impossible, stop and report.
+
 ## Full local gates: direct main push or explicit request
 
 1. **Script tests**
@@ -76,8 +84,9 @@ explicitly asks not to wait.
    PowerShell: set the same env vars, then `cargo test --workspace --locked --offline`
    after `cargo fetch --locked`.
 
-All green → push `main`. Any failure → fix and re-run. A pull-request merge does
-not need this local duplication: its feature-branch CI must be green instead.
+All green → push `main`. Any failure → fix and re-run. This section applies only
+to a direct unverified `main` push or an explicit request for local CI. A green
+feature branch never duplicates the checks locally before fast-forward landing.
 
 ## cargo-deny (optional here; required at release)
 
@@ -102,8 +111,8 @@ Drift → run without `--check`, review, re-check. See [AGENT-SKILLS.md](../../.
 ## Push
 
 Confirm commits to push and attribution. Feature branch: push first, then monitor
-CI. Direct `main`: run the full local gates first. Push to
-`delllusional/DontSpeak`.
+CI and fast-forward a green exact head onto `main` immediately. Direct unverified
+`main`: run the full local gates first. Push to `delllusional/DontSpeak`.
 
 ## Caveats
 
@@ -121,6 +130,10 @@ node scripts/agents/sync-agent-skills.mjs --check
 git push origin "$(git branch --show-current)"
 gh pr checks --watch --interval 10
 ```
+
+Green CI continues directly into the ff-only landing procedure in
+`docs/TASK-BASELINE.md`; there is no local test step between CI and the `main`
+push.
 
 ## Direct-main full gate
 

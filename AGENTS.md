@@ -126,9 +126,11 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 
 `.github/workflows/ci.yml` is source of truth. On feature branches, `prepush`
 runs only attribution, diff, and skill-mirror hygiene locally, then pushes and
-monitors the full per-commit CI gate. Direct `main` pushes run that full gate
-locally first. `make-release` = release/hygiene matrix. Don't move checks between
-them. Scheduled dependency audit stays separate.
+monitors the full per-commit CI gate. A branch whose exact head is green is
+fast-forwarded onto `main` immediately with no repeated local checks. Direct
+unverified `main` pushes run the full gate locally first. `make-release` =
+release/hygiene matrix. Don't move checks between them. Scheduled dependency
+audit stays separate.
 
 ## Code comments
 

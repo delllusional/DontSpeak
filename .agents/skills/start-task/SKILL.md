@@ -37,6 +37,8 @@ the task's base commit.
 - Workers never edit the `main` worktree or another task worktree.
 - Workers do not stash, rebase, reset, prune, remove worktrees, or rewrite shared
   branches. The integrator owns repository administration and landing.
+- The integrator immediately fast-forwards an exact CI-green feature head onto
+  `main` without repeated local checks; see `docs/TASK-BASELINE.md`.
 - Keep build outputs, ports, databases, and live processes task-local. A worktree
   isolates tracked files, not external resources.
 - Commit and report the branch, absolute worktree path, base commit, and checks run.
