@@ -124,9 +124,11 @@ commands — [docs/BUILD-DEPLOY.md](docs/BUILD-DEPLOY.md).
 
 ## Gates
 
-`.github/workflows/ci.yml` is source of truth. `prepush` = per-commit gate;
-`make-release` = release/hygiene matrix. Don't move checks between them. Scheduled
-dependency audit stays separate.
+`.github/workflows/ci.yml` is source of truth. On feature branches, `prepush`
+runs only attribution, diff, and skill-mirror hygiene locally, then pushes and
+monitors the full per-commit CI gate. Direct `main` pushes run that full gate
+locally first. `make-release` = release/hygiene matrix. Don't move checks between
+them. Scheduled dependency audit stays separate.
 
 ## Code comments
 

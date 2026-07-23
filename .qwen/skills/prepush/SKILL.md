@@ -1,6 +1,6 @@
 ---
 name: prepush
-description: Run the exact CI gates locally, then push to origin only if they pass — so the per-commit CI on GitHub never goes red. Mirrors .github/workflows/ci.yml (script tests + clippy + Rust tests). Use when asked to push, prepush, "run CI locally", or verify a change before pushing to main.
+description: On feature branches, run only fast local hygiene, push, and monitor CI's script, clippy, and Rust-test gates. Run the full gates locally only for a direct main push or when explicitly requested. Use when asked to push, prepush, check CI, or verify a change before main.
 ---
 
 # DontSpeak — prepush
@@ -8,8 +8,9 @@ description: Run the exact CI gates locally, then push to origin only if they pa
 > Apply [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md) and
 > [`docs/TASK-EFFORT.md`](../../../docs/TASK-EFFORT.md).
 
-Source of truth: `.github/workflows/ci.yml`. Cargo from `rust/`. rustfmt/rustdoc/deny
-are release-only (`make-release`).
+Source of truth: `.github/workflows/ci.yml`. Feature branches use CI for the full
+per-commit gate. Cargo commands run from `rust/`. rustfmt/rustdoc/deny are
+release-only (`make-release`).
 
 ## Attribution (before commit rewrite and before push)
 
@@ -23,7 +24,34 @@ git log --format=full origin/main..HEAD
 
 Don't push until both pass; re-run after message rewrites.
 
-## Three gates
+## Feature branch default: minimum local, full CI
+
+Before pushing any branch other than `main`:
+
+```bash
+node scripts/agents/check-commit-attribution.mjs origin/main
+git log --format=full origin/main..HEAD
+git diff --check origin/main...HEAD
+node scripts/agents/sync-agent-skills.mjs --check
+git push origin "$(git branch --show-current)"
+```
+
+Do not duplicate the full script, clippy, or workspace-test suites locally unless
+the user explicitly requests local CI or a CI failure needs focused reproduction.
+After pushing, monitor the pull request until all non-release checks reach a
+terminal state:
+
+```bash
+gh pr checks --watch --interval 10
+```
+
+If the branch has no pull request yet, use `gh run list --branch <branch>` and
+`gh run watch <run-id>`. On failure, inspect with `gh run view <run-id>
+--log-failed`, fix, repeat the minimum local gate, push, and monitor again. Do not
+report the push as complete while required CI is still pending unless the user
+explicitly asks not to wait.
+
+## Full local gates: direct main push or explicit request
 
 1. **Script tests**
    ```bash
@@ -48,7 +76,8 @@ Don't push until both pass; re-run after message rewrites.
    PowerShell: set the same env vars, then `cargo test --workspace --locked --offline`
    after `cargo fetch --locked`.
 
-All green → push. Any fail → fix and re-run.
+All green → push `main`. Any failure → fix and re-run. A pull-request merge does
+not need this local duplication: its feature-branch CI must be green instead.
 
 ## cargo-deny (optional here; required at release)
 
@@ -72,8 +101,9 @@ Drift → run without `--check`, review, re-check. See [AGENT-SKILLS.md](../../.
 
 ## Push
 
-Confirm commits to push; attribution clean; `git push origin <branch>` (default `main`)
-to `delllusional/DontSpeak`.
+Confirm commits to push and attribution. Feature branch: push first, then monitor
+CI. Direct `main`: run the full local gates first. Push to
+`delllusional/DontSpeak`.
 
 ## Caveats
 
@@ -82,7 +112,17 @@ to `delllusional/DontSpeak`.
   pkg-config`. Shared code: local OS is fine.
 - Full OS matrix + hygiene = release only (`make-release` / `build-*`).
 
-## One-liner
+## Feature-branch one-liner
+
+```bash
+node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
+git diff --check origin/main...HEAD
+node scripts/agents/sync-agent-skills.mjs --check
+git push origin "$(git branch --show-current)"
+gh pr checks --watch --interval 10
+```
+
+## Direct-main full gate
 
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
