@@ -28,7 +28,9 @@ Queue text for spoken playback.
 | `text` | string | yes | Text to speak. |
 | `tts_args` | object | no | Per-target voice/language/params for this utterance. See voices and models. |
 
-Only the target active at playback is applied. Flat `voice`/`language`/`rate` args are not accepted.
+Every supplied target block is validated against its own descriptor when the call is admitted,
+so an inactive block can still fail the call; only the target active at playback is applied.
+Flat `voice`/`language`/`rate` args are not accepted.
 
 Accepted text returns `Queued as utterance <id>.` — the handle `status` keys this utterance's
 record on. Text that is blank after trimming returns a bare `Queued.` (nothing to correlate).
