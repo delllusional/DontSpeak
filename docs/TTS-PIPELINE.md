@@ -92,11 +92,20 @@ receives plain multilingual text and a speaker ID; OmniVoice receives a style in
 resolved from its preset id in Rust (`OMNIVOICE_PRESETS`) — `default` stays automatic
 voice design. All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 
+**FluidAudio (`fluid`, Apple Silicon, Kokoro only, opt-in):** the same signed shim dylib
+exposes `ds_fluid_tts_*` over FluidAudio's ANE Kokoro. It receives the same Rust-owned IPA
+phonemes as every other Kokoro backend — DontSpeak skips FluidAudio's own G2P so the backends
+cannot drift. Two extra assets it needs: FluidAudio's `initialize()` eagerly loads a
+G2P/lexicon set from its hardcoded `~/.cache/fluidaudio/Models/kokoro`, which DontSpeak
+pre-fills (the `KOKORO_G2P_COREML` repo) for load only; and because the Core ML repo ships one
+voice pack (`ANE/af_heart.bin`) and `ensureVoicePack` throws with no fallback, any other voice's
+`[510, 256]` pack is materialized on demand from the ONNX `voices-v1.0.bin` before synthesis.
+
 ### Built-in model registry
 
 | Model | Language mode | Voices | Providers | Rate / full duplex |
 |---|---|---|---|---|
-| Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX | yes / yes |
+| Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX, FluidAudio | yes / yes |
 | Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
 | Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
 | OmniVoice | auto (any detected language) | 10 design presets | ORT CPU/CUDA, MLX | no / no |

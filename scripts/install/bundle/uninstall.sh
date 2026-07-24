@@ -119,7 +119,9 @@ case "$(uname -s)" in
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
     # Current config/state roots + the legacy ProjectDirs layout, model cache, and OS app caches.
-    # FluidAudio dirs: the pre-MLX builds' Core ML/ANE model cache -- kept so upgraders get cleaned.
+    # ~/.cache/fluidaudio is a LIVE path: the FluidAudio (fluid) provider pre-fills its Kokoro
+    # G2P/lexicon set there because FluidAudio hardcodes that cache dir. Application Support/
+    # FluidAudio stays dead on macOS (that relocation is iOS-only in 0.15.5) but is removed too.
     rm -rf \
       "$H/Library/Application Support/DontSpeak" \
       "$H/Library/Application Support/org.dontspeak.DontSpeak" \

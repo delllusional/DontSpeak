@@ -42,6 +42,10 @@ DontSpeak's MIT licensing.
   A copy of the pinned tag's license is shipped at `licenses/mlx-swift-MIT.txt`.
   https://github.com/ml-explore/mlx-swift
 - **MLX Swift LM** (shared model-loading and language-model layers) — **MIT**.
+- **FluidAudio** (the optional `fluid` provider: Core ML / ANE Kokoro TTS, Parakeet STT, and
+  speaker diarization on Apple Silicon; pinned to 0.15.5) — **Apache-2.0**.
+  A copy of the license is shipped at `licenses/Apache-2.0.txt`.
+  https://github.com/FluidInference/FluidAudio
 - **EventSource** and **yyjson** (transitive networking and JSON support) — **MIT**.
 - **Swift Transformers**, **Swift Hugging Face**, **Swift Xet**, **Swift Numerics**,
   **Swift Algorithms**, **Swift Collections**, **Swift Crypto**, **Swift ASN.1**,
@@ -173,6 +177,19 @@ upstream license:
   https://huggingface.co/nvidia/diar_streaming_sortformer_4spk-v2.1
 - **WeSpeaker VoxCeleb ResNet34-LM** speaker-embedding model, converted to MLX — **MIT**.
   https://huggingface.co/mlx-community/wespeaker-voxceleb-resnet34-LM
+- The optional **FluidAudio `fluid` provider** (Apple Silicon, opt-in) fetches its own pinned
+  Core ML model sets, published by FluidInference:
+  - **Kokoro-82M** Core ML TTS chain and G2P/lexicon sub-models — **Apache-2.0**.
+    https://huggingface.co/FluidInference/kokoro-82m-coreml
+  - **Parakeet TDT 0.6b v2** Core ML STT model (NVIDIA NeMo; English only) — **CC-BY-4.0**.
+    Attribution: "Parakeet TDT 0.6b v2 © NVIDIA, licensed under CC-BY-4.0."
+    https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v2-coreml
+  - **Parakeet realtime EOU 120M** Core ML streaming STT model (NVIDIA NeMo) —
+    **NVIDIA Open Model License**.
+    https://huggingface.co/FluidInference/parakeet-realtime-eou-120m-coreml
+  - **Speaker diarization** Core ML set — pyannote segmentation and WeSpeaker v2 embedding —
+    **CC-BY-4.0**.
+    https://huggingface.co/FluidInference/speaker-diarization-coreml
 - **NVIDIA CUDA** execution-provider runtime (Windows/Linux GPU path, x86_64) — redistributed
   by the user under NVIDIA's CUDA redistributable EULA.
 

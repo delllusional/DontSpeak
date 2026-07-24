@@ -36,9 +36,11 @@ macOS-only today, so Parakeet leads on Windows/Linux.
 
 **TTS engines:** `built_in` or `system`. The built-in model registry contains Kokoro,
 Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU, ORT CUDA,
-and MLX; Kokoro alone has Core ML, rate control, and full-duplex. Model capabilities
-drive voice, rate, full-duplex, download, and provider selection. Speech language is
-detected per utterance in the shared text pipeline and never persisted as a synthesis setting.
+and MLX; Kokoro alone has two Core ML backends — ORT's Core ML execution provider (`coreml`)
+and FluidAudio's native `.mlmodelc` chains (`fluid`, opt-in, Apple Silicon) — plus rate control
+and full-duplex. Model capabilities drive voice, rate, full-duplex, download, and provider
+selection. Speech language is detected per utterance in the shared text pipeline and never
+persisted as a synthesis setting.
 
 ## Caps Lock
 
@@ -67,7 +69,9 @@ and [docs/CLIENT-INTEGRATIONS.md](docs/CLIENT-INTEGRATIONS.md).
 ## Local STT (built-in)
 
 Same warm helper as TTS: Caps-ON opens mic → Parakeet TDT 0.6b v3 over ORT on
-Windows/Linux, or the same model via MLX Audio on Apple Silicon. Caps-OFF: final
+Windows/Linux, or the same model via MLX Audio on Apple Silicon. The opt-in `fluid` rung
+substitutes FluidAudio's Core ML Parakeet TDT 0.6b **v2** (English only, not the v3
+multilingual model) — a deliberate capability trade for the ANE path. Caps-OFF: final
 transcript → focus-gated key injector. The model is full-context, so dictation is decoded
 one speech segment at a time at the pauses a VAD endpointer finds.
 Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
@@ -80,12 +84,16 @@ removal of non-active models — and of a shared asset once nothing installed or
 references it (#220) — over `ds-ipc`, surfaced as the `models` MCP tool.
 `ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
 (Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
-built-in model. Intel macOS never builds or bundles MLX code; its built-in path remains ORT CPU
-when an Intel-compatible runtime is present. A dependency-free Swift shim retains Apple System
-STT on Intel. UI "Runtime" reflects the backend in use.
+built-in model. The opt-in `fluid` provider (Apple Silicon) runs FluidAudio's own pinned Core ML
+sets — Kokoro TTS, Parakeet v2 STT, diarization — through the same signed shim dylib that hosts
+MLX; its model sets download and pin like every other asset, except Kokoro's G2P/lexicon set,
+which FluidAudio hardcodes to `~/.cache/fluidaudio` and which DontSpeak pre-fills there for
+`initialize()` only. Intel macOS never builds or bundles MLX or FluidAudio code; its built-in
+path remains ORT CPU when an Intel-compatible runtime is present. A dependency-free Swift shim
+retains Apple System STT on Intel. UI "Runtime" reflects the backend in use.
 
 Kokoro English frontend uses checksum-pinned BART G2P (ORT) before backend selection —
-MLX Kokoro still needs that ORT dylib. See
+MLX and FluidAudio Kokoro still need that ORT dylib. See
 [docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-and-backends).
 
 ## FFI boundary

@@ -5,6 +5,10 @@ MLX Audio (Apple Silicon) — plus macOS System Speech. Same provider for Caps-L
 always-listening. The model detects its own language among 25 European ones; nothing in the
 config selects it.
 
+The opt-in `fluid` provider (Apple Silicon) substitutes FluidAudio's Core ML Parakeet TDT
+0.6b **v2** (batch) plus a 160 ms EOU streaming set for the live overlay. v2 is **English
+only** — the deliberate capability trade for the ANE path, versus the v3 multilingual default.
+
 The ONNX model is full-context (no encoder cache), so the portable path decodes a whole
 speech segment at each pause the VAD endpointer finds, and force-splits a pause-free
 monologue at `boundary::MAX_SEGMENT_SECS`. That bound is what keeps decode cost flat: a

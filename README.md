@@ -89,7 +89,9 @@ Always-listening does not use Caps Lock.
 | macOS Intel | ORT CPU |
 | Windows / Linux x86_64 | ORT CUDA → CPU |
 
-`coreml` remains available as an explicit macOS TTS provider through ONNX Runtime.
+`coreml` remains available as an explicit macOS TTS provider through ONNX Runtime. `fluid`
+(FluidAudio Core ML / ANE, Apple Silicon) is an opt-in rung for Kokoro TTS, Parakeet v2 STT,
+and diarization — select it with `set_config provider=["fluid", "mlx", "cuda", "cpu"]`.
 
 ## MCP tools
 
