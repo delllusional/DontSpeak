@@ -253,8 +253,20 @@ fn system_label(v: &SpeakerVoice) -> String {
 
 /// Built-in voices for a model and language.
 pub fn built_in_choices(model: TtsModel, language: &str) -> Vec<VoiceChoice> {
+    let kokoro_ids = (model == TtsModel::Kokoro)
+        .then(kokoro_voice_ids)
+        .unwrap_or_default();
+    built_in_choices_from(model, language, &kokoro_ids)
+}
+
+/// Built-in voices over injected Kokoro ids. Other models use their static registries.
+pub fn built_in_choices_from(
+    model: TtsModel,
+    language: &str,
+    kokoro_ids: &[String],
+) -> Vec<VoiceChoice> {
     if model == TtsModel::Kokoro {
-        return kokoro_choices(&primary_subtag(language));
+        return kokoro_choices_from(kokoro_ids, &primary_subtag(language));
     }
     model
         .descriptor()
@@ -272,6 +284,8 @@ pub fn built_in_choices(model: TtsModel, language: &str) -> Vec<VoiceChoice> {
 #[derive(Debug, Clone, Copy)]
 pub enum VoiceCatalog<'a> {
     BuiltIn(TtsModel),
+    /// Built-in catalog over caller-supplied Kokoro ids; other models keep their registry.
+    BuiltInFrom(TtsModel, &'a [String]),
     System(&'a [SpeakerVoice]),
 }
 
@@ -285,11 +299,13 @@ impl VoiceCatalog<'_> {
     /// drops it for every language this build actually speaks.
     pub fn voice_language(&self, voice: &str) -> Option<String> {
         match self {
-            Self::BuiltIn(TtsModel::Kokoro) => match kokoro_language(voice) {
-                "other" => None,
-                language => Some(language.to_string()),
-            },
-            Self::BuiltIn(_) => None,
+            Self::BuiltIn(TtsModel::Kokoro) | Self::BuiltInFrom(TtsModel::Kokoro, _) => {
+                match kokoro_language(voice) {
+                    "other" => None,
+                    language => Some(language.to_string()),
+                }
+            }
+            Self::BuiltIn(_) | Self::BuiltInFrom(_, _) => None,
             Self::System(voices) => voices
                 .iter()
                 .find(|candidate| candidate.id == voice)
@@ -318,6 +334,12 @@ impl VoiceCatalog<'_> {
                 .into_iter()
                 .map(|choice| choice.id)
                 .collect(),
+            Self::BuiltInFrom(model, kokoro_ids) => {
+                built_in_choices_from(*model, language, kokoro_ids)
+                    .into_iter()
+                    .map(|choice| choice.id)
+                    .collect()
+            }
             Self::System(voices) => system_choices_from(voices, &primary_subtag(language))
                 .into_iter()
                 .map(|choice| choice.id)
@@ -868,6 +890,19 @@ mod tests {
         );
         // No entry owns Spanish: empty, so the caller falls back rather than guessing.
         assert!(catalog.pool_for_language(&pool, "es").is_empty());
+    }
+
+    #[test]
+    fn injected_kokoro_catalog_supplies_language_voices() {
+        let ids = vec![
+            "af_sarah".to_string(),
+            "ef_dora".to_string(),
+            "if_sara".to_string(),
+        ];
+        let catalog = VoiceCatalog::BuiltInFrom(TtsModel::Kokoro, &ids);
+        assert_eq!(catalog.voices_for_language("it"), ["if_sara"]);
+        assert_eq!(catalog.voices_for_language("es"), ["ef_dora"]);
+        assert!(catalog.voices_for_language("fr").is_empty());
     }
 
     #[test]

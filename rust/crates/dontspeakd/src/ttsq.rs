@@ -408,6 +408,14 @@ struct PausedState {
     cause: Option<PauseCause>,
 }
 
+#[cfg(test)]
+fn test_kokoro_voice_ids() -> Vec<String> {
+    ["af_sarah", "bf_emma", "ef_dora", "if_sara"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
 pub struct TtsQueue {
     /// Every mutation must publish the new depth via [`TtsQueue::publish_queue_depth`]
     /// before releasing the guard — `queue_depth` mirrors [`speech_depth`].
@@ -442,6 +450,9 @@ pub struct TtsQueue {
     agent_voices: Mutex<HashMap<(Option<WiredAgent>, String), String>>,
     /// `say -v ?` enumeration, read once per process for System language matching.
     system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
+    /// Fixed unit-test catalog; production retains live disk enumeration.
+    #[cfg(test)]
+    kokoro_voice_ids: Vec<String>,
     /// Always acquired inside `items`.
     active: Mutex<ActiveSel>,
     playing: Mutex<Option<PlayingClaim>>,
@@ -486,6 +497,8 @@ impl TtsQueue {
             config: Mutex::new(config),
             agent_voices: Mutex::new(HashMap::new()),
             system_voices: OnceLock::new(),
+            #[cfg(test)]
+            kokoro_voice_ids: test_kokoro_voice_ids(),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -554,6 +567,7 @@ impl TtsQueue {
             config: Mutex::new(VoiceConfig::load(&paths)),
             agent_voices: Mutex::new(HashMap::new()),
             system_voices: OnceLock::new(),
+            kokoro_voice_ids: test_kokoro_voice_ids(),
             active: Mutex::new(ActiveSel::default()),
             last_voice_submit: Mutex::new(None),
             playing: Mutex::new(None),
@@ -1323,6 +1337,20 @@ impl TtsQueue {
             .get_or_init(ds_tts::enumerate::system_voices)
     }
 
+    fn built_in_voice_catalog(
+        &self,
+        model: ds_config::TtsModel,
+    ) -> ds_tts::enumerate::VoiceCatalog<'_> {
+        #[cfg(test)]
+        {
+            ds_tts::enumerate::VoiceCatalog::BuiltInFrom(model, &self.kokoro_voice_ids)
+        }
+        #[cfg(not(test))]
+        {
+            ds_tts::enumerate::VoiceCatalog::BuiltIn(model)
+        }
+    }
+
     /// Shared greeting+worker resolver: `(engine, voice)`. None if TTS off / empty pool.
     /// `language` is the detected language of the utterance; `None` (greeting) keeps the
     /// agent's default assignment.
@@ -1354,7 +1382,7 @@ impl TtsQueue {
                     return None;
                 }
                 self.pick_for_language(
-                    || ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model),
+                    || self.built_in_voice_catalog(cfg.tts_model),
                     source,
                     language,
                     &pool.voices,
@@ -5149,7 +5177,7 @@ mod tests {
     // out of the test — the borrow path is otherwise identical for every catalog.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     #[test]
-    fn resolve_engine_voice_borrows_a_catalog_voice_for_an_unconfigured_language() {
+    fn resolve_engine_voice_borrows_a_system_catalog_voice_for_an_unconfigured_language() {
         let q = mk_queue();
         let mk = |id: &str, tag: &str| ds_tts::SpeakerVoice {
             id: id.into(),
@@ -5190,6 +5218,32 @@ mod tests {
             q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("en"))
                 .map(|(_, v)| v),
             Some("Samantha".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_engine_voice_borrows_an_injected_kokoro_voice_for_an_unconfigured_language() {
+        let q = mk_queue();
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+
+        // The configured pool owns no Italian, so this forces `voices_for_language` through
+        // the queue's fixed test catalog rather than the real model cache.
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("it"))
+                .map(|(_, voice)| voice),
+            Some("if_sara".to_string())
+        );
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::ClaudeCode), Some("en"))
+                .map(|(_, voice)| voice),
+            Some("af_sarah".to_string())
         );
     }
 

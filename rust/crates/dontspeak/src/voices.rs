@@ -35,11 +35,7 @@ pub(crate) fn voice_groups_from(
     match engine {
         TtsEngine::BuiltIn => {
             let language = language.unwrap_or(model.descriptor().default_language);
-            let choices = if model == TtsModel::Kokoro {
-                enumerate::kokoro_choices_from(kokoro_ids, &enumerate::primary_subtag(language))
-            } else {
-                enumerate::built_in_choices(model, language)
-            };
+            let choices = enumerate::built_in_choices_from(model, language, kokoro_ids);
             let voices: Vec<Value> = choices
                 .into_iter()
                 .map(|c| {
