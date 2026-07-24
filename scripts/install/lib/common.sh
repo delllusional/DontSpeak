@@ -3,8 +3,21 @@
 # compute_build_id, find_codesign_id, resolve_sign_identity, require_engine_symbol,
 # swift_build_resilient. Also normalizes PATH.
 
+COMMON_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$COMMON_LIB_DIR/destination-lock.sh"
+
 # Toolchain dirs for non-interactive shells (launchd/cron/IDE).
 export PATH="$HOME/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+# The macOS web installer serializes the app bundle and its companion ~/.local/bin
+# changes under the app lock. Linux installers use the canonical dontspeak binary.
+local_install_lock_destination() {
+  if [ "$(uname -s)" = "Darwin" ]; then
+    printf '%s' "${DONTSPEAK_APP_DIR:-$HOME/Applications/DontSpeak.app}"
+  else
+    printf '%s/dontspeak' "$1"
+  fi
+}
 
 # compute_build_id [repo_dir] -- $DONTSPEAK_BUILD_ID, else git short-12 [+-dirty], else "dev".
 compute_build_id() {

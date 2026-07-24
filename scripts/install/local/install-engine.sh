@@ -30,6 +30,9 @@ echo "==> build hooks/mcp + ds-helper (release)" >&2
 
 echo "==> install binaries -> $INSTALL_DIR" >&2
 REL="$RUST_DIR/target/release"
+trap ds_lock_release EXIT
+trap 'ds_lock_release; exit 130' INT TERM HUP
+ds_lock_acquire "$(local_install_lock_destination "$INSTALL_DIR")"
 for b in dontspeak ds-helper; do
   install -m 0755 "$REL/$b" "$INSTALL_DIR/$b"
 done
@@ -54,4 +57,5 @@ fi
 install -m0755 "$REPO/scripts/install/bundle/uninstall.sh" "$INSTALL_DIR/dontspeak-uninstall"
 echo "==> placed $INSTALL_DIR/dontspeak-uninstall (full removal any time)" >&2
 
+ds_lock_release
 echo "$DONTSPEAK_BUILD_ID"

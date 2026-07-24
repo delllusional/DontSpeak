@@ -394,6 +394,22 @@ fn posix_installers_share_one_destination_lock_block() {
         "scripts/install/web/install.sh and apps/linux/tarball-install.sh carry different \
          destination-lock blocks — they must stay byte-identical"
     );
+
+    let dev = repo_file("scripts/install/lib/destination-lock.sh");
+    for invariant in [
+        "DS_LOCK_STALE_MIN=60",
+        r#"kill -0 "$ds_lock_pid""#,
+        r#""$DS_LOCK_DIR.breaker""#,
+        "ds_lock_acquire()",
+        r#"DONTSPEAK_INSTALL_LOCK_WAIT:-600"#,
+        "ds_lock_release()",
+        r#""$$ "*) rm -rf "$DS_LOCK_DIR" || :"#,
+    ] {
+        assert!(
+            web.contains(invariant) && dev.contains(invariant),
+            "public and development POSIX locks must share recovery invariant `{invariant}`"
+        );
+    }
 }
 
 /// Every platform must take its destination lock BEFORE the first destructive step, and give
@@ -477,11 +493,83 @@ fn installers_lock_before_replacing_the_destination() {
     );
 }
 
+#[test]
+fn development_installers_lock_before_writing_canonical_destinations() {
+    fn precedes(body: &str, first: &str, second: &str, what: &str) {
+        let lock = body
+            .find(first)
+            .unwrap_or_else(|| panic!("{what}: no `{first}`"));
+        let destructive = body
+            .find(second)
+            .unwrap_or_else(|| panic!("{what}: no `{second}`"));
+        assert!(
+            lock < destructive,
+            "{what}: `{first}` must precede `{second}`"
+        );
+    }
+
+    let engine = repo_file("scripts/install/local/install-engine.sh");
+    precedes(
+        &engine,
+        r#"ds_lock_acquire "$(local_install_lock_destination "$INSTALL_DIR")""#,
+        r#"install -m 0755 "$REL/$b" "$INSTALL_DIR/$b""#,
+        "local engine install",
+    );
+    assert!(engine.contains("trap ds_lock_release EXIT"));
+
+    let local = repo_file("scripts/install/local/install.sh");
+    precedes(
+        &local,
+        r#"ds_lock_acquire "$(local_install_lock_destination "$INSTALL_DIR")""#,
+        r#""$INSTALL_DIR/dontspeak" wire --reconcile"#,
+        "local wire",
+    );
+
+    let macos = repo_file("apps/macos/bundle.sh");
+    precedes(
+        &macos,
+        r#"ds_lock_acquire "$APP""#,
+        r#"assemble_app "$APP""#,
+        "macOS development bundle",
+    );
+    assert!(macos.contains("cleanup() { ds_lock_release;"));
+
+    let linux = repo_file("apps/linux/install-gui.sh");
+    precedes(
+        &linux,
+        r#"ds_lock_acquire "$INSTALL_DIR/dontspeak""#,
+        "pkill -x ds-gtk",
+        "Linux development GUI",
+    );
+    precedes(
+        &linux,
+        r#"ds_lock_acquire "$INSTALL_DIR/dontspeak""#,
+        r#"install -m0755 "$HERE/gtk/target/release/ds-gtk""#,
+        "Linux development GUI",
+    );
+    assert!(linux.contains("trap ds_lock_release EXIT"));
+
+    let common = repo_file("scripts/install/lib/common.sh");
+    for required in [
+        r#"${DONTSPEAK_APP_DIR:-$HOME/Applications/DontSpeak.app}"#,
+        r#"printf '%s/dontspeak' "$1""#,
+    ] {
+        assert!(
+            common.contains(required),
+            "local install lock destination must match public installers ({required})"
+        );
+    }
+}
+
 /// A killed installer leaves its lock behind, and Windows never deletes its lock file at all —
 /// so full removal is the uninstaller's job.
 #[test]
 fn uninstallers_remove_the_destination_lock_artifacts() {
     let posix = repo_file("scripts/install/bundle/uninstall.sh");
+    assert!(
+        posix.contains(r#"ds_lock_acquire_best_effort "$INSTALL_DIR/dontspeak""#),
+        "Linux uninstaller must acquire the same .dontspeak destination lock as installers"
+    );
     for needle in [
         ".DontSpeak.app.ds-install.lock",
         ".DontSpeak.app.ds-install.lock.breaker",

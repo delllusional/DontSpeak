@@ -16,6 +16,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$HERE/../../scripts/install/lib/common.sh"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$HOME/.local/bin}"
 # XDG-aware like ICONS_DIR below, tarball-install.sh, and scripts/install/bundle/uninstall.sh -- a
 # hardcoded ~/.local/share here would strand the launcher where the uninstaller
@@ -48,6 +49,9 @@ fi
 # -- 2. Build + install the GUI host ------------------------------------------
 log "building ds-gtk (release)"
 ( cd "$HERE/gtk" && cargo build --release )
+trap ds_lock_release EXIT
+trap 'ds_lock_release; exit 130' INT TERM HUP
+ds_lock_acquire "$INSTALL_DIR/dontspeak"
 # Stop a running host first -- `install` over a live binary is unguarded (mirrors
 # the macOS clean step and the tarball installer).
 pkill -x ds-gtk 2>/dev/null || true
@@ -77,6 +81,7 @@ if [ "$AUTOSTART" = 1 ]; then
   cp "$APPS_DIR/dontspeak.desktop" "$HOME/.config/autostart/dontspeak.desktop"
   log "autostart enabled (~/.config/autostart/dontspeak.desktop)"
 fi
+ds_lock_release
 
 # -- 4. Input-device permissions (Caps-Lock read + uinput injection) ----------
 if [ "$DO_UDEV" = 1 ]; then
@@ -102,7 +107,6 @@ if [ "$DO_AEC" = 1 ]; then
   fi
   echo "   Then enable full-duplex via the MCP: set_config full_duplex=true"
 fi
-
 cat <<EOF
 
 Done. The DontSpeak GUI host is installed.

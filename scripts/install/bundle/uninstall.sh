@@ -167,7 +167,7 @@ case "$(uname -s)" in
     STATE_DIR="${XDG_STATE_HOME:-$H/.local/state}/dontspeak"
     CACHE_DIR="${XDG_CACHE_HOME:-$H/.cache}/dontspeak"
     APPS_DIR="$DATA_ROOT/applications"
-    ds_lock_acquire_best_effort "$INSTALL_DIR"
+    ds_lock_acquire_best_effort "$INSTALL_DIR/dontspeak"
 
     echo "==> 1. stop the running GUI host + warm helper"
     pkill -x ds-gtk 2>/dev/null || true

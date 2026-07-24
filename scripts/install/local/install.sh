@@ -21,8 +21,12 @@ echo "==> binaries + hooks installed (BUILD_ID=$BUILD_ID)"
 # 5. wire --reconcile (exclude_clients; skip missing clients)
 echo
 echo "==> 5. reconcile all detected client integrations"
+trap ds_lock_release EXIT
+trap 'ds_lock_release; exit 130' INT TERM HUP
+ds_lock_acquire "$(local_install_lock_destination "$INSTALL_DIR")"
 "$INSTALL_DIR/dontspeak" wire --reconcile \
   || echo "   !! wire --reconcile failed; run '$INSTALL_DIR/dontspeak wire --reconcile' manually" >&2
+ds_lock_release
 
 if [ "$UNAME" = "Darwin" ]; then LOG_HINT="~/Library/Logs/DontSpeak/dontspeak.log"
 else LOG_HINT="\${XDG_STATE_HOME:-~/.local/state}/dontspeak/logs/dontspeak.log"; fi

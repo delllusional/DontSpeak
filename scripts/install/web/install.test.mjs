@@ -279,8 +279,8 @@ function extractLockBlock(source, begin, end) {
   return source.slice(from, to + end.length);
 }
 
-async function posixLockDriver(root, name) {
-  const source = await readFile(installer, "utf8");
+async function posixLockDriver(root, name, sourcePath = installer) {
+  const source = await readFile(sourcePath, "utf8");
   const block = extractLockBlock(
     source,
     "# -- BEGIN destination lock",
@@ -294,11 +294,48 @@ set -eu
 ${block}
 ds_lock_acquire "$1"
 printf 'entered\\n'
+if [ -n "\${2:-}" ]; then
+  printf 'enter %s\\n' "$2" >> "$3"
+  sleep 1
+  printf 'exit %s\\n' "$2" >> "$3"
+fi
 ds_lock_release
 `,
   );
   return driver;
 }
+
+test(
+  "public and development installers serialize the same destination",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dontspeak-dev-public-lock-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const destination = join(root, "bin", "dontspeak");
+    const sectionLog = join(root, "sections.log");
+    const publicDriver = await posixLockDriver(root, "public.sh");
+    const devDriver = await posixLockDriver(
+      root,
+      "dev.sh",
+      join(repoRoot, "scripts/install/lib/destination-lock.sh"),
+    );
+    const env = { ...process.env, DONTSPEAK_INSTALL_LOCK_WAIT: "10" };
+
+    const runs = await Promise.all([
+      runAsync("sh", [publicDriver, destination, "public", sectionLog], { cwd: root, env }),
+      runAsync("sh", [devDriver, destination, "dev", sectionLog], { cwd: root, env }),
+    ]);
+    for (const run of runs) {
+      assert.equal(run.status, 0, `lock driver failed:\n${run.stdout}\n${run.stderr}`);
+    }
+
+    const sections = await readFile(sectionLog, "utf8");
+    assert.match(
+      sections,
+      /^(enter public\nexit public\nenter dev\nexit dev\n|enter dev\nexit dev\nenter public\nexit public\n)$/,
+    );
+  },
+);
 
 // A pid that is genuinely gone: an unreaped zombie still answers `kill -0`, which would send
 // the dead-owner row down the age rule instead and hang it for the whole timeout.
