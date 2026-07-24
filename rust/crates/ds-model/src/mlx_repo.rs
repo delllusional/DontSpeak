@@ -699,16 +699,33 @@ mod tests {
         assert!(SPEAKER_EMBEDDING_MLX.repo.contains("wespeaker"));
     }
 
+    /// Source-text scan of the two native shims. This proves the shims themselves call no
+    /// native download API; it CANNOT prove FluidAudio's own download call sites
+    /// (`ensureG2PAssets`, `ensureVoicePack`) never fire, because those live inside the
+    /// package, not in `Fluid.swift` -- only the on-device offline `speak` gate proves that.
     #[test]
     fn native_shim_loads_only_rust_managed_local_directories() {
         let shim =
             include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift");
-        for forbidden in ["ModelHub", "snapshotDownload", "downloadModel"] {
-            assert!(
-                !shim.contains(forbidden),
-                "native model download API: {forbidden}"
-            );
+        let fluid =
+            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/Fluid.swift");
+
+        // Universal bans: no native model-download API in either shim.
+        for (name, src) in [("shim.swift", shim), ("Fluid.swift", fluid)] {
+            for forbidden in ["snapshotDownload", "downloadModel"] {
+                assert!(
+                    !src.contains(forbidden),
+                    "{name}: native model download API: {forbidden}"
+                );
+            }
         }
+
+        // shim.swift's own scoped assertions -- the Intel build compiles it ALONE, so these
+        // must not be diluted by concatenating the other file.
+        assert!(
+            !shim.contains("ModelHub"),
+            "shim.swift must not manage the native hub cache directly"
+        );
         assert_eq!(
             shim.matches("OmniVoiceModel.fromPretrained").count(),
             1,
@@ -721,6 +738,24 @@ mod tests {
                 "missing local model load: {required}"
             );
         }
+        // Section 4 boundary: the one-dylib-on-Intel decision rests on shim.swift never
+        // referencing a Fluid.swift symbol, so a FluidAudio reference outside
+        // `#if !SYSTEM_ONLY` would break the Intel build with no local test to catch it.
+        assert!(
+            !shim.contains("FluidAudio"),
+            "shim.swift must not reference FluidAudio (Intel compatibility-build boundary)"
+        );
+
+        // Fluid.swift's ONLY ModelHub use is the offline switch that keeps it load-only.
+        assert!(
+            fluid.contains("ModelHub.offlineMode = true"),
+            "Fluid.swift must load offline"
+        );
+        assert_eq!(
+            fluid.matches("ModelHub").count(),
+            1,
+            "Fluid.swift's only ModelHub use is the offline switch"
+        );
     }
 
     #[test]

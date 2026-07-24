@@ -24,6 +24,10 @@ xcrun() {
   [ "${1:-}" = "swiftc" ] || return 98
   shift
   local out="" system_only=0 intel_target=0
+  # Record every Swift source basename this compile names, so the test can assert the Intel
+  # arm compiles shim.swift ALONE (a second source such as Fluid.swift would link FluidAudio
+  # into the Intel dylib, breaking the one-dylib boundary with no other local test to catch it).
+  : >"$test_dir/swift-sources"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       -D)
@@ -37,6 +41,9 @@ xcrun() {
       -o)
         shift
         out="${1:-}"
+        ;;
+      *.swift)
+        echo "${1##*/}" >>"$test_dir/swift-sources"
         ;;
     esac
     [ "$#" -gt 0 ] && shift
@@ -52,6 +59,12 @@ mlx="$(DONTSPEAK_DIST=1 build_dontspeak_mlx_dylib x86_64 2>"$stderr_file")" \
 [ -f "$mlx" ] || fail "Intel build returned no shim dylib"
 grep -q "built-in models use ONNX CPU" "$stderr_file" \
   || fail "Intel build did not report the ONNX backend"
+# The Intel arm must name exactly one source: shim.swift. Fluid.swift is auto-excluded.
+intel_source_count="$(grep -c . "$test_dir/swift-sources" 2>/dev/null || echo 0)"
+[ "$intel_source_count" = 1 ] \
+  || fail "Intel shim build names $intel_source_count source files, want exactly 1"
+grep -qx "shim.swift" "$test_dir/swift-sources" \
+  || fail "Intel shim build source is not shim.swift"
 bundle_swift_package_resources "$test_dir/resources" "$mlx" >/dev/null \
   || fail "Intel shim incorrectly required MLX resources"
 

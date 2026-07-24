@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use ds_config::{Paths, Provider, VoiceConfig};
 use ds_model::DownloadTarget;
 
-use crate::config_gate::{mlx_shim_available, mlx_tts_active, stt_uses_onnx_runtime};
+use crate::config_gate::{mlx_shim_available, native_tts_active, stt_uses_onnx_runtime};
 use crate::tts::TtsManager;
 
 /// Byte progress of one in-flight download target.
@@ -113,15 +113,17 @@ pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags
 /// Restart warm child after a completed download so it loads the new model(s).
 pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceConfig) -> bool {
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
-    // Shim-aware (same predicate as [`compute_needs`]): provider=mlx without the loaded
-    // shim runs ONNX, so the ONNX model download is the one the child actually hosts.
-    let mlx_tts = mlx_tts_active(cfg);
-    // `is_fluid_tts` is excluded rather than compared: no provider resolves to the FluidAudio
-    // backend yet, so a manually-requested `kokoro_fluid` fetch never produces the model the
-    // warm child is hosting. Its own runtime gate arrives with the backend.
+    // Shim-aware and provider-aware (same predicates as [`compute_needs`]): the warm child
+    // hosts the ONNX, MLX, or Fluid flavor per the resolved provider, so the target's flavor
+    // must match on BOTH native axes for the fetch to be the one it can load. A `provider=mlx`
+    // without the loaded shim runs ONNX, so both flavors read false and the ONNX target matches.
+    let provider = cfg.resolved_tts_provider();
+    let native = native_tts_active(cfg);
+    let mlx_tts = native && provider == ds_config::Provider::Mlx;
+    let fluid_tts = native && provider == ds_config::Provider::Fluid;
     let tts_target_matches = target.tts_model() == Some(cfg.tts_model)
         && target.is_mlx_tts() == mlx_tts
-        && !target.is_fluid_tts();
+        && target.is_fluid_tts() == fluid_tts;
     (builtin_tts && tts_target_matches)
         // eSpeak/G2P/JA assets are loaded by the warm helper — both ONNX and MLX Kokoro.
         || (builtin_tts
@@ -326,9 +328,14 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::ParakeetMlx => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
                 // FluidAudio Core ML sets: same engine-managed fetch, offline shim load. The
                 // Kokoro set spans two roots (ours plus FluidAudio's own cache); one
-                // `ensure_hf_repos` call covers both.
+                // `ensure_hf_repos` call covers both. The shared `voices-v1.0.bin` the ANE
+                // chain materializes packs from stays owned by `KokoroModel`, so fetch it
+                // here without re-attributing it (see `compute_needs`' fluid TTS branch).
                 #[cfg(target_os = "macos")]
-                DownloadTarget::KokoroFluid => hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET),
+                DownloadTarget::KokoroFluid => {
+                    ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &prog)
+                        .and_then(|_| hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET))
+                }
                 #[cfg(target_os = "macos")]
                 DownloadTarget::ParakeetFluid => {
                     hf_repos(&ds_model::coreml_repo::PARAKEET_COREML_SET)
@@ -499,13 +506,26 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             .is_some_and(|roots| ds_model::hf_repo::is_hf_set_present(roots, set))
     };
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
-    let mlx_active = builtin_tts && mlx_tts_active(cfg);
+    let native_active = builtin_tts && native_tts_active(cfg);
+    // Both native rungs share the dylib; `resolved_tts_provider` picks exactly one.
+    let fluid_active = native_active && cfg.resolved_tts_provider() == ds_config::Provider::Fluid;
+    let mlx_active = native_active && !fluid_active;
     let kokoro_selected = builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro;
     // Full Misaki-compatible stack (G2P graphs + espeakng-loader + ORT), not merely
     // "encoder.onnx exists" — that left eSpeak uninstalled on the ONNX path.
     let frontend_present = ds_model::is_kokoro_frontend_present();
     let tts_model = if !builtin_tts {
         None
+    } else if fluid_active {
+        // Fluid Kokoro needs the Core ML set AND the shared voices npz (through `roots`, not
+        // ambient — #212); a half-fetched state re-queues rather than looping.
+        let present = set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
+            && roots
+                .as_ref()
+                .is_some_and(|r| r.model.join(ds_model::KOKORO_VOICES_FILE).is_file());
+        (!present)
+            .then(|| DownloadTarget::fluid_for_tts(cfg.tts_model))
+            .flatten()
     } else if mlx_active {
         (!set_present(ds_model::mlx_repo::tts_mlx_set(cfg.tts_model)))
             .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
-    caps_loop_enabled, mlx_shim_available, mlx_tts_active, parakeet_available,
+    caps_loop_enabled, mlx_shim_available, native_tts_active, parakeet_available,
     parakeet_onnx_files_present, stt_uses_onnx_runtime, tts_model_files_present,
 };
 use crate::downloads::{DownloadProg, TargetState};
@@ -119,7 +119,7 @@ pub(crate) fn model_status_json(
     // (load_synth / ParakeetModel::load), not here.
     // The TTS row reflects the active backend (mirrors the Parakeet row below).
     let shim = mlx_shim_available();
-    let tts_uses_mlx = mlx_tts_active(&cfg);
+    let tts_uses_native = native_tts_active(&cfg);
     let tts_present = tts_model_files_present(&cfg);
     let parakeet_onnx_files = parakeet_onnx_files_present();
     // Same shim-aware ONNX downgrade as TTS.
@@ -228,7 +228,7 @@ pub(crate) fn model_status_json(
         tts_own_downloading,
         cuda_downloading && cfg.resolved_tts_provider() == ds_config::Provider::OrtCuda,
         tts_loaded,
-        tts_uses_mlx,
+        tts_uses_native,
     );
     let parakeet_own_downloading = (stt_uses_onnx && downloading(DownloadTarget::ParakeetModel))
         || downloading(DownloadTarget::ParakeetMlx);
@@ -489,8 +489,14 @@ fn diarization_provider_token(
 }
 
 fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
-    if mlx_tts_active(cfg) {
-        let mut targets = vec![DownloadTarget::mlx_for_tts(cfg.tts_model)];
+    if native_tts_active(cfg) {
+        // Fluid resolves to its own Core ML variant; MLX (and any other native provider) to
+        // the MLX one. `fluid_for_tts` is Some only for Kokoro, which is the only model a
+        // resolved Fluid provider can name.
+        let native_target = DownloadTarget::fluid_for_tts(cfg.tts_model)
+            .filter(|_| cfg.resolved_tts_provider() == ds_config::Provider::Fluid)
+            .unwrap_or_else(|| DownloadTarget::mlx_for_tts(cfg.tts_model));
+        let mut targets = vec![native_target];
         if cfg.tts_model == ds_config::TtsModel::Kokoro {
             targets.push(DownloadTarget::KokoroFrontend);
         }

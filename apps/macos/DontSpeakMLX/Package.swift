@@ -18,6 +18,10 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/Blaizzy/mlx-audio-swift.git", exact: "0.1.3"),
         .package(url: "https://github.com/ml-explore/mlx-swift.git", exact: "0.31.3"),
+        // FluidAudio ships the `fluid` provider (Core ML / ANE Kokoro TTS) inside this same
+        // dylib. `Fluid.swift` is its only consumer; the Intel compatibility build compiles
+        // `shim.swift` alone, so it never links FluidAudio.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", exact: "0.15.5"),
     ],
     targets: [
         .executableTarget(
@@ -36,6 +40,7 @@ let package = Package(
                 .product(name: "MLXAudioTTS", package: "mlx-audio-swift"),
                 .product(name: "MLXAudioSTT", package: "mlx-audio-swift"),
                 .product(name: "MLXAudioVAD", package: "mlx-audio-swift"),
+                .product(name: "FluidAudio", package: "FluidAudio"),
             ]
         ),
         .testTarget(

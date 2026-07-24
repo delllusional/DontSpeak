@@ -519,6 +519,18 @@ impl TtsManager {
         {
             return RealizedProvider::CoreMl;
         }
+        // Fluid before MLX (shared dylib, so `mlx_available` covers both). Only an explicit
+        // `fluid` token -- never `auto` -- selects the ANE Kokoro backend.
+        if let Some(shim_available) = mlx_available
+            && which.eq_ignore_ascii_case(ds_config::Provider::Fluid.as_str())
+            && descriptor.supports_provider(ds_config::Provider::Fluid)
+        {
+            return if shim_available {
+                RealizedProvider::Fluid
+            } else {
+                RealizedProvider::Cpu
+            };
+        }
         if let Some(mlx_available) = mlx_available
             && (which.eq_ignore_ascii_case(ds_config::Provider::Mlx.as_str())
                 || which.eq_ignore_ascii_case("auto"))
@@ -539,23 +551,37 @@ impl TtsManager {
 
     fn tts_assets_ready(prefs: &SpawnPrefs) -> bool {
         let model = prefs.tts_model;
-        if Self::resolve_provider(&prefs.provider, model) == ds_config::RealizedProvider::Mlx {
-            let frontend_ready = model != ds_config::TtsModel::Kokoro
-                || crate::config_gate::kokoro_g2p_files_present();
-            frontend_ready
-                && ds_model::ModelRoots::ambient().is_some_and(|roots| {
-                    ds_model::hf_repo::is_hf_set_present(
-                        &roots,
-                        ds_model::mlx_repo::tts_mlx_set(model),
-                    )
-                })
-        } else {
-            ds_model::tts_model_files_present(
-                model,
-                ds_model::tts_wants_cuda_assets(model, &prefs.provider),
-            ) && ds_model::onnxruntime_dylib_path()
-                .map(|path| path.is_file())
-                .unwrap_or(false)
+        match Self::resolve_provider(&prefs.provider, model) {
+            // Fluid Kokoro: the Core ML set + the shared frontend (G2P/ORT) + the voices npz
+            // the ANE chain materializes packs from (through `roots`, never ambient -- #212).
+            ds_config::RealizedProvider::Fluid => {
+                crate::config_gate::kokoro_g2p_files_present()
+                    && ds_model::ModelRoots::ambient().is_some_and(|roots| {
+                        ds_model::hf_repo::is_hf_set_present(
+                            &roots,
+                            &ds_model::coreml_repo::KOKORO_COREML_SET,
+                        ) && roots.model.join(ds_model::KOKORO_VOICES_FILE).is_file()
+                    })
+            }
+            ds_config::RealizedProvider::Mlx => {
+                let frontend_ready = model != ds_config::TtsModel::Kokoro
+                    || crate::config_gate::kokoro_g2p_files_present();
+                frontend_ready
+                    && ds_model::ModelRoots::ambient().is_some_and(|roots| {
+                        ds_model::hf_repo::is_hf_set_present(
+                            &roots,
+                            ds_model::mlx_repo::tts_mlx_set(model),
+                        )
+                    })
+            }
+            _ => {
+                ds_model::tts_model_files_present(
+                    model,
+                    ds_model::tts_wants_cuda_assets(model, &prefs.provider),
+                ) && ds_model::onnxruntime_dylib_path()
+                    .map(|path| path.is_file())
+                    .unwrap_or(false)
+            }
         }
     }
 

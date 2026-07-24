@@ -41,6 +41,23 @@ int32_t ds_mlx_tts_synthesize2(const char *text, const char *voice, const char *
 
 void ds_mlx_tts_shutdown(void);
 
+// --- TTS (FluidAudio Core ML / ANE) — the `fluid` compute provider -----------------------
+// Ships in this same dylib beside ds_mlx_*, reusing the borrowed-result callback types. Rust
+// owns G2P and pre-downloads every model; the shim loads offline (ModelHub.offlineMode). Only
+// on Apple Silicon: the Intel build compiles shim.swift alone and exports none of these.
+
+// Initialize FluidAudio's ANE Kokoro chain from a DontSpeak-populated local directory.
+// compute_units is ABI-reserved (the recommended ANE preset is pinned this release); pass 0.
+int32_t ds_fluid_tts_init(const char *model_dir, int32_t compute_units);
+
+// Synthesize Rust-supplied Kokoro IPA phonemes to mono fp32 PCM, delivered to `cb`. `voice`
+// is an ANE voice-pack id; `speed` is a Kokoro rate multiplier. This skips FluidAudio's own
+// G2P so every Kokoro backend renders from identical phoneme chunks.
+int32_t ds_fluid_tts_synthesize_phonemes(const char *phonemes, const char *voice, float speed,
+                                         void *ctx, ds_mlx_pcm_cb cb);
+
+void ds_fluid_tts_shutdown(void);
+
 // --- ASR (Parakeet TDT, MLX) — the MLX STT backend -----------------------------
 
 // Load Parakeet TDT v2 (English-only) from a required local model directory.

@@ -53,6 +53,11 @@ pub(crate) enum Backend {
         model: ds_config::TtsModel,
         synth: ds_tts::synth_mlx::MlxTts,
     },
+    #[cfg(target_os = "macos")]
+    Fluid {
+        model: ds_config::TtsModel,
+        synth: ds_tts::synth_fluid::FluidTts,
+    },
 }
 
 impl Backend {
@@ -64,6 +69,8 @@ impl Backend {
             Self::OmniVoice(synth) => synth.provider(),
             #[cfg(target_os = "macos")]
             Self::Mlx { synth, .. } => synth.provider(),
+            #[cfg(target_os = "macos")]
+            Self::Fluid { synth, .. } => synth.provider(),
         }
     }
 
@@ -75,6 +82,8 @@ impl Backend {
             Self::OmniVoice(_) => ds_config::TtsModel::OmniVoice,
             #[cfg(target_os = "macos")]
             Self::Mlx { model, .. } => *model,
+            #[cfg(target_os = "macos")]
+            Self::Fluid { model, .. } => *model,
         }
     }
 
@@ -107,6 +116,11 @@ impl Backend {
             #[cfg(target_os = "macos")]
             (Self::Mlx { synth, .. }, FrontendBatch::Text(chunk)) => {
                 synth.synthesize(chunk, voice, language, rate, params)
+            }
+            // Fluid is Kokoro-only, so it only ever receives phoneme batches.
+            #[cfg(target_os = "macos")]
+            (Self::Fluid { synth, .. }, FrontendBatch::Kokoro(batch)) => {
+                synth.synthesize(batch.as_str(), voice, rate)
             }
             _ => Err("frontend/backend model mismatch".to_string()),
         }
@@ -144,6 +158,25 @@ impl Backend {
 }
 
 fn load_backend_unwarmed(model: ds_config::TtsModel) -> Result<Backend, String> {
+    // FluidAudio before MLX: an explicit `fluid` token selects the ANE Kokoro backend. Never
+    // `auto` (Kokoro-only, opt-in). Shares the one dylib with MLX, so a load failure falls
+    // through to the MLX/ONNX chain below.
+    #[cfg(target_os = "macos")]
+    if model
+        .descriptor()
+        .supports_provider(ds_config::Provider::Fluid)
+    {
+        let pref = std::env::var("DONTSPEAK_PROVIDER").unwrap_or_default();
+        if pref.eq_ignore_ascii_case("fluid") {
+            match ds_tts::synth_fluid::FluidTts::load() {
+                Ok(synth) => return Ok(Backend::Fluid { model, synth }),
+                Err(error) => log::warn!(
+                    target: "helper",
+                    "FluidAudio TTS unavailable ({error}); falling back to ONNX"
+                ),
+            }
+        }
+    }
     #[cfg(target_os = "macos")]
     if model
         .descriptor()

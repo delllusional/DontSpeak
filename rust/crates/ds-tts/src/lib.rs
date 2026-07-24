@@ -8,6 +8,9 @@
 //! tokens → clause batches ([`batch`]) → synth ([`synth`] / MLX) → trim →
 //! play. Pure stages unit-tested without audio/model/network.
 
+/// FluidAudio ANE Kokoro voice-pack materialization. macOS only.
+#[cfg(target_os = "macos")]
+pub mod ane_voices;
 /// Model-bounded phoneme batching (helper bin).
 pub mod batch;
 /// Chatterbox Multilingual AR backend.
@@ -24,6 +27,9 @@ pub mod qwen;
 pub mod sink;
 pub mod spoken;
 pub mod synth;
+/// FluidAudio Core ML / ANE Kokoro. macOS Apple Silicon only.
+#[cfg(target_os = "macos")]
+pub mod synth_fluid;
 /// MLX Audio Kokoro. macOS Apple Silicon only.
 #[cfg(target_os = "macos")]
 pub mod synth_mlx;

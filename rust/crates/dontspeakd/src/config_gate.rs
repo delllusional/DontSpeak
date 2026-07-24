@@ -80,14 +80,18 @@ pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shim_availabl
     !(provider == ds_config::Provider::Mlx && shim_available)
 }
 
-/// Genuine MLX TTS: supported model and platform plus the loaded shim.
-pub(crate) fn mlx_tts_active(cfg: &VoiceConfig) -> bool {
+/// Genuine native TTS: supported model and platform plus the loaded shim. `Mlx` and `Fluid`
+/// share one dylib, so one `shim_available` answers for both.
+pub(crate) fn native_tts_active(cfg: &VoiceConfig) -> bool {
     cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
-        && tts_uses_mlx_runtime(cfg.resolved_tts_provider(), mlx_shim_available())
+        && tts_uses_native_runtime(cfg.resolved_tts_provider(), mlx_shim_available())
 }
 
-fn tts_uses_mlx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
-    provider == ds_config::Provider::Mlx && shim_available
+fn tts_uses_native_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
+    matches!(
+        provider,
+        ds_config::Provider::Mlx | ds_config::Provider::Fluid
+    ) && shim_available
 }
 
 /// System STT usable (probe, no prompt). `build_stt` + status row.
@@ -120,16 +124,26 @@ pub(crate) fn kokoro_g2p_files_present() -> bool {
 
 /// Cheap selected-model presence gate used by status and helper spawn.
 pub(crate) fn tts_model_files_present(cfg: &VoiceConfig) -> bool {
-    if mlx_tts_active(cfg) {
+    if native_tts_active(cfg) {
         let frontend_present =
             cfg.tts_model != ds_config::TtsModel::Kokoro || kokoro_g2p_files_present();
-        frontend_present
-            && roots().is_some_and(|roots| {
-                ds_model::hf_repo::is_hf_set_present(
-                    &roots,
-                    ds_model::mlx_repo::tts_mlx_set(cfg.tts_model),
-                )
-            })
+        if !frontend_present {
+            return false;
+        }
+        let Some(roots) = roots() else {
+            return false;
+        };
+        if cfg.resolved_tts_provider() == ds_config::Provider::Fluid {
+            // Fluid Kokoro: the Core ML set plus the shared voices npz the ANE chain
+            // materializes packs from. Through `roots`, never ambient `model_path` (#212).
+            ds_model::hf_repo::is_hf_set_present(&roots, &ds_model::coreml_repo::KOKORO_COREML_SET)
+                && roots.model.join(ds_model::KOKORO_VOICES_FILE).is_file()
+        } else {
+            ds_model::hf_repo::is_hf_set_present(
+                &roots,
+                ds_model::mlx_repo::tts_mlx_set(cfg.tts_model),
+            )
+        }
     } else {
         ds_model::tts_model_files_present(
             cfg.tts_model,
@@ -398,12 +412,15 @@ mod tests {
     }
 
     #[test]
-    fn tts_uses_mlx_runtime_gates_on_the_shim_not_the_raw_provider() {
+    fn tts_uses_native_runtime_gates_on_the_shim_not_the_raw_provider() {
         use ds_config::Provider;
 
-        assert!(tts_uses_mlx_runtime(Provider::Mlx, true));
-        assert!(!tts_uses_mlx_runtime(Provider::Mlx, false));
-        assert!(!tts_uses_mlx_runtime(Provider::OrtCpu, true));
+        // Both native rungs share the one dylib, so both gate on the loaded shim.
+        assert!(tts_uses_native_runtime(Provider::Mlx, true));
+        assert!(!tts_uses_native_runtime(Provider::Mlx, false));
+        assert!(tts_uses_native_runtime(Provider::Fluid, true));
+        assert!(!tts_uses_native_runtime(Provider::Fluid, false));
+        assert!(!tts_uses_native_runtime(Provider::OrtCpu, true));
     }
 
     /// Both phases run in a child process holding the fixture environment — see

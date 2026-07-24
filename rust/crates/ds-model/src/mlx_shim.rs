@@ -75,6 +75,16 @@ pub fn tts_model_dir_arg(model: ds_config::TtsModel) -> CString {
     path_arg(crate::mlx_repo::tts_mlx_dir(model))
 }
 
+/// Local directory FluidAudio's ANE Kokoro chain loads from -- the Core ML set root, whose
+/// `ANE/` subtree holds the models and `ANE/<voice>.bin` packs. The shim appends `ANE/`
+/// itself, and `ds-tts`'s voice-pack materializer writes into that same `ANE/` dir, so both
+/// resolve through this one root.
+pub fn fluid_kokoro_dir_arg() -> CString {
+    let dir = crate::hf_repo::ModelRoots::ambient()
+        .map(|roots| roots.dir_for(&crate::coreml_repo::KOKORO_COREML));
+    path_arg(dir)
+}
+
 /// Local MLX Parakeet directory, shared by batch and buffered streaming calls.
 pub fn parakeet_model_dir_arg() -> CString {
     path_arg(crate::mlx_repo::parakeet_mlx_dir())

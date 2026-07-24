@@ -90,7 +90,10 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Some(DownloadTarget::KokoroFluid) => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET)
+                // The shared voices npz (owned by KokoroModel) the ANE chain materializes
+                // packs from, plus the two-root Core ML set.
+                ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &p)
+                    .and_then(|_| hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET))
             } else {
                 Ok(())
             }
