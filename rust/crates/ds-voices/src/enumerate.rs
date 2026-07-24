@@ -308,32 +308,6 @@ impl VoiceCatalog<'_> {
             .collect()
     }
 
-    /// Pool entries this build can route at all — the language-less twin of
-    /// [`Self::pool_for_language`], for the greeting, which resolves before any language is
-    /// known. Drops only entries locked to a language this build ships no frontend for, so it
-    /// never narrows more than `pool_for_language` would for a routed language; an unknown
-    /// shape (a nonstandard MLX pack id) stays, because existing config is not discarded on
-    /// that weaker evidence. New input is judged strictly instead — see
-    /// [`is_routable_kokoro_voice`].
-    pub fn routable_pool(&self, pool: &[String]) -> Vec<String> {
-        pool.iter()
-            .filter(|voice| {
-                self.voice_language(voice)
-                    .is_none_or(|language| self.routes_language(&language))
-            })
-            .cloned()
-            .collect()
-    }
-
-    /// Whether this catalog can synthesize `language` at all. A System voice speaks its own
-    /// locale by construction — `say` needs no frontend from us.
-    fn routes_language(&self, language: &str) -> bool {
-        match self {
-            Self::BuiltIn(model) => model.descriptor().supports_language(language),
-            Self::System(_) => true,
-        }
-    }
-
     /// Every shipped voice that can speak `language` — the stand-in pool for a language the
     /// user configured no voice for. Same listing the picker UI and the `voices` tool show, so
     /// a borrowed voice is always one the catalog actually offers. Empty when the catalog has
@@ -365,16 +339,88 @@ pub fn is_model_voice(model: TtsModel, voice: &str) -> bool {
     model.descriptor().voices.contains(&voice)
 }
 
+/// The pool the router picks from for `model`, and the configured entries it locks out.
+/// Entries locked to a language this build ships no frontend for are dropped; when that
+/// empties a non-empty pool the model defaults substitute, matching `VoiceConfig::clamp`'s
+/// empty-pool rule. An unknown shape (a nonstandard MLX pack id) stays — existing config is
+/// not discarded on that weaker evidence; new input is judged strictly instead
+/// ([`is_routable_kokoro_voice`]). Pure: no disk, no `say`. Single source for the router,
+/// `status`, and `voices`, so those three cannot name different pools.
+pub fn effective_builtin_pool(model: TtsModel, configured: &[String]) -> EffectivePool {
+    let catalog = VoiceCatalog::BuiltIn(model);
+    let descriptor = model.descriptor();
+    let (voices, ignored): (Vec<String>, Vec<String>) =
+        configured.iter().cloned().partition(|voice| {
+            catalog
+                .voice_language(voice)
+                .is_none_or(|language| descriptor.supports_language(&language))
+        });
+    if voices.is_empty() && !configured.is_empty() {
+        return EffectivePool {
+            voices: descriptor
+                .default_voices
+                .iter()
+                .map(|voice| (*voice).to_string())
+                .collect(),
+            ignored,
+        };
+    }
+    EffectivePool { voices, ignored }
+}
+
+/// Result of [`effective_builtin_pool`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectivePool {
+    /// What the router picks from.
+    pub voices: Vec<String>,
+    /// Configured entries this build cannot route; empty when every entry is usable.
+    pub ignored: Vec<String>,
+}
+
+/// Why this build cannot route Kokoro `id`, or `None` when it can. Allocation-free on
+/// purpose: [`kokoro_choices_from`] runs this over the whole catalog per listing, and the
+/// greeting's `voices_for_language` fallback runs that. The user-facing sentence is layered
+/// on in [`kokoro_route_refusal`] so both refusing surfaces quote the same words.
+enum KokoroBlock {
+    /// The family char names no language at all (a nonstandard pack id).
+    UnknownFamily,
+    /// A published family whose frontend this build does not ship (`ja`, `zh`).
+    UnroutedLanguage(&'static str),
+}
+
+fn kokoro_block(id: &str) -> Option<KokoroBlock> {
+    match kokoro_language(id) {
+        "other" => Some(KokoroBlock::UnknownFamily),
+        language if !TtsModel::Kokoro.descriptor().supports_language(language) => {
+            Some(KokoroBlock::UnroutedLanguage(language))
+        }
+        _ => None,
+    }
+}
+
 /// Whether this build ships a frontend for the language `id`'s family speaks. Kokoro
 /// publishes Japanese and Mandarin voices whose pipelines were dropped; they are real model
 /// ids, so only the language rules them out — in a configured pool (`set_config`) and per
 /// utterance (`speak`) alike. An unknown family char is not routable either: its language is
 /// unknown, so no frontend can be chosen for it. Existing config is judged by the weaker
-/// [`VoiceCatalog::routable_pool`] instead, which keeps unknown shapes.
+/// [`effective_builtin_pool`] instead, which keeps unknown shapes.
 pub fn is_routable_kokoro_voice(id: &str) -> bool {
-    TtsModel::Kokoro
-        .descriptor()
-        .supports_language(kokoro_language(id))
+    kokoro_block(id).is_none()
+}
+
+/// Why this build refuses `id` as NEW Kokoro input — `set_config` pool edits and `speak`
+/// overrides share the sentence so neither states the wrong reason. A `j`/`z` family is
+/// published but lost its frontend; an unrecognized family char names no language at all.
+/// `None` exactly when [`is_routable_kokoro_voice`] is true.
+pub fn kokoro_route_refusal(id: &str) -> Option<String> {
+    Some(match kokoro_block(id)? {
+        KokoroBlock::UnknownFamily => format!(
+            "`{id}` names no Kokoro language family, so this build cannot route it; see voices"
+        ),
+        KokoroBlock::UnroutedLanguage(language) => {
+            format!("`{id}` speaks {language}, a language this build cannot route; see voices")
+        }
+    })
 }
 
 /// Reject a per-utterance Kokoro voice this build cannot route. Other targets need no check
@@ -386,10 +432,10 @@ pub fn validate_speak_voices(args: &ds_config::TtsArgPools) -> Result<(), String
         .for_target(TtsEngine::BuiltIn, TtsModel::Kokoro)
         .and_then(ds_config::TtsTargetArgs::voice)
     {
-        Some(voice) if !is_routable_kokoro_voice(voice) => Err(format!(
-            "tts_args.kokoro.voice `{voice}` speaks a language this build cannot route; see voices"
-        )),
-        _ => Ok(()),
+        Some(voice) => kokoro_route_refusal(voice).map_or(Ok(()), |refusal| {
+            Err(format!("tts_args.kokoro.voice {refusal}"))
+        }),
+        None => Ok(()),
     }
 }
 
@@ -622,24 +668,77 @@ mod tests {
     }
 
     #[test]
-    fn routable_pool_drops_locked_out_voices_and_keeps_unlocked_ones() {
-        let kokoro = VoiceCatalog::BuiltIn(TtsModel::Kokoro);
-        assert_eq!(
-            kokoro.routable_pool(&["af_sarah".into(), "jf_alpha".into(), "zf_xiaobei".into()]),
-            ["af_sarah"]
+    fn effective_builtin_pool_drops_locked_out_voices_and_substitutes_defaults() {
+        let mixed = effective_builtin_pool(
+            TtsModel::Kokoro,
+            &["af_sarah".into(), "jf_alpha".into(), "zf_xiaobei".into()],
         );
+        assert_eq!(mixed.voices, ["af_sarah"]);
+        assert_eq!(mixed.ignored, ["jf_alpha", "zf_xiaobei"]);
+
+        // Nothing routable left: silence is worse than the model's own defaults, and
+        // `VoiceConfig::clamp` makes the same substitution for the models it can check.
+        let locked = effective_builtin_pool(TtsModel::Kokoro, &["jf_alpha".into()]);
+        assert_eq!(locked.voices, TtsModel::Kokoro.descriptor().default_voices);
+        assert_eq!(locked.ignored, ["jf_alpha"]);
+
         // Existing config is not discarded on the weaker evidence of an unknown shape —
         // that is the nonstandard MLX pack id #222 warns against regressing.
-        assert_eq!(kokoro.routable_pool(&["custom_v1".into()]), ["custom_v1"]);
-        assert_eq!(
-            VoiceCatalog::BuiltIn(TtsModel::Chatterbox).routable_pool(&["default".into()]),
-            ["default"]
+        let unknown_shape = effective_builtin_pool(TtsModel::Kokoro, &["custom_v1".into()]);
+        assert_eq!(unknown_shape.voices, ["custom_v1"]);
+        assert!(unknown_shape.ignored.is_empty());
+
+        let unlocked = effective_builtin_pool(TtsModel::Chatterbox, &["default".into()]);
+        assert_eq!(unlocked.voices, ["default"]);
+        assert!(unlocked.ignored.is_empty());
+
+        // An empty pool is the user's own "speak with nothing", not an emptied one.
+        let empty = effective_builtin_pool(TtsModel::Kokoro, &[]);
+        assert!(empty.voices.is_empty());
+        assert!(empty.ignored.is_empty());
+    }
+
+    #[test]
+    fn kokoro_route_refusal_names_the_real_reason() {
+        let ja = kokoro_route_refusal("jf_alpha").expect("an unrouted family is refused");
+        assert!(ja.contains("speaks ja"), "got: {ja}");
+        assert!(ja.contains("cannot route"), "got: {ja}");
+        assert!(
+            kokoro_route_refusal("zf_xiaobei")
+                .expect("Mandarin is unrouted too")
+                .contains("speaks zh")
         );
-        let voices = system_fixture();
-        assert_eq!(
-            VoiceCatalog::System(&voices).routable_pool(&["Anna".into()]),
-            ["Anna"]
-        );
+        for id in ["df_anna", "custom_v1", "xq_bogus"] {
+            let refusal = kokoro_route_refusal(id).expect("an unknown family is refused");
+            assert!(
+                refusal.contains("names no Kokoro language family"),
+                "{id}: {refusal}"
+            );
+            assert!(!refusal.contains("speaks"), "{id}: {refusal}");
+        }
+        assert_eq!(kokoro_route_refusal("af_sarah"), None);
+        assert_eq!(kokoro_route_refusal("if_sara"), None);
+    }
+
+    /// The allocation-free predicate and the sentence builder are separate entry points over
+    /// one `KokoroBlock`; this is what keeps them from drifting apart again.
+    #[test]
+    fn refusal_and_predicate_agree() {
+        for id in [
+            "af_sarah",
+            "if_sara",
+            "jf_alpha",
+            "zf_xiaobei",
+            "df_anna",
+            "xq_bogus",
+            "custom_v1",
+        ] {
+            assert_eq!(
+                is_routable_kokoro_voice(id),
+                kokoro_route_refusal(id).is_none(),
+                "{id}"
+            );
+        }
     }
 
     #[test]
@@ -653,6 +752,15 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot route")
         );
+        // An unrecognizable family is refused for its own reason, not the language one.
+        let unknown_family =
+            TtsArgPools::with_voice(TtsEngine::BuiltIn, TtsModel::Kokoro, "xq_bogus".into());
+        let err = validate_speak_voices(&unknown_family).unwrap_err();
+        assert!(
+            err.contains("names no Kokoro language family"),
+            "got: {err}"
+        );
+        assert!(!err.contains("speaks"), "got: {err}");
         assert!(
             validate_speak_voices(&TtsArgPools::with_voice(
                 TtsEngine::BuiltIn,

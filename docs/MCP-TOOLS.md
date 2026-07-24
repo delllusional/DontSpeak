@@ -85,6 +85,10 @@ most recent ended utterances, newest first — `{id, voice, language, warning, o
 (never reached playback, so `voice` and `language` are null). Poll for the `id` that `speak`
 returned.
 
+`voices` is the pool actually in effect: a configured built-in voice whose language this build
+cannot route is dropped and listed under `ignored_voices` (present only when there is one), with
+the model defaults substituting when that empties the pool.
+
 ## usage
 
 Coding-agent subscription usage.
@@ -109,6 +113,9 @@ List languages and voices.
 
 `language` filters this query only; synthesis language is detected per utterance.
 Per-model capabilities (languages, providers, params) live in `models`.
+
+`active` marks membership in that same effective pool, so a configured voice this build cannot
+route shows up neither as a listed voice nor as active, and is named in `ignored_voices` instead.
 
 ## models
 

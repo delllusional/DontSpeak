@@ -203,6 +203,31 @@ fn pick_agent_voice(
     candidates[roll(candidates.len())].clone()
 }
 
+/// Activity-log line for configured pool entries the router locks out, or `None` when there
+/// is nothing new to say: the built-in engine is not the one resolved, the pool is unchanged
+/// from `previous`, or every entry routes. Pure so the wording and the once-per-change rule
+/// are testable without a global logger. Warn + source `config` to match `VoiceConfig::load`'s
+/// other "your hand-edit is being ignored" diagnostics.
+fn locked_out_pool_warning(previous: Option<&VoiceConfig>, cfg: &VoiceConfig) -> Option<String> {
+    if cfg.resolved_tts() != Some(ds_config::TtsEngine::BuiltIn) {
+        return None;
+    }
+    let identity = |c: &VoiceConfig| (c.resolved_tts(), c.tts_model, c.active_voices().to_vec());
+    if previous.is_some_and(|previous| identity(previous) == identity(cfg)) {
+        return None;
+    }
+    let pool = ds_tts::enumerate::effective_builtin_pool(cfg.tts_model, cfg.active_voices());
+    if pool.ignored.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "tts_voices.{} entries this build cannot route: {} (ignored); speaking with {}",
+        cfg.tts_model.as_str(),
+        pool.ignored.join(", "),
+        pool.voices.join(", "),
+    ))
+}
+
 #[derive(Debug)]
 enum QueueAction {
     Speech {
@@ -442,6 +467,9 @@ impl TtsQueue {
         mic: ds_platform::MicState,
     ) -> Arc<Self> {
         let config = VoiceConfig::load(&paths);
+        if let Some(warning) = locked_out_pool_warning(None, &config) {
+            log::warn!(target: "config", "{warning}");
+        }
         let q = Arc::new(Self {
             items: Mutex::new(VecDeque::new()),
             queue_depth: AtomicU64::new(0),
@@ -1049,7 +1077,14 @@ impl TtsQueue {
     }
 
     pub(crate) fn set_config(&self, config: VoiceConfig) {
-        *self.config.lock().unwrap() = config;
+        let mut current = self.config.lock().unwrap();
+        let warning = locked_out_pool_warning(Some(&*current), &config);
+        *current = config;
+        // The log sink does file IO: never under the config lock.
+        drop(current);
+        if let Some(warning) = warning {
+            log::warn!(target: "config", "{warning}");
+        }
     }
 
     /// Caps/PTT resume — lifts pause of any cause. No-op if not paused.
@@ -1308,35 +1343,23 @@ impl TtsQueue {
                 &cfg.tts_voices.system,
             ),
             ds_config::TtsEngine::BuiltIn => {
-                let catalog = ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model);
-                let configured = cfg.active_voices();
                 // The greeting resolves with no language, so `pick_for_language` cannot narrow
                 // (#222). Hand-edited config is the only way an unroutable voice gets here —
-                // `set_config` refuses them — and this narrowing is pure: `VoiceCatalog::BuiltIn`
-                // reads nothing. System stays unnarrowed on purpose: its catalog costs `say -v ?`,
-                // which the greeting path must not pay, and a System voice speaks its own locale.
-                let mut pool = catalog.routable_pool(configured);
-                if pool.is_empty() && !configured.is_empty() {
-                    // Every configured voice is locked to a language this build cannot route.
-                    // The model's defaults beat silence, and match `VoiceConfig::clamp`'s own
-                    // empty-pool rule for the models it can check.
-                    log::debug!(
-                        target: "ttsq",
-                        "no configured {} voice this build can route; using the model defaults",
-                        cfg.tts_model.as_str()
-                    );
-                    pool = cfg
-                        .tts_model
-                        .descriptor()
-                        .default_voices
-                        .iter()
-                        .map(|voice| (*voice).to_string())
-                        .collect();
-                }
-                if pool.is_empty() {
+                // `set_config` refuses them — and the narrowing is pure. System stays unnarrowed
+                // on purpose: its catalog costs `say -v ?`, which the greeting path must not pay,
+                // and a System voice speaks its own locale. The substitution is announced once per
+                // config change by `locked_out_pool_warning`, not here: this runs per utterance.
+                let pool =
+                    ds_tts::enumerate::effective_builtin_pool(cfg.tts_model, cfg.active_voices());
+                if pool.voices.is_empty() {
                     return None;
                 }
-                self.pick_for_language(|| catalog, source, language, &pool)
+                self.pick_for_language(
+                    || ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model),
+                    source,
+                    language,
+                    &pool.voices,
+                )
             }
         };
         Some((engine, voice))
@@ -5307,6 +5330,50 @@ mod tests {
             q.resolve_engine_voice(&cfg, Some(WiredAgent::Codex), Some("en"))
                 .map(|(_, voice)| voice),
             Some(claimed)
+        );
+    }
+
+    /// The router substitutes the model defaults silently; this line is the only trace a user
+    /// gets that `config.toml` and playback disagree. Pure — no queue, no logger.
+    #[test]
+    fn a_locked_out_pool_is_announced_once_per_config_change() {
+        let mk = |ladder: Vec<ds_config::TtsEngine>, kokoro: Vec<String>| VoiceConfig {
+            tts_engine_ladder: ladder,
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro,
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let built_in = |kokoro: Vec<String>| mk(vec![ds_config::TtsEngine::BuiltIn], kokoro);
+
+        let locked = built_in(vec!["jf_alpha".to_string()]);
+        let warning = locked_out_pool_warning(None, &locked).expect("a locked pool is announced");
+        assert!(warning.contains("tts_voices.kokoro"), "got: {warning}");
+        assert!(warning.contains("jf_alpha"), "got: {warning}");
+        let default = ds_config::TtsModel::Kokoro.descriptor().default_voices[0];
+        assert!(warning.contains(default), "got: {warning}");
+
+        // A reload that did not touch the pool must not repeat the line.
+        assert_eq!(locked_out_pool_warning(Some(&locked), &locked), None);
+        let other_locked = built_in(vec!["zf_xiaobei".to_string()]);
+        assert!(locked_out_pool_warning(Some(&other_locked), &locked).is_some());
+
+        assert_eq!(
+            locked_out_pool_warning(None, &built_in(vec!["af_sarah".to_string()])),
+            None
+        );
+        // System resolves to another engine (macOS/Windows) or to none (Linux): silent either
+        // way, so this holds on every host.
+        assert_eq!(
+            locked_out_pool_warning(
+                None,
+                &mk(
+                    vec![ds_config::TtsEngine::System],
+                    vec!["jf_alpha".to_string()]
+                )
+            ),
+            None
         );
     }
 

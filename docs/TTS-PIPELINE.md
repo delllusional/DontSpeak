@@ -155,7 +155,9 @@ those stay rejected in a configured pool (`set_config`) and per utterance (`spea
 `tts_args.kokoro.voice`) alike. An unrouted family reports its own language, so the router
 never mistakes it for a language-agnostic voice, and a hand-edited pool entry locked to such
 a language is dropped before the pool is used — including on the greeting path, which
-resolves before any language is known.
+resolves before any language is known. The drop is announced once per config change in the
+activity log (`WARN config`), and `status` / `voices` report the pool in effect alongside the
+entries they ignored.
 
 ## Queue and focus
 

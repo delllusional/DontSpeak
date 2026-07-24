@@ -12,11 +12,32 @@ pub(crate) fn voice_groups(
     model: TtsModel,
     language: Option<&str>,
 ) -> Vec<(String, Vec<Value>)> {
+    // Enumerate the Kokoro catalog only for a query that is actually for it — every other
+    // combination is registry- or `say`-backed and must not pay a disk read.
+    let kokoro_ids = (engine == TtsEngine::BuiltIn && model == TtsModel::Kokoro)
+        .then(enumerate::kokoro_voice_ids)
+        .unwrap_or_default();
+    voice_groups_from(engine, model, language, &kokoro_ids)
+}
+
+/// [`voice_groups`] over an injected Kokoro catalog, so the built-in half reads no disk and
+/// tool-level tests are hermetic. System groups still enumerate `say -v ?` (#235).
+pub(crate) fn voice_groups_from(
+    engine: TtsEngine,
+    model: TtsModel,
+    language: Option<&str>,
+    kokoro_ids: &[String],
+) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
         TtsEngine::BuiltIn => {
             let language = language.unwrap_or(model.descriptor().default_language);
-            let voices: Vec<Value> = enumerate::built_in_choices(model, language)
+            let choices = if model == TtsModel::Kokoro {
+                enumerate::kokoro_choices_from(kokoro_ids, &enumerate::primary_subtag(language))
+            } else {
+                enumerate::built_in_choices(model, language)
+            };
+            let voices: Vec<Value> = choices
                 .into_iter()
                 .map(|c| {
                     let (language_tag, gender) = if model == TtsModel::Kokoro {

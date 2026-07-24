@@ -236,19 +236,13 @@ impl SetConfigArgs {
                         model.as_str()
                     ));
                 }
-                // Kokoro publishes voices whose frontend this build does not ship (Japanese and
-                // Mandarin, since those pipelines were dropped). They are real ids, so
-                // membership passes and only the language rules them out. Voices for the routed
-                // languages are admitted whatever their family: playback narrows the pool to the
-                // detected language, so a non-English voice is only ever picked for its own.
+                // A real Kokoro id passes membership, so only routability rules it out here.
                 if model == TtsModel::Kokoro
-                    && let Some(bad) = voices
+                    && let Some(refusal) = voices
                         .iter()
-                        .find(|voice| !ds_voices::enumerate::is_routable_kokoro_voice(voice))
+                        .find_map(|voice| ds_voices::enumerate::kokoro_route_refusal(voice))
                 {
-                    return Err(format!(
-                        "`{bad}` speaks a language this build cannot route; see voices"
-                    ));
+                    return Err(refusal);
                 }
                 changes.push(format!("{key}=[{}]", voices.join(", ")));
                 *cfg.voices_for_mut(model) = voices;
@@ -778,16 +772,24 @@ mod tests {
             vec!["tts_voices.kokoro=[af_nova, if_sara]".to_string()]
         );
 
-        // A published-but-unrouted family: real id, no frontend, so never admissible.
+        // A published-but-unrouted family: real id, no frontend, so never admissible. The
+        // reason is asserted, not just the refusal — `speak` quotes the same sentence.
         let unroutable: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["jf_alpha"] } }))
                 .unwrap();
-        assert!(unroutable.apply_with(&mut cfg, None).is_err());
+        let err = unroutable.apply_with(&mut cfg, None).unwrap_err();
+        assert!(err.contains("speaks ja"), "got: {err}");
+        assert!(err.contains("cannot route"), "got: {err}");
 
         let unknown_family: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["xq_bogus"] } }))
                 .unwrap();
-        assert!(unknown_family.apply_with(&mut cfg, None).is_err());
+        let err = unknown_family.apply_with(&mut cfg, None).unwrap_err();
+        assert!(
+            err.contains("names no Kokoro language family"),
+            "got: {err}"
+        );
+        assert!(!err.contains("speaks"), "got: {err}");
     }
 
     #[test]

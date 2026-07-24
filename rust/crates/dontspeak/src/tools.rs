@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::engine_launch::ensure_engine;
 use crate::mcp::{ok, structured_tool_result, tool_result};
-use crate::voices::voice_groups;
+use crate::voices::{voice_groups, voice_groups_from};
 
 /// Test helper; production uses [`tools_call_cancellable`].
 #[cfg(test)]
@@ -227,6 +227,17 @@ struct SpeakersArgs {
 }
 
 fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
+    call_voices_with(paths, args, None)
+}
+
+/// [`call_voices`] with the Kokoro catalog injected. `Some(ids)` lists exactly those and
+/// touches no disk (hermetic tests); `None` enumerates the real catalog, lazily and only
+/// when the query needs it.
+fn call_voices_with(
+    paths: &Paths,
+    args: &Value,
+    kokoro_ids: Option<&[String]>,
+) -> Result<Value, String> {
     let a: VoicesArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid voices arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
@@ -260,9 +271,18 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
             ));
         }
     }
-    let mut groups = voice_groups(engine, model, language.as_deref());
+    let mut groups = match kokoro_ids {
+        Some(ids) => voice_groups_from(engine, model, language.as_deref(), ids),
+        None => voice_groups(engine, model, language.as_deref()),
+    };
+    let mut ignored_voices = Vec::new();
     let pool = match engine {
-        ds_config::TtsEngine::BuiltIn => cfg.voices_for(model).to_vec(),
+        ds_config::TtsEngine::BuiltIn => {
+            let effective =
+                ds_voices::enumerate::effective_builtin_pool(model, cfg.voices_for(model));
+            ignored_voices = effective.ignored;
+            effective.voices
+        }
         ds_config::TtsEngine::System => cfg.tts_voices.system.clone(),
     };
     let languages: Vec<Value> = groups
@@ -280,12 +300,19 @@ fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
         })
         .collect();
     // The per-model capability catalog lives in `models` now — one array of model ids, not two.
-    let out = json!({
+    let mut out = json!({
         "engine": engine.as_str(),
         "model": (engine == ds_config::TtsEngine::BuiltIn).then(|| model.as_str()),
         "language": language,
         "languages": languages,
     });
+    // `active` marks the pool actually in effect, so say which configured entries were
+    // dropped to get there — they are absent from `languages` too (`kokoro_choices_from`
+    // filters them), and a bare substituted default would otherwise look like the config.
+    // Not narrowed by the `language` filter: this is a config-level fact, not a listing.
+    if !ignored_voices.is_empty() {
+        out["ignored_voices"] = json!(ignored_voices);
+    }
     Ok(out)
 }
 
@@ -343,8 +370,14 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         }
     };
     let resolved_tts = cfg.resolved_tts();
+    let mut ignored_voices = Vec::new();
     let voices = match resolved_tts {
-        Some(ds_config::TtsEngine::BuiltIn) => cfg.active_voices().to_vec(),
+        Some(ds_config::TtsEngine::BuiltIn) => {
+            let pool =
+                ds_voices::enumerate::effective_builtin_pool(cfg.tts_model, cfg.active_voices());
+            ignored_voices = pool.ignored;
+            pool.voices
+        }
         Some(ds_config::TtsEngine::System) => cfg.tts_voices.system.clone(),
         None => Vec::new(),
     };
@@ -359,6 +392,10 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         "agents": cfg.agents,
         "state": state,
     });
+    // Only when the router dropped something: `voices` alone would look like plain config.
+    if !ignored_voices.is_empty() {
+        out["ignored_voices"] = json!(ignored_voices);
+    }
     if a.detail.unwrap_or(false) {
         out["status"] = match probe {
             EngineProbe::Live(status) => serde_json::to_value(status)
@@ -1155,6 +1192,63 @@ mod status_output {
         assert!(v.get("rate").is_none());
     }
 
+    /// `voices` is what will actually be heard, not the raw config: a hand-edited entry this
+    /// build cannot route is dropped and named, so config, `status`, and playback agree.
+    #[test]
+    fn status_reports_the_effective_pool_and_names_what_it_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nkokoro = [\"af_sarah\", \"jf_alpha\"]\n",
+        )
+        .unwrap();
+
+        let out = call_status(&paths, None, &json!({})).expect("status builds");
+        assert_eq!(out["voices"], json!(["af_sarah"]));
+        assert_eq!(out["ignored_voices"], json!(["jf_alpha"]));
+    }
+
+    #[test]
+    fn status_substitutes_the_defaults_for_a_wholly_unroutable_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nkokoro = [\"jf_alpha\"]\n",
+        )
+        .unwrap();
+
+        let out = call_status(&paths, None, &json!({})).expect("status builds");
+        assert_eq!(
+            out["voices"],
+            json!(TtsModel::Kokoro.descriptor().default_voices)
+        );
+        assert_eq!(out["ignored_voices"], json!(["jf_alpha"]));
+    }
+
+    #[test]
+    fn status_omits_ignored_voices_when_every_entry_routes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+
+        let out = call_status(&paths, None, &json!({})).expect("status builds");
+        assert!(out.get("ignored_voices").is_none());
+    }
+
+    /// Cross-crate drift: `ignored_voices` is emitted here but declared in `ds-tools`, whose
+    /// `status` schema closes `additionalProperties` — nothing validates the payload against
+    /// it at runtime, so a missing property would only surface in a strict MCP client.
+    #[test]
+    fn the_status_schema_declares_ignored_voices() {
+        assert!(
+            !ds_tools::output_schema("status").unwrap()["properties"]["ignored_voices"].is_null()
+        );
+    }
+
     #[test]
     fn status_detail_gates_the_status_section() {
         let dir = tempfile::tempdir().unwrap();
@@ -1508,7 +1602,9 @@ mod set_config_tests {
 
 #[cfg(test)]
 mod voices_tests {
-    //! Pure config + catalog read (no IPC): engine override and `active` marking.
+    //! Config + injected catalog (no IPC): engine override, `active` marking, and the
+    //! entries the router locks out. Kokoro queries go through `call_voices_with` so the
+    //! listing never depends on a real model cache.
     use super::*;
 
     fn rooted_paths() -> (tempfile::TempDir, Paths) {
@@ -1518,10 +1614,30 @@ mod voices_tests {
         (dir, paths)
     }
 
+    /// Injected Kokoro catalog. Fixed here so the listing never depends on the developer's or
+    /// the runner's model cache — `kokoro_voice_ids()` would read the real `voices-v1.0.bin`.
+    /// Holds both Kokoro defaults, a second `en` id for the pool test, one `it` id the default
+    /// `en` filter must exclude, and two published-but-unrouted ids the routability filter must
+    /// drop from the listing.
+    fn kokoro_catalog() -> Vec<String> {
+        [
+            "af_sarah",
+            "am_michael",
+            "bf_emma",
+            "if_sara",
+            "jf_alpha",
+            "zf_xiaobei",
+        ]
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect()
+    }
+
     #[test]
     fn tts_engine_argument_overrides_the_configured_engine() {
         let (_dir, paths) = rooted_paths();
-        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" }))
+        let catalog = kokoro_catalog();
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
             .expect("voices succeeds with no engine running");
         assert_eq!(out["engine"], json!("built_in"));
         assert_eq!(out["language"], json!("en"));
@@ -1549,18 +1665,20 @@ mod voices_tests {
 
     #[test]
     fn every_pool_voice_is_marked_active() {
-        // `active` = pool membership: ALL configured voices flag, not just entry 0 —
-        // there is no privileged "default" slot in the pool.
-        // Pool ids must come from `KOKORO_FALLBACK_IDS` — machines without the real
-        // voices bin (CI) only catalog those, and the test must pass on both.
+        // `active` = membership in the pool actually IN EFFECT, not in `config.toml`: ALL of it
+        // flags, there is no privileged "default" slot. Both ids here route, so the effective
+        // pool is the configured one; an entry this build cannot route is dropped from it and
+        // named in `ignored_voices` instead — see the unroutable-voice test below.
         let (_dir, paths) = rooted_paths();
         std::fs::write(
             &paths.config_toml,
             "[tts_voices]\nkokoro = [\"am_michael\", \"bf_emma\"]\n",
         )
         .unwrap();
-        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" }))
+        let catalog = kokoro_catalog();
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
             .expect("voices succeeds with no engine running");
+        assert!(out.get("ignored_voices").is_none());
         let pool = VoiceConfig::load(&paths).active_voices().to_vec();
         assert_eq!(pool, vec!["am_michael", "bf_emma"]);
 
@@ -1598,8 +1716,51 @@ mod voices_tests {
     #[test]
     fn voices_no_longer_lists_models() {
         let (_dir, paths) = rooted_paths();
-        let out = call_voices(&paths, &json!({ "tts_engine": "built_in" })).unwrap();
+        let catalog = kokoro_catalog();
+        let out =
+            call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog)).unwrap();
         assert!(out.get("models").is_none());
+    }
+
+    /// R1: moving `active` to the effective pool without saying what was dropped would swap
+    /// one silent lie for another — the substituted defaults would read as the config.
+    #[test]
+    fn an_unroutable_configured_voice_is_named_and_the_defaults_take_over() {
+        let (_dir, paths) = rooted_paths();
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nkokoro = [\"jf_alpha\"]\n",
+        )
+        .unwrap();
+        let catalog = kokoro_catalog();
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
+            .expect("voices succeeds with no engine running");
+
+        assert_eq!(out["ignored_voices"], json!(["jf_alpha"]));
+        let defaults = TtsModel::Kokoro.descriptor().default_voices;
+        let mut active = Vec::new();
+        for group in out["languages"].as_array().expect("languages array") {
+            for voice in group["voices"].as_array().expect("voices array") {
+                let id = voice["id"].as_str().expect("voice id").to_string();
+                // Dropped twice over: the `en` filter and `is_routable_kokoro_voice`.
+                assert_ne!(id, "jf_alpha");
+                if voice["active"] == json!(true) {
+                    assert!(defaults.contains(&id.as_str()), "unexpected active {id}");
+                    active.push(id);
+                }
+            }
+        }
+        active.sort(); // The listing is label-sorted; only the set matters here.
+        assert_eq!(active, ["af_sarah", "bf_emma"]);
+    }
+
+    /// Cross-crate drift: `ds-tools`' `voices` schema closes `additionalProperties`, so an
+    /// undeclared property would be rejected by a strict MCP client.
+    #[test]
+    fn the_voices_schema_declares_ignored_voices() {
+        assert!(
+            !ds_tools::output_schema("voices").unwrap()["properties"]["ignored_voices"].is_null()
+        );
     }
 }
 

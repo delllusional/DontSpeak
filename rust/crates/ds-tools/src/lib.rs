@@ -655,6 +655,7 @@ fn output_schema_for(output: Output) -> Value {
                 "engine": { "type": "string", "enum": ["built_in", "system", "off"] },
                 "model": { "type": "string", "enum": ds_config::TtsModel::TOKENS },
                 "voices": { "type": "array", "items": { "type": "string" } },
+                "ignored_voices": { "type": "array", "items": { "type": "string" } },
                 "rates": {
                     "type": "object",
                     "properties": {
@@ -784,6 +785,7 @@ fn output_schema_for(output: Output) -> Value {
                 "engine": { "type": "string", "enum": ["built_in", "system"] },
                 "model": { "type": ["string", "null"], "enum": model_enum_or_null() },
                 "language": { "type": ["string", "null"] },
+                "ignored_voices": { "type": "array", "items": { "type": "string" } },
                 "languages": {
                     "type": "array",
                     "items": {
