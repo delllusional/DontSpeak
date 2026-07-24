@@ -65,19 +65,38 @@ pub(crate) fn parakeet_available() -> bool {
         })
 }
 
-/// Provider-aware Parakeet readiness: ONNX files versus shim plus MLX assets.
+/// Shim + the FluidAudio Parakeet Core ML set (batch + streaming EOU), same markers as the
+/// downloader. Apple-Silicon-only rung, so the shim answer suffices as the platform gate.
+pub(crate) fn parakeet_fluid_available() -> bool {
+    mlx_shim_available()
+        && roots().is_some_and(|roots| {
+            ds_model::hf_repo::is_hf_set_present(
+                &roots,
+                &ds_model::coreml_repo::PARAKEET_COREML_SET,
+            )
+        })
+}
+
+/// Provider-aware Parakeet readiness: ONNX files versus the native set the selected provider
+/// loads (MLX or FluidAudio Core ML). Both native rungs share the one dylib.
 pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
     if stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available()) {
         ds_model::is_parakeet_present() // ONNX-CPU/CUDA: needs the downloaded model FILES
+    } else if cfg.resolved_stt_provider() == ds_config::Provider::Fluid {
+        parakeet_fluid_available() // FluidAudio: shim + its Core ML set
     } else {
         parakeet_available() // MLX: shim + its downloaded model set
     }
 }
 
-/// Built-in STT on ONNX (needs model files) vs native MLX.
-/// real only when shim present; else downgrades to ONNX-CPU. Shared by presence + status.
+/// Built-in STT on ONNX (needs model files) vs a native shim rung. Native (`mlx`/`fluid`) is
+/// real only when the shared shim is present; else it downgrades to ONNX-CPU. Shared by
+/// presence + status.
 pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
-    !(provider == ds_config::Provider::Mlx && shim_available)
+    !(matches!(
+        provider,
+        ds_config::Provider::Mlx | ds_config::Provider::Fluid
+    ) && shim_available)
 }
 
 /// Genuine native TTS: supported model and platform plus the loaded shim. `Mlx` and `Fluid`
@@ -409,6 +428,31 @@ mod tests {
         assert!(stt_uses_onnx_runtime(Provider::OrtCpu, true));
         assert!(stt_uses_onnx_runtime(Provider::OrtCuda, false));
         assert!(stt_uses_onnx_runtime(Provider::OrtCuda, true));
+    }
+
+    /// The two native STT rungs share one dylib, so `stt_uses_onnx_runtime` must treat `mlx`
+    /// and `fluid` identically: native when the shim is present, ONNX-CPU downgrade otherwise —
+    /// exactly like the symmetric TTS gate `tts_uses_native_runtime`.
+    #[test]
+    fn stt_uses_onnx_runtime_treats_both_native_rungs_alike() {
+        use ds_config::Provider;
+        let cases = [
+            (Provider::Mlx, true, false),
+            (Provider::Mlx, false, true),
+            (Provider::Fluid, true, false),
+            (Provider::Fluid, false, true),
+            (Provider::OrtCpu, true, true),
+            (Provider::OrtCpu, false, true),
+            (Provider::OrtCuda, true, true),
+            (Provider::OrtCuda, false, true),
+        ];
+        for (provider, shim, want_onnx) in cases {
+            assert_eq!(
+                stt_uses_onnx_runtime(provider, shim),
+                want_onnx,
+                "{provider:?} shim={shim}"
+            );
+        }
     }
 
     #[test]

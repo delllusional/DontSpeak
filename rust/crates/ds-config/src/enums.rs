@@ -232,9 +232,7 @@ impl Provider {
             Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => cuda_usable_on(os, arch),
             Provider::OrtCoreMl => false,
-            // The FluidAudio Parakeet backend lands with the STT slice; until then this
-            // rung is TTS-only, exactly as `OrtCoreMl` above.
-            Provider::Fluid => false,
+            Provider::Fluid => fluid_usable_on(os, arch),
         }
     }
 
@@ -988,10 +986,8 @@ mod tests {
             (OrtCoreMl, "macos", "aarch64", false, true),
             (OrtCoreMl, "macos", "x86_64", false, true),
             (OrtCoreMl, "windows", "x86_64", false, false),
-            // FluidAudio — Apple Silicon only, like MLX. The STT column is false
-            // everywhere until the FluidAudio Parakeet backend lands; the TTS column is
-            // already live, so the two axes deliberately disagree for now.
-            (Fluid, "macos", "aarch64", false, true),
+            // FluidAudio — Apple Silicon only, like MLX, identically for STT and TTS.
+            (Fluid, "macos", "aarch64", true, true),
             (Fluid, "macos", "x86_64", false, false),
             (Fluid, "windows", "x86_64", false, false),
             (Fluid, "linux", "aarch64", false, false),

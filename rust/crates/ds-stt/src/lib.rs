@@ -19,6 +19,9 @@ pub mod boundary;
 pub mod claude_native;
 /// Speaker diarization ("who spoke when") — trait + MLX backend (macOS).
 pub mod diarize;
+/// FluidAudio Parakeet TDT v2 STT on Core ML / ANE (`fluid` provider). macOS only.
+#[cfg(target_os = "macos")]
+pub mod fluid;
 pub mod local;
 /// MLX Audio Parakeet STT. macOS only.
 #[cfg(target_os = "macos")]

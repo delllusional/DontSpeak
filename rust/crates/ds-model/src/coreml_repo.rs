@@ -41,6 +41,15 @@ pub fn kokoro_ane_dir(roots: &ModelRoots) -> PathBuf {
     roots.dir_for(&KOKORO_COREML).join("ANE")
 }
 
+/// The directory handed to FluidAudio's `AsrModels.load(from:version:.v2)` for the batch set.
+/// The v0.15.5 loader does `from.deletingLastPathComponent().appendingPathComponent(<repo
+/// folder>)`, and for `.v2` that folder is literally `parakeet-tdt-0.6b-v2` — so handing it the
+/// set directory itself round-trips to the same files under `<model>/coreml/`. That is why the
+/// batch set stays a normal `CoreMl` repo rather than needing a bare-`model_dir` root.
+pub fn parakeet_batch_dir(roots: &ModelRoots) -> PathBuf {
+    roots.dir_for(&PARAKEET_COREML)
+}
+
 /// The exact directory `StreamingEouAsrManager.loadModels(from:)` reads the streaming
 /// `.mlmodelc` set + `vocab.json` from. The manifest carries the repo's `160ms/` prefix, so
 /// the loadable directory is that subfolder of the download target.
@@ -620,9 +629,11 @@ pub static KOKORO_G2P_COREML: HfRepo = HfRepo {
 /// Apple-native Parakeet TDT 0.6b **v2** STT — English only, unlike the MLX rung's
 /// multilingual v3.
 ///
-/// TODO: the Core ML ASR loader appends the set's folder name to the directory it is handed;
-/// confirm against `AsrModels.load(from:version:)` when the backend lands whether that
-/// directory is `<model>/coreml` (this layout) or its parent, and move the set if not.
+/// Stays a normal `CoreMl` repo at `parakeet-tdt-0.6b-v2`: FluidAudio 0.15.5's
+/// `AsrModels.load(from:version:.v2)` resolves the model directory as
+/// `from.deletingLastPathComponent()` + the v2 repo folder (`parakeet-tdt-0.6b-v2`), so the
+/// shim hands it this set directory ([`parakeet_batch_dir`]) and the load round-trips to the
+/// same files under `<model>/coreml/`. No bare-`model_dir` root is required.
 pub static PARAKEET_COREML: HfRepo = HfRepo {
     name: "parakeet_coreml",
     repo: "FluidInference/parakeet-tdt-0.6b-v2-coreml",

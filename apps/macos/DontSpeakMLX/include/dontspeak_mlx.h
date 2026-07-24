@@ -58,6 +58,39 @@ int32_t ds_fluid_tts_synthesize_phonemes(const char *phonemes, const char *voice
 
 void ds_fluid_tts_shutdown(void);
 
+// --- ASR (Parakeet TDT v2, FluidAudio Core ML / ANE) — the `fluid` STT backend -----------
+// Same dylib and borrowed-result str callback as ds_mlx_*; Apple Silicon only (the Intel
+// build compiles shim.swift alone and exports none of these). DontSpeak pre-downloads the
+// Parakeet set; the shim loads offline (ModelHub.offlineMode).
+
+// Load Parakeet TDT v2 (English-only) from a required local model directory. FluidAudio's
+// AsrModels.load(from:version:.v2) strips the last path component and re-appends the v2 repo
+// folder, so pass the set directory itself. compute_units is ABI-reserved; pass 0.
+int32_t ds_fluid_asr_init(const char *model_dir, int32_t compute_units);
+
+// Transcribe 16 kHz mono f32 PCM → UTF-8 text, delivered to `cb`. Not initialized → rc 2.
+int32_t ds_fluid_transcribe(const float *samples, size_t n, int32_t sample_rate,
+                            void *ctx, ds_mlx_str_cb cb);
+
+void ds_fluid_asr_shutdown(void);
+
+// Buffered ASR (StreamingEouAsrManager, 160 ms chunk): start an utterance, buffer 16 kHz
+// chunks and periodically refresh the live hypothesis, then decode once more at finish.
+
+// Begin a new streaming utterance (loads the streaming model on first use from model_dir).
+int32_t ds_fluid_asr_stream_start(const char *model_dir);
+
+// Feed a 16 kHz mono chunk; `cb` receives the current hypothesis. Not started → rc 2.
+int32_t ds_fluid_asr_stream_push(const float *samples, size_t n, int32_t sample_rate,
+                                 void *ctx, ds_mlx_str_cb cb);
+
+// Flush the stream; `cb` receives the final transcript.
+int32_t ds_fluid_asr_stream_finish(void *ctx, ds_mlx_str_cb cb);
+
+// Drop buffered utterance state while preserving the process-global warm model shared with
+// ds_fluid_transcribe. ds_fluid_asr_shutdown owns model teardown.
+void ds_fluid_asr_stream_shutdown(void);
+
 // --- ASR (Parakeet TDT, MLX) — the MLX STT backend -----------------------------
 
 // Load Parakeet TDT v2 (English-only) from a required local model directory.

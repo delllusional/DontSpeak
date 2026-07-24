@@ -746,15 +746,17 @@ mod tests {
             "shim.swift must not reference FluidAudio (Intel compatibility-build boundary)"
         );
 
-        // Fluid.swift's ONLY ModelHub use is the offline switch that keeps it load-only.
+        // Fluid.swift's ONLY ModelHub use is the offline switch that keeps it load-only:
+        // every `ModelHub` occurrence must be a `ModelHub.offlineMode = true` (each init path --
+        // TTS, batch ASR, streaming ASR -- sets it), never a download or cache-management call.
         assert!(
             fluid.contains("ModelHub.offlineMode = true"),
             "Fluid.swift must load offline"
         );
         assert_eq!(
             fluid.matches("ModelHub").count(),
-            1,
-            "Fluid.swift's only ModelHub use is the offline switch"
+            fluid.matches("ModelHub.offlineMode = true").count(),
+            "every Fluid.swift ModelHub use must be the offline switch"
         );
     }
 

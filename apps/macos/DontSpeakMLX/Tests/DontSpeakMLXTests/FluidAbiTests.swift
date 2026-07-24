@@ -25,4 +25,38 @@ final class FluidAbiTests: XCTestCase {
         let cb: MlxPcmCb = { _, _, _, _ in }
         XCTAssertEqual(ds_fluid_tts_synthesize_phonemes(nil, nil, 1.0, nil, cb), 2)
     }
+
+    // ASR ABI edges. `ds_fluid_asr_init` / `ds_fluid_asr_stream_start` are never called (they
+    // would touch the ANE), so both managers stay nil for the whole process and the
+    // not-initialized paths are exercised deterministically. No model files, no network.
+
+    /// Transcribing before init returns the not-initialized rc (2), never a crash. The manager
+    /// check precedes the sample check, so a nil sample pointer still reaches rc 2.
+    func testTranscribeBeforeInitReportsNotInitialized() {
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_transcribe(nil, 0, 16_000, nil, cb), 2)
+    }
+
+    /// Pushing a streaming chunk before start returns the not-started rc (2), never a crash.
+    func testStreamPushBeforeStartReportsNotStarted() {
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_asr_stream_push(nil, 0, 16_000, nil, cb), 2)
+    }
+
+    /// Finishing a stream that never started is a graceful empty result (rc 0, a borrowed "" to
+    /// the callback), matching the shim's borrowed-empty contract — not a crash. The callback
+    /// captures nothing (a `@convention(c)` closure cannot), so only the rc is asserted here.
+    func testStreamFinishBeforeStartIsGracefulEmpty() {
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_asr_stream_finish(nil, cb), 0)
+    }
+
+    /// Both ASR shutdowns with no live manager are safe no-ops (idempotent), and a following
+    /// transcribe still reports not-initialized rather than touching a freed manager.
+    func testAsrShutdownWithoutInitIsSafe() {
+        ds_fluid_asr_shutdown()
+        ds_fluid_asr_stream_shutdown()
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_transcribe(nil, 0, 16_000, nil, cb), 2)
+    }
 }

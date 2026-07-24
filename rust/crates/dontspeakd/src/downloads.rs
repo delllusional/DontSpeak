@@ -132,7 +132,9 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
         || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
             && matches!(
                 target,
-                DownloadTarget::ParakeetModel | DownloadTarget::ParakeetMlx
+                DownloadTarget::ParakeetModel
+                    | DownloadTarget::ParakeetMlx
+                    | DownloadTarget::ParakeetFluid
             ))
         || (target == DownloadTarget::Cuda && ds_model::cuda_runtime_wanted(cfg))
 }
@@ -435,6 +437,7 @@ struct DownloadNeeds {
     kokoro_frontend: bool,
     parakeet_model: bool,
     parakeet_mlx: bool,
+    parakeet_fluid: bool,
     diarization_mlx: bool,
     sepformer_model: bool,
 }
@@ -453,6 +456,9 @@ fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     }
     if need.parakeet_mlx {
         targets.push(DownloadTarget::ParakeetMlx);
+    }
+    if need.parakeet_fluid {
+        targets.push(DownloadTarget::ParakeetFluid);
     }
     if need.diarization_mlx {
         targets.push(DownloadTarget::DiarizationMlx);
@@ -546,9 +552,13 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
+    // The native STT rung shares the dylib; `resolved_stt_provider` picks exactly one set.
+    let stt_native = stt_is_builtin && !stt_onnx_runtime;
+    let stt_fluid = stt_native && cfg.resolved_stt_provider() == ds_config::Provider::Fluid;
     let parakeet_model = stt_is_builtin && stt_onnx_runtime && !ds_model::is_parakeet_present();
     let parakeet_mlx =
-        stt_is_builtin && !stt_onnx_runtime && !set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
+        stt_native && !stt_fluid && !set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
+    let parakeet_fluid = stt_fluid && !set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET);
     let diarization_mlx = diarization_mlx_needed(
         DownloadTarget::DiarizationMlx.is_supported_on_this_host(),
         cfg.is_diarization_on(),
@@ -564,6 +574,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         kokoro_frontend,
         parakeet_model,
         parakeet_mlx,
+        parakeet_fluid,
         diarization_mlx,
         sepformer_model,
     }
@@ -825,6 +836,16 @@ mod tests {
                 ..Default::default()
             }),
             vec![DownloadTarget::KokoroFluid, DownloadTarget::KokoroFrontend]
+        );
+        // FluidAudio STT: its own STT target slots after any TTS, exactly where `parakeet_mlx`
+        // would, and is mutually exclusive with it (one native rung per resolved provider).
+        assert_eq!(
+            need(DownloadNeeds {
+                tts_model: DownloadTarget::fluid_for_tts(ds_config::TtsModel::Kokoro),
+                parakeet_fluid: true,
+                ..Default::default()
+            }),
+            vec![DownloadTarget::KokoroFluid, DownloadTarget::ParakeetFluid]
         );
     }
 

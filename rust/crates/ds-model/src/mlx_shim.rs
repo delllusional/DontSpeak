@@ -90,6 +90,24 @@ pub fn parakeet_model_dir_arg() -> CString {
     path_arg(crate::mlx_repo::parakeet_mlx_dir())
 }
 
+/// Directory handed to FluidAudio's `AsrModels.load(from:version:.v2)` for the batch Parakeet
+/// set. The v0.15.5 loader strips the last path component and re-appends the v2 repo folder
+/// (`parakeet-tdt-0.6b-v2`), so handing it the set directory itself round-trips to the same
+/// files -- one resolution shared with the download target via `parakeet_batch_dir`.
+pub fn fluid_parakeet_dir_arg() -> CString {
+    let dir = crate::hf_repo::ModelRoots::ambient()
+        .map(|roots| crate::coreml_repo::parakeet_batch_dir(&roots));
+    path_arg(dir)
+}
+
+/// The `160ms/` streaming EOU directory `StreamingEouAsrManager.loadModels(from:)` reads the
+/// `.mlmodelc` set + `vocab.json` from directly (no parent-stripping, unlike the batch loader).
+pub fn fluid_parakeet_eou_dir_arg() -> CString {
+    let dir = crate::hf_repo::ModelRoots::ambient()
+        .map(|roots| crate::coreml_repo::parakeet_eou_dir(&roots));
+    path_arg(dir)
+}
+
 /// Parent directory containing the Sortformer and WeSpeaker model subdirectories.
 pub fn mlx_model_root_arg() -> CString {
     path_arg(ds_config::mlx_dir())

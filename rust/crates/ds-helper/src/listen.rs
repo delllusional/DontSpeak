@@ -582,6 +582,19 @@ fn build_backend(provider: &str) -> Option<Box<dyn StreamingStt>> {
             }
         };
     }
+    // Apple Silicon only: the Intel shim exports no `ds_fluid_*`, and `fluid` is never a
+    // resolved STT provider there anyway (its platform gate is aarch64) — so this arm can't be
+    // reached on Intel and must not compile into a dlsym-fail (#211).
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    if provider.eq_ignore_ascii_case("fluid") {
+        return match ds_stt::fluid::FluidStreamer::new() {
+            Ok(s) => Some(Box::new(s)),
+            Err(e) => {
+                log::warn!(target: "helper", "streaming: FluidAudio streamer unavailable, using offline: {e}");
+                None
+            }
+        };
+    }
     #[cfg(target_os = "macos")]
     if provider.eq_ignore_ascii_case("system") {
         return match ds_stt::sysspeech::SystemStreamer::new() {
