@@ -35,12 +35,10 @@ Two fields each, resolved by `resolved_stt` / `resolved_tts`:
 macOS-only today, so Parakeet leads on Windows/Linux.
 
 **TTS engines:** `built_in` or `system`. The built-in model registry contains Kokoro,
-Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Every model has ORT CPU, ORT CUDA,
-and MLX; Kokoro alone has two Core ML backends — ORT's Core ML execution provider (`coreml`)
-and FluidAudio's native `.mlmodelc` chains (`fluid`, opt-in, Apple Silicon) — plus rate control
-and full-duplex. Model capabilities drive voice, rate, full-duplex, download, and provider
-selection. Speech language is detected per utterance in the shared text pipeline and never
-persisted as a synthesis setting.
+Chatterbox Multilingual, Qwen3-TTS, and OmniVoice. Their provider coverage is in the
+[runtime matrix](docs/RUNTIME-MATRIX.md). Model capabilities drive voice, rate,
+full-duplex, download, and provider selection. Speech language is detected per utterance
+in the shared text pipeline and never persisted as a synthesis setting.
 
 ## Caps Lock
 
@@ -82,20 +80,15 @@ Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 SHA-256 pinned. The engine also exposes an on-disk inventory (sizes per model) and
 removal of non-active models — and of a shared asset once nothing installed or selected
 references it (#220) — over `ds-ipc`, surfaced as the `models` MCP tool.
-`ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
-(Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
-built-in model. The opt-in `fluid` provider (Apple Silicon) runs FluidAudio's own pinned Core ML
-sets — Kokoro TTS, Parakeet v2 STT, diarization — through its own signed `libdontspeak_fluid.dylib`,
-a peer of `libdontspeak_mlx.dylib` rather than the same file, so a host can carry either without
-the other; its model sets download and pin like every other asset, except Kokoro's G2P/lexicon set,
-which FluidAudio hardcodes to `~/.cache/fluidaudio` and which DontSpeak pre-fills there for
-`initialize()` only. Intel macOS never builds or bundles MLX or FluidAudio code; its built-in
-path remains ORT CPU when an Intel-compatible runtime is present. The dependency-free
-`libdontspeak_sys.dylib` carries Apple System STT and ships on every macOS arch. UI "Runtime"
-reflects the backend in use.
+The canonical [runtime matrix](docs/RUNTIME-MATRIX.md) records runtime pins, platform
+gates, and model/graph coverage. `ort` is loaded dynamically and shared by ORT TTS,
+Parakeet, and auxiliary ONNX graphs in one process. The macOS host keeps System Speech,
+MLX, and FluidAudio in three independent signed dylibs; a host can carry any supported
+subset without linking one family through another. UI "Runtime" reflects the backend
+that was realized, not merely the configured preference.
 
 Kokoro English frontend uses checksum-pinned BART G2P (ORT) before backend selection —
-MLX and FluidAudio Kokoro still need that ORT dylib. See
+MLX and FluidAudio Kokoro still need that ORT dylib. Pipeline details:
 [docs/TTS-PIPELINE.md](docs/TTS-PIPELINE.md#models-and-backends).
 
 ## FFI boundary

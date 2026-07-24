@@ -24,7 +24,7 @@ Canonical path from assistant text to built-in or system speech. Streaming mecha
 | Delivery | Hook/MCP IPC or in-process Codex | `SpeakNarration` / `Speak` / direct enqueue |
 | Schedule | `dontspeakd::TtsQueue` | Session FIFO + policy; detect one ISO language per **utterance** at admit and carry it with optional target-keyed MCP arguments |
 | Text frontend | `ds-tts` | One GFM → prose cleanup for every route; model-capability frontend → bounded typed chunks; System stops at prose |
-| Synthesis | `ds-helper` (built-in) / OS voice (System) | Selected built-in model → ORT CPU everywhere or a supported accelerator; System → `say` / SAPI / spd-say |
+| Synthesis | `ds-helper` (built-in) / OS voice (System) | Selected built-in model → ORT CPU everywhere or a supported accelerator; System → `say` / SAPI |
 | Result | Helper + queue | Success, cancel, disabled, load fail, timeout, synth fail |
 
 Narration selection decides what to speak but does not rewrite it. Every delivery route
@@ -82,6 +82,8 @@ zero chunks = success before opening audio.
 Kokoro + styles + English BART + multilingual frontend assets + ORT are checked as one stack.
 BART is frontend, not ONNX-synth-only — MLX still needs ORT
 (`kokoro_g2p_files_present`, `ensure_ort_dylib_gpu`).
+Runtime pins, platform gates, and per-model provider coverage live in the canonical
+[runtime matrix](RUNTIME-MATRIX.md); this section describes only the TTS data path.
 
 **ONNX:** detected language + bounded chunk → model tokenizer/conditioning → shared ORT sessions → PCM
 commit per batch. Provider acceleration is enabled only where the registry declares it.
@@ -104,14 +106,14 @@ pre-fills (the `KOKORO_G2P_COREML` repo) for load only; and because the Core ML 
 voice pack (`ANE/af_heart.bin`) and `ensureVoicePack` throws with no fallback, any other voice's
 `[510, 256]` pack is materialized on demand from the ONNX `voices-v1.0.bin` before synthesis.
 
-### Built-in model registry
+### Built-in model behavior
 
-| Model | Language mode | Voices | Providers | Rate / full duplex |
-|---|---|---|---|---|
-| Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | ORT CPU/CUDA/Core ML, MLX, FluidAudio | yes / yes |
-| Chatterbox Multilingual | 23 explicit languages | pinned reference voice | ORT CPU/CUDA, MLX | no / no |
-| Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | ORT CPU/CUDA, MLX | no / no |
-| OmniVoice | auto (any detected language) | 10 design presets | ORT CPU/CUDA, MLX | no / no |
+| Model | Language mode | Voices | Rate / full duplex |
+|---|---|---|---|
+| Kokoro | English, Spanish, French, Hindi, Italian, Portuguese | Kokoro voice catalog | yes / yes |
+| Chatterbox Multilingual | 23 explicit languages | pinned reference voice | no / no |
+| Qwen3-TTS CustomVoice | 10 explicit languages | 9 built-in speakers | no / no |
+| OmniVoice | auto (any detected language) | 10 design presets | no / no |
 
 Chatterbox caches transient reference-voice conditioning and uses named/model-derived KV
 caches. Qwen uses the exported cached talker and fixed-frame decoder. OmniVoice runs
