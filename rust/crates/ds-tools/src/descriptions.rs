@@ -73,6 +73,8 @@ pub const SET_CONFIG: &str = "Update and reload settings.";
 pub const SPEAK_TEXT: &str = "Text to speak.";
 pub const SPEAK_TTS_ARGS: &str =
     "Per-target voice/language/params for this utterance. See voices and models.";
+pub const SPEAK_DYNAMIC_VOICE: &str =
+    "Voice ID. Use the `voices` tool to list currently accepted values.";
 
 pub const MUTE_ON: &str = "True to mute, false to unmute.";
 

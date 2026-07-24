@@ -566,12 +566,16 @@ fn tts_param_pool_properties() -> Value {
 }
 
 fn tts_arg_pool_properties() -> Value {
-    let target = |params: &[ds_config::TtsParamDescriptor], language: Value| {
+    let dynamic_voice = || {
+        json!({
+            "type": "string",
+            "minLength": 1,
+            "description": SPEAK_DYNAMIC_VOICE,
+        })
+    };
+    let target = |params: &[ds_config::TtsParamDescriptor], voice: Value, language: Value| {
         let mut args = Map::new();
-        args.insert(
-            "voice".to_string(),
-            json!({ "type": "string", "minLength": 1 }),
-        );
+        args.insert("voice".to_string(), voice);
         args.insert("language".to_string(), language);
         for param in params {
             args.insert(param.key.to_string(), tts_param_schema(param));
@@ -589,10 +593,16 @@ fn tts_arg_pool_properties() -> Value {
         "system".to_string(),
         target(
             ds_config::SYSTEM_TTS_PARAMS,
+            dynamic_voice(),
             json!({ "type": "string", "minLength": 1 }),
         ),
     );
     for descriptor in &ds_config::TTS_MODELS {
+        let voice = if descriptor.model == ds_config::TtsModel::Kokoro {
+            dynamic_voice()
+        } else {
+            json!({ "type": "string", "enum": descriptor.voices })
+        };
         let language = if descriptor.detects_language_automatically() {
             json!({ "type": "string", "minLength": 1 })
         } else {
@@ -600,7 +610,7 @@ fn tts_arg_pool_properties() -> Value {
         };
         properties.insert(
             descriptor.id.to_string(),
-            target(descriptor.config_params, language),
+            target(descriptor.config_params, voice, language),
         );
     }
     Value::Object(properties)
@@ -1652,8 +1662,42 @@ mod tests {
             assert_eq!(targets[target]["additionalProperties"], false);
         };
         assert_target("system", ds_config::SYSTEM_TTS_PARAMS);
+        let assert_dynamic_voice = |target: &str| {
+            let voice = &targets[target]["properties"]["voice"];
+            assert_eq!(voice["type"], "string", "{target} voice type drifted");
+            assert_eq!(voice["minLength"], 1, "{target} voice must stay non-empty");
+            assert!(
+                voice.get("enum").is_none(),
+                "{target} voice catalog is dynamic"
+            );
+            assert_eq!(
+                voice["description"], SPEAK_DYNAMIC_VOICE,
+                "{target} voice discovery prose drifted"
+            );
+            assert!(
+                SPEAK_DYNAMIC_VOICE.contains("`voices` tool"),
+                "dynamic voice description must direct clients to the voices tool"
+            );
+        };
+        assert_dynamic_voice("system");
         for descriptor in &ds_config::TTS_MODELS {
             assert_target(descriptor.id, descriptor.config_params);
+            if descriptor.model == ds_config::TtsModel::Kokoro {
+                assert_dynamic_voice(descriptor.id);
+            } else {
+                let voice = &targets[descriptor.id]["properties"]["voice"];
+                assert_eq!(
+                    voice["enum"],
+                    json!(descriptor.voices),
+                    "{} voice schema drifted",
+                    descriptor.id
+                );
+                assert!(
+                    voice.get("description").is_none(),
+                    "{} voice values are fully described by its enum",
+                    descriptor.id
+                );
+            }
             if descriptor.detects_language_automatically() {
                 assert!(
                     targets[descriptor.id]["properties"]["language"]
