@@ -5,7 +5,7 @@
 name = "ds-linux-gtk"
 # Kept in lockstep by `scripts/release/sync-workspace-version.py` after rust/Cargo.toml bumps.
 # Standalone workspace can't use `version.workspace = true`; release.yml asserts agreement.
-version = "0.3.9"
+version = "0.3.10-dev"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT"
