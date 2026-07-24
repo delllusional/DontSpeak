@@ -21,6 +21,12 @@ The CUDA row is selectable only on x86_64 Windows and Linux. Runtime use additio
 requires the pinned wheel set and a detectable NVIDIA driver; a failed execution-provider
 registration falls back to the CPU EP and status reports CPU.
 
+`ORT_DYLIB_PATH` selection is process-first-wins. Status `ORT CPU` therefore means the CPU
+EP is active; it may be the CPU EP inside the GPU 1.26.0 distribution rather than the CPU
+1.27.1 distribution (1.23.2 on Intel macOS). Core ML is requested for an explicit `coreml`
+selection or `auto` with `DONTSPEAK_FULL_DUPLEX`; registration or dylib-load failure falls
+back to the CPU EP.
+
 The macOS app packages three peer dylibs. `libdontspeak_sys.dylib` has no package
 dependencies and ships on both architectures. The MLX and FluidAudio dylibs are independent,
 Apple-Silicon-only families, so either can be absent without loading symbols from the other.
@@ -48,14 +54,15 @@ Higgs decoder remains on the CPU EP.
 | Apple System STT | - | - | - | - | - | SpeechAnalyzer on macOS 26+; SFSpeechRecognizer on 14-25 |
 | Kokoro BART G2P (English OOV) | yes | yes | yes | - | - | - |
 | Kokoro eSpeak frontend (es/fr/hi/it/pt) | - | - | - | - | - | `espeakng-loader` 0.2.4 |
-| SepFormer speech separation | yes | - | - | - | - | - |
+| SepFormer speech separation (macOS arm64 + x86_64 only) | yes | - | - | - | - | - |
 | Sortformer + WeSpeaker diarization | - | - | - | yes | - | - |
 | pyannote + WeSpeaker diarization | - | - | - | - | yes | - |
 | VAD endpointer | - | - | - | - | - | native Rust |
 
 Kokoro's frontend is chosen before synthesis. Its English BART graphs therefore still need
-ONNX Runtime when synthesis uses MLX or FluidAudio. SepFormer deliberately creates a CPU-only
-session; it is used by speaker lock alongside the Apple-Silicon-only diarization paths.
+ONNX Runtime when synthesis uses MLX or FluidAudio. SepFormer is built only for macOS arm64
+and x86_64 and deliberately creates a CPU-only EP session; it is used by speaker lock
+alongside the Apple-Silicon-only diarization paths.
 
 ## Sources of truth
 
