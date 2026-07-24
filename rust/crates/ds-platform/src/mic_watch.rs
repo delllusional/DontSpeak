@@ -55,6 +55,11 @@ impl MicWatcher {
 pub struct MicState(Arc<AtomicBool>);
 
 impl MicState {
+    /// Create a read handle over caller-owned state without starting a system watcher.
+    pub fn from_shared(state: Arc<AtomicBool>) -> Self {
+        Self(state)
+    }
+
     /// Last-known mic-in-use state — a cheap atomic read, no OS query.
     pub fn is_active(&self) -> bool {
         self.0.load(Ordering::Relaxed)

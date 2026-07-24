@@ -537,8 +537,7 @@ impl TtsQueue {
             )),
             test_options,
         ));
-        // MicState only via watcher; drop freezes last reading.
-        let mic = ds_platform::MicWatcher::spawn(|_| {}).handle();
+        let mic = ds_platform::MicState::from_shared(Arc::new(AtomicBool::new(false)));
         Arc::new(TtsQueue {
             items: Mutex::new(VecDeque::new()),
             queue_depth: AtomicU64::new(0),
