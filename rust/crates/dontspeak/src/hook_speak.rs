@@ -75,9 +75,18 @@ fn earcon_request(
     event: ds_earcon::EarconEvent,
     client: WiredAgent,
 ) -> ds_ipc::Request {
+    earcon_request_with(payload, event, client, |name| std::env::var(name).ok())
+}
+
+fn earcon_request_with(
+    payload: &str,
+    event: ds_earcon::EarconEvent,
+    client: WiredAgent,
+    get: impl Fn(&str) -> Option<String>,
+) -> ds_ipc::Request {
     ds_ipc::Request::Earcon {
         event,
-        session: crate::session_scope::for_hook(payload),
+        session: crate::session_scope::for_hook_with(payload, get),
         source: Some(client),
     }
 }
@@ -186,10 +195,11 @@ mod tests {
             (r#"{"sessionId":"grok-session"}"#, "grok-session"),
         ] {
             assert!(matches!(
-                earcon_request(
+                earcon_request_with(
                     payload,
                     ds_earcon::EarconEvent::ReplyDone,
-                    WiredAgent::ClaudeCode
+                    WiredAgent::ClaudeCode,
+                    |_| None
                 ),
                 ds_ipc::Request::Earcon {
                     session: Some(ref session),

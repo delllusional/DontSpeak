@@ -37,7 +37,11 @@ pub(crate) fn for_mcp(client: Option<WiredAgent>) -> String {
 /// Queue scope for hook-originated operations. Logical payload ids remain the
 /// fallback for direct clients that expose no shared ambient identity.
 pub(crate) fn for_hook(payload: &str) -> Option<String> {
-    ambient().or_else(|| crate::hook_core::session_id_from_payload(payload))
+    for_hook_with(payload, |name| std::env::var(name).ok())
+}
+
+pub(crate) fn for_hook_with(payload: &str, get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ambient_with(get).or_else(|| crate::hook_core::session_id_from_payload(payload))
 }
 
 fn ambient_with(get: impl Fn(&str) -> Option<String>) -> Option<String> {
@@ -118,6 +122,17 @@ mod tests {
         assert_eq!(
             resolve(&[(DONTSPEAK_SESSION_ID, "  "), ("WT_SESSION", "")]),
             None
+        );
+    }
+
+    #[test]
+    fn hook_scope_prefers_ambient_identity_over_payload_session() {
+        assert_eq!(
+            for_hook_with(r#"{"session_id":"payload"}"#, |name| {
+                (name == "TERM_SESSION_ID").then(|| "terminal".into())
+            })
+            .as_deref(),
+            Some("dontspeak:terminal:TERM_SESSION_ID:terminal")
         );
     }
 
