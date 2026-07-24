@@ -566,11 +566,11 @@ fn tts_param_pool_properties() -> Value {
 }
 
 fn tts_arg_pool_properties() -> Value {
-    let dynamic_voice = || {
+    let dynamic_voice = |description: &'static str| {
         json!({
             "type": "string",
             "minLength": 1,
-            "description": SPEAK_DYNAMIC_VOICE,
+            "description": description,
         })
     };
     let target = |params: &[ds_config::TtsParamDescriptor], voice: Value, language: Value| {
@@ -593,13 +593,13 @@ fn tts_arg_pool_properties() -> Value {
         "system".to_string(),
         target(
             ds_config::SYSTEM_TTS_PARAMS,
-            dynamic_voice(),
+            dynamic_voice(SPEAK_SYSTEM_VOICE),
             json!({ "type": "string", "minLength": 1 }),
         ),
     );
     for descriptor in &ds_config::TTS_MODELS {
         let voice = if descriptor.model == ds_config::TtsModel::Kokoro {
-            dynamic_voice()
+            dynamic_voice(SPEAK_KOKORO_VOICE)
         } else {
             json!({ "type": "string", "enum": descriptor.voices })
         };
@@ -1040,6 +1040,46 @@ mod tests {
                 "speak",
                 json!({"text": "hello", "tts_args": {"kokoro": {"voice": "af_sarah", "language": "en", "rate": 1.25}}}),
                 true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"kokoro": {"voice": "custom_pack_voice"}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"system": {"voice": "Installed SAPI Voice"}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"chatterbox": {"voice": "default"}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"qwen": {"voice": "ryan"}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"omnivoice": {"voice": "young_woman"}}}),
+                true,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"chatterbox": {"voice": "unknown"}}}),
+                false,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"qwen": {"voice": "unknown"}}}),
+                false,
+            ),
+            (
+                "speak",
+                json!({"text": "hello", "tts_args": {"omnivoice": {"voice": "unknown"}}}),
+                false,
             ),
             (
                 "speak",
@@ -1662,7 +1702,7 @@ mod tests {
             assert_eq!(targets[target]["additionalProperties"], false);
         };
         assert_target("system", ds_config::SYSTEM_TTS_PARAMS);
-        let assert_dynamic_voice = |target: &str| {
+        let assert_dynamic_voice = |target: &str, description: &str| {
             let voice = &targets[target]["properties"]["voice"];
             assert_eq!(voice["type"], "string", "{target} voice type drifted");
             assert_eq!(voice["minLength"], 1, "{target} voice must stay non-empty");
@@ -1671,19 +1711,19 @@ mod tests {
                 "{target} voice catalog is dynamic"
             );
             assert_eq!(
-                voice["description"], SPEAK_DYNAMIC_VOICE,
+                voice["description"], description,
                 "{target} voice discovery prose drifted"
             );
-            assert!(
-                SPEAK_DYNAMIC_VOICE.contains("`voices` tool"),
-                "dynamic voice description must direct clients to the voices tool"
-            );
         };
-        assert_dynamic_voice("system");
+        assert_dynamic_voice("system", SPEAK_SYSTEM_VOICE);
+        assert!(SPEAK_SYSTEM_VOICE.contains("macOS"));
+        assert!(SPEAK_SYSTEM_VOICE.contains("Windows"));
+        assert!(SPEAK_SYSTEM_VOICE.contains("without tool enumeration"));
         for descriptor in &ds_config::TTS_MODELS {
             assert_target(descriptor.id, descriptor.config_params);
             if descriptor.model == ds_config::TtsModel::Kokoro {
-                assert_dynamic_voice(descriptor.id);
+                assert_dynamic_voice(descriptor.id, SPEAK_KOKORO_VOICE);
+                assert!(SPEAK_KOKORO_VOICE.contains("`voices` tool"));
             } else {
                 let voice = &targets[descriptor.id]["properties"]["voice"];
                 assert_eq!(

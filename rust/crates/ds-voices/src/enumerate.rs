@@ -431,9 +431,9 @@ pub fn kokoro_route_refusal(id: &str) -> Option<String> {
 }
 
 /// Reject a per-utterance Kokoro voice this build cannot route. Other targets need no check
-/// here: System names are freeform, and every other model's per-utterance id is already
-/// gated against its registry at admit (`gate_item` -> `is_model_voice`) and clamped again
-/// in the helper (`supported_voice`).
+/// here: System names are freeform, and every fixed model's id is rejected by
+/// `TtsArgPools::parse` when absent from its registry, then clamped again in the helper
+/// (`supported_voice`) after a queued model switch.
 pub fn validate_speak_voices(args: &ds_config::TtsArgPools) -> Result<(), String> {
     match args
         .for_target(TtsEngine::BuiltIn, TtsModel::Kokoro)

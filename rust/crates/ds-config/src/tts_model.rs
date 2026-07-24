@@ -214,6 +214,14 @@ impl TtsArgPools {
                             .ok_or_else(|| {
                                 format!("tts_args.{target}.voice must be a non-empty string")
                             })?;
+                        if let Some(model) = model
+                            && model != TtsModel::Kokoro
+                            && !model.descriptor().voices.contains(&voice)
+                        {
+                            return Err(format!(
+                                "tts_args.{target}.voice `{voice}` is not supported"
+                            ));
+                        }
                         args.voice = Some(voice.to_string());
                     }
                     "language" => {
@@ -743,6 +751,61 @@ mod tests {
         ] {
             assert!(TtsArgPools::parse(&value).is_err(), "accepted {value}");
         }
+    }
+
+    #[test]
+    fn speak_args_fixed_model_voices_match_their_descriptors() {
+        for descriptor in TTS_MODELS
+            .iter()
+            .filter(|descriptor| descriptor.model != TtsModel::Kokoro)
+        {
+            for voice in descriptor.voices {
+                let value = serde_json::json!({
+                    (descriptor.id): { "voice": voice }
+                });
+                let pools = TtsArgPools::parse(&value).unwrap_or_else(|error| {
+                    panic!("rejected {} voice {voice}: {error}", descriptor.id)
+                });
+                assert_eq!(
+                    pools
+                        .for_target(TtsEngine::BuiltIn, descriptor.model)
+                        .and_then(TtsTargetArgs::voice),
+                    Some(*voice)
+                );
+            }
+
+            let value = serde_json::json!({
+                (descriptor.id): { "voice": "not_a_registry_voice" }
+            });
+            let error = TtsArgPools::parse(&value).unwrap_err();
+            assert!(
+                error.contains("is not supported"),
+                "{} accepted an unknown voice: {error}",
+                descriptor.id
+            );
+        }
+    }
+
+    #[test]
+    fn speak_args_kokoro_and_system_voices_remain_dynamic() {
+        let pools = TtsArgPools::parse(&serde_json::json!({
+            "kokoro": { "voice": "custom_pack_voice" },
+            "system": { "voice": "Installed SAPI Voice" }
+        }))
+        .expect("dynamic voice names remain admissible");
+
+        assert_eq!(
+            pools
+                .for_target(TtsEngine::BuiltIn, TtsModel::Kokoro)
+                .and_then(TtsTargetArgs::voice),
+            Some("custom_pack_voice")
+        );
+        assert_eq!(
+            pools
+                .for_target(TtsEngine::System, TtsModel::Kokoro)
+                .and_then(TtsTargetArgs::voice),
+            Some("Installed SAPI Voice")
+        );
     }
 
     #[test]
