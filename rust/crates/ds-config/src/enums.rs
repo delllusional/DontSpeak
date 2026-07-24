@@ -181,12 +181,18 @@ pub enum Provider {
     OrtCoreMl,
     /// Native MLX Metal/CPU backend. Both engines on Apple Silicon.
     Mlx,
+    /// FluidAudio's native Core ML / ANE chains. Distinct from [`Provider::OrtCoreMl`]:
+    /// that is ONNX Runtime's Core ML execution provider over our own ONNX graphs, this
+    /// loads FluidAudio's pinned `.mlmodelc` bundles through its Swift API. Kokoro TTS,
+    /// Parakeet STT, and diarization only — see `TtsModelDescriptor::providers`.
+    Fluid,
 }
 
 impl Provider {
     /// All variants — catalog parity single source.
     pub const ALL: &'static [Provider] = &[
         Provider::Mlx,
+        Provider::Fluid,
         Provider::OrtCuda,
         Provider::OrtCoreMl,
         Provider::OrtCpu,
@@ -198,6 +204,7 @@ impl Provider {
             "cuda" => Some(Provider::OrtCuda),
             "coreml" => Some(Provider::OrtCoreMl),
             "mlx" => Some(Provider::Mlx),
+            "fluid" => Some(Provider::Fluid),
             _ => None,
         }
     }
@@ -209,6 +216,7 @@ impl Provider {
             Provider::OrtCuda => "cuda",
             Provider::OrtCoreMl => "coreml",
             Provider::Mlx => "mlx",
+            Provider::Fluid => "fluid",
         }
     }
 
@@ -224,6 +232,9 @@ impl Provider {
             Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => cuda_usable_on(os, arch),
             Provider::OrtCoreMl => false,
+            // The FluidAudio Parakeet backend lands with the STT slice; until then this
+            // rung is TTS-only, exactly as `OrtCoreMl` above.
+            Provider::Fluid => false,
         }
     }
 
@@ -239,6 +250,7 @@ impl Provider {
             Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => cuda_usable_on(os, arch),
             Provider::OrtCoreMl => os == "macos",
+            Provider::Fluid => fluid_usable_on(os, arch),
         }
     }
 }
@@ -250,6 +262,15 @@ fn cuda_usable_on(os: &str, arch: &str) -> bool {
 
 /// MLX Audio = Apple Silicon only. Shared STT/TTS predicate.
 fn mlx_usable_on(os: &str, arch: &str) -> bool {
+    os == "macos" && arch == "aarch64"
+}
+
+/// FluidAudio's Core ML chains target the Apple Neural Engine, which exists only on Apple
+/// Silicon; on Intel macOS the same graphs fall to CPU/GPU, which ORT CPU already covers.
+/// Same gate as MLX so the ladder has one Apple-Silicon shape, and so the Intel
+/// compatibility dylib — which compiles `shim.swift` alone and exports no `ds_fluid_*`
+/// symbols — is never selected.
+fn fluid_usable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
 
@@ -269,6 +290,8 @@ pub enum RealizedProvider {
     CoreMl,
     /// MLX Audio on Apple Silicon.
     Mlx,
+    /// FluidAudio Core ML / ANE on Apple Silicon.
+    Fluid,
     /// System STT (no ort).
     System,
 }
@@ -281,6 +304,7 @@ impl RealizedProvider {
             RealizedProvider::Cpu => "CPU",
             RealizedProvider::CoreMl => "CoreML",
             RealizedProvider::Mlx => "MLX",
+            RealizedProvider::Fluid => "Fluid",
             RealizedProvider::System => "System",
         }
     }
@@ -291,6 +315,7 @@ impl RealizedProvider {
             "CUDA" => RealizedProvider::Cuda,
             "CoreML" => RealizedProvider::CoreMl,
             "MLX" => RealizedProvider::Mlx,
+            "Fluid" => RealizedProvider::Fluid,
             "System" => RealizedProvider::System,
             _ => RealizedProvider::Cpu,
         }
@@ -302,6 +327,7 @@ impl RealizedProvider {
             RealizedProvider::Cuda => Provider::OrtCuda,
             RealizedProvider::CoreMl => Provider::OrtCoreMl,
             RealizedProvider::Mlx => Provider::Mlx,
+            RealizedProvider::Fluid => Provider::Fluid,
             RealizedProvider::Cpu | RealizedProvider::System => Provider::OrtCpu,
         }
     }
@@ -553,7 +579,7 @@ macro_rules! strict_de {
 strict_de!(SttEngine, "built_in|system|claude_code");
 strict_de!(TtsEngine, "built_in|system");
 strict_de!(ListenMode, "record_submit|always");
-strict_de!(Provider, "cpu|cuda|coreml|mlx");
+strict_de!(Provider, "cpu|cuda|coreml|mlx|fluid");
 strict_de!(TrayKind, "stt|tts|stt_animated|tts_animated");
 strict_de!(CancelSpeechScope, "current|other");
 strict_de!(DiarizerProvider, "mlx");
@@ -782,7 +808,7 @@ mod tests {
     fn realized_provider_vocabulary_is_stable() {
         use RealizedProvider::*;
         // Exhaustive round-trip (the match forces every variant to be considered).
-        for rp in [Cuda, Cpu, CoreMl, Mlx, System] {
+        for rp in [Cuda, Cpu, CoreMl, Mlx, Fluid, System] {
             assert_eq!(
                 RealizedProvider::parse(rp.as_str()),
                 rp,
@@ -794,19 +820,27 @@ mod tests {
         assert_eq!(Cpu.as_str(), "CPU");
         assert_eq!(CoreMl.as_str(), "CoreML");
         assert_eq!(Mlx.as_str(), "MLX");
+        assert_eq!(Fluid.as_str(), "Fluid");
         assert_eq!(System.as_str(), "System");
         assert_eq!(Provider::Mlx.as_str(), "mlx");
+        assert_eq!(Provider::Fluid.as_str(), "fluid");
         assert_eq!(DiarizerProvider::Mlx.as_str(), "mlx");
         assert_eq!(Provider::parse("coreml"), Some(Provider::OrtCoreMl));
+        assert_eq!(Provider::parse("fluid"), Some(Provider::Fluid));
         // Unknown / casing drift → CPU, never a spurious accelerated-provider claim.
+        // `fluid`/`FLUID` are the CONFIG token's casing, not the realized wire token —
+        // they must not be mistaken for a realized FluidAudio backend.
         assert_eq!(RealizedProvider::parse("cuda"), Cpu);
         assert_eq!(RealizedProvider::parse("Cuda"), Cpu);
+        assert_eq!(RealizedProvider::parse("fluid"), Cpu);
+        assert_eq!(RealizedProvider::parse("FLUID"), Cpu);
         assert_eq!(RealizedProvider::parse(""), Cpu);
         assert_eq!(RealizedProvider::parse("bogus"), Cpu);
         // Mapping to the config Provider vocabulary (System has no ort rung → CPU).
         assert_eq!(Cuda.to_provider(), Provider::OrtCuda);
         assert_eq!(CoreMl.to_provider(), Provider::OrtCoreMl);
         assert_eq!(Mlx.to_provider(), Provider::Mlx);
+        assert_eq!(Fluid.to_provider(), Provider::Fluid);
         assert_eq!(Cpu.to_provider(), Provider::OrtCpu);
         assert_eq!(System.to_provider(), Provider::OrtCpu);
     }
@@ -954,11 +988,68 @@ mod tests {
             (OrtCoreMl, "macos", "aarch64", false, true),
             (OrtCoreMl, "macos", "x86_64", false, true),
             (OrtCoreMl, "windows", "x86_64", false, false),
+            // FluidAudio — Apple Silicon only, like MLX. The STT column is false
+            // everywhere until the FluidAudio Parakeet backend lands; the TTS column is
+            // already live, so the two axes deliberately disagree for now.
+            (Fluid, "macos", "aarch64", false, true),
+            (Fluid, "macos", "x86_64", false, false),
+            (Fluid, "windows", "x86_64", false, false),
+            (Fluid, "linux", "aarch64", false, false),
         ];
         for (p, os, arch, want_stt, want_tts) in cases {
             assert_eq!(p.stt_usable_on(os, arch), want_stt, "stt {p:?} {os}/{arch}");
             assert_eq!(p.tts_usable_on(os, arch), want_tts, "tts {p:?} {os}/{arch}");
         }
+    }
+
+    /// The `fluid` rung is per-MODEL, not just per-platform: FluidAudio ships a Core ML
+    /// Kokoro and nothing else, so a `fluid`-first ladder must resolve Kokoro to Fluid and
+    /// fall the other three through to the next usable rung — the descriptor filter in
+    /// `resolved_tts_provider` doing the work, with no model-specific branch anywhere.
+    #[test]
+    fn fluid_is_skipped_when_the_model_does_not_support_it() {
+        use crate::TtsModel;
+        let ladder = [Provider::Fluid, Provider::Mlx, Provider::OrtCpu];
+        let resolve = |model: TtsModel, os: &str, arch: &str| {
+            let descriptor = model.descriptor();
+            ladder
+                .iter()
+                .copied()
+                .find(|p| p.tts_usable_on(os, arch) && descriptor.supports_provider(*p))
+                .unwrap_or(Provider::OrtCpu)
+        };
+        assert_eq!(
+            resolve(TtsModel::Kokoro, "macos", "aarch64"),
+            Provider::Fluid
+        );
+        for model in [TtsModel::Chatterbox, TtsModel::Qwen, TtsModel::OmniVoice] {
+            assert_eq!(
+                resolve(model, "macos", "aarch64"),
+                Provider::Mlx,
+                "{} has no FluidAudio export and must fall through",
+                model.as_str()
+            );
+        }
+        // Intel macOS has no ANE, so even Kokoro skips the rung.
+        for model in TtsModel::ALL.iter().copied() {
+            assert_eq!(resolve(model, "macos", "x86_64"), Provider::OrtCpu);
+            assert_eq!(resolve(model, "windows", "x86_64"), Provider::OrtCpu);
+        }
+    }
+
+    /// Pins the deliberate decision NOT to put `fluid` in the out-of-box ladder: it covers
+    /// one of four TTS models, so leading with it would make the default backend
+    /// model-dependent, and it would add its Core ML sets to every clean install.
+    /// Selecting it is an explicit `set_config provider=["fluid", ...]`.
+    #[test]
+    fn default_provider_ladder_does_not_include_fluid() {
+        assert_eq!(
+            default_provider(),
+            vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]
+        );
+        assert!(!default_provider().contains(&Provider::Fluid));
+        // It is still a parseable, selectable token — just not a default one.
+        assert!(Provider::ALL.contains(&Provider::Fluid));
     }
 
     #[test]

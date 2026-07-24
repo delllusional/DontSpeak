@@ -52,6 +52,7 @@ status:
     role_stt: STT
     role_diar: Diarization
     mlx: MLX Audio
+    fluid: FluidAudio Core ML
     coreml: ORT Core ML
     cuda: ORT CUDA
     cpu: ORT CPU

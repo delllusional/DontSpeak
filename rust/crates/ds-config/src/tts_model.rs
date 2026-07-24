@@ -620,6 +620,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         warmup_voice: "af_heart",
         providers: &[
             Provider::Mlx,
+            Provider::Fluid,
             Provider::OrtCuda,
             Provider::OrtCoreMl,
             Provider::OrtCpu,
@@ -1078,6 +1079,21 @@ mod tests {
                 .descriptor()
                 .supports_provider(Provider::OrtCoreMl)
         );
+        // FluidAudio publishes a Core ML Kokoro only — the other three models have no
+        // export, so the rung must be absent from their descriptors rather than being
+        // filtered out somewhere downstream.
+        assert!(
+            TtsModel::Kokoro
+                .descriptor()
+                .supports_provider(Provider::Fluid)
+        );
+        for model in [TtsModel::Chatterbox, TtsModel::Qwen, TtsModel::OmniVoice] {
+            assert!(
+                !model.descriptor().supports_provider(Provider::Fluid),
+                "{} must not advertise a FluidAudio backend",
+                model.as_str()
+            );
+        }
         assert!(TtsModel::Chatterbox.descriptor().wants_cuda("auto"));
         assert!(TtsModel::Qwen.descriptor().wants_cuda("cuda"));
         assert!(TtsModel::OmniVoice.descriptor().wants_cuda("auto"));

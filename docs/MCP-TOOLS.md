@@ -234,7 +234,7 @@ Update and reload settings.
 | `double_tap_submit` | boolean | Double-tap submits. Default false. |
 | `paste_delay_ms` | integer 0–5000 | Paste→submit delay ms. Default 100. |
 | `full_duplex` | boolean | Mic open during replies. Default false. |
-| `provider` | array of `mlx`, `cuda`, `coreml`, `cpu` | Compute provider order. Default ["mlx","cuda","cpu"]. |
+| `provider` | array of `mlx`, `fluid`, `cuda`, `coreml`, `cpu` | Compute provider order. Default ["mlx","cuda","cpu"]. |
 
 **Diarization** (hidden while `DIARIZATION_ENABLED` is false)
 

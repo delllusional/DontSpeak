@@ -271,7 +271,7 @@ static TOOLS: &[Tool] = &[
             p(FULL_DUPLEX, PType::Bool, false, SET_CONFIG_FULL_DUPLEX),
             p(
                 PROVIDER,
-                PType::EnumArray(&["mlx", "cuda", "coreml", "cpu"]),
+                PType::EnumArray(&["mlx", "fluid", "cuda", "coreml", "cpu"]),
                 false,
                 SET_CONFIG_PROVIDER,
             ),
@@ -617,7 +617,7 @@ fn model_capabilities_schema() -> Value {
             "languages": { "type": "array", "items": { "type": "string" } },
             "providers": {
                 "type": "array",
-                "items": { "type": "string", "enum": ["mlx", "cuda", "coreml", "cpu"] }
+                "items": { "type": "string", "enum": ["mlx", "fluid", "cuda", "coreml", "cpu"] }
             },
             "supports_rate": { "type": "boolean" },
             "supports_full_duplex": { "type": "boolean" },
@@ -1667,6 +1667,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// PARITY GUARD for the OTHER provider enum. `set_config`'s array is pinned by
+    /// `set_config_enums_match_config_types` below, but the `models` OUTPUT schema carries
+    /// a second, independent literal in `model_capabilities_schema` — and the `ds-core`
+    /// payload check validates key presence and JSON type, never enum membership. Without
+    /// this, adding a `Provider` variant leaves `models` advertising a capability list that
+    /// omits a provider it actually reports, and nothing fails.
+    #[test]
+    fn model_capabilities_provider_enum_matches_the_provider_vocabulary() {
+        use ds_config::Provider;
+
+        let advertised: Vec<String> =
+            model_capabilities_schema()["properties"]["providers"]["items"]["enum"]
+                .as_array()
+                .expect("providers.items.enum is an array")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("provider token is a string")
+                        .to_string()
+                })
+                .collect();
+        let expected: Vec<String> = Provider::ALL
+            .iter()
+            .map(|provider| provider.as_str().to_string())
+            .collect();
+        assert_eq!(advertised, expected);
     }
 
     /// PARITY GUARD: set_config enums must list exactly the backing ds_config tokens.

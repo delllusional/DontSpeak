@@ -170,6 +170,8 @@ pub fn runtime_label(provider: &str) -> String {
         "common.dash"
     } else if provider == Provider::Mlx.as_str() {
         "status.engine.mlx"
+    } else if provider == Provider::Fluid.as_str() {
+        "status.engine.fluid"
     } else if provider == Provider::OrtCoreMl.as_str() {
         "status.engine.coreml"
     } else if provider == Provider::OrtCuda.as_str() {
@@ -335,6 +337,9 @@ mod tests {
         assert_eq!(runtime_label("cpu"), "ORT CPU");
         assert_eq!(runtime_label("cuda"), "ORT CUDA");
         assert_eq!(runtime_label("mlx"), "MLX Audio");
+        // `fluid` and `coreml` are two different Core ML backends and must not share a
+        // label — the status row is the only place a user can tell them apart.
+        assert_eq!(runtime_label("fluid"), "FluidAudio Core ML");
         assert_eq!(runtime_label("coreml"), "ORT Core ML");
         assert_eq!(runtime_label("whatever"), "whatever");
         assert_eq!(runtime_label(""), "—"); // no backend realized yet → dash (issue #205)
