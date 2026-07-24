@@ -27,6 +27,34 @@
 # Idempotent: every piece is removed best-effort; missing ones are skipped.
 set -uo pipefail   # deliberately NOT -e: one missing piece must not abort the teardown
 
+# Best-effort mirror of the installer destination lock.  Uninstall must not race an
+# install finalization, but inability to acquire it must never turn removal into a hard
+# failure.  Keep this standalone: the uninstaller is shipped as a single payload file.
+DS_LOCK_DIR=""
+DS_LOCK_OWNED=0
+ds_lock_path() { printf '%s/.%s.ds-install.lock' "$(dirname "$1")" "$(basename "$1")"; }
+ds_lock_acquire_best_effort() {
+  DS_LOCK_DIR="$(ds_lock_path "$1")"
+  mkdir -p "$(dirname "$DS_LOCK_DIR")" 2>/dev/null || return 0
+  local waited=0 max_wait="${DONTSPEAK_INSTALL_LOCK_WAIT:-10}"
+  while ! mkdir "$DS_LOCK_DIR" 2>/dev/null; do
+    [ -d "$DS_LOCK_DIR" ] || return 0
+    if [ "$waited" -ge "$max_wait" ]; then
+      echo "uninstall: warning: could not acquire install lock $DS_LOCK_DIR; continuing" >&2
+      return 0
+    fi
+    sleep 1; waited=$((waited + 1))
+  done
+  DS_LOCK_OWNED=1
+  printf '%s %s\n' "$$" "$(uname -n)" > "$DS_LOCK_DIR/owner"
+}
+ds_lock_release() {
+  [ "$DS_LOCK_OWNED" = 1 ] || return 0
+  DS_LOCK_OWNED=0
+  rm -rf "$DS_LOCK_DIR" 2>/dev/null || true
+  DS_LOCK_DIR=""
+}
+
 H="$HOME"
 INSTALL_DIR="${DONTSPEAK_INSTALL_DIR:-$H/.local/bin}"
 
@@ -46,6 +74,8 @@ done
 case "$(uname -s)" in
   Darwin)
     BUNDLE_ID="app.dontspeak.org"
+    APP_DIR="${DONTSPEAK_APP_DIR:-$H/Applications/DontSpeak.app}"
+    ds_lock_acquire_best_effort "$APP_DIR"
 
     echo "==> 1. quit the running app + engine + warm helper"
     osascript -e 'quit app "DontSpeak"' 2>/dev/null || true
@@ -58,7 +88,6 @@ case "$(uname -s)" in
     echo "==> 2. un-wire every registry client before deleting binaries"
     # `wire --all --remove` strips every registry surface. Prefer the ~/.local/bin CLI,
     # else the CLI bundled in the app (Contents/Helpers).
-    APP_DIR="${DONTSPEAK_APP_DIR:-$H/Applications/DontSpeak.app}"
     CLI=""
     for c in \
       "$INSTALL_DIR/dontspeak" \
@@ -78,16 +107,15 @@ case "$(uname -s)" in
     # An installer killed mid-finalization leaves its destination lock (and, rarer, the
     # breaker slot that serializes stale-lock removal) behind -- see the destination-lock
     # block in scripts/install/web/install.sh.
-    rm -rf "$H/Applications/.DontSpeak.app.ds-install.lock" \
-      "$H/Applications/.DontSpeak.app.ds-install.lock.breaker"
+    if [ "$DS_LOCK_OWNED" = 1 ]; then rm -rf "$H/Applications/.DontSpeak.app.ds-install.lock.breaker"; fi
     # A bundle installed with the DONTSPEAK_APP_DIR override lives outside the standard
     # per-user layout -- honor the same override here or that bundle is never removed.
     if [ -n "${DONTSPEAK_APP_DIR:-}" ]; then
-      rm -rf "$DONTSPEAK_APP_DIR" \
-        "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock" \
-        "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock.breaker"
+      rm -rf "$DONTSPEAK_APP_DIR"
+      if [ "$DS_LOCK_OWNED" = 1 ]; then rm -rf "$(dirname "$DONTSPEAK_APP_DIR")/.$(basename "$DONTSPEAK_APP_DIR").ds-install.lock.breaker"; fi
     fi
     for b in dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
+    ds_lock_release
 
     echo "==> 4. remove app data, downloaded models, caches, logs, state"
     # Current config/state roots + the legacy ProjectDirs layout, model cache, and OS app caches.
@@ -139,6 +167,7 @@ case "$(uname -s)" in
     STATE_DIR="${XDG_STATE_HOME:-$H/.local/state}/dontspeak"
     CACHE_DIR="${XDG_CACHE_HOME:-$H/.cache}/dontspeak"
     APPS_DIR="$DATA_ROOT/applications"
+    ds_lock_acquire_best_effort "$INSTALL_DIR"
 
     echo "==> 1. stop the running GUI host + warm helper"
     pkill -x ds-gtk 2>/dev/null || true
@@ -157,8 +186,8 @@ case "$(uname -s)" in
     for b in ds-gtk dontspeak ds-helper; do rm -f "$INSTALL_DIR/$b"; done
     # Crash residue from an installer killed mid-finalization (see the destination-lock block
     # in apps/linux/tarball-install.sh).
-    rm -rf "$INSTALL_DIR/.dontspeak.ds-install.lock" \
-      "$INSTALL_DIR/.dontspeak.ds-install.lock.breaker"
+    if [ "$DS_LOCK_OWNED" = 1 ]; then rm -rf "$INSTALL_DIR/.dontspeak.ds-install.lock.breaker"; fi
+    ds_lock_release
 
     echo "==> 4. remove the .desktop launchers (app menu + autostart) + the app icon"
     rm -f "$APPS_DIR/dontspeak.desktop" \
