@@ -222,7 +222,7 @@ impl Provider {
         match self {
             Provider::OrtCpu => true,
             Provider::Mlx => mlx_usable_on(os, arch),
-            Provider::OrtCuda => matches!(os, "windows" | "linux"),
+            Provider::OrtCuda => cuda_usable_on(os, arch),
             Provider::OrtCoreMl => false,
         }
     }
@@ -237,10 +237,15 @@ impl Provider {
         match self {
             Provider::OrtCpu => true,
             Provider::Mlx => mlx_usable_on(os, arch),
-            Provider::OrtCuda => matches!(os, "windows" | "linux"),
+            Provider::OrtCuda => cuda_usable_on(os, arch),
             Provider::OrtCoreMl => os == "macos",
         }
     }
+}
+
+/// The bundled ONNX Runtime CUDA wheels are x86_64 Windows/Linux only.
+fn cuda_usable_on(os: &str, arch: &str) -> bool {
+    matches!(os, "windows" | "linux") && arch == "x86_64"
 }
 
 /// MLX Audio = Apple Silicon only. Shared STT/TTS predicate.
@@ -939,9 +944,11 @@ mod tests {
             (OrtCpu, "macos", "aarch64", true, true),
             (OrtCpu, "windows", "x86_64", true, true),
             (OrtCpu, "linux", "aarch64", true, true),
-            // CUDA — Windows/Linux GPU EP only, both axes; never macOS.
+            // CUDA — x86_64 Windows/Linux GPU EP only, both axes; never ARM64 or macOS.
             (OrtCuda, "windows", "x86_64", true, true),
             (OrtCuda, "linux", "x86_64", true, true),
+            (OrtCuda, "windows", "aarch64", false, false),
+            (OrtCuda, "linux", "aarch64", false, false),
             (OrtCuda, "macos", "aarch64", false, false),
             // Core ML is an explicit macOS TTS-only ONNX Runtime provider.
             (OrtCoreMl, "macos", "aarch64", false, true),
@@ -962,7 +969,7 @@ mod tests {
         // `cuda` first item degrades gracefully instead of dead-ending. This is the
         // cross-platform analogue of the live `model_status` check (which showed `cpu` on macOS).
         let ladder = [Provider::OrtCuda, Provider::OrtCpu];
-        // arch is irrelevant for CUDA/CPU; pin one for the walk (MLX arch-gating is tested below).
+        // Pin x86_64 here; the full provider matrix above covers the ARM64 CUDA gate.
         let resolve_tts = |os: &str| {
             ladder
                 .iter()
