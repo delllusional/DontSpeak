@@ -26,7 +26,13 @@ function argument(name, fallback) {
 }
 
 const repo = argument("--repo", "delllusional/DontSpeak");
+const requiredLogin = argument("--login", "yanchenko");
 const login = runGh(["api", "user", "--jq", ".login"]);
+if (login !== requiredLogin) {
+  fail(
+    `GitHub account ${login} is prohibited for ${repo}; switch to ${requiredLogin} before any repository operation.`,
+  );
+}
 const repoState = JSON.parse(
   runGh([
     "repo",

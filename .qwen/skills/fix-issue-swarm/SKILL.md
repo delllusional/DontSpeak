@@ -12,12 +12,14 @@ for publishing, CI monitoring, landing, and cleanup.
 
 ## Establish control
 
-1. Run `scripts/audit-issues.mjs --repo delllusional/DontSpeak` from a clean
-   freshly based integration worktree. Record its timestamp, active GitHub login,
-   permission, main SHA, open pull requests, and open issues.
-2. Require `WRITE`, `MAINTAIN`, or `ADMIN`. If the active account lacks it, inspect
-   `gh auth status`, select an authenticated account that has it, switch explicitly,
-   and rerun the audit. Never print tokens.
+1. Require the exact active GitHub login `yanchenko` for every DontSpeak read or
+   write. `axy-yanchenko` is reserved for AMBOSS repositories and is prohibited
+   here, regardless of its permission. Run `gh auth switch --hostname github.com
+   --user yanchenko`, verify with `gh api user --jq .login`, and never print tokens.
+2. Run `scripts/audit-issues.mjs --repo delllusional/DontSpeak` from a clean
+   freshly based integration worktree. The script fails closed unless the active
+   login is `yanchenko`. Record its timestamp, login, permission, main SHA, open
+   pull requests, and open issues. Require `WRITE`, `MAINTAIN`, or `ADMIN`.
 3. Inspect `git worktree list`, remote branches, pull requests, issue assignees, and
    recent issue comments. Exclude work already claimed or in progress. Ignore every
    issue linked, referenced as fixed, or otherwise covered by an open pull request,
