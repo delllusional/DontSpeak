@@ -47,7 +47,8 @@ private func sysMakeBuffer(_ samples: [Float], sampleRate: Double) -> AVAudioPCM
     guard
         let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false),
-        let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))
+        let buf = AVAudioPCMBuffer(
+            pcmFormat: format, frameCapacity: AVAudioFrameCount(max(samples.count, 1)))
     else { return nil }
     buf.frameLength = AVAudioFrameCount(samples.count)
     samples.withUnsafeBufferPointer { src in
