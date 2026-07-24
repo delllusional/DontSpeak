@@ -167,8 +167,10 @@ Expect **9 assets**: `checksums.txt`, `install.sh`, `install.ps1`, linux
 `{x86_64,aarch64}.zip`. Missing Linux = best-effort job fail (re-cut or ship without).
 Missing installer = release failure. Body = the tag annotation **plus** the CI-filled
 Binaries size column (they intentionally diverge in exactly that column; not empty
-auto-notes). Check no `…` size cells remain; if the soft-fail patch step failed,
-recover with the scripted patch — never a hand-edit:
+auto-notes). For a real release, check no `…` size cells remain; if the soft-fail
+patch step failed, recover with the scripted patch — never a hand-edit. `-dev` drafts
+intentionally retain the `…` size placeholders; do not run the manual scripted size
+patch for a draft.
 
 ```bash
 tmp="$(mktemp -d)"
