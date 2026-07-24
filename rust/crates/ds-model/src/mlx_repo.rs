@@ -706,9 +706,9 @@ mod tests {
     #[test]
     fn native_shim_loads_only_rust_managed_local_directories() {
         let shim =
-            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift");
+            include_str!("../../../../apps/macos/DontSpeakShims/Sources/DontSpeakMLX/shim.swift");
         let fluid =
-            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/Fluid.swift");
+            include_str!("../../../../apps/macos/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift");
 
         // Universal bans: no native model-download API in either shim.
         for (name, src) in [("shim.swift", shim), ("Fluid.swift", fluid)] {

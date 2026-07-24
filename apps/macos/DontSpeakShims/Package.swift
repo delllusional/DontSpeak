@@ -9,7 +9,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "DontSpeakMLX",
+    name: "DontSpeakShims",
     platforms: [
         .macOS(.v14)
     ],
@@ -56,7 +56,7 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "DontSpeakMLXTests",
+            name: "DontSpeakShimsTests",
             dependencies: [
                 "DontSpeakSys",
                 "DontSpeakMLX",

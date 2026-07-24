@@ -98,7 +98,7 @@ shim_dylib_name() { echo "libdontspeak_$1.dylib"; }
 # the filename the Rust loader and app bundle contract use.
 stage_shim_dylib() {
   local family="$1" source="$2" swarch="$3"
-  local out="$BUNDLE_LIB_DIR/DontSpeakMLX/.build/shims-$swarch/$(shim_dylib_name "$family")"
+  local out="$BUNDLE_LIB_DIR/DontSpeakShims/.build/shims-$swarch/$(shim_dylib_name "$family")"
   mkdir -p "${out%/*}"
   cp "$source" "$out"
   echo "$out"
@@ -109,7 +109,7 @@ stage_shim_dylib() {
 # the same name from the pair, so no caller ever globs xcode-* and picks up another arch's or
 # another family's tree. Separate roots per family also keep a Fluid edit from invalidating
 # the ~12-minute mlx-swift tree.
-shim_derived_dir() { echo "$BUNDLE_LIB_DIR/DontSpeakMLX/.build/xcode-$1-$2"; }
+shim_derived_dir() { echo "$BUNDLE_LIB_DIR/DontSpeakShims/.build/xcode-$1-$2"; }
 
 # shim_missing FAMILY WHY -- dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
 # DONTSPEAK_ALLOW_MISSING_SHIM=1; dev builds warn and continue (rc 0).
@@ -160,7 +160,7 @@ shim_prebuilt_usable() {
 # derived-data trees.
 build_shim() {
   local family="$1" swarch="$2"
-  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
+  local pkg="$BUNDLE_LIB_DIR/DontSpeakShims"
   case "$swarch" in
     arm64|x86_64) ;;
     *)

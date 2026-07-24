@@ -113,17 +113,17 @@ jobs:
         id: mlx-cache
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/SourcePackages/checkouts
-          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakShims/.build/xcode-mlx-arm64/Build/Products/Release
+            apps/macos/DontSpeakShims/.build/xcode-mlx-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakShims/Package.resolved', 'apps/macos/DontSpeakShims/Package.swift', 'apps/macos/DontSpeakShims/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakShims/include/**') }}
 
       - uses: actions/cache@v6
         id: fluid-cache
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/SourcePackages/checkouts
-          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakShims/.build/xcode-fluid-arm64/Build/Products/Release
+            apps/macos/DontSpeakShims/.build/xcode-fluid-arm64/SourcePackages/checkouts
+          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakShims/Package.resolved', 'apps/macos/DontSpeakShims/Package.swift', 'apps/macos/DontSpeakShims/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakShims/include/**') }}
 
       # Through bundle-lib.sh, so the cached tree is byte-for-byte what a release build makes.
       # DONTSPEAK_DIST=1 makes a broken build fail this job instead of silently caching a

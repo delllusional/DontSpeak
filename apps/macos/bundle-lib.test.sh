@@ -21,13 +21,13 @@ fi
 
 # Source fixture: build_shim globs $BUNDLE_LIB_DIR-rooted directories, so the stub compile has
 # real paths to record. Without it the glob would expand to the literal pattern.
-mkdir -p "$test_dir/DontSpeakMLX/Sources/DontSpeakSys" \
-         "$test_dir/DontSpeakMLX/Sources/DontSpeakFluid" \
-         "$test_dir/DontSpeakMLX/Sources/DontSpeakMLX"
-: >"$test_dir/DontSpeakMLX/Sources/DontSpeakSys/Sys.swift"
-: >"$test_dir/DontSpeakMLX/Sources/DontSpeakSys/SysLog.swift"
-: >"$test_dir/DontSpeakMLX/Sources/DontSpeakFluid/Fluid.swift"
-: >"$test_dir/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift"
+mkdir -p "$test_dir/DontSpeakShims/Sources/DontSpeakSys" \
+         "$test_dir/DontSpeakShims/Sources/DontSpeakFluid" \
+         "$test_dir/DontSpeakShims/Sources/DontSpeakMLX"
+: >"$test_dir/DontSpeakShims/Sources/DontSpeakSys/Sys.swift"
+: >"$test_dir/DontSpeakShims/Sources/DontSpeakSys/SysLog.swift"
+: >"$test_dir/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift"
+: >"$test_dir/DontSpeakShims/Sources/DontSpeakMLX/shim.swift"
 
 xcodebuild() { return 99; }
 xcrun() {
@@ -97,7 +97,7 @@ sys_source_count="$(grep -c . "$test_dir/swift-sources" 2>/dev/null || echo 0)"
 while IFS= read -r source; do
   [ -n "$source" ] || continue
   case "$source" in
-    "$test_dir/DontSpeakMLX/Sources/DontSpeakSys/"*) ;;
+    "$test_dir/DontSpeakShims/Sources/DontSpeakSys/"*) ;;
     *) fail "sys shim build names a source outside DontSpeakSys: $source" ;;
   esac
 done <"$test_dir/swift-sources"
@@ -117,15 +117,15 @@ grep -q "unsupported Swift architecture" "$stderr_file" \
   || fail "unknown architecture error was not reported"
 
 # Empty source directory: name the directory rather than letting swiftc report a literal glob.
-mv "$test_dir/DontSpeakMLX/Sources/DontSpeakSys" "$test_dir/sys-sources-away"
-mkdir -p "$test_dir/DontSpeakMLX/Sources/DontSpeakSys"
+mv "$test_dir/DontSpeakShims/Sources/DontSpeakSys" "$test_dir/sys-sources-away"
+mkdir -p "$test_dir/DontSpeakShims/Sources/DontSpeakSys"
 if build_shim sys arm64 >/dev/null 2>"$stderr_file"; then
   fail "an empty Sources/DontSpeakSys was accepted"
 fi
 grep -q "no Swift sources in .*DontSpeakSys" "$stderr_file" \
   || fail "empty-source-dir error did not name the directory"
-rmdir "$test_dir/DontSpeakMLX/Sources/DontSpeakSys"
-mv "$test_dir/sys-sources-away" "$test_dir/DontSpeakMLX/Sources/DontSpeakSys"
+rmdir "$test_dir/DontSpeakShims/Sources/DontSpeakSys"
+mv "$test_dir/sys-sources-away" "$test_dir/DontSpeakShims/Sources/DontSpeakSys"
 
 # -- dist-vs-dev waiver, per family ------------------------------------------------------
 if DONTSPEAK_DIST=1 build_shim fluid arm64 >/dev/null 2>"$stderr_file"; then
@@ -177,14 +177,14 @@ fi
 
 out="$(DONTSPEAK_DIST=1 DONTSPEAK_SHIM_REUSE_PREBUILT=1 build_shim mlx arm64 2>"$stderr_file")" \
   || fail "matching prebuilt arm64 mlx tree was not reused"
-mlx_staged="$test_dir/DontSpeakMLX/.build/shims-arm64/libdontspeak_mlx.dylib"
+mlx_staged="$test_dir/DontSpeakShims/.build/shims-arm64/libdontspeak_mlx.dylib"
 [ "$out" = "$mlx_staged" ] || fail "mlx reuse returned '$out', want '$mlx_staged'"
 cmp "$out" "$mlx_prebuilt" || fail "staged mlx dylib differs from the cached product"
 
 # A fluid tree carries no metallib and must still be reusable; an mlx tree without one must not.
 out="$(DONTSPEAK_DIST=1 DONTSPEAK_SHIM_REUSE_PREBUILT=1 build_shim fluid arm64 2>"$stderr_file")" \
   || fail "metallib-less prebuilt fluid tree was rejected"
-fluid_staged="$test_dir/DontSpeakMLX/.build/shims-arm64/libdontspeak_fluid.dylib"
+fluid_staged="$test_dir/DontSpeakShims/.build/shims-arm64/libdontspeak_fluid.dylib"
 [ "$out" = "$fluid_staged" ] || fail "fluid reuse returned '$out', want '$fluid_staged'"
 cmp "$out" "$fluid_prebuilt" || fail "staged fluid dylib differs from the cached product"
 
@@ -242,7 +242,7 @@ grep -q "FluidAudio is still linked" "$stderr_file" \
 # A prior plain `swift build` leaves package checkouts that belong to no shipped family.
 # Keep one beside the real per-family trees so every harvest proves it cannot contaminate an
 # app assembled later in the same checkout.
-plain_checkouts="$test_dir/DontSpeakMLX/.build/checkouts"
+plain_checkouts="$test_dir/DontSpeakShims/.build/checkouts"
 mkdir -p "$plain_checkouts/plain-build-only"
 echo "legal" >"$plain_checkouts/plain-build-only/LICENSE"
 

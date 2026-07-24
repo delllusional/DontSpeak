@@ -26,8 +26,8 @@ apps/macos/models/
 # build --locked against it, so keep it out of this ignore list.
 target/
 
-# macOS DontSpeakMLX Swift package smoke-test artifacts
-apps/macos/DontSpeakMLX/*.wav
+# macOS DontSpeakShims Swift package smoke-test artifacts
+apps/macos/DontSpeakShims/*.wav
 
 # Windows installer build artifacts
 apps/windows/installer/payload/

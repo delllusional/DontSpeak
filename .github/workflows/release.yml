@@ -111,12 +111,12 @@ jobs:
             *)          arches='["arm64"]' ;;
           esac
           echo "macos-arches=$arches" >> "$GITHUB_OUTPUT"
-          # The DontSpeakMLX suite is ~7 min of Metal xcodebuild whose only inputs live in that
+          # The DontSpeakShims suite is ~7 min of Metal xcodebuild whose only inputs live in that
           # one directory (sources, tests, and the mlx-swift/mlx-audio-swift pins in
           # Package.resolved). Re-run it when the package moved since the last REAL release —
           # -dev tags are excluded as baselines because their own runs use this same gate.
           prev="$(git describe --tags --abbrev=0 --exclude='*-dev*' HEAD^ 2>/dev/null || true)"
-          if [ -z "$prev" ] || ! git diff --quiet "$prev" HEAD -- apps/macos/DontSpeakMLX; then
+          if [ -z "$prev" ] || ! git diff --quiet "$prev" HEAD -- apps/macos/DontSpeakShims; then
             echo "mlx-changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "mlx-changed=false" >> "$GITHUB_OUTPUT"
@@ -313,18 +313,18 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/SourcePackages/checkouts
-          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakShims/.build/xcode-mlx-arm64/Build/Products/Release
+            apps/macos/DontSpeakShims/.build/xcode-mlx-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakShims/Package.resolved', 'apps/macos/DontSpeakShims/Package.swift', 'apps/macos/DontSpeakShims/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakShims/include/**') }}
 
       - name: Restore the prebuilt FluidAudio shim
         if: matrix.arch == 'arm64'
         uses: actions/cache/restore@v6
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/SourcePackages/checkouts
-          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakShims/.build/xcode-fluid-arm64/Build/Products/Release
+            apps/macos/DontSpeakShims/.build/xcode-fluid-arm64/SourcePackages/checkouts
+          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakShims/Package.resolved', 'apps/macos/DontSpeakShims/Package.swift', 'apps/macos/DontSpeakShims/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakShims/include/**') }}
 
       # DONTSPEAK_DIST=1 → hardened-runtime sign inside-out with entitlements, then
       # notarize+staple the .app (via the APPLE_ID trio) and zip it. onnxruntime is not

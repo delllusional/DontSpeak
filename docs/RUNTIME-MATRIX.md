@@ -69,7 +69,7 @@ alongside the Apple-Silicon-only diarization paths.
 - Platform and engine gates: [`ds-config/src/enums.rs`](../rust/crates/ds-config/src/enums.rs)
 - Built-in TTS capabilities: [`ds-config/src/tts_model.rs`](../rust/crates/ds-config/src/tts_model.rs)
 - ONNX Runtime, CUDA, and eSpeak pins: [`ds-model/src/urls.rs`](../rust/crates/ds-model/src/urls.rs)
-- macOS shim dependency pins: [`DontSpeakMLX/Package.swift`](../apps/macos/DontSpeakMLX/Package.swift)
+- macOS shim dependency pins: [`DontSpeakShims/Package.swift`](../apps/macos/DontSpeakShims/Package.swift)
 - STT routing and auxiliary graphs: [`ds-stt/src/local.rs`](../rust/crates/ds-stt/src/local.rs),
   [`streaming.rs`](../rust/crates/ds-stt/src/streaming.rs),
   [`separate.rs`](../rust/crates/ds-stt/src/separate.rs), and
