@@ -1,7 +1,7 @@
 //! Shared macOS speech C-ABI shim loader. One dylib per runtime family (`sys`, `mlx`,
 //! `fluid`), each with its own path variable and its own `Frameworks` member, so a host can
 //! carry any subset. One place for the env vars + dlopen so `ds-stt` and `ds-tts` can't drift
-//! (neither depends on the other). Each caller keeps its own `Library` (dlopen refcounts).
+//! (neither depends on the other). Callers retain every loaded `Library` for its use period.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};

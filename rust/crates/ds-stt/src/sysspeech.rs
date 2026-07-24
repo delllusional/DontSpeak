@@ -4,6 +4,7 @@
 //! locale → UNAVAILABLE.
 
 use std::ffi::c_void;
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 
@@ -19,6 +20,25 @@ type SysTranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void,
 type SysStreamStartFn = unsafe extern "C" fn() -> i32;
 type SysStreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type SysStreamFinishFn = unsafe extern "C" fn(*mut c_void, StrCb) -> i32;
+
+// Cache rejection too: the host sets the path before engine start and its signed bundle is
+// immutable for this process, while retrying would put `codesign` back on every status poll.
+static SYSTEM_SHIM: OnceLock<Result<Library, String>> = OnceLock::new();
+
+fn cached<T>(
+    slot: &OnceLock<Result<T, String>>,
+    init: impl FnOnce() -> Result<T, String>,
+) -> Result<&T, String> {
+    slot.get_or_init(init).as_ref().map_err(Clone::clone)
+}
+
+/// One verified `dlopen` for the process lifetime. Status polls and System STT consumers share
+/// this handle, so the app-bundle `codesign` gate runs at most once instead of once per poll.
+fn system_shim() -> Result<&'static Library, String> {
+    cached(&SYSTEM_SHIM, || {
+        ds_model::shim::open(ds_model::shim::Shim::Sys)
+    })
+}
 
 /// Usability of the System STT engine, mapped from the shim's `ds_sys_available` code.
 /// Mirrors Parakeet's present/warming/ready split so the status dot reads the same way.
@@ -59,7 +79,7 @@ fn reason_for(rc: i32) -> Option<String> {
 /// Probe the shim's `ds_sys_available` WITHOUT prompting/downloading (safe for the
 /// frequent model-status poll). Shim absent (non-app build) ⇒ [`SystemState::Unavailable`].
 pub fn state() -> SystemState {
-    let Ok(lib) = ds_model::shim::open(ds_model::shim::Shim::Sys) else {
+    let Ok(lib) = system_shim() else {
         return SystemState::Unavailable;
     };
     // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
@@ -90,7 +110,7 @@ pub fn available() -> bool {
 /// when the config resolves to System via the default ladder — see
 /// `dontspeakd::boot::authorize_system_stt_if_needed`.
 pub fn authorize() -> Result<(), String> {
-    let lib = ds_model::shim::open(ds_model::shim::Shim::Sys)?;
+    let lib = system_shim()?;
     // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
     let rc = unsafe {
         let f: Symbol<SysAuthorizeFn> = lib
@@ -108,7 +128,7 @@ pub fn authorize() -> Result<(), String> {
 /// SFSpeechRecognizer on 14–25. The OS owns the models, so `preload` only opens the
 /// shim and `unload` is a no-op.
 pub struct SystemTranscriber {
-    lib: Option<Library>,
+    lib: Option<&'static Library>,
 }
 
 impl SystemTranscriber {
@@ -118,7 +138,7 @@ impl SystemTranscriber {
 
     fn ensure_lib(&mut self) -> Result<(), String> {
         if self.lib.is_none() {
-            self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Sys)?);
+            self.lib = Some(system_shim()?);
         }
         Ok(())
     }
@@ -155,17 +175,17 @@ impl Default for SystemTranscriber {
 }
 
 /// Streaming system STT ([`StreamingStt`]); same session loop as ONNX/MLX.
-/// Own shim handle (`dlopen` refcounts). Auth/availability stay in [`state`]/[`authorize`].
+/// Borrows the process-lifetime shim handle. Auth/availability stay in [`state`]/[`authorize`].
 pub struct SystemStreamer {
-    lib: Library,
+    lib: &'static Library,
     /// Wall ms in `push`/`finish` for the current utterance (STTSTATS).
     transcribe_ms: f64,
 }
 
 impl SystemStreamer {
-    /// Open shim; `Err` → offline fallback.
+    /// Acquire the shim; `Err` → offline fallback.
     pub fn new() -> Result<Self, String> {
-        let lib = ds_model::shim::open(ds_model::shim::Shim::Sys)?;
+        let lib = system_shim()?;
         Ok(Self {
             lib,
             transcribe_ms: 0.0,
@@ -228,5 +248,58 @@ impl StreamingStt for SystemStreamer {
 
     fn provider(&self) -> ds_config::RealizedProvider {
         ds_config::RealizedProvider::System
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::cached;
+
+    #[test]
+    fn cached_handle_initializes_once_and_stays_live() {
+        struct Handle<'a>(&'a AtomicUsize);
+        impl Drop for Handle<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let opens = AtomicUsize::new(0);
+        let drops = AtomicUsize::new(0);
+        let slot = std::sync::OnceLock::new();
+        let first = cached(&slot, || {
+            opens.fetch_add(1, Ordering::Relaxed);
+            Ok(Handle(&drops))
+        })
+        .unwrap();
+        let second = cached(&slot, || {
+            opens.fetch_add(1, Ordering::Relaxed);
+            Err("must not reopen".into())
+        })
+        .unwrap();
+
+        assert!(std::ptr::eq(first, second));
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+        drop(slot);
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn cached_failure_is_not_retried_by_the_poll() {
+        let opens = AtomicUsize::new(0);
+        let slot = std::sync::OnceLock::<Result<(), String>>::new();
+        for _ in 0..3 {
+            assert_eq!(
+                cached(&slot, || {
+                    opens.fetch_add(1, Ordering::Relaxed);
+                    Err("signature rejected".into())
+                }),
+                Err("signature rejected".into())
+            );
+        }
+        assert_eq!(opens.load(Ordering::Relaxed), 1);
     }
 }
