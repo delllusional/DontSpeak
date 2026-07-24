@@ -1,7 +1,7 @@
 //! On-disk inventory of the model cache: what each built-in model costs, and removal.
 //!
 //! Every entry is derived from the existing registries ([`crate::tts_assets`],
-//! [`crate::mlx_repo`], [`crate::spec`], [`crate::ort`]) — there is no second taxonomy to
+//! [`crate::mlx_repo`], [`crate::coreml_repo`], [`crate::spec`], [`crate::ort`]) — there is no second taxonomy to
 //! keep in sync. The whole API is parameterized on [`ModelRoots`]; nothing here resolves an
 //! ambient root, not even inside `remove_at`'s flights, so a test can never scan or delete
 //! the developer's real caches.
@@ -12,8 +12,8 @@
 //! at load. Sizes are logical bytes (`symlink_metadata().len()`), never block usage, and
 //! symlinks are not followed — the same walk shape as the orphan sweep.
 //!
-//! Diarization (`diarization_mlx`, `sepformer_model`) is deliberately unlisted while the
-//! feature is hidden (#77); enabling it must add its row here.
+//! Diarization (`diarization_mlx`, `diarization_fluid`, `sepformer_model`) is deliberately
+//! unlisted while the feature is hidden (#77); enabling it must add its row here.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -96,7 +96,11 @@ static ROWS: &[Row] = &[
         id: "kokoro",
         kind: AssetKind::Tts,
         model: Some(TtsModel::Kokoro),
-        targets: &[DownloadTarget::KokoroModel, DownloadTarget::KokoroMlx],
+        targets: &[
+            DownloadTarget::KokoroModel,
+            DownloadTarget::KokoroMlx,
+            DownloadTarget::KokoroFluid,
+        ],
     },
     Row {
         id: "chatterbox",
@@ -123,7 +127,11 @@ static ROWS: &[Row] = &[
         id: ds_config::STT_MODEL_TOKEN,
         kind: AssetKind::Stt,
         model: None,
-        targets: &[DownloadTarget::ParakeetModel, DownloadTarget::ParakeetMlx],
+        targets: &[
+            DownloadTarget::ParakeetModel,
+            DownloadTarget::ParakeetMlx,
+            DownloadTarget::ParakeetFluid,
+        ],
     },
     Row {
         id: ds_config::KOKORO_FRONTEND_ASSET_TOKEN,
@@ -221,6 +229,10 @@ pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<Path
             .map(|name| root.join(name))
             .collect(),
         DownloadTarget::ParakeetMlx => hf_dirs(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
+        // Two roots: the Core ML chain under our own cache, and the G2P sub-models under
+        // FluidAudio's. A removal reclaims both.
+        DownloadTarget::KokoroFluid => hf_dirs(roots, &crate::coreml_repo::KOKORO_COREML_SET),
+        DownloadTarget::ParakeetFluid => hf_dirs(roots, &crate::coreml_repo::PARAKEET_COREML_SET),
         DownloadTarget::KokoroFrontend => {
             let mut paths: Vec<PathBuf> = KOKORO_G2P_FILES
                 .iter()
@@ -233,6 +245,7 @@ pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<Path
         DownloadTarget::Cuda => vec![crate::ort::cuda_runtime_dir_under(root)],
         // Unlisted: diarization is hidden (#77), and `Models` is an installer group.
         DownloadTarget::DiarizationMlx
+        | DownloadTarget::DiarizationFluid
         | DownloadTarget::SepformerModel
         | DownloadTarget::Models => Vec::new(),
     }
@@ -293,6 +306,15 @@ fn variant_installed(roots: &ModelRoots, target: DownloadTarget) -> bool {
             .iter()
             .all(|name| root.join(name).is_file()),
         DownloadTarget::ParakeetMlx => hf_set_installed(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
+        // Files on disk only. The Fluid Kokoro engine additionally needs the shared voice
+        // pack, but that is a USABILITY gate: folding it in here would make an installed set
+        // read as absent and let a reclaim delete the frontend it loads (#220).
+        DownloadTarget::KokoroFluid => {
+            hf_set_installed(roots, &crate::coreml_repo::KOKORO_COREML_SET)
+        }
+        DownloadTarget::ParakeetFluid => {
+            hf_set_installed(roots, &crate::coreml_repo::PARAKEET_COREML_SET)
+        }
         DownloadTarget::KokoroFrontend => {
             KOKORO_G2P_FILES
                 .iter()
@@ -304,6 +326,7 @@ fn variant_installed(roots: &ModelRoots, target: DownloadTarget) -> bool {
         DownloadTarget::Onnxruntime => root.join(crate::ort::onnxruntime_dylib_file()).is_file(),
         DownloadTarget::Cuda => crate::ort::cuda_runtime_dir_under(root).is_dir(),
         DownloadTarget::DiarizationMlx
+        | DownloadTarget::DiarizationFluid
         | DownloadTarget::SepformerModel
         | DownloadTarget::Models => false,
     }
@@ -359,15 +382,16 @@ pub fn asset_in_use(cfg: &VoiceConfig, id: &str) -> bool {
 }
 
 /// Every target whose installed files load through the shared ORT dylib: the five ONNX sets
-/// plus MLX Kokoro, whose English G2P is an ORT graph. Not `Cuda` — the CUDA runtime ships
-/// its own onnxruntime under `cuda/`.
-const ORT_CONSUMER_TARGETS: [DownloadTarget; 6] = [
+/// plus both native Kokoro flavors, whose English G2P is an ORT graph on every backend. Not
+/// `Cuda` — the CUDA runtime ships its own onnxruntime under `cuda/`.
+const ORT_CONSUMER_TARGETS: [DownloadTarget; 7] = [
     DownloadTarget::KokoroModel,
     DownloadTarget::ChatterboxModel,
     DownloadTarget::QwenModel,
     DownloadTarget::OmniVoiceModel,
     DownloadTarget::ParakeetModel,
     DownloadTarget::KokoroMlx,
+    DownloadTarget::KokoroFluid,
 ];
 
 fn any_installed(roots: &ModelRoots, targets: &[DownloadTarget]) -> bool {
@@ -421,7 +445,11 @@ pub fn shared_asset_referenced(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) 
         [DownloadTarget::KokoroFrontend] => {
             any_installed(
                 roots,
-                &[DownloadTarget::KokoroModel, DownloadTarget::KokoroMlx],
+                &[
+                    DownloadTarget::KokoroModel,
+                    DownloadTarget::KokoroMlx,
+                    DownloadTarget::KokoroFluid,
+                ],
             ) || (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
                 && cfg.tts_model == TtsModel::Kokoro)
         }
@@ -709,6 +737,31 @@ mod tests {
                 .contains(&root.join(crate::ort::onnxruntime_dylib_file()))
         );
         assert!(owned_paths_under(&roots, DownloadTarget::DiarizationMlx).is_empty());
+        assert!(owned_paths_under(&roots, DownloadTarget::DiarizationFluid).is_empty());
+
+        // The Fluid variant is exactly its two repo directories — one of them outside the
+        // model root. `voices-v1.0.bin` is the ONNX variant's file even though the Fluid
+        // engine reads it too, so `variant_bytes(KokoroFluid)` under-reports by its size
+        // rather than double-counting it across the row's variants.
+        let fluid = owned_paths_under(&roots, DownloadTarget::KokoroFluid);
+        assert_eq!(
+            fluid,
+            vec![
+                roots
+                    .model
+                    .join("coreml")
+                    .join(crate::coreml_repo::KOKORO_COREML_DIR_NAME),
+                roots
+                    .fluid
+                    .join(crate::coreml_repo::KOKORO_G2P_COREML_DIR_NAME),
+            ]
+        );
+        for path in &kokoro {
+            assert!(
+                !fluid.contains(path),
+                "{path:?} belongs to the ONNX variant"
+            );
+        }
     }
 
     /// A second flat (`dir_name: None`) set must own ITS files. Kokoro is the only flat set
@@ -781,6 +834,19 @@ mod tests {
         }
     }
 
+    /// Both repos of the Fluid Kokoro set, marker included — one under the model root, one
+    /// under the third-party cache. The shared `voices-v1.0.bin` is deliberately NOT written:
+    /// the variant is installed on files alone.
+    fn seed_kokoro_fluid(roots: &ModelRoots) {
+        for repo in crate::coreml_repo::KOKORO_COREML_SET {
+            let dir = roots.dir_for(repo);
+            for file in repo.files {
+                write(&dir.join(file.path), b"coreml");
+            }
+            write(&dir.join(".ds-ready"), repo.revision.as_bytes());
+        }
+    }
+
     /// Everything deselected: no engine resolves, so only on-disk state can reference a
     /// shared asset. `speaker_lock` and `diarizer` default to off.
     fn nothing_selected() -> VoiceConfig {
@@ -845,6 +911,70 @@ mod tests {
             !assets.iter().any(|asset| asset.id == "diarization"),
             "diarization stays unlisted while the feature is hidden (#77)"
         );
+    }
+
+    /// The `kokoro` row is one id with three variants: the Fluid one alone makes the row
+    /// installed, and `models remove kokoro` reclaims BOTH of its directories — including the
+    /// one in FluidAudio's own cache, which no other row owns.
+    #[test]
+    fn a_kokoro_row_holding_only_the_fluid_variant_is_installed_and_fully_reclaimed() {
+        if !DownloadTarget::KokoroFluid.is_supported_on_this_host() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
+        seed_kokoro_fluid(&roots);
+        let coreml = roots.dir_for(&crate::coreml_repo::KOKORO_COREML);
+        let g2p = roots.dir_for(&crate::coreml_repo::KOKORO_G2P_COREML);
+        assert_fixture_is_isolated(root.path(), &coreml);
+        assert_fixture_is_isolated(root.path(), &g2p);
+
+        let assets = scan_at(&roots);
+        let kokoro = asset(&assets, "kokoro");
+        assert!(
+            kokoro.installed(),
+            "the Fluid variant alone installs the row"
+        );
+        assert!(
+            variant(kokoro, DownloadTarget::KokoroFluid)
+                .unwrap()
+                .installed
+        );
+        assert!(
+            !variant(kokoro, DownloadTarget::KokoroModel)
+                .unwrap()
+                .installed
+        );
+        assert!(kokoro.bytes() > 0);
+
+        let reclaimed = remove_at(&roots, &nothing_selected(), "kokoro").unwrap();
+        assert!(reclaimed > 0);
+        assert!(!coreml.exists());
+        assert!(!g2p.exists(), "the third-party cache is reclaimed too");
+    }
+
+    /// #220's contract for the third variant: Kokoro's English G2P is an ORT BART graph on
+    /// every backend, so an installed Fluid Kokoro holds both shared rows even with nothing
+    /// selected — otherwise a reclaim would delete assets it loads.
+    #[test]
+    fn kokoro_fluid_keeps_the_onnx_runtime_referenced() {
+        assert_eq!(ORT_CONSUMER_TARGETS.len(), 7);
+        assert!(ORT_CONSUMER_TARGETS.contains(&DownloadTarget::KokoroFluid));
+        if !DownloadTarget::KokoroFluid.is_supported_on_this_host() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
+        let cfg = nothing_selected();
+        assert!(!shared_asset_referenced(&roots, &cfg, "onnxruntime"));
+
+        seed_kokoro_fluid(&roots);
+        assert!(shared_asset_referenced(&roots, &cfg, "onnxruntime"));
+        assert!(shared_asset_referenced(&roots, &cfg, "kokoro_frontend"));
+        for id in ["onnxruntime", "kokoro_frontend"] {
+            let err = remove_at(&roots, &cfg, id).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{id}");
+        }
     }
 
     #[test]

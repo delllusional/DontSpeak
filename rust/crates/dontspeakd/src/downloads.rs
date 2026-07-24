@@ -116,8 +116,12 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
     // Shim-aware (same predicate as [`compute_needs`]): provider=mlx without the loaded
     // shim runs ONNX, so the ONNX model download is the one the child actually hosts.
     let mlx_tts = mlx_tts_active(cfg);
-    let tts_target_matches =
-        target.tts_model() == Some(cfg.tts_model) && target.is_mlx_tts() == mlx_tts;
+    // `is_fluid_tts` is excluded rather than compared: no provider resolves to the FluidAudio
+    // backend yet, so a manually-requested `kokoro_fluid` fetch never produces the model the
+    // warm child is hosting. Its own runtime gate arrives with the backend.
+    let tts_target_matches = target.tts_model() == Some(cfg.tts_model)
+        && target.is_mlx_tts() == mlx_tts
+        && !target.is_fluid_tts();
     (builtin_tts && tts_target_matches)
         // eSpeak/G2P/JA assets are loaded by the warm helper — both ONNX and MLX Kokoro.
         || (builtin_tts
@@ -320,6 +324,19 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 )),
                 #[cfg(target_os = "macos")]
                 DownloadTarget::ParakeetMlx => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
+                // FluidAudio Core ML sets: same engine-managed fetch, offline shim load. The
+                // Kokoro set spans two roots (ours plus FluidAudio's own cache); one
+                // `ensure_hf_repos` call covers both.
+                #[cfg(target_os = "macos")]
+                DownloadTarget::KokoroFluid => hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET),
+                #[cfg(target_os = "macos")]
+                DownloadTarget::ParakeetFluid => {
+                    hf_repos(&ds_model::coreml_repo::PARAKEET_COREML_SET)
+                }
+                #[cfg(target_os = "macos")]
+                DownloadTarget::DiarizationFluid => {
+                    hf_repos(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
+                }
                 // SepFormer speaker-lock — re-resolved per dictation; no warm-child restart.
                 #[cfg(target_os = "macos")]
                 DownloadTarget::SepformerModel => {
@@ -779,6 +796,44 @@ mod tests {
                 DownloadTarget::ParakeetModel,
             ]
         );
+        // A native flavor is carried by the same one-of field, so the Core ML variant needs
+        // no plan shape of its own — only a `compute_needs` branch that selects it.
+        assert_eq!(
+            need(DownloadNeeds {
+                tts_model: DownloadTarget::fluid_for_tts(ds_config::TtsModel::Kokoro),
+                kokoro_frontend: true,
+                ..Default::default()
+            }),
+            vec![DownloadTarget::KokoroFluid, DownloadTarget::KokoroFrontend]
+        );
+    }
+
+    /// The Fluid TTS variant must NOT restart the warm child yet: nothing resolves to that
+    /// backend, so the child is hosting the ONNX or MLX model either way.
+    #[test]
+    fn a_fluid_tts_fetch_does_not_reload_a_child_that_cannot_host_it() {
+        use ds_config::{Provider, TtsEngine, TtsModel, VoiceConfig};
+
+        let kokoro = VoiceConfig {
+            tts_engine: Some(vec![TtsEngine::BuiltIn]),
+            tts_model: TtsModel::Kokoro,
+            provider: vec![Provider::OrtCpu],
+            stt_engine: Some(Vec::new()),
+            ..VoiceConfig::default()
+        };
+        assert_eq!(
+            DownloadTarget::KokoroFluid.tts_model(),
+            Some(TtsModel::Kokoro),
+            "the target still names its model for the inventory row"
+        );
+        assert!(!download_needs_child_reload(
+            DownloadTarget::KokoroFluid,
+            &kokoro
+        ));
+        assert!(download_needs_child_reload(
+            DownloadTarget::KokoroModel,
+            &kokoro
+        ));
     }
 
     /// Parallel targets: independent progress/errors; re-begin clears Failed.

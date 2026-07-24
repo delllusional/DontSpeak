@@ -188,7 +188,9 @@ pub fn catalog() -> Value {
             projects.push(project_obj(p, files));
         }
     };
-    let push_mlx = |projects: &mut Vec<Value>, r: &crate::hf_repo::HfRepo| {
+    // Every self-managed HF set is Apple-Silicon-only, MLX and Core ML alike. An empty
+    // `display_name` folds the set into another entry, so it is listed through that one.
+    let push_native = |projects: &mut Vec<Value>, r: &crate::hf_repo::HfRepo| {
         if apple && !r.display_name.is_empty() {
             projects.push(hf_project_obj(r));
         }
@@ -223,7 +225,10 @@ pub fn catalog() -> Value {
     );
     push_portable(&mut projects, &urls::PARAKEET);
     for repo in crate::mlx_repo::all_mlx_repos() {
-        push_mlx(&mut projects, repo);
+        push_native(&mut projects, repo);
+    }
+    for repo in crate::coreml_repo::all_coreml_repos() {
+        push_native(&mut projects, repo);
     }
     push_portable(&mut projects, &urls::SEPFORMER_PROJECT);
 
@@ -407,26 +412,32 @@ mod tests {
         }
     }
 
-    /// MLX sets are Apple-Silicon only and every downloaded set is cataloged.
+    /// The self-managed native sets are Apple-Silicon only and every one of them carries a
+    /// full license record — including the sets that are FOLDED into another catalog entry.
+    /// Those may leave `display_name`/`usage` empty (the folding rule in [`catalog`]) but not
+    /// `license`/`license_url`: their bytes are downloaded like any other, so dropping the
+    /// license record would lose the attribution entirely.
     #[test]
-    fn mlx_sets_are_apple_silicon_only_and_fully_licensed() {
-        use crate::mlx_repo;
-
+    fn native_sets_are_apple_silicon_only_and_fully_licensed() {
         assert_eq!(
             urls::Platform::APPLE_MLX,
             &[urls::Platform::MacArm64],
-            "MLX Audio sets run only on Apple Silicon"
+            "the native model sets run only on Apple Silicon"
         );
-        // Every listed MLX set carries a full license record (the can't-drift guard for
-        // the macOS additions, independent of which platform the test runs on).
-        for r in mlx_repo::all_mlx_repos() {
-            for (field, val) in [
-                ("usage", r.usage),
-                ("license", r.license),
-                ("license_url", r.license_url),
-            ] {
-                assert!(!val.is_empty(), "MLX set `{}` has empty {field}", r.name);
+        for r in crate::mlx_repo::all_mlx_repos()
+            .into_iter()
+            .chain(crate::coreml_repo::all_coreml_repos())
+        {
+            for (field, val) in [("license", r.license), ("license_url", r.license_url)] {
+                assert!(!val.is_empty(), "set `{}` has empty {field}", r.name);
             }
+            assert_eq!(
+                r.display_name.is_empty(),
+                r.usage.is_empty(),
+                "set `{}`: display_name and usage are empty TOGETHER — that pair is what \
+                 folds a sub-component into another catalog entry",
+                r.name
+            );
         }
     }
 

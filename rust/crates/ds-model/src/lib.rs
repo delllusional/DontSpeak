@@ -34,6 +34,7 @@
 use std::path::{Path, PathBuf};
 
 mod archive;
+pub mod coreml_repo;
 pub mod download;
 pub mod hash;
 pub mod hf_repo;

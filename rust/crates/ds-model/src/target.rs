@@ -16,10 +16,16 @@ pub enum DownloadTarget {
     KokoroFrontend,
     /// MLX Kokoro set ([`crate::mlx_repo::KOKORO_MLX_SET`]). Apple-Silicon macOS.
     KokoroMlx,
+    /// FluidAudio Core ML Kokoro set ([`crate::coreml_repo::KOKORO_COREML_SET`]).
+    /// Apple-Silicon macOS.
+    KokoroFluid,
     /// Full Parakeet streaming set + ORT. Wire `"parakeet_model"`.
     ParakeetModel,
     /// MLX Parakeet set ([`crate::mlx_repo::PARAKEET_MLX_SET`]). Apple-Silicon macOS.
     ParakeetMlx,
+    /// FluidAudio Core ML Parakeet sets ([`crate::coreml_repo::PARAKEET_COREML_SET`]).
+    /// Apple-Silicon macOS.
+    ParakeetFluid,
     /// SepFormer speaker-lock + ORT. macOS. Wire `"sepformer_model"`.
     SepformerModel,
     /// Chatterbox Multilingual ONNX set + ORT.
@@ -38,6 +44,9 @@ pub enum DownloadTarget {
     Cuda,
     /// Speaker diarization via MLX (Apple-Silicon macOS). Wire `"diarization_mlx"`.
     DiarizationMlx,
+    /// Speaker diarization via FluidAudio Core ML
+    /// ([`crate::coreml_repo::DIARIZATION_COREML_SET`]). Apple-Silicon macOS.
+    DiarizationFluid,
     /// Installer group: default Kokoro TTS + Parakeet STT ONNX models.
     Models,
 }
@@ -62,6 +71,12 @@ impl DownloadTarget {
         ),
     ];
 
+    /// The FluidAudio Core ML flavor is PARTIAL — Kokoro only — so it is its own table
+    /// rather than a fourth column of [`Self::TTS_TARGETS`], which every built-in TTS model
+    /// must fill.
+    const FLUID_TTS_TARGETS: [(ds_config::TtsModel, Self); 1] =
+        [(ds_config::TtsModel::Kokoro, Self::KokoroFluid)];
+
     /// The stable wire token for this target (what the IPC / CLI / installer pass).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -69,8 +84,10 @@ impl DownloadTarget {
             DownloadTarget::KokoroModel => "kokoro_model",
             DownloadTarget::KokoroFrontend => "kokoro_frontend",
             DownloadTarget::KokoroMlx => "kokoro_mlx",
+            DownloadTarget::KokoroFluid => "kokoro_fluid",
             DownloadTarget::ParakeetModel => "parakeet_model",
             DownloadTarget::ParakeetMlx => "parakeet_mlx",
+            DownloadTarget::ParakeetFluid => "parakeet_fluid",
             DownloadTarget::SepformerModel => "sepformer_model",
             DownloadTarget::ChatterboxModel => "chatterbox_model",
             DownloadTarget::ChatterboxMlx => "chatterbox_mlx",
@@ -80,6 +97,7 @@ impl DownloadTarget {
             DownloadTarget::OmniVoiceMlx => "omnivoice_mlx",
             DownloadTarget::Cuda => "cuda",
             DownloadTarget::DiarizationMlx => "diarization_mlx",
+            DownloadTarget::DiarizationFluid => "diarization_fluid",
             DownloadTarget::Models => "models",
         }
     }
@@ -92,8 +110,10 @@ impl DownloadTarget {
             "kokoro_model" => DownloadTarget::KokoroModel,
             "kokoro_frontend" => DownloadTarget::KokoroFrontend,
             "kokoro_mlx" => DownloadTarget::KokoroMlx,
+            "kokoro_fluid" => DownloadTarget::KokoroFluid,
             "parakeet_model" => DownloadTarget::ParakeetModel,
             "parakeet_mlx" => DownloadTarget::ParakeetMlx,
+            "parakeet_fluid" => DownloadTarget::ParakeetFluid,
             "sepformer_model" => DownloadTarget::SepformerModel,
             "chatterbox_model" => DownloadTarget::ChatterboxModel,
             "chatterbox_mlx" => DownloadTarget::ChatterboxMlx,
@@ -103,6 +123,7 @@ impl DownloadTarget {
             "omnivoice_mlx" => DownloadTarget::OmniVoiceMlx,
             "cuda" => DownloadTarget::Cuda,
             "diarization_mlx" => DownloadTarget::DiarizationMlx,
+            "diarization_fluid" => DownloadTarget::DiarizationFluid,
             "models" => DownloadTarget::Models,
             _ => return None,
         })
@@ -113,8 +134,9 @@ impl DownloadTarget {
     /// (the engine's `start_download`, [`crate::spec::prefetch_items`], ds-helper's
     /// `run_prefetch`) must mirror this matrix:
     ///
-    /// * the MLX sets (`kokoro_mlx` / `parakeet_mlx` / `diarization_mlx`)
-    ///   exist only where the native shim runs — macOS;
+    /// * the MLX sets (`kokoro_mlx` / `parakeet_mlx` / `diarization_mlx`) and the FluidAudio
+    ///   Core ML sets (`kokoro_fluid` / `parakeet_fluid` / `diarization_fluid`) exist only
+    ///   where the native shim runs and the Neural Engine ships — Apple-Silicon macOS;
     /// * `sepformer_model` is macOS-only too (the speaker-lock is macOS code), though it
     ///   is plain ONNX, not MLX;
     /// * `cuda` (the ONNX CUDA EP wheels) exists only on x86_64 Windows/Linux;
@@ -126,7 +148,10 @@ impl DownloadTarget {
             | DownloadTarget::QwenMlx
             | DownloadTarget::OmniVoiceMlx
             | DownloadTarget::ParakeetMlx
-            | DownloadTarget::DiarizationMlx => {
+            | DownloadTarget::DiarizationMlx
+            | DownloadTarget::KokoroFluid
+            | DownloadTarget::ParakeetFluid
+            | DownloadTarget::DiarizationFluid => {
                 cfg!(all(target_os = "macos", target_arch = "aarch64"))
             }
             DownloadTarget::SepformerModel => cfg!(target_os = "macos"),
@@ -147,9 +172,16 @@ impl DownloadTarget {
 
     /// Built-in TTS model fetched by this target.
     pub fn tts_model(self) -> Option<ds_config::TtsModel> {
-        Self::TTS_TARGETS.iter().find_map(|(model, portable, mlx)| {
-            (*portable == self || *mlx == self).then_some(*model)
-        })
+        Self::TTS_TARGETS
+            .iter()
+            .find_map(|(model, portable, mlx)| {
+                (*portable == self || *mlx == self).then_some(*model)
+            })
+            .or_else(|| {
+                Self::FLUID_TTS_TARGETS
+                    .iter()
+                    .find_map(|(model, fluid)| (*fluid == self).then_some(*model))
+            })
     }
 
     /// Apple-MLX download target for one built-in TTS model.
@@ -172,6 +204,22 @@ impl DownloadTarget {
     pub fn is_mlx_tts(self) -> bool {
         Self::TTS_TARGETS.iter().any(|(_, _, mlx)| *mlx == self)
     }
+
+    /// FluidAudio Core ML download target for one built-in TTS model, or `None` where that
+    /// backend has no set — fallible unlike [`Self::mlx_for_tts`], because the flavor is
+    /// partial.
+    pub fn fluid_for_tts(model: ds_config::TtsModel) -> Option<Self> {
+        Self::FLUID_TTS_TARGETS
+            .iter()
+            .find_map(|(candidate, fluid)| (*candidate == model).then_some(*fluid))
+    }
+
+    /// Whether this target is a built-in FluidAudio Core ML TTS set.
+    pub fn is_fluid_tts(self) -> bool {
+        Self::FLUID_TTS_TARGETS
+            .iter()
+            .any(|(_, fluid)| *fluid == self)
+    }
 }
 
 #[cfg(test)]
@@ -185,8 +233,10 @@ mod tests {
             DownloadTarget::KokoroModel,
             DownloadTarget::KokoroFrontend,
             DownloadTarget::KokoroMlx,
+            DownloadTarget::KokoroFluid,
             DownloadTarget::ParakeetModel,
             DownloadTarget::ParakeetMlx,
+            DownloadTarget::ParakeetFluid,
             DownloadTarget::SepformerModel,
             DownloadTarget::ChatterboxModel,
             DownloadTarget::ChatterboxMlx,
@@ -196,10 +246,44 @@ mod tests {
             DownloadTarget::OmniVoiceMlx,
             DownloadTarget::Cuda,
             DownloadTarget::DiarizationMlx,
+            DownloadTarget::DiarizationFluid,
             DownloadTarget::Models,
         ] {
             assert_eq!(DownloadTarget::parse(t.as_str()), Some(t), "{:?}", t);
         }
+    }
+
+    /// The FluidAudio TTS flavor is partial, so `fluid_for_tts` is fallible where
+    /// `mlx_for_tts` is total — and `tts_model` must still answer for the one target that
+    /// exists, or a completed `kokoro_fluid` fetch would look like nobody's model.
+    #[test]
+    fn fluid_targets_exist_only_for_kokoro() {
+        assert_eq!(
+            DownloadTarget::fluid_for_tts(ds_config::TtsModel::Kokoro),
+            Some(DownloadTarget::KokoroFluid)
+        );
+        for model in ds_config::TtsModel::ALL.iter().copied() {
+            let fluid = DownloadTarget::fluid_for_tts(model);
+            assert_eq!(
+                fluid.is_some(),
+                model == ds_config::TtsModel::Kokoro,
+                "{model:?}"
+            );
+            if let Some(target) = fluid {
+                assert_eq!(target.tts_model(), Some(model));
+                assert!(target.is_fluid_tts());
+                assert!(!target.is_mlx_tts(), "the two flavors stay disjoint");
+            }
+        }
+        for other in [
+            DownloadTarget::KokoroModel,
+            DownloadTarget::KokoroMlx,
+            DownloadTarget::ParakeetFluid,
+            DownloadTarget::DiarizationFluid,
+        ] {
+            assert!(!other.is_fluid_tts(), "{other:?}");
+        }
+        assert_eq!(DownloadTarget::ParakeetFluid.tts_model(), None);
     }
 
     #[test]
@@ -227,27 +311,30 @@ mod tests {
         ] {
             assert!(t.is_supported_on_this_host(), "{t:?} must be universal");
         }
-        // The four MLX sets are Apple-Silicon-only; the plain-ONNX speaker-lock separator
-        // is macOS on ANY arch — the split matters on Intel macOS.
-        let mlx_only = [
+        // The MLX and FluidAudio Core ML sets are Apple-Silicon-only; the plain-ONNX
+        // speaker-lock separator is macOS on ANY arch — the split matters on Intel macOS.
+        let apple_silicon_only = [
             KokoroMlx,
             ChatterboxMlx,
             QwenMlx,
             OmniVoiceMlx,
             ParakeetMlx,
             DiarizationMlx,
+            KokoroFluid,
+            ParakeetFluid,
+            DiarizationFluid,
         ];
         #[cfg(target_os = "macos")]
         {
             #[cfg(target_arch = "aarch64")]
-            for t in mlx_only {
+            for t in apple_silicon_only {
                 assert!(
                     t.is_supported_on_this_host(),
                     "{t:?} is an Apple-Silicon target"
                 );
             }
             #[cfg(not(target_arch = "aarch64"))]
-            for t in mlx_only {
+            for t in apple_silicon_only {
                 assert!(
                     !t.is_supported_on_this_host(),
                     "{t:?} is Apple-Silicon-only"
@@ -264,7 +351,7 @@ mod tests {
         }
         #[cfg(target_os = "windows")]
         {
-            for t in mlx_only {
+            for t in apple_silicon_only {
                 assert!(!t.is_supported_on_this_host(), "{t:?} is macOS-only");
             }
             assert!(!SepformerModel.is_supported_on_this_host());
@@ -275,7 +362,7 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            for t in mlx_only {
+            for t in apple_silicon_only {
                 assert!(
                     !t.is_supported_on_this_host(),
                     "{t:?} is not a Linux target"

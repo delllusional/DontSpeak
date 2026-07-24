@@ -88,6 +88,27 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
                 Ok(())
             }
         }
+        Some(DownloadTarget::KokoroFluid) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET)
+            } else {
+                Ok(())
+            }
+        }
+        Some(DownloadTarget::ParakeetFluid) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                hf_repos(&ds_model::coreml_repo::PARAKEET_COREML_SET)
+            } else {
+                Ok(())
+            }
+        }
+        Some(DownloadTarget::DiarizationFluid) => {
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                hf_repos(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
+            } else {
+                Ok(())
+            }
+        }
         // Off-macOS quiet skip (installer semantics; mirrors `is_supported_on_this_host`).
         Some(DownloadTarget::SepformerModel) => {
             if cfg!(target_os = "macos") {
