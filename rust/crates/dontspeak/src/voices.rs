@@ -17,16 +17,19 @@ pub(crate) fn voice_groups(
     let kokoro_ids = (engine == TtsEngine::BuiltIn && model == TtsModel::Kokoro)
         .then(enumerate::kokoro_voice_ids)
         .unwrap_or_default();
-    voice_groups_from(engine, model, language, &kokoro_ids)
+    let system_voices = (engine == TtsEngine::System)
+        .then(enumerate::system_voices)
+        .unwrap_or_default();
+    voice_groups_from(engine, model, language, &kokoro_ids, &system_voices)
 }
 
-/// [`voice_groups`] over an injected Kokoro catalog, so the built-in half reads no disk and
-/// tool-level tests are hermetic. System groups still enumerate `say -v ?` (#235).
+/// [`voice_groups`] over injected catalogs, so tests need neither the model cache nor `say`.
 pub(crate) fn voice_groups_from(
     engine: TtsEngine,
     model: TtsModel,
     language: Option<&str>,
     kokoro_ids: &[String],
+    system_voices: &[ds_voices::SpeakerVoice],
 ) -> Vec<(String, Vec<Value>)> {
     let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
     match engine {
@@ -66,12 +69,11 @@ pub(crate) fn voice_groups_from(
             }
         }
         TtsEngine::System => {
-            let sys = enumerate::system_voices();
-            for subtag in system_group_subtags(&sys, language) {
-                let voices: Vec<Value> = enumerate::system_choices_from(&sys, &subtag)
+            for subtag in system_group_subtags(system_voices, language) {
+                let voices: Vec<Value> = enumerate::system_choices_from(system_voices, &subtag)
                     .into_iter()
                     .map(|c| {
-                        let voice = sys.iter().find(|v| v.id == c.id);
+                        let voice = system_voices.iter().find(|v| v.id == c.id);
                         let gender = voice.and_then(|v| enumerate::gender_str(v.gender));
                         let language_tag = voice.map(|v| v.language_tag.clone());
                         json!({

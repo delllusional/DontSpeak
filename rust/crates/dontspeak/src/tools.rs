@@ -227,16 +227,24 @@ struct SpeakersArgs {
 }
 
 fn call_voices(paths: &Paths, args: &Value) -> Result<Value, String> {
-    call_voices_with(paths, args, None)
+    call_voices_from(paths, args, None)
 }
 
-/// [`call_voices`] with the Kokoro catalog injected. `Some(ids)` lists exactly those and
-/// touches no disk (hermetic tests); `None` enumerates the real catalog, lazily and only
-/// when the query needs it.
+/// [`call_voices`] with both catalogs injected for hermetic tests.
+#[cfg(test)]
 fn call_voices_with(
     paths: &Paths,
     args: &Value,
-    kokoro_ids: Option<&[String]>,
+    kokoro_ids: &[String],
+    system_voices: &[ds_voices::SpeakerVoice],
+) -> Result<Value, String> {
+    call_voices_from(paths, args, Some((kokoro_ids, system_voices)))
+}
+
+fn call_voices_from(
+    paths: &Paths,
+    args: &Value,
+    catalogs: Option<(&[String], &[ds_voices::SpeakerVoice])>,
 ) -> Result<Value, String> {
     let a: VoicesArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid voices arguments: {e}"))?;
@@ -271,8 +279,14 @@ fn call_voices_with(
             ));
         }
     }
-    let mut groups = match kokoro_ids {
-        Some(ids) => voice_groups_from(engine, model, language.as_deref(), ids),
+    let mut groups = match catalogs {
+        Some((kokoro_ids, system_voices)) => voice_groups_from(
+            engine,
+            model,
+            language.as_deref(),
+            kokoro_ids,
+            system_voices,
+        ),
         None => voice_groups(engine, model, language.as_deref()),
     };
     let mut ignored_voices = Vec::new();
@@ -1603,8 +1617,8 @@ mod set_config_tests {
 #[cfg(test)]
 mod voices_tests {
     //! Config + injected catalog (no IPC): engine override, `active` marking, and the
-    //! entries the router locks out. Kokoro queries go through `call_voices_with` so the
-    //! listing never depends on a real model cache.
+    //! entries the router locks out. Queries go through `call_voices_with` so the listing
+    //! never depends on a real model cache or system voice enumerator.
     use super::*;
 
     fn rooted_paths() -> (tempfile::TempDir, Paths) {
@@ -1633,11 +1647,23 @@ mod voices_tests {
         .collect()
     }
 
+    fn system_catalog() -> Vec<ds_voices::SpeakerVoice> {
+        let voice = |id: &str, language_tag: &str| ds_voices::SpeakerVoice {
+            id: id.into(),
+            name: id.into(),
+            language_tag: language_tag.into(),
+            downloadable: false,
+            gender: None,
+            quality: None,
+        };
+        vec![voice("Anna", "de-DE"), voice("Samantha", "en-US")]
+    }
+
     #[test]
     fn tts_engine_argument_overrides_the_configured_engine() {
         let (_dir, paths) = rooted_paths();
         let catalog = kokoro_catalog();
-        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), &catalog, &[])
             .expect("voices succeeds with no engine running");
         assert_eq!(out["engine"], json!("built_in"));
         assert_eq!(out["language"], json!("en"));
@@ -1647,9 +1673,11 @@ mod voices_tests {
     fn language_argument_is_trimmed_and_lowercased() {
         // Registry-only model (chatterbox) keeps this disk-free.
         let (_dir, paths) = rooted_paths();
-        let out = call_voices(
+        let out = call_voices_with(
             &paths,
             &json!({ "tts_engine": "built_in", "tts_model": "chatterbox", "language": " RU " }),
+            &[],
+            &[],
         )
         .expect("normalized language is accepted");
         assert_eq!(out["language"], json!("ru"));
@@ -1658,9 +1686,14 @@ mod voices_tests {
     #[test]
     fn system_voices_without_a_filter_have_a_null_language() {
         let (_dir, paths) = rooted_paths();
-        let out = call_voices(&paths, &json!({ "tts_engine": "system" }))
+        let catalog = system_catalog();
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "system" }), &[], &catalog)
             .expect("system voices succeed without a language filter");
         assert_eq!(out["language"], Value::Null);
+        assert_eq!(out["languages"][0]["language"], json!("de"));
+        assert_eq!(out["languages"][0]["voices"][0]["id"], json!("Anna"));
+        assert_eq!(out["languages"][1]["language"], json!("en"));
+        assert_eq!(out["languages"][1]["voices"][0]["id"], json!("Samantha"));
     }
 
     #[test]
@@ -1676,7 +1709,7 @@ mod voices_tests {
         )
         .unwrap();
         let catalog = kokoro_catalog();
-        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), &catalog, &[])
             .expect("voices succeeds with no engine running");
         assert!(out.get("ignored_voices").is_none());
         let pool = VoiceConfig::load(&paths).active_voices().to_vec();
@@ -1718,7 +1751,7 @@ mod voices_tests {
         let (_dir, paths) = rooted_paths();
         let catalog = kokoro_catalog();
         let out =
-            call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog)).unwrap();
+            call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), &catalog, &[]).unwrap();
         assert!(out.get("models").is_none());
     }
 
@@ -1733,7 +1766,7 @@ mod voices_tests {
         )
         .unwrap();
         let catalog = kokoro_catalog();
-        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), Some(&catalog))
+        let out = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), &catalog, &[])
             .expect("voices succeeds with no engine running");
 
         assert_eq!(out["ignored_voices"], json!(["jf_alpha"]));
