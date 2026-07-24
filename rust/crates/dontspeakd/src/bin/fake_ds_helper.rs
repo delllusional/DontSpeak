@@ -4,8 +4,9 @@
 //! READY unless `DONTSPEAK_FAKE_WEDGE_PRE_READY` (pre-READY hang — #59 handshake kill) or
 //! `DONTSPEAK_FAKE_STT_LOADED_THEN` (STTLOADED + STT_PROVIDER, then `err`/`eof`/`hang`
 //! before READY — #213 residency clearing). `listen` → `PARTIAL wedge-ack` then hang;
-//! `speak` → DONE (or exit after `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS`); `load tts` →
-//! TTSLOADED. Parse `op` via JSON (not substring). EOF exits.
+//! `speak` → DONE (or exit after `DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS`, or soft-error with
+//! `DONTSPEAK_FAKE_ERROR_ON_SPEAK`); `load tts` → TTSLOADED. Parse `op` via JSON (not
+//! substring). EOF exits.
 
 use std::io::{BufRead, Write};
 
@@ -43,6 +44,7 @@ fn main() {
     let close_on_speak_ms = std::env::var("DONTSPEAK_FAKE_CLOSE_ON_SPEAK_MS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
+    let error_on_speak = std::env::var_os("DONTSPEAK_FAKE_ERROR_ON_SPEAK").is_some();
     let _ = writeln!(out, "{}", ds_helper_proto::READY);
     let _ = out.flush();
 
@@ -67,6 +69,11 @@ fn main() {
                     let _ = out.flush();
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                     return;
+                }
+                if error_on_speak {
+                    let _ = writeln!(out, "{}fake speak failure", ds_helper_proto::ERR);
+                    let _ = out.flush();
+                    continue;
                 }
                 let _ = writeln!(out, "{}2", ds_helper_proto::PROGRESS_PREFIX);
                 let _ = writeln!(

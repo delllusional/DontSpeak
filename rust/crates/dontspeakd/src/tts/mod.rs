@@ -1210,6 +1210,16 @@ impl TtsManager {
         self.speak_slot.0.lock().unwrap().progress
     }
 
+    /// Count one utterance only after the queue exhausts transparent recovery.
+    pub(crate) fn record_speak_failure(&self) {
+        self.stats.record_failure();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn speak_failures_for_test(&self) -> u64 {
+        self.stats.snapshot().failures
+    }
+
     /// Block on OS speech. Muted requests are consumed without spawning; live mute kills
     /// the synthesizer because System TTS cannot volume-drain.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1339,7 +1349,6 @@ impl TtsManager {
         });
         if let Err(e) = self.write_request(&req.to_string()) {
             self.mark_dead();
-            self.stats.record_failure();
             return Err(e);
         }
         // The helper lazily (re)loads Kokoro to serve this — it's resident now. Optimistic
@@ -1359,7 +1368,6 @@ impl TtsManager {
             if now >= deadline {
                 drop(s);
                 self.mark_dead_if_current(my_gen);
-                self.stats.record_failure();
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "TTS helper did not finish the speak request",
@@ -1380,7 +1388,6 @@ impl TtsManager {
             if fatal {
                 self.mark_dead_if_current(my_gen);
             }
-            self.stats.record_failure();
             return Err(if fatal {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
             } else {

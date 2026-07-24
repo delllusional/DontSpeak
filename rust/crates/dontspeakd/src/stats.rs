@@ -61,7 +61,7 @@ impl TtsStats {
         }
     }
 
-    /// Record a failed warm-speak (the utterance is dropped; there is no fallback path).
+    /// Record an utterance that still failed after transparent recovery was exhausted.
     pub fn record_failure(&self) {
         self.inner.lock().unwrap().failures += 1;
     }

@@ -1584,12 +1584,13 @@ impl TtsQueue {
                     retries_left -= 1;
                     // Clear active before re-gate so cancel can't strand tts_active.
                     self.set_tts_active(false);
-                    log::warn!(
+                    log::info!(
                         target: "ttsq",
-                        "queued speak lost its child during dispatch; retrying once: {e}"
+                        "queued speak interrupted by child replacement; retrying once: {e}"
                     );
                 }
                 Err(e) => {
+                    self.tts.record_speak_failure();
                     log::warn!(target: "ttsq", "queued speak failed: {e}");
                     return (
                         SpeechOutcome::Done(ds_status::UtteranceOutcome::Failed),
@@ -4609,7 +4610,39 @@ mod tests {
             resume_skip, 2,
             "progress 2 proves the retry completed on the replacement child"
         );
+        assert_eq!(
+            q.tts.speak_failures_for_test(),
+            0,
+            "a recovered child replacement is not a failed utterance"
+        );
         q.set_tts_active(false); // the real worker clears this after play_speech returns
+        q.tts.set_enabled(false);
+    }
+
+    #[test]
+    fn a_terminal_speak_error_is_counted_once() {
+        let bin = crate::tts::wedge_recovery_tests::fake_helper_bin();
+        let dir = tempfile::tempdir().unwrap();
+        let q = TtsQueue::test_stub_with_helper(
+            dir.path(),
+            bin,
+            crate::tts::TtsManagerTestOptions::default()
+                .with_first_spawn_env(&[("DONTSPEAK_FAKE_ERROR_ON_SPEAK", "1")]),
+        );
+        *q.config.lock().unwrap() = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            ..VoiceConfig::default()
+        };
+
+        let handle = spawn_test_speech(&q, "fail once");
+        let (outcome, _) = handle.join().expect("speech test thread panicked");
+
+        assert_eq!(
+            outcome,
+            SpeechOutcome::Done(ds_status::UtteranceOutcome::Failed)
+        );
+        assert_eq!(q.tts.speak_failures_for_test(), 1);
+        q.set_tts_active(false);
         q.tts.set_enabled(false);
     }
 
