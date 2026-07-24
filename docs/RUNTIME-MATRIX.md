@@ -44,8 +44,8 @@ Higgs decoder remains on the CPU EP.
 | Model or graph | ORT CPU | ORT CUDA | ORT Core ML | MLX | FluidAudio | OS / native |
 |---|---|---|---|---|---|---|
 | Parakeet TDT 0.6b v3 (25 languages) | yes | yes | - | yes | - | - |
-| Parakeet TDT 0.6b v2 (English only) | - | - | - | - | yes | - |
-| `SFSpeechRecognizer` | - | - | - | - | - | macOS System STT |
+| Parakeet TDT 0.6b v2 batch + 160 ms realtime EOU (English only) | - | - | - | - | yes | - |
+| Apple System STT | - | - | - | - | - | SpeechAnalyzer on macOS 26+; SFSpeechRecognizer on 14-25 |
 | Kokoro BART G2P (English OOV) | yes | yes | yes | - | - | - |
 | Kokoro eSpeak frontend (es/fr/hi/it/pt) | - | - | - | - | - | `espeakng-loader` 0.2.4 |
 | SepFormer speech separation | yes | - | - | - | - | - |
