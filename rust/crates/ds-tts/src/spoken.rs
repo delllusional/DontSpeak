@@ -148,13 +148,15 @@ fn spoken_token(token: &str) -> Option<String> {
     }
 }
 
-/// Hex token 7–40 chars with at least one a–f (plain decimals are not hashes).
+/// Hex token 7–40 chars carrying both a digit and an `a–f` letter — real hashes have
+/// digits, and all-letter hex strings are English words ("defaced", "acceded").
 fn is_hash_like(token: &str) -> bool {
     let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     let len = core.len();
     (7..=40).contains(&len)
         && core.chars().all(|ch| ch.is_ascii_hexdigit())
         && core.chars().any(|ch| ch.is_ascii_alphabetic())
+        && core.chars().any(|ch| ch.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -184,6 +186,23 @@ mod tests {
         assert_eq!(
             SpokenText::from_markdown("Line 1234567 of 2026 tests pass.").as_str(),
             "Line 1234567 of 2026 tests pass."
+        );
+    }
+
+    /// Regression: 7+ letter words built only from `a-f` are valid hex, so the length and
+    /// letter rules alone silently swallowed them. A hash always carries a digit.
+    #[test]
+    fn hex_letter_words_are_spoken_not_dropped() {
+        assert_eq!(
+            SpokenText::from_markdown("The banner was defaced, then effaced; they acceded.")
+                .as_str(),
+            "The banner was defaced, then effaced; they acceded."
+        );
+        // A full SHA-1 still drops.
+        assert_eq!(
+            SpokenText::from_markdown("See eedfc5710bd3c0a5c4a1f2e6d7b8093c4e5f6a71 for context.")
+                .as_str(),
+            "See for context."
         );
     }
 

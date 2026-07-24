@@ -5,9 +5,10 @@
 //!
 //! Runs via [`crate::normalize_kokoro_text`] before split/phonemize. English-only.
 //!
-//! Cardinals, thousands-grouped, decimals, ordinals, leading minus; multi-dot
-//! keeps separators; alphanumerics get word boundaries; leading-zero / overlong
-//! runs digit-by-digit; non-number tokens pass through.
+//! Cardinals, thousands-grouped (a comma groups only with exactly three digits after
+//! it), decimals, ordinals, leading minus; multi-dot keeps separators; alphanumerics
+//! get word boundaries; leading-zero / overlong runs digit-by-digit; non-number tokens
+//! pass through.
 
 /// `0..=19` spelled out (index = value).
 const ONES: [&str; 20] = [
@@ -145,6 +146,24 @@ fn ordinal_word(word: &str) -> String {
     }
 }
 
+/// A `,` at `at` separates thousands only with a 1..=3-digit group before it (exactly three
+/// after the first comma) and EXACTLY three digits after: "1,2,3" is a digit list, not 123.
+/// Side effect of the head rule: "1234,567" and Indian grouping ("12,34,567") stop fusing and
+/// read as separate numbers — the expander is English-only (issue #227), and English text
+/// never groups that way.
+fn thousands_comma(chars: &[char], at: usize, group_len: usize, grouped: bool) -> bool {
+    let head_ok = if grouped {
+        group_len == 3
+    } else {
+        (1..=3).contains(&group_len)
+    };
+    head_ok
+        && chars
+            .get(at + 1..at + 4)
+            .is_some_and(|group| group.iter().all(char::is_ascii_digit))
+        && !chars.get(at + 4).is_some_and(char::is_ascii_digit)
+}
+
 /// Expand every plain number token in `text` to its English words, leaving all
 /// other characters untouched. Idempotent on number-free text.
 ///
@@ -181,16 +200,20 @@ pub fn expand_numbers(text: &str) -> String {
         }
 
         let mut int_digits = String::new();
+        let mut group_len = 0usize; // digits since the last accepted comma
+        let mut grouped = false; // a thousands comma was accepted
         while i < chars.len() {
             if chars[i].is_ascii_digit() {
                 int_digits.push(chars[i]);
+                group_len += 1;
                 i += 1;
             } else if chars[i] == ','
-                && i + 1 < chars.len()
-                && chars[i + 1].is_ascii_digit()
                 && !int_digits.is_empty()
+                && thousands_comma(&chars, i, group_len, grouped)
             {
                 i += 1; // skip thousands comma
+                group_len = 0;
+                grouped = true;
             } else {
                 break;
             }
@@ -287,10 +310,35 @@ mod tests {
             expand_numbers("12,345"),
             "twelve thousand three hundred forty-five"
         );
+        assert_eq!(
+            expand_numbers("1,234,567"),
+            "one million two hundred thirty-four thousand five hundred sixty-seven"
+        );
+        assert_eq!(
+            expand_numbers("1,234.56"),
+            "one thousand two hundred thirty-four point five six"
+        );
         assert_eq!(expand_numbers("3.14"), "three point one four");
         assert_eq!(expand_numbers("0.5"), "zero point five");
         assert_eq!(expand_numbers("-5"), "minus five");
         assert_eq!(expand_numbers("(-5)"), "(minus five)");
+    }
+
+    #[test]
+    fn digit_lists_are_not_fused_into_one_number() {
+        // A comma groups thousands only with exactly three digits after it, so an enumeration
+        // stays an enumeration instead of reading as one large number.
+        assert_eq!(expand_numbers("1,2,3"), "one,two,three");
+        assert_eq!(expand_numbers("1,23"), "one,twenty-three");
+        assert_eq!(
+            expand_numbers("12,3456"),
+            "twelve,three thousand four hundred fifty-six"
+        );
+        // Documented side effect of the head rule (see `thousands_comma`).
+        assert_eq!(
+            expand_numbers("1234,567"),
+            "one thousand two hundred thirty-four,five hundred sixty-seven"
+        );
     }
 
     #[test]
