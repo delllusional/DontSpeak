@@ -26,7 +26,7 @@ function argument(name, fallback) {
 }
 
 const repo = argument("--repo", "delllusional/DontSpeak");
-const requiredLogin = argument("--login", "yanchenko");
+const requiredLogin = "yanchenko";
 const login = runGh(["api", "user", "--jq", ".login"]);
 if (login !== requiredLogin) {
   fail(
