@@ -295,6 +295,21 @@ jobs:
             exit 1
           fi
 
+      # Tests may read the ambient model catalog, but the fresh runner's real cache must
+      # remain absent. Any entry here was created by this run's `cargo test` step.
+      - name: "verify tests didn't leak into the real model cache (issue #212)"
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)   model_dir="${XDG_CACHE_HOME:-$HOME/.cache}/dontspeak/models" ;;
+            macOS)   model_dir="$HOME/Library/Caches/DontSpeak/models" ;;
+            Windows) model_dir="${LOCALAPPDATA}/DontSpeak/models" ;;
+          esac
+          if [ -e "$model_dir" ]; then
+            echo "::error::cargo test created $model_dir -- a test reached the real model cache instead of a tempdir (see issue #212)."
+            exit 1
+          fi
+
       # macOS SwiftUI app: run swift test only if the package declares test targets.
       - name: swift test (macOS app, if any)
         if: runner.os == 'macOS'
