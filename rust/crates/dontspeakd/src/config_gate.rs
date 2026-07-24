@@ -701,7 +701,6 @@ mod tests {
     #[test]
     fn model_capability_gates_full_duplex() {
         use ds_config::{SttEngine, TtsEngine, TtsModel};
-        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
             let cfg = VoiceConfig {
                 tts_engine: Some(vec![TtsEngine::BuiltIn]),
@@ -739,9 +738,6 @@ mod tests {
             ..c.clone()
         }));
 
-        // Intel macOS resolves built_in from a runtime ORT capability; its two deterministic
-        // branches are tested with an injected value in ds-config instead of scanning Homebrew.
-        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
             let c2 = cfg(vec![TtsEngine::BuiltIn], vec![SttEngine::BuiltIn]);
             assert!(helper_uses_tts(&c2));

@@ -4828,11 +4828,11 @@ mod tests {
     /// Regression (audit): `pause_bg` focus loss DURING the readiness wait must
     /// re-enter the hold gate once the model becomes ready — the old shape went straight to
     /// playback, speaking into whatever app was frontmost after up to 60 s of warm-up.
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn gate_item_rechecks_the_focus_hold_after_the_readiness_wait() {
         let q = mk_queue();
         q.tts.suppress_heal_for_test();
+        q.tts.set_full_duplex_active_for_test(true);
         *q.config.lock().unwrap() = VoiceConfig {
             tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
             ..VoiceConfig::default()
@@ -5047,7 +5047,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn resolve_engine_voice_uses_the_selected_models_pool() {
         let q = mk_queue();
@@ -5069,10 +5068,6 @@ mod tests {
         );
     }
 
-    // Kokoro is usable everywhere EXCEPT Intel macOS without an onnxruntime dylib present
-    // (a runtime capability, not a static (os,arch) fact — see `intel_mac_builtin_ort_available`),
-    // so gate out only that one platform, matching `voice.rs`'s own tests of this ladder.
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn resolve_engine_voice_kokoro_with_pool_delegates_to_agent_assignment() {
         let q = mk_queue();
@@ -5110,7 +5105,6 @@ mod tests {
         assert_ne!(other, voice);
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn resolve_engine_voice_kokoro_picks_a_voice_that_owns_the_language() {
         // The gap this closes: an Italian reply used to be spoken by whichever English voice
@@ -5200,7 +5194,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn resolve_engine_voice_leaves_language_agnostic_models_alone() {
         // Chatterbox conditions on the language argument, so its voice must survive narrowing
@@ -5219,7 +5212,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn resolve_engine_voice_kokoro_empty_pool_is_none() {
         // No fallback voice exists: an empty pool (only constructible directly — load()
@@ -5240,7 +5232,6 @@ mod tests {
         assert!(q.agent_voices.lock().unwrap().is_empty());
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn unwired_source_with_a_pool_claims_a_stable_voice() {
         let q = mk_queue();
@@ -5262,7 +5253,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn greeting_claims_the_agent_voice_reused_by_later_replies() {
         // Locking-at-open: the SessionStart greeting claims the agent's voice, and a later
@@ -5377,7 +5367,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn an_unroutable_pool_voice_never_speaks_even_on_the_language_less_greeting_path() {
         // #222: `pick_for_language` short-circuits before the catalog exists when the language

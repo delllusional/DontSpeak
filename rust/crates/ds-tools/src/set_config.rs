@@ -934,7 +934,6 @@ mod tests {
         assert!(cfg.tts_params.omnivoice.is_empty(), "no partial mutation");
     }
 
-    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     #[test]
     fn full_duplex_rejects_for_built_in_chatterbox() {
         let mut cfg = VoiceConfig {
