@@ -822,6 +822,36 @@ mod drift {
         }
     }
 
+    pub(super) fn assert_object_matches(label: &str, value: &Value, schema: &Value) {
+        let properties = schema["properties"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: schema declares properties"));
+        let object = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{label}: payload is an object"));
+        for (key, field) in object {
+            let property = properties
+                .get(key)
+                .unwrap_or_else(|| panic!("{label}: schema has no `{key}`"));
+            let actual = json_type_of(field);
+            match &property["type"] {
+                Value::String(declared) => assert_eq!(declared, actual, "{label}.{key}"),
+                Value::Array(declared) => assert!(
+                    declared.iter().any(|token| token == actual),
+                    "{label}.{key}: {declared:?} does not admit {actual}"
+                ),
+                other => panic!("{label}.{key}: unusable schema type {other:?}"),
+            }
+        }
+        for required in schema["required"].as_array().into_iter().flatten() {
+            let key = required.as_str().unwrap();
+            assert!(
+                object.contains_key(key),
+                "{label}: missing required `{key}`"
+            );
+        }
+    }
+
     /// Schema properties match populated args by name + scalar type.
     fn assert_schema_matches(tool: &str, schema: &Value, populated: Value) {
         let props = schema["properties"]
@@ -1261,6 +1291,77 @@ mod status_output {
         assert!(
             !ds_tools::output_schema("status").unwrap()["properties"]["ignored_voices"].is_null()
         );
+    }
+
+    /// DRIFT GUARD: the payload builder and the closed `ds-tools` schema live in different
+    /// modules, so walk every closed object shape they share.
+    #[test]
+    fn status_payloads_match_their_advertised_output_schema() {
+        let schema = ds_tools::output_schema("status").expect("status advertises an output schema");
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(config_dir.path());
+        paths.config_toml = config_dir.path().join("config.toml");
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nkokoro = [\"jf_alpha\"]\n",
+        )
+        .unwrap();
+
+        let concise = call_status(&paths, None, &json!({})).expect("concise status builds");
+        super::drift::assert_object_matches("status concise", &concise, &schema);
+        super::drift::assert_object_matches(
+            "status concise.rates",
+            &concise["rates"],
+            &schema["properties"]["rates"],
+        );
+        super::drift::assert_object_matches(
+            "status concise.state",
+            &concise["state"],
+            &schema["properties"]["state"],
+        );
+
+        let (_socket_dir, sock, requests, server) = serve_status_once(live_status());
+        let detailed = call_status(&paths, Some(&sock), &json!({ "detail": true }))
+            .expect("detailed live status builds");
+        assert!(matches!(requests.recv().unwrap(), Request::ModelStatus));
+        server.join().unwrap();
+
+        super::drift::assert_object_matches("status detailed", &detailed, &schema);
+        super::drift::assert_object_matches(
+            "status detailed.rates",
+            &detailed["rates"],
+            &schema["properties"]["rates"],
+        );
+        let state_schema = &schema["properties"]["state"];
+        super::drift::assert_object_matches(
+            "status detailed.state",
+            &detailed["state"],
+            state_schema,
+        );
+
+        let recent = detailed["state"]["recent_utterances"]
+            .as_array()
+            .expect("live fixture has recent utterances");
+        assert!(!recent.is_empty());
+        for utterance in recent {
+            super::drift::assert_object_matches(
+                "status detailed.state.recent_utterances",
+                utterance,
+                &state_schema["properties"]["recent_utterances"]["items"],
+            );
+        }
+
+        let downloads = detailed["state"]["downloads"]
+            .as_array()
+            .expect("live fixture has downloads");
+        assert!(!downloads.is_empty());
+        for download in downloads {
+            super::drift::assert_object_matches(
+                "status detailed.state.downloads",
+                download,
+                &state_schema["properties"]["downloads"]["items"],
+            );
+        }
     }
 
     #[test]
@@ -1794,6 +1895,49 @@ mod voices_tests {
         assert!(
             !ds_tools::output_schema("voices").unwrap()["properties"]["ignored_voices"].is_null()
         );
+    }
+
+    /// DRIFT GUARD: validate both voice-entry branches against the closed schema without
+    /// consulting the model cache or the host's system voice enumerator.
+    #[test]
+    fn voices_payloads_match_their_advertised_output_schema() {
+        fn assert_payload(label: &str, payload: &Value, schema: &Value) {
+            super::drift::assert_object_matches(label, payload, schema);
+            let language_schema = &schema["properties"]["languages"]["items"];
+            let voice_schema = &language_schema["properties"]["voices"]["items"];
+            let languages = payload["languages"]
+                .as_array()
+                .expect("voices payload has language groups");
+            assert!(!languages.is_empty());
+            for language in languages {
+                super::drift::assert_object_matches(label, language, language_schema);
+                let voices = language["voices"]
+                    .as_array()
+                    .expect("language group has voices");
+                assert!(!voices.is_empty());
+                for voice in voices {
+                    super::drift::assert_object_matches(label, voice, voice_schema);
+                }
+            }
+        }
+
+        let schema = ds_tools::output_schema("voices").expect("voices advertises an output schema");
+        let (_dir, paths) = rooted_paths();
+        std::fs::write(
+            &paths.config_toml,
+            "[tts_voices]\nkokoro = [\"jf_alpha\"]\n",
+        )
+        .unwrap();
+
+        let kokoro = kokoro_catalog();
+        let built_in = call_voices_with(&paths, &json!({ "tts_engine": "built_in" }), &kokoro, &[])
+            .expect("injected built-in voices build");
+        assert_payload("voices built_in", &built_in, &schema);
+
+        let system = system_catalog();
+        let system = call_voices_with(&paths, &json!({ "tts_engine": "system" }), &[], &system)
+            .expect("injected system voices build");
+        assert_payload("voices system", &system, &schema);
     }
 }
 
