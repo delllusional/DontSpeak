@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fix Issue Swarm"
+  short_description: "Audit and land safe parallel GitHub fixes"
+  default_prompt: "Use $fix-issue-swarm to audit the DontSpeak issue queue and land a safe parallel bugfix batch."
