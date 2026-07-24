@@ -783,9 +783,10 @@ mod tests {
 
         // An unknown family char names no language to lock against, so the pool keeps it
         // (#222) and admit accepts it too — the two must not disagree on the same id.
-        let unknown_family: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["custom_v1"] } }))
-                .unwrap();
+        let unknown_family: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "tts_voices": { "kokoro": ["custom_v1"] } }),
+        )
+        .unwrap();
         let changes = unknown_family
             .apply_with(&mut cfg, None)
             .expect("an unknown-shape pack id is accepted, matching the pool");
