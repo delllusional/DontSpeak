@@ -1,6 +1,6 @@
 ---
 name: fix-issue-swarm
-description: Audit the DontSpeak GitHub issue queue, select several high-value low-risk issues that need no user input or product decision, fix non-overlapping issues with parallel agents in isolated branches and worktrees, integrate them on a batch bugfix branch, review and verify them, land the exact green batch on main, close the issues, and refresh the queue for the next wave. Use for autonomous issue triage, parallel bugfix batches, issue sweeps, or requests to repeatedly pick and land safe repository fixes.
+description: Audit the DontSpeak GitHub issue queue, select high-value low-risk issues that need no user input or product decision, fix non-overlapping issues with parallel agents in isolated branches and worktrees, integrate them on a batch bugfix branch, review and verify them, land the exact green batch on main, close the issues, and repeat until the qualified queue is exhausted. Use for autonomous issue triage, parallel bugfix batches, issue sweeps, or requests to repeatedly pick and land every safe repository fix.
 ---
 
 # Fix an issue swarm
@@ -42,10 +42,12 @@ Reject an issue from autonomous execution when it needs any of:
 - broad refactoring, dependency migration, security-sensitive behavior, or a large
   cross-platform contract change.
 
-Select two or three issues whose likely files, crates, apps, tests, and build state
-do not intersect. Summarize the reason, expected files, validation, and risk before
-dispatch. Assign or comment only when useful to prevent duplicate work, using the
-verified GitHub account.
+Select up to three issues whose likely files, crates, apps, tests, and build state
+do not intersect. Prefer waves of two or three, but select a final singleton when it
+is the only qualified issue; lack of a parallel partner is not an exclusion.
+Summarize the reason, expected files, validation, and risk before dispatch. Assign
+or comment only when useful to prevent duplicate work, using the verified GitHub
+account.
 
 ## Dispatch parallel workers
 
@@ -61,10 +63,12 @@ writing agent owns each. Give every worker:
 - a prohibition on pushing, issue closure, integration, landing, cleanup,
   rebasing, stashing, resetting, or edits outside its worktree.
 
-Run at least two implementation agents concurrently. Keep one integration owner.
-Workers must not share writable worktrees or machine-wide build outputs. Treat
-worker branches as local staging branches; publish only the combined integration
-branch so one exact CI head gates the batch.
+Run at least two implementation agents concurrently whenever the wave contains two
+or more issues. For a singleton wave, use one implementation agent and a different
+agent for independent read-only review. Keep one integration owner. Workers must
+not share writable worktrees or machine-wide build outputs. Treat worker branches
+as local staging branches; publish only the combined integration branch so one
+exact CI head gates the batch.
 
 ## Cross-review and integrate
 
@@ -96,8 +100,10 @@ Rerun `scripts/audit-issues.mjs` after landing. Compare issue numbers and
 `createdAt` values with the starting snapshot, call out issues opened during the
 wave, and rank the safest next candidates.
 
-When the user requested continuous autonomous waves, immediately start the next
-wave if at least two non-overlapping qualified issues remain. Otherwise stop and
-report why the remaining issues require input, carry higher risk, overlap active
-work, or lack a parallel partner. Never lower the selection bar merely to keep
-agents busy.
+When the user requests continuous or exhaustive operation, immediately start the
+next wave while any qualified issue remains, including a final singleton. Take a
+fresh live snapshot after every landing so issues created during the run enter the
+same selection process. Stop only when zero open issues meet every selection
+criterion. Report the remaining issues by exclusion reason: user decision, higher
+risk, active work or open PR, unclear acceptance criteria, broad scope, or live
+resource dependency. Never lower the selection bar merely to keep agents busy.
