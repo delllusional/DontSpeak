@@ -55,14 +55,16 @@ writing agent owns each. Give every worker:
 - the issue URL and raw issue body/comments;
 - its branch, worktree, base SHA, and non-overlap boundary;
 - instructions to inspect, plan, implement, test proportionately, commit with
-  `Fixes #N`, push, and report SHA/checks;
+  `Fixes #N`, and report SHA/checks;
 - permission to fix only small obvious adjacent defects and otherwise file an
   issue under the repository policy;
-- a prohibition on issue closure, integration, landing, cleanup, rebasing,
-  stashing, resetting, or edits outside its worktree.
+- a prohibition on pushing, issue closure, integration, landing, cleanup,
+  rebasing, stashing, resetting, or edits outside its worktree.
 
 Run at least two implementation agents concurrently. Keep one integration owner.
-Workers must not share writable worktrees or machine-wide build outputs.
+Workers must not share writable worktrees or machine-wide build outputs. Treat
+worker branches as local staging branches; publish only the combined integration
+branch so one exact CI head gates the batch.
 
 ## Cross-review and integrate
 
@@ -73,7 +75,7 @@ and repeat review for material changes.
 
 The integrator then:
 
-1. Confirm every worker branch is clean, pushed, based on the recorded batch base,
+1. Confirm every worker branch is clean, based on the recorded batch base,
    independently reviewed, and limited to its assigned scope.
 2. Cherry-pick the reviewed commits onto the integration branch in the least
    dependency-sensitive order. Stop on ambiguity or conflicts; do not improvise a
