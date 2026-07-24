@@ -76,8 +76,9 @@ Check, in order, and report a concrete finding for anything that fails:
    'ds-i18n's catalog?
 2. FFI mirror drift — if the plan touches 'ds-core' or 'model_status', does it
    account for hand-updating BOTH 'apps/windows/winui/Native.cs' and
-   'apps/macos/Sources/DontSpeak/DontSpeakCore.swift', plus the round-trip test? A
-   plan that updates the Rust side only is incomplete.
+   'apps/macos/Sources/DontSpeakLogic/ModelStatusDTO.swift', plus the macOS
+   'apps/macos/Tests/DontSpeakLogicTests/ModelStatusContractTests.swift' contract?
+   A plan that updates the Rust side only is incomplete.
 3. Cross-platform completeness — if the plan touches shared engine code or
    'ds-platform', does it cover macOS, Windows, and Linux, or silently assume one
    host generalizes to all three?
@@ -125,8 +126,10 @@ Rules:
   implication it missed), fix the immediate blocker if it's small and say so in your
   report — don't silently expand scope beyond that.
 - If you touch 'ds-core'/'model_status', update BOTH FFI mirrors
-  ('apps/windows/winui/Native.cs', 'apps/macos/Sources/DontSpeak/DontSpeakCore.swift')
-  in the same change and run the round-trip test — a one-sided FFI edit is not done.
+  ('apps/windows/winui/Native.cs',
+  'apps/macos/Sources/DontSpeakLogic/ModelStatusDTO.swift') in the same change and
+  run the macOS 'apps/macos/Tests/DontSpeakLogicTests/ModelStatusContractTests.swift'
+  contract — a one-sided FFI edit is not done.
 - New user-facing strings go in 'rust/crates/ds-i18n/locales/en.yml', never literal
   in Swift/C#/XAML.
 - Verify against the correct rebuild route for what you changed (see
@@ -153,10 +156,11 @@ Per risk area, verify:
 
 - FFI boundary ('ds-core') — does the Rust source of truth ('rust/crates/ds-status'
   for 'model_status', 'src/ffi.rs' for the C ABI) actually match BOTH hand-written
-  mirrors ('apps/windows/winui/Native.cs', 'apps/macos/Sources/DontSpeak/DontSpeakCore.swift')
-  field-for-field? Did the round-trip test actually change (not just pass because it
-  wasn't touched)? Is 'dontspeak.h' regenerated (cbindgen) and consistent with
-  'src/ffi.rs'?
+  mirrors ('apps/windows/winui/Native.cs',
+  'apps/macos/Sources/DontSpeakLogic/ModelStatusDTO.swift') field-for-field? Did the
+  macOS 'apps/macos/Tests/DontSpeakLogicTests/ModelStatusContractTests.swift'
+  contract actually change (not just pass because it wasn't touched)? Is
+  'dontspeak.h' regenerated (cbindgen) and consistent with 'src/ffi.rs'?
 - 'ds-ipc' socket protocol — does a client (hook/MCP server) and the engine agree
   on the NDJSON message shape after this change? Any new message type handled on
   both ends? Any auth/permission implication for the Unix-domain socket itself?
