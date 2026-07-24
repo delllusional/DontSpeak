@@ -12,6 +12,7 @@ description = "Config and path resolution for DontSpeak (config.toml, pidfile)."
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 directories = { workspace = true }
 # Wiring our hooks into OpenAI Codex's `~/.codex/config.toml` without disturbing
 # the user's existing config (format-preserving, like the additive settings.json merge).

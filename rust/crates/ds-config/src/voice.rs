@@ -1,14 +1,13 @@
 //! `VoiceConfig` — typed speech config from `config.toml`.
 
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    io,
-    path::PathBuf,
-    sync::{Mutex, OnceLock},
+    collections::HashSet,
+    io::{self, Read, Seek, Write},
+    sync::Mutex,
 };
 
 use serde::{Deserialize, Deserializer, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::enums::{
     de_clear_on_input, de_diarizer, de_exclude_clients, de_listen_mode, de_narrate, de_provider,
@@ -677,14 +676,25 @@ impl<'de> serde::Deserializer<'de> for StructFieldNames<'_> {
 impl VoiceConfig {
     /// Load config.toml; fail-open defaults. Unknown keys warned; numbers clamped.
     pub fn load(paths: &Paths) -> Self {
+        // Keep config read -> warning append -> fingerprint commit ordered across every loader.
+        let _local_diagnostics = CONFIG_DIAGNOSTICS_LOCAL_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut diagnostics = open_config_diagnostics(paths).ok();
         let text = match std::fs::read_to_string(&paths.config_toml) {
             Ok(text) => text,
             Err(_) => {
-                forget_config_diagnostics(&paths.config_toml);
+                if let Some(state) = diagnostics.as_mut() {
+                    let _ = clear_config_diagnostics(state);
+                }
                 return Self::default();
             }
         };
-        let emit_diagnostics = config_diagnostics_changed(&paths.config_toml, &text);
+        let fingerprint = config_fingerprint(&text);
+        let emit_diagnostics = diagnostics
+            .as_mut()
+            .and_then(|state| config_diagnostics_changed(state, &fingerprint).ok())
+            .unwrap_or(true);
         let Ok(table) = toml::from_str::<toml::Table>(&text) else {
             if emit_diagnostics {
                 log(
@@ -693,6 +703,9 @@ impl VoiceConfig {
                     "config",
                     "config.toml is not valid TOML; using defaults",
                 );
+            }
+            if emit_diagnostics && let Some(state) = diagnostics.as_mut() {
+                let _ = store_config_diagnostics(state, &fingerprint);
             }
             return Self::default();
         };
@@ -710,6 +723,9 @@ impl VoiceConfig {
                 }
             }
             warn_dropped_tts_params(&table, paths);
+            if let Some(state) = diagnostics.as_mut() {
+                let _ = store_config_diagnostics(state, &fingerprint);
+            }
         }
         let mut cfg: VoiceConfig = toml::Value::Table(table).try_into().unwrap_or_default();
         cfg.clamp();
@@ -829,26 +845,51 @@ impl VoiceConfig {
     }
 }
 
-static CONFIG_DIAGNOSTICS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+static CONFIG_DIAGNOSTICS_LOCAL_LOCK: Mutex<()> = Mutex::new(());
+const CONFIG_DIAGNOSTICS_FILE: &str = "config-diagnostics.fp";
 
-/// Emit warnings once per distinct file content, not on every status poll.
-fn config_diagnostics_changed(path: &std::path::Path, text: &str) -> bool {
-    let mut hasher = DefaultHasher::new();
-    text.hash(&mut hasher);
-    let fingerprint = hasher.finish();
-    let mut seen = CONFIG_DIAGNOSTICS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    seen.insert(path.to_path_buf(), fingerprint) != Some(fingerprint)
+fn config_fingerprint(text: &str) -> String {
+    use std::fmt::Write as _;
+
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to String is infallible");
+            hex
+        })
 }
 
-fn forget_config_diagnostics(path: &std::path::Path) {
-    if let Some(seen) = CONFIG_DIAGNOSTICS.get() {
-        seen.lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
+/// Persistent lock + fingerprint. It stays in place so waiters never lock different inodes.
+fn open_config_diagnostics(paths: &Paths) -> io::Result<std::fs::File> {
+    std::fs::create_dir_all(&paths.state_dir)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let state = options.open(paths.state_dir.join(CONFIG_DIAGNOSTICS_FILE))?;
+    state.lock()?;
+    Ok(state)
+}
+
+fn config_diagnostics_changed(state: &mut std::fs::File, fingerprint: &str) -> io::Result<bool> {
+    state.rewind()?;
+    let mut previous = String::new();
+    state.read_to_string(&mut previous)?;
+    Ok(previous.trim() != fingerprint)
+}
+
+fn store_config_diagnostics(state: &mut std::fs::File, fingerprint: &str) -> io::Result<()> {
+    state.set_len(0)?;
+    state.rewind()?;
+    writeln!(state, "{fingerprint}")
+}
+
+fn clear_config_diagnostics(state: &mut std::fs::File) -> io::Result<()> {
+    state.set_len(0)?;
+    state.rewind()
 }
 
 #[cfg(test)]
@@ -2032,6 +2073,19 @@ pub(crate) mod tests {
         let first = std::fs::read_to_string(&paths.log_file).unwrap();
         assert_eq!(first.matches("unknown key in config.toml").count(), 1);
         assert_eq!(first.matches("tts_params.qwen").count(), 1);
+        let state_path = paths.state_dir.join(CONFIG_DIAGNOSTICS_FILE);
+        assert_eq!(
+            std::fs::read_to_string(&state_path).unwrap().trim(),
+            config_fingerprint(invalid)
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&state_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
 
         std::fs::write(&paths.config_toml, "greet = true\n").unwrap();
         VoiceConfig::load(&paths);
@@ -2040,6 +2094,94 @@ pub(crate) mod tests {
         let second = std::fs::read_to_string(&paths.log_file).unwrap();
         assert_eq!(second.matches("unknown key in config.toml").count(), 2);
         assert_eq!(second.matches("tts_params.qwen").count(), 2);
+    }
+
+    #[test]
+    fn config_fingerprint_is_stable_sha256() {
+        assert_eq!(
+            config_fingerprint("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    const CONFIG_DIAGNOSTICS_CHILD_ROOT: &str = "DONTSPEAK_TEST_CONFIG_DIAGNOSTICS_CHILD_ROOT";
+
+    #[test]
+    fn config_diagnostics_child() {
+        let Some(root) = std::env::var_os(CONFIG_DIAGNOSTICS_CHILD_ROOT) else {
+            return;
+        };
+        VoiceConfig::load(&Paths::rooted_at(std::path::Path::new(&root)));
+    }
+
+    fn run_config_diagnostics_children(root: &std::path::Path, count: usize) {
+        let test_binary = std::env::current_exe().unwrap();
+        let mut children: Vec<_> = (0..count)
+            .map(|_| {
+                std::process::Command::new(&test_binary)
+                    .args(["--exact", "voice::tests::config_diagnostics_child"])
+                    .env(CONFIG_DIAGNOSTICS_CHILD_ROOT, root)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+    }
+
+    #[test]
+    fn load_deduplicates_config_diagnostics_across_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let invalid = "narate = \"off\"\n[tts_params.qwen]\nbogus = 1.0\n";
+        std::fs::create_dir_all(paths.config_toml.parent().unwrap()).unwrap();
+        std::fs::write(&paths.config_toml, invalid).unwrap();
+
+        run_config_diagnostics_children(dir.path(), 8);
+        run_config_diagnostics_children(dir.path(), 8);
+        let first = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(first.matches("unknown key in config.toml").count(), 1);
+        assert_eq!(first.matches("tts_params.qwen").count(), 1);
+
+        std::fs::write(&paths.config_toml, "greet = true\n").unwrap();
+        run_config_diagnostics_children(dir.path(), 1);
+        std::fs::write(&paths.config_toml, invalid).unwrap();
+        run_config_diagnostics_children(dir.path(), 8);
+        let second = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(second.matches("unknown key in config.toml").count(), 2);
+        assert_eq!(second.matches("tts_params.qwen").count(), 2);
+
+        std::fs::remove_file(&paths.config_toml).unwrap();
+        run_config_diagnostics_children(dir.path(), 1);
+        std::fs::write(&paths.config_toml, invalid).unwrap();
+        run_config_diagnostics_children(dir.path(), 1);
+        let third = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(third.matches("unknown key in config.toml").count(), 3);
+        assert_eq!(third.matches("tts_params.qwen").count(), 3);
+    }
+
+    #[test]
+    fn load_emits_diagnostics_when_the_fingerprint_state_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = Paths::rooted_at(dir.path());
+        paths.config_toml = dir.path().join("config.toml");
+        paths.state_dir = dir.path().join("state-blocker");
+        std::fs::write(&paths.state_dir, "not a directory").unwrap();
+        std::fs::write(
+            &paths.config_toml,
+            "narate = \"off\"\nstt_engine_ladder = [\"built_in\"]\n",
+        )
+        .unwrap();
+
+        let first = VoiceConfig::load(&paths);
+        let second = VoiceConfig::load(&paths);
+        assert_eq!(first.stt_engine_ladder, vec![SttEngine::BuiltIn]);
+        assert_eq!(second.stt_engine_ladder, vec![SttEngine::BuiltIn]);
+        let log = std::fs::read_to_string(&paths.log_file).unwrap();
+        assert_eq!(log.matches("unknown key in config.toml").count(), 2);
     }
 
     #[test]
