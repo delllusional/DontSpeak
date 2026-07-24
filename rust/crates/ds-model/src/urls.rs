@@ -416,12 +416,10 @@ pub enum Platform {
     WindowsArm64,
     LinuxX64,
     LinuxArm64,
-    /// Apple Silicon — the only macOS target with the native MLX Audio path and a
-    /// bundled ONNX Runtime dist.
+    /// Apple Silicon — the only macOS target with the native MLX Audio path.
     MacArm64,
-    /// Intel macOS — no MLX path and no downloadable ONNX Runtime
-    /// dist (Microsoft ships arm64-only; `ort.rs` falls back to a Homebrew-installed
-    /// runtime there); only the portable model assets apply to the catalog.
+    /// Intel macOS — no MLX path; uses Microsoft's last x86_64 ONNX Runtime dist,
+    /// pinned above at 1.23.2.
     MacX64,
 }
 

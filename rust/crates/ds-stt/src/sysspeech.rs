@@ -104,8 +104,9 @@ pub fn authorize() -> Result<(), String> {
     }
 }
 
-/// `SFSpeechRecognizer` ASR behind the C ABI. No model files — the recognizer is the
-/// OS's, so `preload` only opens the shim and `unload` is a no-op.
+/// Apple System Speech ASR behind the C ABI: SpeechAnalyzer on macOS 26+, with
+/// SFSpeechRecognizer on 14–25. The OS owns the models, so `preload` only opens the
+/// shim and `unload` is a no-op.
 pub struct SystemTranscriber {
     lib: Option<Library>,
 }

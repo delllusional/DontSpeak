@@ -327,7 +327,7 @@ public func ds_mlx_tts_shutdown() {
     state.lock.unlock()
 }
 
-// MARK: - ASR (Parakeet TDT v2, English, MLX)
+// MARK: - ASR (Parakeet TDT v3, multilingual, MLX)
 
 private final class AsrState: @unchecked Sendable {
     let lock = NSLock()
@@ -355,7 +355,7 @@ private func transcribe(_ model: ParakeetModel, _ samples: [Float]) -> String {
     model.generate(audio: MLXArray(samples)).text
 }
 
-/// Load Parakeet TDT v2 (English-only; mirrors ONNX — not v3 multilingual). 0 = ok.
+/// Load Parakeet TDT v3 multilingual, matching the ONNX path. 0 = ok.
 @_cdecl("ds_mlx_asr_init")
 public func ds_mlx_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     _ = computeUnits
