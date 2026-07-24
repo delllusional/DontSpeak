@@ -371,11 +371,6 @@ bundle_swift_package_licenses() {
       *) ;;
     esac
   done
-  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
-  # Last resort: a plain `swift build` tree, which has no per-family derived data.
-  if [ -z "$roots" ] && [ -d "$pkg/.build/checkouts" ]; then
-    roots="$pkg/.build/checkouts"
-  fi
   [ -n "$roots" ] || return 0
   mkdir -p "$out"
   local checkouts checkout_dir package_name legal_file legal_name copied=0 seen=""

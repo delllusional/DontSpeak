@@ -235,6 +235,13 @@ grep -q "FluidAudio is still linked" "$stderr_file" \
   || fail "mlx isolation failure did not explain itself"
 
 # -- harvester arch + family scoping (the two-arch contamination regression) -------------
+# A prior plain `swift build` leaves package checkouts that belong to no shipped family.
+# Keep one beside the real per-family trees so every harvest proves it cannot contaminate an
+# app assembled later in the same checkout.
+plain_checkouts="$test_dir/DontSpeakMLX/.build/checkouts"
+mkdir -p "$plain_checkouts/plain-build-only"
+echo "legal" >"$plain_checkouts/plain-build-only/LICENSE"
+
 for family in mlx fluid; do
   products="$(shim_derived_dir "$family" arm64)/Build/Products/Release"
   mkdir -p "$products/$family-only.bundle"
@@ -252,6 +259,8 @@ bundle_swift_package_licenses "$test_dir/lic-arm64" arm64 sys mlx fluid >/dev/nu
   || fail "FluidAudio package licences were dropped"
 [ ! -f "$test_dir/lic-arm64/swift-syntax-LICENSE" ] \
   || fail "build-only swift-syntax licence was bundled"
+[ ! -f "$test_dir/lic-arm64/plain-build-only-LICENSE" ] \
+  || fail "plain SwiftPM checkout contaminated a family-scoped licence harvest"
 
 bundle_swift_package_resources "$test_dir/res-arm64" arm64 sys mlx fluid >/dev/null \
   || fail "resource harvest failed for a full arm64 build"
