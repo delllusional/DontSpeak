@@ -22,8 +22,8 @@ after publish, CI patches **only** the Lines table's Binaries size cells
   `cargo generate-lockfile` — that re-resolves registry deps and causes huge lock churn):
   ```bash
   python3 scripts/release/sync-workspace-version.py --strip-dev
-  (cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
-  (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+  (cd rust && cargo metadata --format-version 1 --locked >/dev/null)
+  (cd apps/linux/gtk && cargo metadata --format-version 1 --locked >/dev/null)
   ```
   Escalate patch→minor/major only deliberately. Diff locks: only workspace package
   `version =` lines (~one per crate). No lingering `-dev` for a real release.
@@ -46,8 +46,8 @@ after publish, CI patches **only** the Lines table's Binaries size cells
      ```bash
      (cd rust && cargo update -p rust-i18n -p rust-i18n-macro -p rust-i18n-support)
      (cd apps/linux/gtk && cargo update -p rust-i18n -p rust-i18n-macro -p rust-i18n-support)
-     (cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
-     (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+     (cd rust && cargo metadata --format-version 1 --locked >/dev/null)
+     (cd apps/linux/gtk && cargo metadata --format-version 1 --locked >/dev/null)
      cargo tree -i <crate> --manifest-path rust/Cargo.toml --locked
      cargo tree -i <crate> --manifest-path apps/linux/gtk/Cargo.toml --locked
      ```
@@ -217,8 +217,8 @@ After publish, one command updates Cargo.toml + both locks (no full re-resolve):
 ```bash
 python3 scripts/release/sync-workspace-version.py --bump-dev
 # or: python3 scripts/release/sync-workspace-version.py --set 0.4.0-dev
-(cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
-(cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+(cd rust && cargo metadata --format-version 1 --locked >/dev/null)
+(cd apps/linux/gtk && cargo metadata --format-version 1 --locked >/dev/null)
 ```
 
 Commit all four files. Next real release: `--strip-dev` (or `--set` higher non-dev),

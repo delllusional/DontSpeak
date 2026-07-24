@@ -5,8 +5,8 @@ name: CI
 # the WinUI app adds winui.tests (xunit) — each on its own OS leg.
 #
 # Cost/coverage split:
-#   • Per commit / PR  → Linux only, essentials only (script tests + clippy + Rust tests;
-#     covers the platform-agnostic majority).
+#   • Per commit / PR  → Linux only, essentials only (script tests + lock resolution +
+#     clippy + Rust tests; covers the platform-agnostic majority).
 #   • Release pipeline → clippy + tests on the FULL ubuntu + windows-2025 + macos-26
 #     matrix, PLUS the hygiene gate (rustfmt + rustdoc) AND cargo-deny
 #     (advisories/bans/licenses/sources), so the macOS MLX and Windows CUDA paths
@@ -98,6 +98,22 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --workspace --no-deps --locked
+
+  # Resolve both independent Cargo workspaces on every commit. This is deliberately
+  # separate from compilation: the GTK host is release-built, but its committed lock
+  # must stay current whenever a shared path crate changes its dependencies.
+  lockfiles:
+    name: Cargo.lock resolution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: resolve Rust workspace
+        working-directory: rust
+        run: cargo metadata --format-version 1 --locked > /dev/null
+      - name: resolve Linux GTK host
+        working-directory: apps/linux/gtk
+        run: cargo metadata --format-version 1 --locked > /dev/null
 
   # Clippy gate: deny ALL warnings across the workspace + every target (incl. tests). It uses
   # the same cost/coverage split as the test job: Linux per commit, then all three OSes for a

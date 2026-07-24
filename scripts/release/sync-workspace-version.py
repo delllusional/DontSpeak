@@ -13,8 +13,8 @@ registry checksum tied to their marketing version string — only their version 
 in the lock needs to match Cargo.toml. This script updates those fields surgically.
 
 After running, verify with:
-  (cd rust && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
-  (cd apps/linux/gtk && cargo metadata --format-version 1 --locked --no-deps >/dev/null)
+  (cd rust && cargo metadata --format-version 1 --locked >/dev/null)
+  (cd apps/linux/gtk && cargo metadata --format-version 1 --locked >/dev/null)
 
 Usage (from repo root):
   scripts/release/sync-workspace-version.py --print      # bare marketing version on stdout
