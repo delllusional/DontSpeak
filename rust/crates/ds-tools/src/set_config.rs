@@ -236,17 +236,15 @@ impl SetConfigArgs {
                         model.as_str()
                     ));
                 }
-                // Kokoro publishes voices whose frontend this build does not ship (German; and
-                // Japanese/Mandarin since those pipelines were dropped). They are real ids, so
+                // Kokoro publishes voices whose frontend this build does not ship (Japanese and
+                // Mandarin, since those pipelines were dropped). They are real ids, so
                 // membership passes and only the language rules them out. Voices for the routed
                 // languages are admitted whatever their family: playback narrows the pool to the
                 // detected language, so a non-English voice is only ever picked for its own.
                 if model == TtsModel::Kokoro
-                    && let Some(bad) = voices.iter().find(|voice| {
-                        !descriptor
-                            .languages
-                            .contains(&ds_voices::enumerate::kokoro_language(voice))
-                    })
+                    && let Some(bad) = voices
+                        .iter()
+                        .find(|voice| !ds_voices::enumerate::is_routable_kokoro_voice(voice))
                 {
                     return Err(format!(
                         "`{bad}` speaks a language this build cannot route; see voices"
@@ -780,9 +778,9 @@ mod tests {
             vec!["tts_voices.kokoro=[af_nova, if_sara]".to_string()]
         );
 
-        // German ships no frontend at all, so its family is never admissible.
+        // A published-but-unrouted family: real id, no frontend, so never admissible.
         let unroutable: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["df_anna"] } }))
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["jf_alpha"] } }))
                 .unwrap();
         assert!(unroutable.apply_with(&mut cfg, None).is_err());
 

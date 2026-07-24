@@ -33,12 +33,18 @@ fn earcon_session(ttsq: &TtsQueue, requested: Option<String>) -> Option<String> 
     requested.or_else(|| ttsq.active_session())
 }
 
+/// Reject, don't clamp: `TtsArgPools::parse` already refuses an unsupported target language,
+/// so an unroutable per-utterance voice must refuse too rather than silently substitute.
 fn speak_tts_args(value: Option<serde_json::Value>) -> Result<Option<TtsArgPools>, String> {
     value
         .as_ref()
-        .map(TtsArgPools::parse)
+        .map(|value| {
+            let pools = TtsArgPools::parse(value)?;
+            ds_tts::enumerate::validate_speak_voices(&pools)?;
+            Ok(pools)
+        })
         .transpose()
-        .map_err(|error| format!("invalid tts_args: {error}"))
+        .map_err(|error: String| format!("invalid tts_args: {error}"))
 }
 
 fn models_response(
@@ -596,6 +602,21 @@ mod tests {
             })))
             .unwrap_err()
             .contains("invalid tts_args")
+        );
+        // A voice locked to a language this build cannot route is refused at admit, not
+        // clamped: the utterance would otherwise speak through a foreign speaker embedding.
+        assert!(
+            speak_tts_args(Some(serde_json::json!({
+                "kokoro": { "voice": "jf_alpha" }
+            })))
+            .unwrap_err()
+            .contains("cannot route")
+        );
+        assert!(
+            speak_tts_args(Some(serde_json::json!({
+                "kokoro": { "voice": "if_sara" }
+            })))
+            .is_ok()
         );
         assert!(speak_tts_args(None).unwrap().is_none());
     }

@@ -33,9 +33,11 @@ const KOKORO_MLX_DIR_NAME: &str = "kokoro-82m";
 
 // ── Kokoro id parsing (PURE) ─────────────────────────────────────────────────
 
-/// Language subtag from a Kokoro id's leading family char (`af_sarah` → "en").
-/// Unknown shapes → "other". German (`d`) has no frontend; Japanese (`j`) and
-/// Mandarin (`z`) lost theirs, so their voices stay unreachable.
+/// Language a Kokoro id's leading family char actually speaks (`af_sarah` → "en"),
+/// including the published-but-unrouted `j`/`z` families — the router locks those out
+/// instead of mistaking them for language-agnostic voices. Whether this build ships a
+/// frontend for that language is a separate question ([`is_routable_kokoro_voice`]).
+/// Unknown shapes → "other"; Kokoro publishes no German family at all.
 pub fn kokoro_language(id: &str) -> &'static str {
     match id.as_bytes().first() {
         // `a` American + `b` British both → "en".
@@ -44,7 +46,9 @@ pub fn kokoro_language(id: &str) -> &'static str {
         Some(b'f') => "fr",
         Some(b'h') => "hi",
         Some(b'i') => "it",
+        Some(b'j') => "ja",
         Some(b'p') => "pt",
+        Some(b'z') => "zh",
         _ => "other",
     }
 }
@@ -207,11 +211,12 @@ pub fn kokoro_choices_from(ids: &[String], language: &str) -> Vec<VoiceChoice> {
     let mut out: Vec<VoiceChoice> = ids
         .iter()
         .filter(|id| {
-            if want.contains('-') {
-                kokoro_language_tag(id).eq_ignore_ascii_case(&want)
-            } else {
-                kokoro_language(id) == want
-            }
+            is_routable_kokoro_voice(id)
+                && if want.contains('-') {
+                    kokoro_language_tag(id).eq_ignore_ascii_case(&want)
+                } else {
+                    kokoro_language(id) == want
+                }
         })
         .map(|id| VoiceChoice {
             label: kokoro_label(id),
@@ -276,6 +281,8 @@ impl VoiceCatalog<'_> {
     /// Chatterbox, Qwen, and OmniVoice condition on the language argument instead, so their
     /// voices are never locked. An id absent from the System catalog is treated as unlocked:
     /// those names are freeform, and a name we cannot resolve is no evidence of a mismatch.
+    /// An unrouted Kokoro family reports its own language, so [`Self::pool_for_language`]
+    /// drops it for every language this build actually speaks.
     pub fn voice_language(&self, voice: &str) -> Option<String> {
         match self {
             Self::BuiltIn(TtsModel::Kokoro) => match kokoro_language(voice) {
@@ -299,6 +306,32 @@ impl VoiceCatalog<'_> {
             .filter(|voice| self.voice_language(voice).is_none_or(|owned| owned == want))
             .cloned()
             .collect()
+    }
+
+    /// Pool entries this build can route at all — the language-less twin of
+    /// [`Self::pool_for_language`], for the greeting, which resolves before any language is
+    /// known. Drops only entries locked to a language this build ships no frontend for, so it
+    /// never narrows more than `pool_for_language` would for a routed language; an unknown
+    /// shape (a nonstandard MLX pack id) stays, because existing config is not discarded on
+    /// that weaker evidence. New input is judged strictly instead — see
+    /// [`is_routable_kokoro_voice`].
+    pub fn routable_pool(&self, pool: &[String]) -> Vec<String> {
+        pool.iter()
+            .filter(|voice| {
+                self.voice_language(voice)
+                    .is_none_or(|language| self.routes_language(&language))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether this catalog can synthesize `language` at all. A System voice speaks its own
+    /// locale by construction — `say` needs no frontend from us.
+    fn routes_language(&self, language: &str) -> bool {
+        match self {
+            Self::BuiltIn(model) => model.descriptor().supports_language(language),
+            Self::System(_) => true,
+        }
     }
 
     /// Every shipped voice that can speak `language` — the stand-in pool for a language the
@@ -330,6 +363,34 @@ pub fn is_model_voice(model: TtsModel, voice: &str) -> bool {
         return kokoro_disk_voice_ids().is_none_or(|ids| ids.iter().any(|id| id == voice));
     }
     model.descriptor().voices.contains(&voice)
+}
+
+/// Whether this build ships a frontend for the language `id`'s family speaks. Kokoro
+/// publishes Japanese and Mandarin voices whose pipelines were dropped; they are real model
+/// ids, so only the language rules them out — in a configured pool (`set_config`) and per
+/// utterance (`speak`) alike. An unknown family char is not routable either: its language is
+/// unknown, so no frontend can be chosen for it. Existing config is judged by the weaker
+/// [`VoiceCatalog::routable_pool`] instead, which keeps unknown shapes.
+pub fn is_routable_kokoro_voice(id: &str) -> bool {
+    TtsModel::Kokoro
+        .descriptor()
+        .supports_language(kokoro_language(id))
+}
+
+/// Reject a per-utterance Kokoro voice this build cannot route. Other targets need no check
+/// here: System names are freeform, and every other model's per-utterance id is already
+/// gated against its registry at admit (`gate_item` -> `is_model_voice`) and clamped again
+/// in the helper (`supported_voice`).
+pub fn validate_speak_voices(args: &ds_config::TtsArgPools) -> Result<(), String> {
+    match args
+        .for_target(TtsEngine::BuiltIn, TtsModel::Kokoro)
+        .and_then(ds_config::TtsTargetArgs::voice)
+    {
+        Some(voice) if !is_routable_kokoro_voice(voice) => Err(format!(
+            "tts_args.kokoro.voice `{voice}` speaks a language this build cannot route; see voices"
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// Non-refusing clamp of a per-utterance voice to `model` — the voice-axis twin of
@@ -470,12 +531,13 @@ mod tests {
         assert_eq!(kokoro_language("af_sarah"), "en");
         assert_eq!(kokoro_language("bm_george"), "en");
         assert_eq!(kokoro_language("ef_dora"), "es");
-        // No frontend → "other": German was never mapped, Japanese and Mandarin were dropped.
+        // Published but unrouted: they report their real language so the router can lock
+        // them out rather than treat them as language-agnostic.
+        assert_eq!(kokoro_language("jf_alpha"), "ja");
+        assert_eq!(kokoro_language("zf_xiaobei"), "zh");
+        // Unknown shapes never panic — Kokoro publishes no `d` family at all.
         assert_eq!(kokoro_language("df_anna"), "other");
         assert_eq!(kokoro_language("dm_klaus"), "other");
-        assert_eq!(kokoro_language("jf_alpha"), "other");
-        assert_eq!(kokoro_language("zf_xiaobei"), "other");
-        // Unknown shapes never panic.
         assert_eq!(kokoro_language("weird"), "other");
         assert_eq!(kokoro_language(""), "other");
     }
@@ -522,8 +584,101 @@ mod tests {
         sorted.sort();
         assert_eq!(labels, sorted);
 
-        // German removed for now: no language selects the `d` family.
+        // The `d` family is an unknown shape (Kokoro publishes none), so no language ever
+        // selects it.
         assert!(kokoro_choices_from(&ids, "de").is_empty());
+    }
+
+    #[test]
+    fn unrouted_kokoro_families_never_join_another_languages_pool() {
+        let kokoro = VoiceCatalog::BuiltIn(TtsModel::Kokoro);
+        assert_eq!(kokoro.voice_language("jf_alpha"), Some("ja".to_string()));
+        assert_eq!(
+            kokoro.pool_for_language(&["af_sarah".into(), "jf_alpha".into()], "en"),
+            ["af_sarah"]
+        );
+        // #222's headline repro: a pool of only unrouted voices owns nothing.
+        assert!(
+            kokoro
+                .pool_for_language(&["jf_alpha".into()], "en")
+                .is_empty()
+        );
+        // The pickable list never starts advertising what the router cannot use.
+        assert!(
+            kokoro_choices_from(
+                &["af_sarah".into(), "jf_alpha".into(), "zf_xiaobei".into()],
+                "ja"
+            )
+            .is_empty()
+        );
+
+        assert!(is_routable_kokoro_voice("af_sarah"));
+        assert!(is_routable_kokoro_voice("if_sara"));
+        assert!(!is_routable_kokoro_voice("jf_alpha"));
+        assert!(!is_routable_kokoro_voice("zf_xiaobei"));
+        // Unknown shapes are refused too: no language, so no frontend can be chosen.
+        assert!(!is_routable_kokoro_voice("df_anna"));
+        assert!(!is_routable_kokoro_voice("xq_bogus"));
+    }
+
+    #[test]
+    fn routable_pool_drops_locked_out_voices_and_keeps_unlocked_ones() {
+        let kokoro = VoiceCatalog::BuiltIn(TtsModel::Kokoro);
+        assert_eq!(
+            kokoro.routable_pool(&["af_sarah".into(), "jf_alpha".into(), "zf_xiaobei".into()]),
+            ["af_sarah"]
+        );
+        // Existing config is not discarded on the weaker evidence of an unknown shape —
+        // that is the nonstandard MLX pack id #222 warns against regressing.
+        assert_eq!(kokoro.routable_pool(&["custom_v1".into()]), ["custom_v1"]);
+        assert_eq!(
+            VoiceCatalog::BuiltIn(TtsModel::Chatterbox).routable_pool(&["default".into()]),
+            ["default"]
+        );
+        let voices = system_fixture();
+        assert_eq!(
+            VoiceCatalog::System(&voices).routable_pool(&["Anna".into()]),
+            ["Anna"]
+        );
+    }
+
+    #[test]
+    fn validate_speak_voices_refuses_an_unroutable_kokoro_voice() {
+        use ds_config::TtsArgPools;
+
+        let unroutable =
+            TtsArgPools::with_voice(TtsEngine::BuiltIn, TtsModel::Kokoro, "jf_alpha".into());
+        assert!(
+            validate_speak_voices(&unroutable)
+                .unwrap_err()
+                .contains("cannot route")
+        );
+        assert!(
+            validate_speak_voices(&TtsArgPools::with_voice(
+                TtsEngine::BuiltIn,
+                TtsModel::Kokoro,
+                "if_sara".into()
+            ))
+            .is_ok()
+        );
+        // Other models keep their own registry gate; System names are freeform.
+        assert!(
+            validate_speak_voices(&TtsArgPools::with_voice(
+                TtsEngine::BuiltIn,
+                TtsModel::Chatterbox,
+                "default".into()
+            ))
+            .is_ok()
+        );
+        assert!(
+            validate_speak_voices(&TtsArgPools::with_voice(
+                TtsEngine::System,
+                TtsModel::Kokoro,
+                "Anna".into()
+            ))
+            .is_ok()
+        );
+        assert!(validate_speak_voices(&TtsArgPools::default()).is_ok());
     }
 
     #[test]

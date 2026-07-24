@@ -497,7 +497,11 @@ fn call_speak(
         return Err("`text` is required.".into());
     }
     if let Some(args) = &a.tts_args {
-        ds_config::TtsArgPools::parse(args)
+        let pools = ds_config::TtsArgPools::parse(args)
+            .map_err(|error| format!("invalid speak arguments: {error}"))?;
+        // Kept here rather than in `validate_param`'s `PType::TtsArgs` arm: that arm answers
+        // with a generic shape complaint, which would replace this actionable message.
+        ds_voices::enumerate::validate_speak_voices(&pools)
             .map_err(|error| format!("invalid speak arguments: {error}"))?;
     }
     match ds_ipc::request(
@@ -1431,6 +1435,28 @@ mod engine_unavailable {
                 "{name}: got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn an_unroutable_kokoro_voice_is_refused_before_the_engine_is_contacted() {
+        let (_dir, sock) = no_such_socket();
+        let err = call_speak(
+            &sock,
+            &json!({ "text": "hello", "tts_args": { "kokoro": { "voice": "jf_alpha" } } }),
+            Some(WiredAgent::ClaudeCode),
+            "scope",
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot route"), "got: {err}");
+        // A routed voice gets past validation and only then fails on the dead socket.
+        let ok = call_speak(
+            &sock,
+            &json!({ "text": "hello", "tts_args": { "kokoro": { "voice": "if_sara" } } }),
+            Some(WiredAgent::ClaudeCode),
+            "scope",
+        )
+        .unwrap_err();
+        assert!(ok.starts_with("engine unavailable: "), "got: {ok}");
     }
 }
 

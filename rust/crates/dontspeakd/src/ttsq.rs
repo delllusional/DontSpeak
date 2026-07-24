@@ -1308,16 +1308,35 @@ impl TtsQueue {
                 &cfg.tts_voices.system,
             ),
             ds_config::TtsEngine::BuiltIn => {
-                let pool = cfg.active_voices();
+                let catalog = ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model);
+                let configured = cfg.active_voices();
+                // The greeting resolves with no language, so `pick_for_language` cannot narrow
+                // (#222). Hand-edited config is the only way an unroutable voice gets here —
+                // `set_config` refuses them — and this narrowing is pure: `VoiceCatalog::BuiltIn`
+                // reads nothing. System stays unnarrowed on purpose: its catalog costs `say -v ?`,
+                // which the greeting path must not pay, and a System voice speaks its own locale.
+                let mut pool = catalog.routable_pool(configured);
+                if pool.is_empty() && !configured.is_empty() {
+                    // Every configured voice is locked to a language this build cannot route.
+                    // The model's defaults beat silence, and match `VoiceConfig::clamp`'s own
+                    // empty-pool rule for the models it can check.
+                    log::debug!(
+                        target: "ttsq",
+                        "no configured {} voice this build can route; using the model defaults",
+                        cfg.tts_model.as_str()
+                    );
+                    pool = cfg
+                        .tts_model
+                        .descriptor()
+                        .default_voices
+                        .iter()
+                        .map(|voice| (*voice).to_string())
+                        .collect();
+                }
                 if pool.is_empty() {
                     return None;
                 }
-                self.pick_for_language(
-                    || ds_tts::enumerate::VoiceCatalog::BuiltIn(cfg.tts_model),
-                    source,
-                    language,
-                    pool,
-                )
+                self.pick_for_language(|| catalog, source, language, &pool)
             }
         };
         Some((engine, voice))
@@ -2165,6 +2184,12 @@ mod tests {
                 "it"
             ),
             None
+        );
+        // A published-but-unrouted family now reports its own language, so the diagnostic
+        // fires instead of skipping it as language-agnostic.
+        assert_eq!(
+            utterance_warning(Some(TtsEngine::BuiltIn), TtsModel::Kokoro, "jf_alpha", "en"),
+            Some(UtteranceWarning::VoiceLanguageMismatch)
         );
     }
 
@@ -5283,6 +5308,46 @@ mod tests {
                 .map(|(_, voice)| voice),
             Some(claimed)
         );
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    #[test]
+    fn an_unroutable_pool_voice_never_speaks_even_on_the_language_less_greeting_path() {
+        // #222: `pick_for_language` short-circuits before the catalog exists when the language
+        // is unknown, so the narrowing has to happen in `resolve_engine_voice` itself.
+        // Hermetic: the defaults substitution guarantees a non-empty English pool, so
+        // `pool_for_language` never falls through to `voices_for_language` -> `kokoro_choices`
+        // -> the real `ds_config::model_dir()`.
+        let defaults = ds_config::TtsModel::Kokoro.descriptor().default_voices;
+        let mk = |kokoro: Vec<String>| VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro,
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+
+        let mixed = mk(vec!["af_sarah".to_string(), "jf_alpha".to_string()]);
+        let q = mk_queue();
+        assert_eq!(
+            q.resolve_engine_voice(&mixed, Some(WiredAgent::Codex), None)
+                .map(|(_, voice)| voice),
+            Some("af_sarah".to_string())
+        );
+
+        // #222's headline config: nothing routable left, so the model defaults substitute.
+        let locked = mk(vec!["jf_alpha".to_string()]);
+        for language in [None, Some("en")] {
+            let q = mk_queue();
+            let (_, voice) = q
+                .resolve_engine_voice(&locked, Some(WiredAgent::Codex), language)
+                .expect("Kokoro is usable on this build");
+            assert!(
+                defaults.contains(&voice.as_str()),
+                "{language:?} must fall back to a default voice, got: {voice}"
+            );
+        }
     }
 
     /// Solid English turn corpus: what a short digest falls back to when it cannot
