@@ -38,6 +38,8 @@ internal static class Native
     [DllImport(Dll)] private static extern IntPtr ds_human_size(ulong bytes);
     [DllImport(Dll)] private static extern byte ds_diarization_ui_enabled();
     [DllImport(Dll)] private static extern byte ds_agents_ui_enabled();
+    [DllImport(Dll)] private static extern IntPtr ds_tray_icon_kind(
+        byte sttActive, byte ttsActive, [MarshalAs(UnmanagedType.LPUTF8Str)] string trayIndicatorJson);
     [DllImport(Dll)] private static extern void ds_string_free(IntPtr s);
     [DllImport(Dll)] private static extern byte ds_set_muted(byte on);
     [DllImport(Dll)] private static extern byte ds_open_voice_settings();
@@ -65,6 +67,27 @@ internal static class Native
 
     /// <summary><c>ds_agents_ui_enabled</c> — initial/engine-down probe; live updates ride model_status.</summary>
     public static bool AgentsUiEnabled() => ds_agents_ui_enabled() != 0;
+
+    /// <summary>
+    /// Shared <c>ds_tray_icon_kind</c> — one rule with macOS/Linux. Returns
+    /// <c>idle</c> | <c>recording</c> | <c>speaking</c> (unknown/malformed → idle).
+    /// </summary>
+    public static string TrayIconKind(bool sttActive, bool ttsActive, string[] trayIndicator)
+    {
+        var json = JsonSerializer.Serialize(trayIndicator ?? Array.Empty<string>());
+        return TakeString(ds_tray_icon_kind(
+            (byte)(sttActive ? 1 : 0),
+            (byte)(ttsActive ? 1 : 0),
+            json));
+    }
+
+    /// <summary>Map a <c>ds_tray_icon_kind</c> token. Unknown → Idle (shared default).</summary>
+    public static TrayIcon.IconState ParseTrayIconKind(string kind) => kind switch
+    {
+        "recording" => TrayIcon.IconState.Recording,
+        "speaking" => TrayIcon.IconState.Speaking,
+        _ => TrayIcon.IconState.Idle,
+    };
 
     /// <summary>Cached for process life.</summary>
     public static string Version() => _version ??= TakeString(ds_version());
@@ -238,16 +261,10 @@ internal sealed class HealthSnapshot
     public DiarizationStatus Diarization = new();
     public Dictation Dictation = new();
 
-    /// <summary>See <c>ds_status::tray_icon_kind</c>.</summary>
-    public TrayIcon.IconState IndicatorState()
-    {
-        bool Colors(string state) =>
-            Array.IndexOf(Activity.TrayIndicator, state) >= 0 ||
-            Array.IndexOf(Activity.TrayIndicator, state + "_animated") >= 0;
-        if (Activity.Recording && Colors("stt")) return TrayIcon.IconState.Recording;
-        if (Activity.Speaking && Colors("tts")) return TrayIcon.IconState.Speaking;
-        return TrayIcon.IconState.Idle;
-    }
+    /// <summary>Shared <c>ds_tray_icon_kind</c> — one rule with macOS/Linux (not re-mirrored in C#).</summary>
+    public TrayIcon.IconState IndicatorState() =>
+        Native.ParseTrayIconKind(
+            Native.TrayIconKind(Activity.Recording, Activity.Speaking, Activity.TrayIndicator));
     public TtsStats Tts = new();
     public SttStats Stt = new();
     public LifetimeStats Lifetime = new();

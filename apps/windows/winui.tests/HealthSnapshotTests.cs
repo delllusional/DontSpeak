@@ -203,18 +203,17 @@ public class HealthSnapshotTests
         Assert.Equal(50, s.Lifetime.SttSecs);
     }
 
-    [Fact]
-    public void IndicatorStateHonorsTheTrayIndicatorSet()
+    // Tray kind selection lives in ds_status::tray_icon_kind (Rust). WinUI only maps the
+    // returned token — pure, no ds_core.dll. Unknown → Idle matches the FFI default.
+    // (IconState is internal; keep the public test surface as strings.)
+    [Theory]
+    [InlineData("recording", "Recording")]
+    [InlineData("speaking", "Speaking")]
+    [InlineData("idle", "Idle")]
+    [InlineData("", "Idle")]
+    [InlineData("bogus", "Idle")]
+    public void ParseTrayIconKindMapsSharedTokens(string kind, string expected)
     {
-        var s = new HealthSnapshot();
-        s.Activity.Recording = true;
-        s.Activity.Speaking = true;
-        Assert.Equal(TrayIcon.IconState.Recording, s.IndicatorState());
-
-        s.Activity.TrayIndicator = new[] { "tts_animated" };
-        Assert.Equal(TrayIcon.IconState.Speaking, s.IndicatorState());
-
-        s.Activity.TrayIndicator = Array.Empty<string>();
-        Assert.Equal(TrayIcon.IconState.Idle, s.IndicatorState());
+        Assert.Equal(expected, Native.ParseTrayIconKind(kind).ToString());
     }
 }

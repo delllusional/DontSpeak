@@ -3,7 +3,7 @@
   <!--
     xunit tests for the WinUI app's PURE seams — the model-status JSON parse
     (HealthSnapshot.FromJson with a stubbed state-word formatter) and the tray
-    indicator-state mapping. No ds_core.dll and no Windows App Runtime needed:
+    icon-kind token map (Native.ParseTrayIconKind). No ds_core.dll and no Windows App Runtime needed:
     nothing here touches a WinUI type at runtime, so `dotnet test` runs on a bare
     windows runner (csharp.yml per-commit; ci.yml's release leg picks it up too).
   -->
