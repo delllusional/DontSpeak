@@ -146,8 +146,9 @@ pub enum Request {
     /// On-disk model inventory (sizes + removability). Distinct from [`Request::ModelStatus`],
     /// which reports the RUNNING engine's lifecycle.
     ListModels,
-    /// Delete every on-disk variant of one model id. Refused for the selected TTS/STT model,
-    /// a model with a download in flight, and the shared assets. Replies with the
+    /// Delete every on-disk variant of one model or shared-asset id. Refused for the selected
+    /// TTS/STT model, an id with a download in flight, a shared asset something installed or
+    /// selected still references, and an id this host has no target for. Replies with the
     /// post-removal inventory.
     RemoveModel {
         id: String,

@@ -60,8 +60,8 @@ pub use download::{
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
 pub use inventory::{
-    Asset, AssetKind, Variant, asset_in_use, inventory_json, is_known_asset, removal_targets,
-    remove_at, scan_at,
+    Asset, AssetKind, Variant, asset_in_use, asset_targets, cuda_runtime_wanted, inventory_json,
+    is_shared_asset, remove_at, scan_at, shared_asset_referenced,
 };
 pub use kokoro_frontend::{
     ensure_espeak_loader_with_progress, espeak_library_path, espeak_root_dir,

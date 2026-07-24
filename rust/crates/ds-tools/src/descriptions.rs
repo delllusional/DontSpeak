@@ -80,8 +80,7 @@ pub const VOICES_ENGINE: &str = "Engine to inspect.";
 pub const VOICES_MODEL: &str = "Built-in model to inspect.";
 pub const VOICES_LANGUAGE: &str = "Language to inspect.";
 
-pub const MODELS_REMOVE: &str =
-    "Model to delete from the cache. The active TTS/STT model is refused.";
+pub const MODELS_REMOVE: &str = "Model or shared asset to delete from the cache. The active model, and a shared asset something still needs, are refused.";
 
 pub const LISTEN_SECONDS: &str = "Max recording seconds. Default 30.";
 

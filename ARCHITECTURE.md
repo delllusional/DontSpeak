@@ -76,7 +76,8 @@ Details: [docs/STT-PIPELINE.md](docs/STT-PIPELINE.md).
 
 `ds-model`: URLs, paths, digests. On-demand parallel download into app data dir,
 SHA-256 pinned. The engine also exposes an on-disk inventory (sizes per model) and
-removal of non-active models over `ds-ipc`, surfaced as the `models` MCP tool.
+removal of non-active models — and of a shared asset once nothing installed or selected
+references it (#220) — over `ds-ipc`, surfaced as the `models` MCP tool.
 `ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
 (Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
 built-in model. Intel macOS never builds or bundles MLX code; its built-in path remains ORT CPU

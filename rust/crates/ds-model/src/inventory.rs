@@ -43,6 +43,13 @@ impl AssetKind {
             AssetKind::Runtime => "runtime",
         }
     }
+
+    /// Frontend/runtime rows are the assets more than one model set loads; TTS/STT rows are
+    /// one model's own files. A shared row is removable once nothing references it — see
+    /// [`shared_asset_referenced`] (#220).
+    pub fn is_shared(self) -> bool {
+        matches!(self, AssetKind::Frontend | AssetKind::Runtime)
+    }
 }
 
 /// One on-disk flavor of an asset, keyed by its existing [`DownloadTarget`] wire token.
@@ -59,9 +66,6 @@ pub struct Asset {
     pub id: &'static str,
     pub kind: AssetKind,
     pub model: Option<TtsModel>,
-    /// Shared assets (ORT, the Kokoro text frontend, the CUDA runtime) are listed with
-    /// their sizes but never removed — every model depends on them (#220).
-    pub removable: bool,
     pub variants: Vec<Variant>,
 }
 
@@ -82,7 +86,6 @@ struct Row {
     id: &'static str,
     kind: AssetKind,
     model: Option<TtsModel>,
-    removable: bool,
     targets: &'static [DownloadTarget],
 }
 
@@ -93,14 +96,12 @@ static ROWS: &[Row] = &[
         id: "kokoro",
         kind: AssetKind::Tts,
         model: Some(TtsModel::Kokoro),
-        removable: true,
         targets: &[DownloadTarget::KokoroModel, DownloadTarget::KokoroMlx],
     },
     Row {
         id: "chatterbox",
         kind: AssetKind::Tts,
         model: Some(TtsModel::Chatterbox),
-        removable: true,
         targets: &[
             DownloadTarget::ChatterboxModel,
             DownloadTarget::ChatterboxMlx,
@@ -110,42 +111,36 @@ static ROWS: &[Row] = &[
         id: "qwen",
         kind: AssetKind::Tts,
         model: Some(TtsModel::Qwen),
-        removable: true,
         targets: &[DownloadTarget::QwenModel, DownloadTarget::QwenMlx],
     },
     Row {
         id: "omnivoice",
         kind: AssetKind::Tts,
         model: Some(TtsModel::OmniVoice),
-        removable: true,
         targets: &[DownloadTarget::OmniVoiceModel, DownloadTarget::OmniVoiceMlx],
     },
     Row {
         id: ds_config::STT_MODEL_TOKEN,
         kind: AssetKind::Stt,
         model: None,
-        removable: true,
         targets: &[DownloadTarget::ParakeetModel, DownloadTarget::ParakeetMlx],
     },
     Row {
-        id: "kokoro_frontend",
+        id: ds_config::KOKORO_FRONTEND_ASSET_TOKEN,
         kind: AssetKind::Frontend,
         model: None,
-        removable: false,
         targets: &[DownloadTarget::KokoroFrontend],
     },
     Row {
-        id: "onnxruntime",
+        id: ds_config::ONNXRUNTIME_ASSET_TOKEN,
         kind: AssetKind::Runtime,
         model: None,
-        removable: false,
         targets: &[DownloadTarget::Onnxruntime],
     },
     Row {
-        id: "cuda",
+        id: ds_config::CUDA_ASSET_TOKEN,
         kind: AssetKind::Runtime,
         model: None,
-        removable: false,
         targets: &[DownloadTarget::Cuda],
     },
 ];
@@ -154,17 +149,11 @@ fn row(id: &str) -> Option<&'static Row> {
     ROWS.iter().find(|row| row.id == id)
 }
 
-/// The removable targets behind an id, or `None` when the id is unknown or shared.
-/// Checked engine-side as well as by the tool schema — defence in depth across the IPC edge.
-pub fn removal_targets(id: &str) -> Option<&'static [DownloadTarget]> {
-    row(id).filter(|row| row.removable).map(|row| row.targets)
-}
-
-/// Does this build list `id` at all? Separates the two reasons [`removal_targets`] answers
-/// `None`, so an id a NEWER CLI knows and this engine does not is reported as version skew
-/// instead of as a shared asset.
-pub fn is_known_asset(id: &str) -> bool {
-    row(id).is_some()
+/// The download targets behind `id`, or `None` when this build does not list the id at all.
+/// Whether `id` may be removed right now is dynamic — see [`shared_asset_referenced`] and
+/// `dontspeakd::models::refusal`, which owns the user-facing refusal text.
+pub fn asset_targets(id: &str) -> Option<&'static [DownloadTarget]> {
+    row(id).map(|row| row.targets)
 }
 
 /// A flat set's own ONNX weights: THAT model's files minus the shared text-frontend files, so
@@ -344,7 +333,6 @@ pub fn scan_at(root: &Path) -> Vec<Asset> {
                 id: row.id,
                 kind: row.kind,
                 model: row.model,
-                removable: row.removable,
                 variants,
             })
         })
@@ -366,7 +354,89 @@ pub fn asset_in_use(cfg: &VoiceConfig, id: &str) -> bool {
     }
 }
 
+/// Every target whose installed files load through the shared ORT dylib: the five ONNX sets
+/// plus MLX Kokoro, whose English G2P is an ORT graph. Not `Cuda` — the CUDA runtime ships
+/// its own onnxruntime under `cuda/`.
+const ORT_CONSUMER_TARGETS: [DownloadTarget; 6] = [
+    DownloadTarget::KokoroModel,
+    DownloadTarget::ChatterboxModel,
+    DownloadTarget::QwenModel,
+    DownloadTarget::OmniVoiceModel,
+    DownloadTarget::ParakeetModel,
+    DownloadTarget::KokoroMlx,
+];
+
+fn any_installed(root: &Path, targets: &[DownloadTarget]) -> bool {
+    targets
+        .iter()
+        .copied()
+        .filter(|target| target.is_supported_on_this_host())
+        .any(|target| variant_installed(root, target))
+}
+
+/// macOS speaker-lock pulls the SepFormer separator, whose install ends in the same
+/// `ensure_onnxruntime` step as every ONNX model set ([`crate::setup`]). Mirrors
+/// `dontspeakd::downloads::compute_needs`' `sepformer_model` arm minus its presence probe —
+/// presence is the on-disk clause's job.
+fn sepformer_selected(cfg: &VoiceConfig) -> bool {
+    DownloadTarget::SepformerModel.is_supported_on_this_host()
+        && cfg.speaker_lock
+        && cfg.is_diarization_on()
+}
+
+/// Would this configuration load the CUDA EP? The ONE spelling of "a built-in engine
+/// resolves to the CUDA provider", read by the engine's boot prefetch (`apply_tts_provider`)
+/// and its warm-child reload (`download_needs_child_reload`), so a reclaimed runtime is never
+/// one the next pass re-fetches. Typed `Provider` throughout — never a `"cuda"` string.
+pub fn cuda_runtime_wanted(cfg: &VoiceConfig) -> bool {
+    (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+        && cfg.resolved_tts_provider() == ds_config::Provider::OrtCuda)
+        || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
+            && cfg.resolved_stt_provider() == ds_config::Provider::OrtCuda)
+}
+
+/// Is `id` one of the shared rows (ORT dylib, CUDA runtime, Kokoro frontend)?
+pub fn is_shared_asset(id: &str) -> bool {
+    row(id).is_some_and(|row| row.kind.is_shared())
+}
+
+/// Does anything on this host still need shared asset `id`? Two independent reasons:
+/// something INSTALLED loads it (never break an installed model), or the current SELECTION
+/// would make the engine fetch it again (never remove what the next reload undoes).
+/// `false` for a model row and for an id this build does not list.
+pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool {
+    let Some(row) = row(id) else { return false };
+    match row.targets {
+        [DownloadTarget::KokoroFrontend] => {
+            any_installed(
+                root,
+                &[DownloadTarget::KokoroModel, DownloadTarget::KokoroMlx],
+            ) || (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+                && cfg.tts_model == TtsModel::Kokoro)
+        }
+        [DownloadTarget::Onnxruntime] => {
+            any_installed(root, &ORT_CONSUMER_TARGETS)
+                // Diarization has no inventory row while the feature is hidden (#77), so
+                // probe its file directly rather than through a row that does not exist.
+                || root.join(crate::spec::SEPFORMER_FILE).is_file()
+                || cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
+                || cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
+                || sepformer_selected(cfg)
+        }
+        [DownloadTarget::Cuda] => cuda_runtime_wanted(cfg),
+        // Every model row, and any future multi-target shared row — which must then be
+        // given its own arm here.
+        _ => false,
+    }
+}
+
 /// Delete every path `id` owns under `root`, returning the reclaimed bytes.
+///
+/// Enforces exactly two gates, so a caller that skips `dontspeakd::models::refusal` still
+/// cannot break an install: `id` must be listed by this build, and a shared asset must be
+/// unreferenced ([`shared_asset_referenced`]) — defence in depth across the IPC edge. The
+/// active-model, host-support and in-flight-download gates stay engine-side with their own
+/// messages, the same split as [`asset_in_use`].
 ///
 /// Idempotent in outcome, not side-effect-free: each path is deleted inside its own
 /// destination flight, and entering a flight materializes the destination's parent, the
@@ -374,13 +444,13 @@ pub fn asset_in_use(cfg: &VoiceConfig, id: &str) -> bool {
 /// download attempt leaves. Partial failure is surfaced, never repaired: on an `io::Error`
 /// the asset stays half-deleted and re-running this is the recovery (removal operates on
 /// paths present, not on `installed`).
-pub fn remove_at(root: &Path, id: &str) -> std::io::Result<u64> {
-    let targets = removal_targets(id).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("`{id}` is not a removable model"),
-        )
-    })?;
+pub fn remove_at(root: &Path, cfg: &VoiceConfig, id: &str) -> std::io::Result<u64> {
+    let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
+    let targets =
+        asset_targets(id).ok_or_else(|| invalid(format!("`{id}` is not a removable asset")))?;
+    if shared_asset_referenced(root, cfg, id) {
+        return Err(invalid(format!("`{id}` is still referenced")));
+    }
     let mut paths: Vec<PathBuf> = targets
         .iter()
         .flat_map(|target| owned_paths_under(root, *target))
@@ -394,7 +464,7 @@ pub fn remove_at(root: &Path, id: &str) -> std::io::Result<u64> {
     }
     log::info!(
         target: "model",
-        "removed model `{id}`: reclaimed {reclaimed} bytes under {}",
+        "removed asset `{id}`: reclaimed {reclaimed} bytes under {}",
         root.display()
     );
     Ok(reclaimed)
@@ -457,9 +527,10 @@ fn capabilities_json(model: TtsModel) -> Value {
 
 /// The `models` tool payload. `removed` is present only after a successful removal.
 ///
-/// `removable` answers "can this be removed right now": a shared asset never can, the
-/// selected model cannot, and neither can one whose download is in flight. `reason` names
-/// only the durable cause (`active` / `shared`) — live download state belongs to `status`.
+/// `removable` answers "can this be removed right now": the selected model cannot, a shared
+/// asset something installed or selected still references cannot, and neither can one whose
+/// download is in flight. `reason` names only the durable cause (`active` / `shared`) —
+/// live download state belongs to `status`.
 pub fn inventory_json(
     root: &Path,
     cfg: &VoiceConfig,
@@ -469,14 +540,23 @@ pub fn inventory_json(
     let assets: Vec<Value> = scan_at(root)
         .into_iter()
         .map(|asset| {
-            let active = asset.removable && asset_in_use(cfg, asset.id);
-            let downloading = asset
-                .variants
-                .iter()
-                .any(|variant| active_downloads.contains(&variant.target));
+            let shared = asset.kind.is_shared();
+            let active = asset_in_use(cfg, asset.id);
+            let referenced = shared && shared_asset_referenced(root, cfg, asset.id);
+            // A shared row is off-limits while ANY fetch runs. Coarse on purpose: the precise
+            // answer is "which `start_download` arms end in `ensure_onnxruntime_with_progress`",
+            // a third table that would have to track those arms. Over-blocking costs one retry.
+            let downloading = if shared {
+                !active_downloads.is_empty()
+            } else {
+                asset
+                    .variants
+                    .iter()
+                    .any(|variant| active_downloads.contains(&variant.target))
+            };
             let reason = if active {
                 Some("active")
-            } else if !asset.removable {
+            } else if referenced {
                 Some("shared")
             } else {
                 None
@@ -487,7 +567,7 @@ pub fn inventory_json(
                 "installed": asset.installed(),
                 "bytes": asset.bytes(),
                 "active": active,
-                "removable": asset.removable && !active && !downloading,
+                "removable": !active && !referenced && !downloading,
                 "reason": reason,
                 "variants": asset.variants.iter().map(|variant| json!({
                     "id": variant.target.as_str(),
@@ -662,6 +742,26 @@ mod tests {
         );
     }
 
+    /// Kokoro's ONNX set is all four `KOKORO_FILES` — the two G2P graphs included, because
+    /// `variant_installed` mirrors `tts_model_files_present`. Seeding only the flat weights
+    /// leaves `KokoroModel` NOT installed.
+    fn seed_kokoro_onnx(root: &Path) {
+        let dir = crate::tts_assets::tts_model_dir_under(root, TtsModel::Kokoro);
+        for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Kokoro).files_for(false) {
+            write(&dir.join(file.file_name), b"kokoro");
+        }
+    }
+
+    /// Everything deselected: no engine resolves, so only on-disk state can reference a
+    /// shared asset. `speaker_lock` and `diarizer` default to off.
+    fn nothing_selected() -> VoiceConfig {
+        VoiceConfig {
+            tts_engine: Some(Vec::new()),
+            stt_engine: Some(Vec::new()),
+            ..VoiceConfig::default()
+        }
+    }
+
     fn asset<'a>(assets: &'a [Asset], id: &str) -> &'a Asset {
         assets
             .iter()
@@ -743,22 +843,31 @@ mod tests {
     }
 
     #[test]
-    fn removal_targets_cover_every_removable_token_and_nothing_else() {
-        for id in ds_config::MODEL_ASSET_TOKENS {
-            let targets = removal_targets(id).unwrap_or_else(|| panic!("{id} is removable"));
+    fn asset_targets_cover_every_removable_token_and_nothing_else() {
+        for id in ds_config::REMOVABLE_ASSET_TOKENS {
+            let targets = asset_targets(id).unwrap_or_else(|| panic!("{id} has a row"));
             assert!(!targets.is_empty(), "{id}");
         }
-        for id in ["onnxruntime", "cuda", "kokoro_frontend", "sepformer", ""] {
-            assert!(removal_targets(id).is_none(), "{id} must not be removable");
+        for id in ["sepformer", "bogus", ""] {
+            assert!(asset_targets(id).is_none(), "{id} must not have a row");
         }
-        // Every row id is either a removable token or a shared asset — no third state.
         for row in ROWS {
+            assert!(
+                ds_config::REMOVABLE_ASSET_TOKENS.contains(&row.id),
+                "{} is a row the remove enum does not advertise",
+                row.id
+            );
             assert_eq!(
-                row.removable,
-                ds_config::MODEL_ASSET_TOKENS.contains(&row.id),
+                row.kind.is_shared(),
+                ds_config::SHARED_ASSET_TOKENS.contains(&row.id),
                 "{}",
                 row.id
             );
+            // Licenses the single-target slice patterns in `shared_asset_referenced`.
+            if row.kind.is_shared() {
+                assert_eq!(row.targets.len(), 1, "{}", row.id);
+                assert_eq!(row.id, row.targets[0].as_str(), "{}", row.id);
+            }
         }
     }
 
@@ -774,7 +883,10 @@ mod tests {
         write(&dylib, b"shared runtime");
         let expected = dir_size_at(&chatterbox);
 
-        assert_eq!(remove_at(root.path(), "chatterbox").unwrap(), expected);
+        assert_eq!(
+            remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap(),
+            expected
+        );
         assert!(!chatterbox.exists());
         assert!(qwen.join("keep.onnx").is_file(), "a sibling model survives");
         assert!(dylib.is_file(), "the shared runtime is never removed");
@@ -798,7 +910,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let chatterbox = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &chatterbox);
-        assert_eq!(remove_at(root.path(), "chatterbox").unwrap(), 0);
+        assert_eq!(
+            remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap(),
+            0
+        );
 
         assert!(!chatterbox.exists(), "no model directory is materialized");
         let mut expected = vec![
@@ -826,11 +941,210 @@ mod tests {
     #[test]
     fn remove_rejects_an_id_it_does_not_own() {
         let root = tempfile::tempdir().unwrap();
-        for id in ["onnxruntime", "kokoro_frontend", "bogus"] {
-            let err = remove_at(root.path(), id).unwrap_err();
+        for id in ["bogus", ""] {
+            let err = remove_at(root.path(), &nothing_selected(), id).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{id}");
         }
         assert!(!root.path().join("mlx").exists(), "a refusal locks nothing");
+    }
+
+    #[test]
+    fn shared_references_follow_what_is_installed() {
+        let cfg = nothing_selected();
+        let empty = tempfile::tempdir().unwrap();
+        for id in ds_config::SHARED_ASSET_TOKENS {
+            assert!(
+                !shared_asset_referenced(empty.path(), &cfg, id),
+                "{id} on an empty root"
+            );
+        }
+
+        let chatterbox = tempfile::tempdir().unwrap();
+        let dir = crate::tts_assets::tts_model_dir_under(chatterbox.path(), TtsModel::Chatterbox);
+        for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Chatterbox).files_for(false) {
+            write(&dir.join(file.file_name), b"chatterbox");
+        }
+        assert!(shared_asset_referenced(
+            chatterbox.path(),
+            &cfg,
+            "onnxruntime"
+        ));
+        assert!(!shared_asset_referenced(
+            chatterbox.path(),
+            &cfg,
+            "kokoro_frontend"
+        ));
+
+        let kokoro = tempfile::tempdir().unwrap();
+        seed_kokoro_onnx(kokoro.path());
+        assert!(shared_asset_referenced(kokoro.path(), &cfg, "onnxruntime"));
+        assert!(shared_asset_referenced(
+            kokoro.path(),
+            &cfg,
+            "kokoro_frontend"
+        ));
+
+        // Diarization has no row (#77): only a direct file probe sees its ORT consumer.
+        let sepformer = tempfile::tempdir().unwrap();
+        write(
+            &sepformer.path().join(crate::spec::SEPFORMER_FILE),
+            b"separator",
+        );
+        assert!(shared_asset_referenced(
+            sepformer.path(),
+            &cfg,
+            "onnxruntime"
+        ));
+        assert!(!shared_asset_referenced(
+            sepformer.path(),
+            &cfg,
+            "kokoro_frontend"
+        ));
+
+        // MLX Kokoro runs English G2P through the BART ONNX graph, so it needs the dylib.
+        if DownloadTarget::KokoroMlx.is_supported_on_this_host() {
+            let mlx = tempfile::tempdir().unwrap();
+            let dir = crate::mlx_repo::repo_dir_under(mlx.path(), &crate::mlx_repo::KOKORO_MLX);
+            for file in crate::mlx_repo::KOKORO_MLX.files {
+                write(&dir.join(file.path), b"k");
+            }
+            write(
+                &dir.join(".ds-ready"),
+                crate::mlx_repo::KOKORO_MLX.revision.as_bytes(),
+            );
+            assert!(shared_asset_referenced(mlx.path(), &cfg, "onnxruntime"));
+            assert!(shared_asset_referenced(mlx.path(), &cfg, "kokoro_frontend"));
+        }
+    }
+
+    #[test]
+    fn shared_references_follow_the_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let built_in_tts = |model| VoiceConfig {
+            tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
+            tts_model: model,
+            stt_engine: Some(Vec::new()),
+            ..VoiceConfig::default()
+        };
+
+        let kokoro = built_in_tts(TtsModel::Kokoro);
+        assert!(shared_asset_referenced(root.path(), &kokoro, "onnxruntime"));
+        assert!(shared_asset_referenced(
+            root.path(),
+            &kokoro,
+            "kokoro_frontend"
+        ));
+
+        let chatterbox = built_in_tts(TtsModel::Chatterbox);
+        assert!(shared_asset_referenced(
+            root.path(),
+            &chatterbox,
+            "onnxruntime"
+        ));
+        assert!(!shared_asset_referenced(
+            root.path(),
+            &chatterbox,
+            "kokoro_frontend"
+        ));
+
+        let stt_only = VoiceConfig {
+            tts_engine: Some(Vec::new()),
+            stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
+            ..VoiceConfig::default()
+        };
+        assert!(shared_asset_referenced(
+            root.path(),
+            &stt_only,
+            "onnxruntime"
+        ));
+
+        let off = nothing_selected();
+        for id in ds_config::SHARED_ASSET_TOKENS {
+            assert!(!shared_asset_referenced(root.path(), &off, id), "{id}");
+        }
+
+        // Speaker-lock's SepFormer install ends in the same ensure-ORT step (#220 F7).
+        let diarizing = VoiceConfig {
+            speaker_lock: true,
+            diarizer: vec![ds_config::DiarizerProvider::Mlx],
+            ..nothing_selected()
+        };
+        assert_eq!(
+            shared_asset_referenced(root.path(), &diarizing, "onnxruntime"),
+            DownloadTarget::SepformerModel.is_supported_on_this_host()
+        );
+    }
+
+    #[test]
+    fn cuda_reference_follows_the_resolved_provider() {
+        let root = tempfile::tempdir().unwrap();
+        let has_row = DownloadTarget::Cuda.is_supported_on_this_host();
+        let built_in_tts = |provider| VoiceConfig {
+            tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
+            stt_engine: Some(Vec::new()),
+            provider: vec![provider],
+            ..VoiceConfig::default()
+        };
+
+        let cpu = built_in_tts(ds_config::Provider::OrtCpu);
+        assert!(!shared_asset_referenced(root.path(), &cpu, "cuda"));
+
+        let cuda = built_in_tts(ds_config::Provider::OrtCuda);
+        assert_eq!(shared_asset_referenced(root.path(), &cuda, "cuda"), has_row);
+
+        // A CUDA STT alone keeps the runtime, even with TTS off (`5cf0c0b` made
+        // `Provider::OrtCuda` usability arch-aware, so this tracks the row exactly).
+        let stt_cuda = VoiceConfig {
+            tts_engine: Some(Vec::new()),
+            stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
+            provider: vec![ds_config::Provider::OrtCuda],
+            ..VoiceConfig::default()
+        };
+        assert_eq!(
+            shared_asset_referenced(root.path(), &stt_cuda, "cuda"),
+            has_row
+        );
+
+        let off = VoiceConfig {
+            provider: vec![ds_config::Provider::OrtCuda],
+            ..nothing_selected()
+        };
+        assert!(!shared_asset_referenced(root.path(), &off, "cuda"));
+    }
+
+    #[test]
+    fn an_unreferenced_shared_asset_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let dylib = root.path().join(crate::ort::onnxruntime_dylib_file());
+        assert_fixture_is_isolated(root.path(), &dylib);
+        let paths = crate::ort::onnxruntime_paths_under(root.path());
+        for path in &paths {
+            write(path, b"managed runtime");
+        }
+        let expected: u64 = paths.iter().map(|path| dir_size_at(path)).sum();
+
+        assert_eq!(
+            remove_at(root.path(), &nothing_selected(), "onnxruntime").unwrap(),
+            expected
+        );
+        for path in &paths {
+            assert!(!path.exists(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn remove_at_refuses_a_referenced_shared_asset() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Chatterbox).files_for(false) {
+            write(&dir.join(file.file_name), b"chatterbox");
+        }
+        let dylib = root.path().join(crate::ort::onnxruntime_dylib_file());
+        write(&dylib, b"managed runtime");
+
+        let err = remove_at(root.path(), &nothing_selected(), "onnxruntime").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(dylib.is_file(), "a refusal deletes nothing");
     }
 
     /// The invariant this preserves: you can never remove something the engine
@@ -871,6 +1185,9 @@ mod tests {
     fn payload_marks_the_active_model_and_the_shared_assets() {
         let root = tempfile::tempdir().unwrap();
         seed(root.path());
+        // `seed` installs Kokoro MLX only, which exists on Apple Silicon alone; the full ONNX
+        // set makes `kokoro_frontend` referenced ON DISK on every host.
+        seed_kokoro_onnx(root.path());
         // STT off explicitly: the default ladder resolves to `system` on macOS but falls
         // through to `built_in` on Linux/Windows, which would make `parakeet` the active
         // STT and flip the `removable` row below by host.
@@ -913,19 +1230,49 @@ mod tests {
         assert_eq!(parakeet["removable"], true);
         assert_eq!(parakeet["capabilities"], Value::Null);
 
-        for id in ["kokoro_frontend", "onnxruntime"] {
-            let shared = by_id(id);
+        // Every shared row is referenced here: `kokoro_frontend` and `onnxruntime` on disk,
+        // and `cuda` by selection — the unset `provider` ladder resolves built-in TTS to
+        // `OrtCuda` wherever the row exists.
+        for id in ds_config::SHARED_ASSET_TOKENS {
+            let Some(shared) = assets.iter().find(|asset| asset["id"] == *id) else {
+                assert_eq!(
+                    *id, "cuda",
+                    "only the CUDA row is host-gated off x86_64 Windows/Linux"
+                );
+                continue;
+            };
             assert_eq!(shared["removable"], false, "{id}");
             assert_eq!(shared["reason"], "shared", "{id}");
             assert_eq!(shared["active"], false, "{id}");
         }
-        // Deterministic order: TTS models, then STT, then the shared rows.
+        // Deterministic order: TTS models, then STT, then the shared rows this host can hold.
         let ids: Vec<&str> = assets
             .iter()
             .map(|asset| asset["id"].as_str().unwrap())
             .collect();
-        let expected_prefix: Vec<&str> = ds_config::MODEL_ASSET_TOKENS.to_vec();
-        assert_eq!(&ids[..expected_prefix.len()], expected_prefix.as_slice());
+        let expected: Vec<&str> = ds_config::REMOVABLE_ASSET_TOKENS
+            .iter()
+            .copied()
+            .filter(|id| {
+                asset_targets(id)
+                    .unwrap()
+                    .iter()
+                    .any(|target| target.is_supported_on_this_host())
+            })
+            .collect();
+        assert_eq!(ids, expected);
+
+        // Nothing installed and nothing selected: every shared row this host lists is free.
+        let empty = tempfile::tempdir().unwrap();
+        let free = inventory_json(empty.path(), &nothing_selected(), &[], None);
+        for shared in
+            free["assets"].as_array().unwrap().iter().filter(|asset| {
+                ds_config::SHARED_ASSET_TOKENS.contains(&asset["id"].as_str().unwrap())
+            })
+        {
+            assert_eq!(shared["removable"], true, "{}", shared["id"]);
+            assert_eq!(shared["reason"], Value::Null, "{}", shared["id"]);
+        }
     }
 
     #[test]
@@ -934,7 +1281,7 @@ mod tests {
         seed(root.path());
         let chatterbox = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &chatterbox);
-        let bytes = remove_at(root.path(), "chatterbox").unwrap();
+        let bytes = remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap();
         assert!(bytes > 0);
         let payload = inventory_json(
             root.path(),
@@ -997,7 +1344,7 @@ mod tests {
         let removal_root = root.path().to_path_buf();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
-            let bytes = remove_at(&removal_root, "chatterbox").unwrap();
+            let bytes = remove_at(&removal_root, &nothing_selected(), "chatterbox").unwrap();
             done_tx.send(bytes).unwrap();
         });
         assert!(
@@ -1091,7 +1438,7 @@ mod tests {
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
             removed_tx
-                .send(remove_at(&removal_root, "kokoro").unwrap())
+                .send(remove_at(&removal_root, &nothing_selected(), "kokoro").unwrap())
                 .unwrap();
         });
         assert!(

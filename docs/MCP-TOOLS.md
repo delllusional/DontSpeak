@@ -116,7 +116,7 @@ Built-in models: capabilities, disk usage, and removal.
 
 | Param | Type | Required | Description |
 |---|---|---|---|
-| `remove` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice`, `parakeet` | no | Model to delete from the cache. The active TTS/STT model is refused. |
+| `remove` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice`, `parakeet`, `kokoro_frontend`, `onnxruntime`, `cuda` | no | Model or shared asset to delete from the cache. The active model, and a shared asset something still needs, are refused. |
 
 Without `remove` this only reads. Output: `model_dir`, `total_bytes`, and one `assets` row
 per model id — `kind` (`tts`/`stt`/`frontend`/`runtime`), `installed`, `bytes`, `active`,
@@ -137,18 +137,31 @@ Removal takes every on-disk variant of one model (ONNX and MLX). It is refused w
   ``models: `parakeet` is the active STT model — switch with set_config stt_engine first``
 - one of its downloads is in flight —
   ``models: `chatterbox` is downloading right now — try again when it finishes``
-- the id is a shared asset (`onnxruntime`, `kokoro_frontend`, `cuda`) —
-  ``models: `onnxruntime` is shared by every model and cannot be removed``
+- the ORT runtime is still referenced —
+  ``models: `onnxruntime` is still needed by an installed or selected ONNX model — remove those models first``
+- the Kokoro text frontend is still referenced —
+  ``models: `kokoro_frontend` is still needed by Kokoro — remove or deselect `kokoro` first``
+- the CUDA runtime is still selected —
+  ``models: `cuda` is the resolved compute provider — set_config provider without `cuda` first``
+- a shared asset is asked for while any download runs —
+  ``models: `onnxruntime` is shared and a download is in flight — try again when it finishes``
+- this host has no target for the id —
+  ``models: `cuda` is not available on this platform``. The enum is the same on every
+  platform, but the `cuda` row only exists on x86_64 Windows/Linux.
 - the running engine does not list the id at all —
   ``models: unknown model `<id>` — the running engine may be older than this CLI``. The
   schema already rejects unknown ids, so this only appears when the CLI is newer than the
   engine ([BUILD-DEPLOY.md](BUILD-DEPLOY.md) — rebuild the engine).
 
-Shared assets are listed with their sizes but never removed; `removable` is also false
-while a download is in flight, where `reason` stays null (live download state belongs to
-`status`). Removing a model that was never downloaded succeeds and reclaims 0 bytes; it
-may create empty cache directories and lock sidecars. Removal never changes the selection
-and never triggers a re-download.
+A shared asset (`kokoro_frontend`, `onnxruntime`, `cuda`) is reclaimable once nothing
+references it — nothing installed loads it, and the current config would not make the
+engine fetch it again. `reason: "shared"` means *still referenced*, not *never removable*.
+Reclaiming is therefore ordered: remove the models first, then `kokoro_frontend`, then
+`onnxruntime`; freeing `cuda` needs `set_config provider` without `cuda`. `removable` is
+also false while a download is in flight, where `reason` stays null (live download state
+belongs to `status`). Removing a model that was never downloaded succeeds and reclaims 0
+bytes; it may create empty cache directories and lock sidecars. Removal never changes the
+selection and never triggers a re-download.
 
 Partial failure is surfaced, not repaired: the response is an MCP error
 (``models: could not remove `<id>`: <io error>``) with no `removed` block, the row then

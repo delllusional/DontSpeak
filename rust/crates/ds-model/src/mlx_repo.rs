@@ -1291,7 +1291,14 @@ mod tests {
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
             removed_tx
-                .send(crate::inventory::remove_at(&removal_root, "kokoro").unwrap())
+                .send(
+                    crate::inventory::remove_at(
+                        &removal_root,
+                        &ds_config::VoiceConfig::default(),
+                        "kokoro",
+                    )
+                    .unwrap(),
+                )
                 .unwrap();
         });
         assert!(

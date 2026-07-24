@@ -24,19 +24,24 @@ fn active_targets(downloads: &DownloadProg) -> Vec<DownloadTarget> {
         .collect()
 }
 
-/// Refuse a removal the engine would immediately undo, or that would break every model.
-/// `None` ⇒ the removal may proceed.
-fn refusal(cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<String> {
-    let Some(targets) = ds_model::removal_targets(id) else {
-        // The tool schema already rejects both, so reaching here means the CLI and the engine
-        // disagree about the model list — name that, instead of telling the user a model this
-        // build has never heard of is "shared by every model".
-        return Some(if ds_model::is_known_asset(id) {
-            format!("models: `{id}` is shared by every model and cannot be removed")
-        } else {
-            format!("models: unknown model `{id}` — the running engine may be older than this CLI")
-        });
+/// Refuse a removal the engine would immediately undo, or that would break an installed
+/// model. `None` ⇒ the removal may proceed. First match wins.
+fn refusal(root: &Path, cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<String> {
+    let Some(targets) = ds_model::asset_targets(id) else {
+        // The tool schema already rejects this, so reaching here means the CLI and the engine
+        // disagree about the asset list.
+        return Some(format!(
+            "models: unknown model `{id}` — the running engine may be older than this CLI"
+        ));
     };
+    if !targets
+        .iter()
+        .any(|target| target.is_supported_on_this_host())
+    {
+        // The remove enum is one platform-independent list while `scan_at` drops a row this
+        // host cannot hold; without this the answer is a confusing 0-byte "success".
+        return Some(format!("models: `{id}` is not available on this platform"));
+    }
     if ds_model::asset_in_use(cfg, id) {
         // Distinct texts: on Windows and Linux the STT ladder resolves to built_in by
         // default, so pointing that user at tts_model would be actively wrong.
@@ -50,6 +55,27 @@ fn refusal(cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<Str
             )
         });
     }
+    if ds_model::shared_asset_referenced(root, cfg, id) {
+        return Some(match id {
+            ds_config::ONNXRUNTIME_ASSET_TOKEN => format!(
+                "models: `{id}` is still needed by an installed or selected ONNX model — remove those models first"
+            ),
+            ds_config::KOKORO_FRONTEND_ASSET_TOKEN => format!(
+                "models: `{id}` is still needed by Kokoro — remove or deselect `kokoro` first"
+            ),
+            _ => format!(
+                "models: `{id}` is the resolved compute provider — set_config provider without `cuda` first"
+            ),
+        });
+    }
+    if ds_model::is_shared_asset(id) && !active.is_empty() {
+        // `DownloadTarget::Onnxruntime` is never an engine download target — every ORT fetch
+        // is a step inside another target's setup — so the per-target check below cannot see
+        // the Chatterbox download that is about to install the dylib.
+        return Some(format!(
+            "models: `{id}` is shared and a download is in flight — try again when it finishes"
+        ));
+    }
     if targets.iter().any(|target| active.contains(target)) {
         return Some(format!(
             "models: `{id}` is downloading right now — try again when it finishes"
@@ -58,8 +84,8 @@ fn refusal(cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<Str
     None
 }
 
-/// List the on-disk inventory, optionally removing one model id first. A failed removal
-/// answers with an error and no payload — never a success carrying a stale row.
+/// List the on-disk inventory, optionally removing one model or shared-asset id first. A
+/// failed removal answers with an error and no payload — never a success carrying a stale row.
 pub(crate) fn respond(
     paths: &Paths,
     downloads: &DownloadProg,
@@ -70,10 +96,10 @@ pub(crate) fn respond(
     let active = active_targets(downloads);
     let mut removed = None;
     if let Some(id) = remove {
-        if let Some(message) = refusal(&cfg, id, &active) {
+        if let Some(message) = refusal(root, &cfg, id, &active) {
             return ds_ipc::Response::error(message);
         }
-        match ds_model::remove_at(root, id) {
+        match ds_model::remove_at(root, &cfg, id) {
             Ok(bytes) => removed = Some((id, bytes)),
             Err(e) => {
                 return ds_ipc::Response::error(format!("models: could not remove `{id}`: {e}"));
@@ -90,6 +116,32 @@ mod tests {
     use super::*;
     use crate::downloads::{DownloadProgress, DownloadState};
     use std::sync::{Arc, Mutex};
+
+    /// Guards a fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`: the flight would
+    /// then take its sweep gate in the REAL model dir (#204).
+    fn assert_fixture_is_isolated(root: &Path, path: &Path) {
+        assert!(
+            ds_model::sweep_root_of(path).is_some_and(|resolved| resolved.starts_with(root)),
+            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
+        );
+    }
+
+    fn seed_onnx_set(root: &Path, model: ds_config::TtsModel) {
+        let set = ds_model::tts_ort_asset_set(model);
+        let dir = set
+            .dir_name
+            .map_or_else(|| root.to_path_buf(), |name| root.join(name));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in set.files_for(false) {
+            std::fs::write(dir.join(file.file_name), b"weights").unwrap();
+        }
+    }
+
+    fn seed_ort_dylib(root: &Path) -> std::path::PathBuf {
+        let dylib = root.join(ds_model::onnxruntime_dylib_file());
+        std::fs::write(&dylib, b"managed runtime").unwrap();
+        dylib
+    }
 
     /// `Paths::rooted_at` keeps the fixture off the developer's real config.toml.
     fn fixture(config: &str) -> (tempfile::TempDir, Paths) {
@@ -159,7 +211,7 @@ mod tests {
 
     #[test]
     fn a_downloading_model_is_refused() {
-        let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");
         let models = tempfile::tempdir().unwrap();
         let message = error_of(respond(
             &paths,
@@ -174,16 +226,121 @@ mod tests {
     }
 
     #[test]
-    fn shared_ids_are_refused_engine_side_too() {
-        let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
+    fn a_referenced_shared_id_is_refused_engine_side_too() {
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");
         let models = tempfile::tempdir().unwrap();
-        for id in ["onnxruntime", "kokoro_frontend", "cuda"] {
-            let message = error_of(respond(&paths, &downloads(&[]), models.path(), Some(id)));
+        seed_onnx_set(models.path(), ds_config::TtsModel::Chatterbox);
+        assert_eq!(
+            error_of(respond(
+                &paths,
+                &downloads(&[]),
+                models.path(),
+                Some("onnxruntime")
+            )),
+            "models: `onnxruntime` is still needed by an installed or selected ONNX model — remove those models first"
+        );
+
+        seed_onnx_set(models.path(), ds_config::TtsModel::Kokoro);
+        assert_eq!(
+            error_of(respond(
+                &paths,
+                &downloads(&[]),
+                models.path(),
+                Some("kokoro_frontend")
+            )),
+            "models: `kokoro_frontend` is still needed by Kokoro — remove or deselect `kokoro` first"
+        );
+    }
+
+    #[test]
+    fn an_unreferenced_shared_asset_is_reclaimed() {
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\nprovider = [\"cpu\"]\n");
+        let models = tempfile::tempdir().unwrap();
+        let dylib = seed_ort_dylib(models.path());
+        assert_fixture_is_isolated(models.path(), &dylib);
+
+        let after = payload(respond(
+            &paths,
+            &downloads(&[]),
+            models.path(),
+            Some("onnxruntime"),
+        ));
+        assert_eq!(after["removed"]["id"], "onnxruntime");
+        assert!(after["removed"]["bytes"].as_u64().unwrap() > 0);
+        let row = after["assets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|asset| asset["id"] == "onnxruntime")
+            .unwrap()
+            .clone();
+        assert_eq!(row["installed"], false);
+        assert!(!dylib.exists());
+    }
+
+    /// The CUDA runtime is referenced by SELECTION alone, so this fixture must resolve a
+    /// built-in engine — with a model whose own row is not the one being removed.
+    #[test]
+    fn the_cuda_runtime_follows_the_resolved_provider() {
+        let cfg = |provider: &str| {
+            format!(
+                "tts_engine = \"built_in\"\ntts_model = \"chatterbox\"\nstt_engine = []\nprovider = [\"{provider}\"]\n"
+            )
+        };
+        if !DownloadTarget::Cuda.is_supported_on_this_host() {
+            let (_config, paths) = fixture(&cfg("cpu"));
+            let models = tempfile::tempdir().unwrap();
             assert_eq!(
-                message,
-                format!("models: `{id}` is shared by every model and cannot be removed")
+                error_of(respond(
+                    &paths,
+                    &downloads(&[]),
+                    models.path(),
+                    Some("cuda")
+                )),
+                "models: `cuda` is not available on this platform"
             );
+            return;
         }
+
+        let (_config, paths) = fixture(&cfg("cuda"));
+        let models = tempfile::tempdir().unwrap();
+        assert_eq!(
+            error_of(respond(
+                &paths,
+                &downloads(&[]),
+                models.path(),
+                Some("cuda")
+            )),
+            "models: `cuda` is the resolved compute provider — set_config provider without `cuda` first"
+        );
+
+        let (_config, paths) = fixture(&cfg("cpu"));
+        let models = tempfile::tempdir().unwrap();
+        assert_fixture_is_isolated(models.path(), &models.path().join("cuda"));
+        let after = payload(respond(
+            &paths,
+            &downloads(&[]),
+            models.path(),
+            Some("cuda"),
+        ));
+        assert_eq!(after["removed"]["id"], "cuda");
+    }
+
+    /// `DownloadTarget::Onnxruntime` is never an engine download target — the dylib installs
+    /// as a step inside another target's setup — so only the shared clause can catch this.
+    #[test]
+    fn a_shared_id_is_refused_while_any_download_is_in_flight() {
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\nprovider = [\"cpu\"]\n");
+        let models = tempfile::tempdir().unwrap();
+        assert_eq!(
+            error_of(respond(
+                &paths,
+                &downloads(&[DownloadTarget::ChatterboxModel]),
+                models.path(),
+                Some("onnxruntime")
+            )),
+            "models: `onnxruntime` is shared and a download is in flight — try again when it finishes"
+        );
     }
 
     /// An id this engine does not list is version skew, not a shared asset: a CLI updated
@@ -191,7 +348,7 @@ mod tests {
     /// engine must point at itself rather than at a shared-asset rule that does not apply.
     #[test]
     fn an_unlisted_id_names_the_engine_as_the_stale_side() {
-        let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");
         let models = tempfile::tempdir().unwrap();
         let message = error_of(respond(
             &paths,
@@ -207,17 +364,10 @@ mod tests {
 
     #[test]
     fn a_successful_removal_reports_the_reclaimed_bytes_and_flips_the_row() {
-        let (_config, paths) = fixture("tts_engine = \"off\"\nstt_engine = \"off\"\n");
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");
         let models = tempfile::tempdir().unwrap();
         let dir = models.path().join("qwen3-tts");
-        // This is the one test here that enters a destination flight, which resolves its sweep
-        // root from the ambient `DONTSPEAK_MODEL_DIR`: a value covering `TMPDIR` would put the
-        // gate in the real cache (#204).
-        assert!(
-            ds_model::sweep_root_of(&dir)
-                .is_some_and(|resolved| resolved.starts_with(models.path())),
-            "the fixture must not sit under DONTSPEAK_MODEL_DIR (#204)"
-        );
+        assert_fixture_is_isolated(models.path(), &dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("talker_cache.onnx"), b"weights on disk").unwrap();
 

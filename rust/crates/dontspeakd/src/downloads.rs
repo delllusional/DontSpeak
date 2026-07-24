@@ -128,10 +128,7 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
                 target,
                 DownloadTarget::ParakeetModel | DownloadTarget::ParakeetMlx
             ))
-        || (target == DownloadTarget::Cuda
-            && ((builtin_tts && cfg.resolved_tts_provider() == Provider::OrtCuda)
-                || (cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
-                    && cfg.resolved_stt_provider() == Provider::OrtCuda)))
+        || (target == DownloadTarget::Cuda && ds_model::cuda_runtime_wanted(cfg))
 }
 
 /// Mark a due target Active. Active/permanent/backoff-gated targets attach or stay idle.
@@ -527,36 +524,15 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     }
 }
 
-/// Prefetch ~1.4 GB CUDA runtime only on `Provider::OrtCuda` + real driver + missing runtime.
-/// `auto` excluded (never silent large pull). Typed Provider — never a `"cuda"` string.
-/// Pure; caller supplies live probe results. Platform-gated to where the runtime exists.
+/// Prefetch the ~1.4 GB CUDA runtime only when a built-in engine resolves to CUDA
+/// ([`ds_model::cuda_runtime_wanted`]) plus a real driver and a missing runtime.
+/// `auto` excluded (never silent large pull). Pure; caller supplies live probe results.
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
 ))]
-fn should_prefetch_cuda(
-    which: Provider,
-    has_cuda_consumer: bool,
-    driver_present: bool,
-    runtime_present: bool,
-) -> bool {
-    which == Provider::OrtCuda && has_cuda_consumer && driver_present && !runtime_present
-}
-
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
-fn cuda_prefetch_provider(
-    tts_provider: Provider,
-    stt_provider: Provider,
-    stt_consumer: bool,
-) -> Provider {
-    if stt_consumer && stt_provider == Provider::OrtCuda {
-        Provider::OrtCuda
-    } else {
-        tts_provider
-    }
+fn should_prefetch_cuda(wanted: bool, driver_present: bool, runtime_present: bool) -> bool {
+    wanted && driver_present && !runtime_present
 }
 
 /// Apply provider to warm child; report whether CUDA runtime should enter [`fetch_plan`].
@@ -569,17 +545,8 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, cfg: &VoiceConfig, which: Provider)
         target_arch = "x86_64"
     ))]
     {
-        let tts_consumer = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
-            && cfg
-                .tts_model_descriptor()
-                .supports_provider(ds_config::Provider::OrtCuda);
-        let stt_consumer = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
-            && cfg.resolved_stt_provider() == Provider::OrtCuda;
-        let cuda_provider =
-            cuda_prefetch_provider(which, cfg.resolved_stt_provider(), stt_consumer);
         should_prefetch_cuda(
-            cuda_provider,
-            tts_consumer || stt_consumer,
+            ds_model::cuda_runtime_wanted(cfg),
             ds_model::is_cuda_driver_present(),
             ds_model::is_cuda_runtime_present(),
         )
@@ -1052,35 +1019,19 @@ mod tests {
         );
     }
 
-    /// CUDA prefetch: typed `Provider::OrtCuda` only; driver/runtime vetoes.
+    /// CUDA prefetch vetoes; which selections set `wanted` is
+    /// `ds_model::cuda_runtime_wanted`'s own test.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
     ))]
     #[test]
-    fn cuda_prefetch_requires_cuda_rung_driver_and_absent_runtime() {
-        use super::{cuda_prefetch_provider, should_prefetch_cuda};
-        use ds_config::Provider;
+    fn cuda_prefetch_requires_a_wanted_runtime_a_driver_and_an_absent_runtime() {
+        use super::should_prefetch_cuda;
 
-        assert!(should_prefetch_cuda(Provider::OrtCuda, true, true, false));
-        assert!(!should_prefetch_cuda(Provider::OrtCuda, false, true, false));
-        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, false, false));
-        assert!(!should_prefetch_cuda(Provider::OrtCuda, true, true, true));
-        for p in [Provider::OrtCpu, Provider::Mlx] {
-            assert!(
-                !should_prefetch_cuda(p, true, true, false),
-                "{p:?} must not prefetch"
-            );
-        }
-
-        assert_eq!(
-            cuda_prefetch_provider(Provider::OrtCpu, Provider::OrtCuda, true),
-            Provider::OrtCuda,
-            "CUDA STT must prefetch even when the selected TTS model is CPU-only"
-        );
-        assert_eq!(
-            cuda_prefetch_provider(Provider::OrtCpu, Provider::OrtCuda, false),
-            Provider::OrtCpu
-        );
+        assert!(should_prefetch_cuda(true, true, false));
+        assert!(!should_prefetch_cuda(false, true, false));
+        assert!(!should_prefetch_cuda(true, false, false));
+        assert!(!should_prefetch_cuda(true, true, true));
     }
 }

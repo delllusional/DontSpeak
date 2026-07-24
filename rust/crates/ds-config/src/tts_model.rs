@@ -49,10 +49,36 @@ strict_de!(TtsModel, "kokoro|chatterbox|qwen|omnivoice");
 /// STT half of [`MODEL_ASSET_TOKENS`].
 pub const STT_MODEL_TOKEN: &str = "parakeet";
 
-/// Every removable on-disk model asset, by id — the `models` tool's `remove` enum.
+/// Every on-disk model asset, by id — the model half of [`REMOVABLE_ASSET_TOKENS`].
 /// Hand-written like [`TtsModel::TOKENS`] because MCP schema enums are const contexts;
 /// `model_asset_tokens_are_the_tts_models_then_the_stt_model` pins the composition.
 pub const MODEL_ASSET_TOKENS: &[&str] = &["kokoro", "chatterbox", "qwen", "omnivoice", "parakeet"];
+
+pub const KOKORO_FRONTEND_ASSET_TOKEN: &str = "kokoro_frontend";
+pub const ONNXRUNTIME_ASSET_TOKEN: &str = "onnxruntime";
+pub const CUDA_ASSET_TOKEN: &str = "cuda";
+
+/// Shared on-disk assets, in inventory row order. Reclaimable only while nothing
+/// references them (#220).
+pub const SHARED_ASSET_TOKENS: &[&str] = &[
+    KOKORO_FRONTEND_ASSET_TOKEN,
+    ONNXRUNTIME_ASSET_TOKEN,
+    CUDA_ASSET_TOKEN,
+];
+
+/// Every id the `models` tool's `remove` accepts: the model sets, then the shared assets.
+/// Hand-written for the same const-context reason as [`MODEL_ASSET_TOKENS`]; composition
+/// pinned by `removable_asset_tokens_are_the_models_then_the_shared_assets`.
+pub const REMOVABLE_ASSET_TOKENS: &[&str] = &[
+    "kokoro",
+    "chatterbox",
+    "qwen",
+    "omnivoice",
+    "parakeet",
+    "kokoro_frontend",
+    "onnxruntime",
+    "cuda",
+];
 
 pub(crate) fn de_tts_model<'de, D>(deserializer: D) -> Result<TtsModel, D::Error>
 where
@@ -771,6 +797,23 @@ mod tests {
             [STT_MODEL_TOKEN]
         );
         assert!(!TtsModel::TOKENS.contains(&STT_MODEL_TOKEN));
+    }
+
+    /// The remove enum is the model tokens then the shared assets, disjoint: a new row on
+    /// either side must extend its own list, and neither id space may shadow the other.
+    #[test]
+    fn removable_asset_tokens_are_the_models_then_the_shared_assets() {
+        assert_eq!(
+            &REMOVABLE_ASSET_TOKENS[..MODEL_ASSET_TOKENS.len()],
+            MODEL_ASSET_TOKENS
+        );
+        assert_eq!(
+            &REMOVABLE_ASSET_TOKENS[MODEL_ASSET_TOKENS.len()..],
+            SHARED_ASSET_TOKENS
+        );
+        for id in SHARED_ASSET_TOKENS {
+            assert!(!MODEL_ASSET_TOKENS.contains(id), "{id}");
+        }
     }
 
     #[test]

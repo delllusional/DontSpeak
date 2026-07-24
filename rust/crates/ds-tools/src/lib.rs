@@ -179,7 +179,7 @@ static TOOLS: &[Tool] = &[
         description: MODELS,
         params: &[p(
             REMOVE,
-            PType::Enum(ds_config::MODEL_ASSET_TOKENS),
+            PType::Enum(ds_config::REMOVABLE_ASSET_TOKENS),
             false,
             MODELS_REMOVE,
         )],
@@ -855,7 +855,7 @@ fn output_schema_for(output: Output) -> Value {
                 "removed": {
                     "type": "object",
                     "properties": {
-                        "id": { "type": "string", "enum": ds_config::MODEL_ASSET_TOKENS },
+                        "id": { "type": "string", "enum": ds_config::REMOVABLE_ASSET_TOKENS },
                         "bytes": { "type": "integer", "minimum": 0 }
                     },
                     "required": ["id", "bytes"],
@@ -1061,7 +1061,9 @@ mod tests {
             ("models", json!({}), true),
             ("models", json!({"remove": "kokoro"}), true),
             ("models", json!({"remove": "parakeet"}), true),
-            ("models", json!({"remove": "onnxruntime"}), false),
+            ("models", json!({"remove": "onnxruntime"}), true),
+            ("models", json!({"remove": "cuda"}), true),
+            ("models", json!({"remove": "sepformer"}), false),
             ("models", json!({"extra": true}), false),
             ("set_config", json!({"narrate": ["shorts"]}), true),
             ("set_config", json!({"narrate": ["other"]}), false),
