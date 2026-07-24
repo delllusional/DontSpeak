@@ -24,8 +24,8 @@ registration falls back to the CPU EP and status reports CPU.
 `ORT_DYLIB_PATH` selection is process-first-wins. Status `ORT CPU` therefore means the CPU
 EP is active; it may be the CPU EP inside the GPU 1.26.0 distribution rather than the CPU
 1.27.1 distribution (1.23.2 on Intel macOS). Core ML is requested for an explicit `coreml`
-selection or `auto` with `DONTSPEAK_FULL_DUPLEX`; registration or dylib-load failure falls
-back to the CPU EP.
+selection or `auto` with `DONTSPEAK_FULL_DUPLEX`; registration or session/model-load failure
+falls back to the CPU EP.
 
 The macOS app packages three peer dylibs. `libdontspeak_sys.dylib` has no package
 dependencies and ships on both architectures. The MLX and FluidAudio dylibs are independent,
