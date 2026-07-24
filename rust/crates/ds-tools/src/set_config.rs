@@ -759,7 +759,7 @@ mod tests {
     fn set_config_args_fresh_install_accepts_routed_kokoro_ids() {
         // No enumeration source (None = fresh install, no voices bin / MLX dir yet):
         // lazily-downloadable pack ids are accepted instead of being rejected against the
-        // static fallback list, provided their language is one this build routes.
+        // static fallback list, unless they are locked to a published-but-unrouted language.
         let mut cfg = VoiceConfig::default();
         let ok: SetConfigArgs = serde_json::from_value(
             serde_json::json!({ "tts_voices": { "kokoro": ["af_nova", "if_sara"] } }),
@@ -781,15 +781,16 @@ mod tests {
         assert!(err.contains("speaks ja"), "got: {err}");
         assert!(err.contains("cannot route"), "got: {err}");
 
+        // An unknown family char names no language to lock against, so the pool keeps it
+        // (#222) and admit accepts it too — the two must not disagree on the same id.
         let unknown_family: SetConfigArgs =
-            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["xq_bogus"] } }))
+            serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["custom_v1"] } }))
                 .unwrap();
-        let err = unknown_family.apply_with(&mut cfg, None).unwrap_err();
-        assert!(
-            err.contains("names no Kokoro language family"),
-            "got: {err}"
-        );
-        assert!(!err.contains("speaks"), "got: {err}");
+        let changes = unknown_family
+            .apply_with(&mut cfg, None)
+            .expect("an unknown-shape pack id is accepted, matching the pool");
+        assert_eq!(cfg.tts_voices.kokoro, ["custom_v1"]);
+        assert_eq!(changes, vec!["tts_voices.kokoro=[custom_v1]".to_string()]);
     }
 
     #[test]

@@ -377,49 +377,34 @@ pub struct EffectivePool {
     pub ignored: Vec<String>,
 }
 
-/// Why this build cannot route Kokoro `id`, or `None` when it can. Allocation-free on
-/// purpose: [`kokoro_choices_from`] runs this over the whole catalog per listing, and the
-/// greeting's `voices_for_language` fallback runs that. The user-facing sentence is layered
-/// on in [`kokoro_route_refusal`] so both refusing surfaces quote the same words.
-enum KokoroBlock {
-    /// The family char names no language at all (a nonstandard pack id).
-    UnknownFamily,
-    /// A published family whose frontend this build does not ship (`ja`, `zh`).
-    UnroutedLanguage(&'static str),
-}
-
-fn kokoro_block(id: &str) -> Option<KokoroBlock> {
+/// The published language `id`'s Kokoro family speaks but this build ships no frontend for
+/// (`ja`, `zh`), or `None` when the build can route `id`. An unknown family char names no
+/// language, so — like an unlocked voice — it conditions on the detected language and is
+/// routable. That match with [`effective_builtin_pool`], which keeps unknown shapes, is
+/// load-bearing: split the two and a voice the router speaks with gets refused elsewhere,
+/// naming a reason that is false for it. Allocation-free: [`kokoro_choices_from`] runs this
+/// over the whole catalog per listing.
+fn kokoro_unrouted_language(id: &str) -> Option<&'static str> {
     match kokoro_language(id) {
-        "other" => Some(KokoroBlock::UnknownFamily),
-        language if !TtsModel::Kokoro.descriptor().supports_language(language) => {
-            Some(KokoroBlock::UnroutedLanguage(language))
-        }
+        "other" => None,
+        language if !TtsModel::Kokoro.descriptor().supports_language(language) => Some(language),
         _ => None,
     }
 }
 
-/// Whether this build ships a frontend for the language `id`'s family speaks. Kokoro
-/// publishes Japanese and Mandarin voices whose pipelines were dropped; they are real model
-/// ids, so only the language rules them out — in a configured pool (`set_config`) and per
-/// utterance (`speak`) alike. An unknown family char is not routable either: its language is
-/// unknown, so no frontend can be chosen for it. Existing config is judged by the weaker
-/// [`effective_builtin_pool`] instead, which keeps unknown shapes.
+/// Whether this build ships a frontend for `id`. Kokoro publishes Japanese and Mandarin
+/// voices whose pipelines were dropped; they are real model ids, so only the language rules
+/// them out — in a configured pool (`set_config`) and per utterance (`speak`) alike.
 pub fn is_routable_kokoro_voice(id: &str) -> bool {
-    kokoro_block(id).is_none()
+    kokoro_unrouted_language(id).is_none()
 }
 
 /// Why this build refuses `id` as NEW Kokoro input — `set_config` pool edits and `speak`
-/// overrides share the sentence so neither states the wrong reason. A `j`/`z` family is
-/// published but lost its frontend; an unrecognized family char names no language at all.
-/// `None` exactly when [`is_routable_kokoro_voice`] is true.
+/// overrides share the sentence so neither states the wrong reason. `None` exactly when
+/// [`is_routable_kokoro_voice`] is true.
 pub fn kokoro_route_refusal(id: &str) -> Option<String> {
-    Some(match kokoro_block(id)? {
-        KokoroBlock::UnknownFamily => format!(
-            "`{id}` names no Kokoro language family, so this build cannot route it; see voices"
-        ),
-        KokoroBlock::UnroutedLanguage(language) => {
-            format!("`{id}` speaks {language}, a language this build cannot route; see voices")
-        }
+    kokoro_unrouted_language(id).map(|language| {
+        format!("`{id}` speaks {language}, a language this build cannot route; see voices")
     })
 }
 
@@ -662,9 +647,10 @@ mod tests {
         assert!(is_routable_kokoro_voice("if_sara"));
         assert!(!is_routable_kokoro_voice("jf_alpha"));
         assert!(!is_routable_kokoro_voice("zf_xiaobei"));
-        // Unknown shapes are refused too: no language, so no frontend can be chosen.
-        assert!(!is_routable_kokoro_voice("df_anna"));
-        assert!(!is_routable_kokoro_voice("xq_bogus"));
+        // Unknown shapes stay routable: no identifiable language means no lock, so `speak`
+        // and the pool agree instead of one refusing what the other speaks with.
+        assert!(is_routable_kokoro_voice("df_anna"));
+        assert!(is_routable_kokoro_voice("xq_bogus"));
     }
 
     #[test]
@@ -708,20 +694,17 @@ mod tests {
                 .expect("Mandarin is unrouted too")
                 .contains("speaks zh")
         );
+        // An unknown family char names no language, so it is not refused — the pool keeps it
+        // and the router speaks with it (#222); refusing it here would state a false reason.
         for id in ["df_anna", "custom_v1", "xq_bogus"] {
-            let refusal = kokoro_route_refusal(id).expect("an unknown family is refused");
-            assert!(
-                refusal.contains("names no Kokoro language family"),
-                "{id}: {refusal}"
-            );
-            assert!(!refusal.contains("speaks"), "{id}: {refusal}");
+            assert_eq!(kokoro_route_refusal(id), None, "{id}");
         }
         assert_eq!(kokoro_route_refusal("af_sarah"), None);
         assert_eq!(kokoro_route_refusal("if_sara"), None);
     }
 
     /// The allocation-free predicate and the sentence builder are separate entry points over
-    /// one `KokoroBlock`; this is what keeps them from drifting apart again.
+    /// one reason; this is what keeps them from drifting apart again.
     #[test]
     fn refusal_and_predicate_agree() {
         for id in [
@@ -752,15 +735,11 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot route")
         );
-        // An unrecognizable family is refused for its own reason, not the language one.
+        // An unknown family char is accepted, matching the pool that keeps it (#222); the
+        // engine already clamps a per-utterance voice that is not on disk at synth time.
         let unknown_family =
-            TtsArgPools::with_voice(TtsEngine::BuiltIn, TtsModel::Kokoro, "xq_bogus".into());
-        let err = validate_speak_voices(&unknown_family).unwrap_err();
-        assert!(
-            err.contains("names no Kokoro language family"),
-            "got: {err}"
-        );
-        assert!(!err.contains("speaks"), "got: {err}");
+            TtsArgPools::with_voice(TtsEngine::BuiltIn, TtsModel::Kokoro, "custom_v1".into());
+        assert!(validate_speak_voices(&unknown_family).is_ok());
         assert!(
             validate_speak_voices(&TtsArgPools::with_voice(
                 TtsEngine::BuiltIn,
