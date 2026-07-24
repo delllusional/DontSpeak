@@ -133,6 +133,29 @@ fn model_subdirectories_do_not_collide() {
     assert!(!tts_model_files_present(TtsModel::OmniVoice, true));
 }
 
+/// The argument `ds_fluid_tts_init` hands `KokoroAneManager(directory:)`, pinned at the ambient
+/// boundary the shim actually calls. FluidAudio appends the `.english` variant's whole
+/// `folderName` (`kokoro-82m-coreml/ANE`), so this must stay the Core ML ROOT: the set dir
+/// resolved one level too deep and failed closed as `networkDisabled(download(...))` under
+/// `ModelHub.offlineMode`. macOS-gated with `mlx_shim` itself; `kokoro_hub_layout` covers the
+/// same contract on the Linux-only per-commit gate.
+#[cfg(target_os = "macos")]
+#[test]
+fn fluid_kokoro_dir_arg_is_the_coreml_root() {
+    let model_dir = EmptyModelDir::enter();
+    let coreml = model_dir.path().join("coreml");
+
+    let arg = ds_model::mlx_shim::fluid_kokoro_dir_arg();
+    let arg = PathBuf::from(arg.to_str().expect("utf-8 model path"));
+
+    assert_eq!(arg, coreml);
+    assert_ne!(
+        arg,
+        coreml.join("kokoro-82m-coreml"),
+        "root, not the set dir"
+    );
+}
+
 /// The SAFETY claims above rest on this binary being the crate's only env writer outside
 /// `ort::set_ort_dylib_path` (`Once`-guarded, single deterministic path). A `set_var` added
 /// back to a `#[cfg(test)]` module in `src/` would race the download tests' `model_dir()`

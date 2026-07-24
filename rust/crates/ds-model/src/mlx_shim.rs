@@ -75,13 +75,13 @@ pub fn tts_model_dir_arg(model: ds_config::TtsModel) -> CString {
     path_arg(crate::mlx_repo::tts_mlx_dir(model))
 }
 
-/// Local directory FluidAudio's ANE Kokoro chain loads from -- the Core ML set root, whose
-/// `ANE/` subtree holds the models and `ANE/<voice>.bin` packs. The shim appends `ANE/`
-/// itself, and `ds-tts`'s voice-pack materializer writes into that same `ANE/` dir, so both
-/// resolve through this one root.
+/// The Core ML root handed to FluidAudio's ANE Kokoro chain. FluidAudio appends the variant's
+/// full `folderName` (`kokoro-82m-coreml/ANE`), so this is the root ABOVE the set dir -- see
+/// [`crate::coreml_repo::kokoro_hub_root`], which shares one resolution with the download
+/// target and with `ds-tts`'s voice-pack materializer.
 pub fn fluid_kokoro_dir_arg() -> CString {
     let dir = crate::hf_repo::ModelRoots::ambient()
-        .map(|roots| roots.dir_for(&crate::coreml_repo::KOKORO_COREML));
+        .map(|roots| crate::coreml_repo::kokoro_hub_root(&roots));
     path_arg(dir)
 }
 

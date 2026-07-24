@@ -11,6 +11,10 @@ use crate::hf_repo::{HfFile, HfRepo, ModelRoots, RepoRoot};
 
 /// On-disk folder name of the Apple-native Kokoro Core ML chain.
 pub const KOKORO_COREML_DIR_NAME: &str = "kokoro-82m-coreml";
+/// The Kokoro variant subfolder we fetch — MIRRORS the `.english` variant the shim requests
+/// (`KokoroAneManager(variant: .english)`), whose FluidAudio `folderName` is
+/// `<KOKORO_COREML_DIR_NAME>/ANE`. Mandarin (`ANE-zh`) and Japanese (`ANE-ja`) are unrouted.
+pub const KOKORO_ANE_VARIANT: &str = "ANE";
 /// Folder name inside FluidAudio's OWN cache. Its `G2PModel` singleton hardcodes
 /// `TtsCacheDirectory.ensure()/Models/kokoro`, so this name is theirs, not ours.
 pub const KOKORO_G2P_COREML_DIR_NAME: &str = "kokoro";
@@ -38,7 +42,18 @@ const KOKORO_HF_REVISION: &str = "c94edcb4b671856795458645cd389c0a9184e8bb";
 /// voice packs from (`<voice>.bin`; only `af_heart.bin` ships). A pack materialized for that
 /// chain MUST land here: DontSpeak initializes it with its OWN root, not FluidAudio's cache.
 pub fn kokoro_ane_dir(roots: &ModelRoots) -> PathBuf {
-    roots.dir_for(&KOKORO_COREML).join("ANE")
+    roots.dir_for(&KOKORO_COREML).join(KOKORO_ANE_VARIANT)
+}
+
+/// The directory handed to FluidAudio's `KokoroAneManager(directory:)` — the Core ML root, NOT
+/// the Kokoro set dir. `KokoroAneResourceDownloader.ensureModels` appends the variant's whole
+/// `folderName` (`kokoro-82m-coreml/ANE` for `.english`), so the argument is one level ABOVE
+/// the set dir; handing it the set dir resolves to `…/kokoro-82m-coreml/kokoro-82m-coreml/ANE`,
+/// which misses and — under `ModelHub.offlineMode` — fails as
+/// `networkDisabled(download(kokoro-82m-coreml/ANE))` instead of loading. `kokoro_hub_layout`
+/// pins this against [`kokoro_ane_dir`], where the downloader actually writes.
+pub fn kokoro_hub_root(roots: &ModelRoots) -> PathBuf {
+    ds_config::coreml_dir_under(&roots.model)
 }
 
 /// The directory handed to FluidAudio's `AsrModels.load(from:version:.v2)` for the batch set.
@@ -826,6 +841,43 @@ mod tests {
         assert!(
             !g2p.starts_with(&roots.model),
             "the G2P set is pre-filled into FluidAudio's own cache"
+        );
+    }
+
+    /// FluidAudio resolves its Kokoro models as `directory + <variant folderName>`, and for
+    /// `.english` that folder is the two-component `kokoro-82m-coreml/ANE` — so the argument is
+    /// the Core ML ROOT, not the set dir. Passing the set dir resolved one level too deep and,
+    /// under `ModelHub.offlineMode`, surfaced as `networkDisabled(download(...))` rather than a
+    /// load. This pins the argument against where the downloader actually writes.
+    #[test]
+    fn kokoro_hub_layout() {
+        let roots = ModelRoots::under(Path::new("/roots"));
+
+        assert_eq!(kokoro_hub_root(&roots), roots.model.join("coreml"));
+        assert_eq!(
+            kokoro_hub_root(&roots).join(format!("{KOKORO_COREML_DIR_NAME}/{KOKORO_ANE_VARIANT}")),
+            kokoro_ane_dir(&roots),
+            "FluidAudio's append must land on the downloaded set"
+        );
+        assert_ne!(
+            kokoro_hub_root(&roots),
+            roots.dir_for(&KOKORO_COREML),
+            "the hub root is ABOVE the set dir"
+        );
+    }
+
+    /// Cross-language drift guard: the variant this manifest fetches (`ANE/` prefixes, pinned by
+    /// [`KOKORO_ANE_VARIANT`]) MUST be the variant `ds_fluid_tts_init` asks FluidAudio for, or
+    /// the loader would resolve a folder we never downloaded. The Swift side names it as an enum
+    /// case, so assert that case still appears verbatim.
+    #[test]
+    fn kokoro_variant_matches_the_swift_loader() {
+        const FLUID_SWIFT: &str =
+            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/Fluid.swift");
+        assert_eq!(KOKORO_ANE_VARIANT, "ANE", "the `.english` variant folder");
+        assert!(
+            FLUID_SWIFT.contains("variant: .english"),
+            "Fluid.swift must request the .english Kokoro variant"
         );
     }
 }

@@ -95,7 +95,10 @@ voice design. All return 24 kHz PCM through the synchronous borrowed-buffer call
 **FluidAudio (`fluid`, Apple Silicon, Kokoro only, opt-in):** the same signed shim dylib
 exposes `ds_fluid_tts_*` over FluidAudio's ANE Kokoro. It receives the same Rust-owned IPA
 phonemes as every other Kokoro backend — DontSpeak skips FluidAudio's own G2P so the backends
-cannot drift. Two extra assets it needs: FluidAudio's `initialize()` eagerly loads a
+cannot drift. `KokoroAneManager(directory:)` takes the Core ML **root**, not the Kokoro set dir:
+FluidAudio appends the `.english` variant's whole `folderName` (`kokoro-82m-coreml/ANE`), so the
+set dir resolves one level too deep and fails closed as `networkDisabled` under offline mode
+(`ds_model::coreml_repo::kokoro_hub_root`). Two extra assets it needs: FluidAudio's `initialize()` eagerly loads a
 G2P/lexicon set from its hardcoded `~/.cache/fluidaudio/Models/kokoro`, which DontSpeak
 pre-fills (the `KOKORO_G2P_COREML` repo) for load only; and because the Core ML repo ships one
 voice pack (`ANE/af_heart.bin`) and `ensureVoicePack` throws with no fallback, any other voice's
