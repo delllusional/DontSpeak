@@ -712,13 +712,15 @@ pub(crate) fn parse_stt_ladder(v: &toml::Value) -> Vec<SttEngine> {
     fail_open_vec!(v, SttEngine, SttEngine::parse).unwrap_or_else(default_stt_engine_ladder)
 }
 
-/// Fail-open `tts_engine` preference: scalar = force; `[]` = off; else `None` (use ladder).
+/// Fail-open `tts_engine` preference: engine scalar = force; `"off"`/`[]` = off;
+/// else `None` (use ladder).
 pub(crate) fn de_tts_engine_pref<'de, D>(d: D) -> Result<Option<Vec<TtsEngine>>, D::Error>
 where
     D: Deserializer<'de>,
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
     Ok(match v {
+        toml::Value::String(s) if s.trim().eq_ignore_ascii_case("off") => Some(Vec::new()),
         toml::Value::String(s) => TtsEngine::parse(&s).map(|e| vec![e]),
         toml::Value::Array(items) if items.is_empty() => Some(Vec::new()),
         _ => None,
@@ -732,6 +734,7 @@ where
 {
     let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
     Ok(match v {
+        toml::Value::String(s) if s.trim().eq_ignore_ascii_case("off") => Some(Vec::new()),
         toml::Value::String(s) => SttEngine::parse(&s).map(|e| vec![e]),
         toml::Value::Array(items) if items.is_empty() => Some(Vec::new()),
         _ => None,

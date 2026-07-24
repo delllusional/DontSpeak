@@ -1468,6 +1468,7 @@ pub(crate) mod tests {
         );
         // An empty array ⇒ Some(vec![]) — explicit off.
         assert_eq!(p(r#"{"tts_engine":[]}"#), Some(Vec::new()));
+        assert_eq!(p(r#"{"tts_engine":"off"}"#), Some(Vec::new()));
         // An unrecognized token or a non-empty array fails open to None (unset), never a
         // silent wrong choice.
         assert_eq!(p(r#"{"tts_engine":"festival"}"#), None);
@@ -1485,7 +1486,30 @@ pub(crate) mod tests {
             Some(vec![SttEngine::ClaudeCode])
         );
         assert_eq!(p(r#"{"stt_engine":[]}"#), Some(Vec::new()));
+        assert_eq!(p(r#"{"stt_engine":"off"}"#), Some(Vec::new()));
         assert_eq!(p(r#"{"stt_engine":"deepgram"}"#), None);
+    }
+
+    #[test]
+    fn engine_preference_off_tokens_round_trip_as_empty_arrays() {
+        let parsed: VoiceConfig =
+            toml::from_str("tts_engine = \"off\"\nstt_engine = \"off\"\n").unwrap();
+        assert_eq!(parsed.tts_engine, Some(Vec::new()));
+        assert_eq!(parsed.stt_engine, Some(Vec::new()));
+        assert_eq!(parsed.resolved_tts(), None);
+        assert_eq!(parsed.resolved_stt(), None);
+
+        let encoded = toml::to_string(&parsed).unwrap();
+        let table: toml::Table = toml::from_str(&encoded).unwrap();
+        for field in ["tts_engine", "stt_engine"] {
+            assert!(
+                table[field].as_array().is_some_and(Vec::is_empty),
+                "{field} must serialize to the canonical [] off form"
+            );
+        }
+        let round_trip: VoiceConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(round_trip.tts_engine, parsed.tts_engine);
+        assert_eq!(round_trip.stt_engine, parsed.stt_engine);
     }
 
     #[test]
