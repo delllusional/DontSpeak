@@ -211,7 +211,8 @@ pub(crate) fn model_status_json(
     let tts_system_enabled = resolved_tts == Some(ds_config::TtsEngine::System);
     let tts_system_running = tts_system_enabled;
 
-    let diar_present = diarization_present();
+    let diar_present = ds_model::ModelRoots::ambient()
+        .is_some_and(|roots| diarization_present(&roots, cfg.resolved_diarizer()));
     // SepFormer required for lock green (exists check only — sha at download).
     let sepformer_present = ds_model::model_path(ds_model::SEPFORMER_FILE)
         .map(|p| p.is_file())
@@ -474,17 +475,17 @@ fn tts_provider_token(
 
 /// Realized diarizer token — `None` until a diarization backend can actually run.
 /// The diarizer loads inside `ds-helper` on demand and reports nothing back, so the
-/// engine measures what that load path needs: the config ladder, shim + MLX asset set
-/// (`backend_present`, mirroring [`parakeet_available`]), and `ensure_mlx_backend`, the
-/// sole provider→backend mapping — without which `resolved_diarizer`'s `Mlx` fallback
-/// would claim a backend off Apple-Silicon macOS. Speaker lock and SepFormer gate the row's `running`,
+/// engine measures what that load path needs: the config ladder, shim + the rung's asset set
+/// (`backend_present`, mirroring [`parakeet_available`]), and `ensure_backend`, the sole
+/// provider→backend mapping — without which `resolved_diarizer`'s fallback would claim a
+/// backend off Apple-Silicon macOS. Speaker lock and SepFormer gate the row's `running`,
 /// not the backend: `diarize`/`enroll` serve without either.
 fn diarization_provider_token(
     diarizer: ds_config::DiarizerProvider,
     enabled: bool,
     backend_present: bool,
 ) -> Option<String> {
-    (enabled && backend_present && ds_stt::diarize::ensure_mlx_backend(diarizer).is_ok())
+    (enabled && backend_present && ds_stt::diarize::ensure_backend(diarizer).is_ok())
         .then(|| diarizer.as_str().to_string())
 }
 
@@ -506,11 +507,27 @@ fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
     }
 }
 
-/// MLX diarization present — same completion markers as downloader.
-fn diarization_present() -> bool {
-    ds_model::ModelRoots::ambient().is_some_and(|roots| {
-        ds_model::hf_repo::is_hf_set_present(&roots, &ds_model::mlx_repo::DIARIZATION_MLX_SET)
-    })
+/// The diarization model set a resolved rung loads — MLX Sortformer + WeSpeaker, or FluidAudio's
+/// Core ML pyannote + WeSpeaker. The ONE place the provider chooses a set, so the presence probe
+/// and the status token can't disagree about which rung's files gate the row.
+fn diarization_set_for(
+    provider: ds_config::DiarizerProvider,
+) -> &'static [&'static ds_model::HfRepo] {
+    match provider {
+        ds_config::DiarizerProvider::Mlx => &ds_model::mlx_repo::DIARIZATION_MLX_SET[..],
+        ds_config::DiarizerProvider::Fluid => &ds_model::coreml_repo::DIARIZATION_COREML_SET[..],
+    }
+}
+
+/// Diarization set present for `provider` — same completion markers as the downloader, over the
+/// set matching the RESOLVED rung. R8/#200: a `diarizer=["fluid"]` config with only the MLX set
+/// on disk must read absent, so the (hidden) row never claims `provider:"fluid"` while unable to
+/// load. Takes `roots` as a value so no test resolves `$HOME` (#212).
+fn diarization_present(
+    roots: &ds_model::ModelRoots,
+    provider: ds_config::DiarizerProvider,
+) -> bool {
+    ds_model::hf_repo::is_hf_set_present(roots, diarization_set_for(provider))
 }
 
 /// Row "downloading": own fetch, or Cuda while `!engine_loaded` on ONNX path.
@@ -666,10 +683,10 @@ pub(crate) fn dictation_state(
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineShared, StatusGate, active_download_statuses, combined_error,
-        diarization_provider_token, dictation_local_stt, dictation_state, engine_state,
-        model_status_json, realized_provider_token, row_download_frac, row_downloading,
-        status_tts_model, stt_provider_token, tts_provider_token,
+        EngineShared, StatusGate, active_download_statuses, combined_error, diarization_present,
+        diarization_provider_token, diarization_set_for, dictation_local_stt, dictation_state,
+        engine_state, model_status_json, realized_provider_token, row_download_frac,
+        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -1120,23 +1137,56 @@ mod tests {
     #[test]
     fn diarization_provider_names_only_a_usable_backend() {
         // #200: the token was a constant, so the row claimed "mlx" with state "missing".
-        // Config off or shim/assets absent ⇒ nothing loadable ⇒ nothing to name.
-        let mlx = ds_config::DiarizerProvider::Mlx;
-        for (enabled, present) in [(false, false), (false, true), (true, false)] {
-            assert_eq!(
-                diarization_provider_token(mlx, enabled, present),
-                None,
-                "no loadable backend with enabled={enabled} present={present}"
-            );
+        // R8: extended to every rung — config off or shim/assets absent ⇒ nothing loadable ⇒
+        // nothing to name, for MLX and FluidAudio alike.
+        for provider in ds_config::DiarizerProvider::ALL.iter().copied() {
+            for (enabled, present) in [(false, false), (false, true), (true, false)] {
+                assert_eq!(
+                    diarization_provider_token(provider, enabled, present),
+                    None,
+                    "{provider:?}: no loadable backend with enabled={enabled} present={present}"
+                );
+            }
+            // Wiring is Apple-Silicon-macOS-only (`ds_stt::diarize::ensure_backend`, which
+            // defers to `is_diarizer_usable`), so elsewhere even a downloaded, enabled diarizer
+            // names nothing.
+            let usable = diarization_provider_token(provider, true, true);
+            if provider.is_diarizer_usable() {
+                assert_eq!(usable.as_deref(), Some(provider.as_str()));
+            } else {
+                assert_eq!(usable, None, "{provider:?}");
+            }
         }
-        // Wiring is Apple-Silicon-macOS-only (`ds_stt::diarize::ensure_mlx_backend`, which
-        // defers to `is_diarizer_usable`), so elsewhere even a downloaded, enabled diarizer
-        // names nothing.
-        let usable = diarization_provider_token(mlx, true, true);
-        if mlx.is_diarizer_usable() {
-            assert_eq!(usable.as_deref(), Some("mlx"));
-        } else {
-            assert_eq!(usable, None);
+    }
+
+    #[test]
+    fn diarization_presence_follows_the_selected_rung() {
+        use ds_config::DiarizerProvider;
+        // R8: the presence probe must follow the RESOLVED provider's set, so a
+        // `diarizer=["fluid"]` config with only the MLX set on disk can never read the Core ML
+        // row as present (and thus never claim `provider:"fluid"` on a row that cannot load).
+        // Pin the set routing directly; the sha256 probe over real model files can't be
+        // materialized hermetically.
+        let names = |set: &[&ds_model::HfRepo]| set.iter().map(|r| r.name).collect::<Vec<_>>();
+        assert_eq!(
+            names(diarization_set_for(DiarizerProvider::Mlx)),
+            names(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
+        );
+        assert_eq!(
+            names(diarization_set_for(DiarizerProvider::Fluid)),
+            names(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
+        );
+        // The two rungs must select DIFFERENT sets — the swap R8 guards against.
+        assert_ne!(
+            names(diarization_set_for(DiarizerProvider::Mlx)),
+            names(diarization_set_for(DiarizerProvider::Fluid))
+        );
+        // Absent on disk, presence is false for every rung, resolved through `roots` (no
+        // `$HOME` read).
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = ds_model::ModelRoots::under(tmp.path());
+        for provider in DiarizerProvider::ALL.iter().copied() {
+            assert!(!diarization_present(&roots, provider), "{provider:?}");
         }
     }
 

@@ -278,7 +278,7 @@ static TOOLS: &[Tool] = &[
             // Diarization (hidden when gate off).
             p(
                 DIARIZER,
-                PType::EnumArray(&["mlx"]),
+                PType::EnumArray(&["mlx", "fluid"]),
                 false,
                 SET_CONFIG_DIARIZER,
             ),
@@ -1696,6 +1696,54 @@ mod tests {
             .map(|provider| provider.as_str().to_string())
             .collect();
         assert_eq!(advertised, expected);
+    }
+
+    /// CATALOG-LEVEL drift guard for HIDDEN enum params. `set_config_enums_match_config_types`
+    /// walks the EMITTED schema, so while `DIARIZATION_ENABLED == false` the `diarizer` param is
+    /// absent and NOTHING there checks its vocabulary against `DiarizerProvider`. This walks the
+    /// `TOOLS` catalog directly instead, so a new `DiarizerProvider` rung that isn't mirrored
+    /// into the param's `EnumArray` fails HERE even while the row ships dark. Every hidden
+    /// enum-array param must be pinned, so the next hidden rung cannot drift either.
+    #[test]
+    fn hidden_enum_params_track_their_vocabularies() {
+        use ds_config::DiarizerProvider;
+
+        let set_config = TOOLS
+            .iter()
+            .find(|t| t.name == "set_config")
+            .expect("set_config tool in TOOLS");
+
+        // Each hidden set_config param that carries an enum-array vocabulary, pinned to its
+        // backing ds_config enum. Extend this when a hidden enum param is added.
+        let pinned: &[(&str, Vec<&'static str>)] = &[(
+            DIARIZER,
+            DiarizerProvider::ALL.iter().map(|&d| d.as_str()).collect(),
+        )];
+
+        let mut checked = 0;
+        for param in set_config.params {
+            if !HIDDEN_SET_CONFIG_PARAMS.contains(&param.name) {
+                continue;
+            }
+            if let PType::EnumArray(vocab) = &param.ty {
+                let (_, want) = pinned
+                    .iter()
+                    .find(|(name, _)| *name == param.name)
+                    .unwrap_or_else(|| {
+                        panic!("hidden enum param {} has no pinned vocabulary", param.name)
+                    });
+                assert_eq!(
+                    vocab.to_vec(),
+                    *want,
+                    "hidden param {} enum drifted from its ds_config vocabulary",
+                    param.name
+                );
+                checked += 1;
+            }
+        }
+        // The guard is only load-bearing while the param is actually hidden from the wire.
+        assert!(HIDDEN_SET_CONFIG_PARAMS.contains(&DIARIZER));
+        assert_eq!(checked, pinned.len(), "every pinned hidden enum was found");
     }
 
     /// PARITY GUARD: set_config enums must list exactly the backing ds_config tokens.

@@ -407,9 +407,10 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     });
 }
 
-/// MLX diarization fetch only on hosts that can run it (Apple Silicon) — elsewhere an
-/// enabled diarizer must not loop a doomed fetch on an unsupported target. Pure for tests.
-fn diarization_mlx_needed(host_supported: bool, diarization_on: bool, set_present: bool) -> bool {
+/// A diarization set is fetched only on hosts that can run it (Apple Silicon) — elsewhere an
+/// enabled diarizer must not loop a doomed fetch on an unsupported target. Shared by both rungs
+/// (`caller` selects the set by the resolved provider). Pure for tests.
+fn diarization_needed(host_supported: bool, diarization_on: bool, set_present: bool) -> bool {
     host_supported && diarization_on && !set_present
 }
 
@@ -439,6 +440,7 @@ struct DownloadNeeds {
     parakeet_mlx: bool,
     parakeet_fluid: bool,
     diarization_mlx: bool,
+    diarization_fluid: bool,
     sepformer_model: bool,
 }
 
@@ -462,6 +464,9 @@ fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     }
     if need.diarization_mlx {
         targets.push(DownloadTarget::DiarizationMlx);
+    }
+    if need.diarization_fluid {
+        targets.push(DownloadTarget::DiarizationFluid);
     }
     if need.sepformer_model {
         targets.push(DownloadTarget::SepformerModel);
@@ -559,11 +564,23 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let parakeet_mlx =
         stt_native && !stt_fluid && !set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
     let parakeet_fluid = stt_fluid && !set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET);
-    let diarization_mlx = diarization_mlx_needed(
-        DownloadTarget::DiarizationMlx.is_supported_on_this_host(),
-        cfg.is_diarization_on(),
-        set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
-    );
+    // Fetch only the resolved rung's set — a `diarizer=["fluid"]` config pulls the Core ML
+    // diarization set, not MLX's (and vice versa). Off-Apple-Silicon `resolved_diarizer` falls
+    // back to `Mlx`, whose host gate is false there, so neither loops a doomed fetch.
+    let diar_provider = cfg.resolved_diarizer();
+    let diarization_on = cfg.is_diarization_on();
+    let diarization_mlx = diar_provider == ds_config::DiarizerProvider::Mlx
+        && diarization_needed(
+            DownloadTarget::DiarizationMlx.is_supported_on_this_host(),
+            diarization_on,
+            set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
+        );
+    let diarization_fluid = diar_provider == ds_config::DiarizerProvider::Fluid
+        && diarization_needed(
+            DownloadTarget::DiarizationFluid.is_supported_on_this_host(),
+            diarization_on,
+            set_present(&ds_model::coreml_repo::DIARIZATION_COREML_SET),
+        );
     // Speaker-lock on + model absent: without it lock fails open (unfiltered).
     let sepformer_model = cfg!(target_os = "macos")
         && cfg.speaker_lock
@@ -576,6 +593,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         parakeet_mlx,
         parakeet_fluid,
         diarization_mlx,
+        diarization_fluid,
         sepformer_model,
     }
 }
@@ -621,7 +639,7 @@ fn apply_tts_provider(tts: &Arc<TtsManager>, cfg: &VoiceConfig, which: Provider)
 mod tests {
     use super::{
         AUTO_RETRY_BASE, AUTO_RETRY_CAP, DownloadNeeds, DownloadProgress, DownloadState, RetryGate,
-        TargetState, begin_download, begin_download_at, compute_needs, diarization_mlx_needed,
+        TargetState, begin_download, begin_download_at, compute_needs, diarization_needed,
         download_event_msg, download_needs_child_reload, fetch_plan, finish_download,
         finish_download_at, needed_downloads, needs_kokoro_frontend,
     };
@@ -734,18 +752,24 @@ mod tests {
         ));
     }
 
-    /// `diarization_mlx` need only when host supports the target.
+    /// Diarization fetch need only when the host supports the target — both rungs share the
+    /// predicate, so pin each target's host gate is Apple Silicon.
     #[test]
-    fn diarization_mlx_need_is_gated_on_host_support() {
-        let host = DownloadTarget::DiarizationMlx.is_supported_on_this_host();
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        assert!(!host, "MLX diarization is Apple Silicon only");
-        // Diarizer on + set absent: the need still follows host support.
-        assert_eq!(diarization_mlx_needed(host, true, false), host);
-        assert!(!diarization_mlx_needed(false, true, false));
-        assert!(!diarization_mlx_needed(true, false, false));
-        assert!(!diarization_mlx_needed(true, true, true));
-        assert!(diarization_mlx_needed(true, true, false));
+    fn diarization_need_is_gated_on_host_support() {
+        for target in [
+            DownloadTarget::DiarizationMlx,
+            DownloadTarget::DiarizationFluid,
+        ] {
+            let host = target.is_supported_on_this_host();
+            #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+            assert!(!host, "{target:?} diarization is Apple Silicon only");
+            // Diarizer on + set absent: the need still follows host support.
+            assert_eq!(diarization_needed(host, true, false), host);
+        }
+        assert!(!diarization_needed(false, true, false));
+        assert!(!diarization_needed(true, false, false));
+        assert!(!diarization_needed(true, true, true));
+        assert!(diarization_needed(true, true, false));
     }
 
     #[test]
@@ -846,6 +870,15 @@ mod tests {
                 ..Default::default()
             }),
             vec![DownloadTarget::KokoroFluid, DownloadTarget::ParakeetFluid]
+        );
+        // The Fluid diarization set slots exactly where the MLX one does, and each is selected
+        // by the resolved provider (never both), so the plan carries at most one.
+        assert_eq!(
+            need(DownloadNeeds {
+                diarization_fluid: true,
+                ..Default::default()
+            }),
+            vec![DownloadTarget::DiarizationFluid]
         );
     }
 

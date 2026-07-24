@@ -758,6 +758,26 @@ mod tests {
         assert_ne!(KOKORO_COREML.root, KOKORO_G2P_COREML.root);
     }
 
+    /// Cross-language drift guard: the two diarization `.mlmodelc` basenames the shim loads
+    /// MUST be exactly the constants this manifest pins, or the Rust presence probe and the
+    /// Swift loader (`ds_fluid_diar_init`) would look at different files. The Swift side hard-
+    /// codes them as string literals; this asserts they still appear verbatim in `Fluid.swift`.
+    /// Four levels up from `ds-model/src/` is the repo root — the same base `mlx_repo.rs`'s
+    /// Swift guard uses (`include_str!` resolves against this source file, not the CWD).
+    #[test]
+    fn diarization_model_names_match_prefixes() {
+        const FLUID_SWIFT: &str =
+            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/Fluid.swift");
+        assert!(
+            FLUID_SWIFT.contains(DIARIZATION_SEGMENTATION_MODEL),
+            "Fluid.swift must load {DIARIZATION_SEGMENTATION_MODEL}"
+        );
+        assert!(
+            FLUID_SWIFT.contains(DIARIZATION_EMBEDDING_MODEL),
+            "Fluid.swift must load {DIARIZATION_EMBEDDING_MODEL}"
+        );
+    }
+
     /// `.mlmodelc` members are nested manifest paths, so a hand-edited `..` would escape the
     /// download target — the transfer rejects that at run time; this rejects it at review time.
     #[test]

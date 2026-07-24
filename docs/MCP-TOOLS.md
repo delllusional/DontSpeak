@@ -240,7 +240,7 @@ Update and reload settings.
 
 | Param | Type | Description |
 |---|---|---|
-| `diarizer` | array of `mlx` | Diarization providers. [] = off (default). |
+| `diarizer` | array of `mlx`, `fluid` | Diarization providers. [] = off (default). |
 | `activity_threshold` | number 0.1–0.9 | Speaker-activity cutoff. Default 0.5. |
 | `match_threshold` | number 0.0–1.0 | Voiceprint match threshold. Default 0.65. |
 | `speaker_lock` | boolean | Only enrolled speakers. Default off. |

@@ -276,10 +276,10 @@ fn record_16k(seconds: u64, cancel: &std::sync::atomic::AtomicBool) -> Result<Ve
     Ok(pcm)
 }
 
-/// Gate via [`ds_stt::diarize::ensure_mlx_backend`] (sole provider-to-backend mapping).
+/// Gate via [`ds_stt::diarize::ensure_backend`] (sole provider-to-backend mapping).
 #[cfg(target_os = "macos")]
 fn ensure_mlx_diarizer(cfg: &ds_config::VoiceConfig) -> Result<(), String> {
-    ds_stt::diarize::ensure_mlx_backend(cfg.resolved_diarizer())
+    ds_stt::diarize::ensure_backend(cfg.resolved_diarizer())
 }
 
 /// One-shot diarize: record → cluster (config threshold). Emits `DIAR`/`DIARERR` + `DDONE`.

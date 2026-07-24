@@ -138,15 +138,20 @@ pub enum DiarizerProvider {
     /// MLX Audio on Apple Silicon (macOS only).
     #[default]
     Mlx,
+    /// FluidAudio's Core ML / ANE diarization — pyannote segmentation + WeSpeaker (macOS
+    /// Apple Silicon). Second rung beside MLX; both need the Neural Engine, so both share the
+    /// Apple-Silicon gate.
+    Fluid,
 }
 
 impl DiarizerProvider {
     /// All variants — catalog parity single source.
-    pub const ALL: &'static [DiarizerProvider] = &[DiarizerProvider::Mlx];
+    pub const ALL: &'static [DiarizerProvider] = &[DiarizerProvider::Mlx, DiarizerProvider::Fluid];
 
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "mlx" => Some(DiarizerProvider::Mlx),
+            "fluid" => Some(DiarizerProvider::Fluid),
             _ => None,
         }
     }
@@ -155,16 +160,25 @@ impl DiarizerProvider {
     pub fn as_str(self) -> &'static str {
         match self {
             DiarizerProvider::Mlx => "mlx",
+            DiarizerProvider::Fluid => "fluid",
         }
     }
 
-    /// Platform usable? (`mlx` = Apple-Silicon macOS only.) The ONE spelling of the
-    /// diarizer's platform gate: `ds_stt::diarize::ensure_mlx_backend` defers to it rather
-    /// than keeping a second `cfg!`, so the rung config calls usable is exactly the rung
-    /// that maps to a backend.
+    /// Platform usable? The ONE spelling of the diarizer's platform gate:
+    /// `ds_stt::diarize::ensure_backend` defers to it rather than keeping a second `cfg!`, so
+    /// the rung config calls usable is exactly the rung that maps to a backend.
     pub fn is_diarizer_usable(self) -> bool {
+        self.diarizer_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+    }
+
+    /// Pure `(os, arch)` form of [`is_diarizer_usable`](DiarizerProvider::is_diarizer_usable) —
+    /// the shape `Provider` already has (`stt_usable_on`/`tts_usable_on`), so the cross-platform
+    /// matrix can pin `fluid` off Apple Silicon without a second `cfg!` (the drift #211 caught).
+    /// Both rungs are Apple-Silicon macOS: MLX Sortformer and FluidAudio's Core ML chains alike
+    /// run only on the Neural Engine.
+    pub(crate) fn diarizer_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
-            DiarizerProvider::Mlx => cfg!(all(target_os = "macos", target_arch = "aarch64")),
+            DiarizerProvider::Mlx | DiarizerProvider::Fluid => os == "macos" && arch == "aarch64",
         }
     }
 }
@@ -580,7 +594,7 @@ strict_de!(ListenMode, "record_submit|always");
 strict_de!(Provider, "cpu|cuda|coreml|mlx|fluid");
 strict_de!(TrayKind, "stt|tts|stt_animated|tts_animated");
 strict_de!(CancelSpeechScope, "current|other");
-strict_de!(DiarizerProvider, "mlx");
+strict_de!(DiarizerProvider, "mlx|fluid");
 strict_de!(NarrateKind, "digests|shorts");
 
 /// Default narrate: shorts + digests. Empty array opts out.
@@ -823,6 +837,11 @@ mod tests {
         assert_eq!(Provider::Mlx.as_str(), "mlx");
         assert_eq!(Provider::Fluid.as_str(), "fluid");
         assert_eq!(DiarizerProvider::Mlx.as_str(), "mlx");
+        assert_eq!(DiarizerProvider::Fluid.as_str(), "fluid");
+        assert_eq!(
+            DiarizerProvider::parse("fluid"),
+            Some(DiarizerProvider::Fluid)
+        );
         assert_eq!(Provider::parse("coreml"), Some(Provider::OrtCoreMl));
         assert_eq!(Provider::parse("fluid"), Some(Provider::Fluid));
         // Unknown / casing drift → CPU, never a spurious accelerated-provider claim.
@@ -995,6 +1014,37 @@ mod tests {
         for (p, os, arch, want_stt, want_tts) in cases {
             assert_eq!(p.stt_usable_on(os, arch), want_stt, "stt {p:?} {os}/{arch}");
             assert_eq!(p.tts_usable_on(os, arch), want_tts, "tts {p:?} {os}/{arch}");
+        }
+    }
+
+    /// The diarizer's platform gate, as the full cross-platform matrix (runnable on any host)
+    /// plus host agreement — §10's `ds-config` matrix test. Both rungs are Apple-Silicon macOS
+    /// only, so a `diarizer=["fluid"]` config skips the rung everywhere else, exactly like MLX.
+    #[test]
+    fn diarizer_usability_matches_the_provider_matrix() {
+        use DiarizerProvider::*;
+        let cases = [
+            (Mlx, "macos", "aarch64", true),
+            (Mlx, "macos", "x86_64", false),
+            (Mlx, "windows", "x86_64", false),
+            (Mlx, "linux", "aarch64", false),
+            (Fluid, "macos", "aarch64", true),
+            (Fluid, "macos", "x86_64", false),
+            (Fluid, "windows", "x86_64", false),
+            (Fluid, "linux", "aarch64", false),
+        ];
+        for (p, os, arch, want) in cases {
+            assert_eq!(p.diarizer_usable_on(os, arch), want, "{p:?} {os}/{arch}");
+        }
+        // Host agreement: the pub `is_diarizer_usable` (which the live diarizer walks) must
+        // match the pure form for THIS (os, arch), so the two spellings never drift.
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        for p in DiarizerProvider::ALL.iter().copied() {
+            assert_eq!(
+                p.is_diarizer_usable(),
+                p.diarizer_usable_on(os, arch),
+                "{p:?}"
+            );
         }
     }
 

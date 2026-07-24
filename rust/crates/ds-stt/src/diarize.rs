@@ -118,22 +118,25 @@ pub trait Diarizer {
     }
 }
 
-/// Map resolved diarizer rung → backend. Only MLX is wired; else user-facing `Err`.
-/// The platform half of the gate is
-/// [`DiarizerProvider::is_diarizer_usable`](ds_config::DiarizerProvider::is_diarizer_usable)
-/// (Apple-Silicon macOS for `mlx`) — a local `cfg!` here would drift from what config
-/// resolves and hand callers a backend that only fails later at dylib load.
-pub fn ensure_mlx_backend(provider: DiarizerProvider) -> Result<(), String> {
-    match provider {
-        DiarizerProvider::Mlx if provider.is_diarizer_usable() => Ok(()),
-        // Reject unwired providers (and every provider off its platform) so config is honored.
-        other => Err(format!(
-            "diarizer={} is not available on this platform (only MLX is wired)",
-            other.as_str()
-        )),
+/// Map a resolved diarizer rung → its backend gate. Both rungs (MLX Sortformer and FluidAudio
+/// Core ML) run only where their chains can — Apple-Silicon macOS — so the platform half is
+/// [`DiarizerProvider::is_diarizer_usable`](ds_config::DiarizerProvider::is_diarizer_usable); a
+/// local `cfg!` here would drift from what config resolves and hand callers a backend that only
+/// fails later at dylib load. The message covers both causes (a rung off its platform, or a
+/// future unwired rung) deliberately, so it stays true as rungs are added.
+pub fn ensure_backend(provider: DiarizerProvider) -> Result<(), String> {
+    if provider.is_diarizer_usable() {
+        Ok(())
+    } else {
+        Err(format!(
+            "diarizer={} is not available on this platform",
+            provider.as_str()
+        ))
     }
 }
 
+#[cfg(target_os = "macos")]
+pub use fluid_impl::FluidDiarizer;
 #[cfg(target_os = "macos")]
 pub use mlx_impl::MlxDiarizer;
 
@@ -279,6 +282,151 @@ mod mlx_impl {
     }
 }
 
+/// FluidAudio pyannote + WeSpeaker (Core ML / ANE) via `libdontspeak_mlx` (macOS). Mirrors
+/// [`MlxDiarizer`] exactly — same `Diarizer` trait, same borrowed-callback bridge — but resolves
+/// the `ds_fluid_diar_*` symbols and loads the Core ML diarization set. `DiarizerManager` is not
+/// an actor, so the shim takes a full-call lock; nothing here need reason about that.
+#[cfg(target_os = "macos")]
+mod fluid_impl {
+    use std::ffi::{c_char, c_void};
+
+    use libloading::{Library, Symbol};
+
+    use super::{DiarizationOutput, Diarizer, parse_output};
+    use ds_model::mlx_shim::{PcmCb, StrCb};
+
+    // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
+    type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
+    type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
+    type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
+    type DiarShutdownFn = unsafe extern "C" fn();
+
+    pub struct FluidDiarizer {
+        lib: Option<Library>,
+        loaded: bool,
+        /// Clustering cutoff for `ds_fluid_diar_init` (0.1–0.9; 0.0 → shim default 0.7).
+        clustering_threshold: f32,
+    }
+
+    impl FluidDiarizer {
+        pub fn new() -> Self {
+            FluidDiarizer {
+                lib: None,
+                loaded: false,
+                clustering_threshold: 0.0,
+            }
+        }
+
+        /// `0.0` keeps the shim default; positive values clamp to 0.1–0.9.
+        pub fn with_threshold(threshold: f32) -> Self {
+            FluidDiarizer {
+                lib: None,
+                loaded: false,
+                clustering_threshold: if threshold.is_finite() && threshold > 0.0 {
+                    threshold.clamp(0.1, 0.9)
+                } else {
+                    0.0
+                },
+            }
+        }
+
+        fn ensure_lib(&mut self) -> Result<(), String> {
+            if self.lib.is_none() {
+                self.lib = Some(ds_model::mlx_shim::open()?);
+            }
+            Ok(())
+        }
+    }
+
+    impl Diarizer for FluidDiarizer {
+        fn preload(&mut self) -> Result<(), String> {
+            if self.loaded {
+                return Ok(());
+            }
+            self.ensure_lib()?;
+            let lib = self.lib.as_ref().expect("lib opened above");
+            // SAFETY: symbol matches `DiarInitFn`; `dir` lives across the blocking call.
+            let rc = unsafe {
+                let init: Symbol<DiarInitFn> = lib
+                    .get(b"ds_fluid_diar_init\0")
+                    .map_err(|e| format!("ds_fluid_diar_init symbol: {e}"))?;
+                let dir = ds_model::mlx_shim::fluid_diarization_dir_arg();
+                init(dir.as_ptr(), self.clustering_threshold)
+            };
+            if rc != 0 {
+                return Err(format!("ds_fluid_diar_init failed (rc={rc})"));
+            }
+            self.loaded = true;
+            Ok(())
+        }
+
+        fn diarize_pcm_16k_full(&mut self, pcm: &[f32]) -> Result<DiarizationOutput, String> {
+            if pcm.is_empty() {
+                return Ok(DiarizationOutput::default());
+            }
+            self.preload()?;
+            let lib = self.lib.as_ref().expect("lib loaded above");
+            // SAFETY: the shim exports this name with the `DiarizeFn` C ABI.
+            let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_fluid_diarize\0") }
+                .map_err(|e| format!("ds_fluid_diarize symbol: {e}"))?;
+            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
+            let json = ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+                dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            })
+            .map_err(|rc| format!("ds_fluid_diarize failed (rc={rc})"))?;
+            parse_output(&json)
+        }
+
+        fn embed(&mut self, pcm: &[f32]) -> Result<Vec<f32>, String> {
+            if pcm.is_empty() {
+                return Err("embed: empty audio".into());
+            }
+            self.preload()?;
+            let lib = self.lib.as_ref().expect("lib loaded above");
+            // SAFETY: the shim exports this name with the `EmbedFn` C ABI.
+            let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_fluid_diar_embed\0") }
+                .map_err(|e| format!("ds_fluid_diar_embed symbol: {e}"))?;
+            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
+            let emb = ds_model::mlx_shim::collect_pcm(|ctx, cb| unsafe {
+                ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            })
+            .map_err(|rc| format!("ds_fluid_diar_embed failed (rc={rc})"))?;
+            if emb.is_empty() {
+                return Err("embed: empty embedding".into());
+            }
+            Ok(emb)
+        }
+
+        fn unload(&mut self) -> bool {
+            if !self.loaded {
+                return false;
+            }
+            if let Some(lib) = &self.lib {
+                // SAFETY: idempotent shim shutdown.
+                unsafe {
+                    if let Ok(sd) = lib.get::<DiarShutdownFn>(b"ds_fluid_diar_shutdown\0") {
+                        sd();
+                    }
+                }
+            }
+            self.loaded = false;
+            true
+        }
+    }
+
+    impl Default for FluidDiarizer {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Drop for FluidDiarizer {
+        fn drop(&mut self) {
+            self.unload();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,19 +466,24 @@ mod tests {
     }
 
     #[test]
-    fn ensure_mlx_backend_gates_provider_per_platform() {
-        // Mlx is the one provider rung today, so the gate must answer exactly what config
-        // calls usable — asserted against `is_diarizer_usable` rather than a second `cfg!`,
-        // which is the drift #211 caught (x86_64 macOS got Ok). The Err message is the exact
-        // user-facing string the warm helper's diarize/enroll ops emit — keep it byte-stable.
-        let res = ensure_mlx_backend(DiarizerProvider::Mlx);
-        assert_eq!(res.is_ok(), DiarizerProvider::Mlx.is_diarizer_usable());
-        if let Err(msg) = res {
-            assert_eq!(
-                msg,
-                "diarizer=mlx is not available on this platform \
-                 (only MLX is wired)"
-            );
+    fn ensure_backend_gates_every_provider_per_platform() {
+        // Every rung's gate must answer exactly what config calls usable — asserted against
+        // `is_diarizer_usable` rather than a second `cfg!`, which is the drift #211 caught
+        // (x86_64 macOS got Ok). The Err message is the exact user-facing string the warm
+        // helper's diarize/enroll ops emit — keep it byte-stable, and it no longer claims
+        // "only MLX is wired" now that FluidAudio is a second rung.
+        for provider in DiarizerProvider::ALL.iter().copied() {
+            let res = ensure_backend(provider);
+            assert_eq!(res.is_ok(), provider.is_diarizer_usable(), "{provider:?}");
+            if let Err(msg) = res {
+                assert_eq!(
+                    msg,
+                    format!(
+                        "diarizer={} is not available on this platform",
+                        provider.as_str()
+                    )
+                );
+            }
         }
     }
 

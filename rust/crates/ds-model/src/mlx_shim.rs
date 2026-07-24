@@ -108,6 +108,15 @@ pub fn fluid_parakeet_eou_dir_arg() -> CString {
     path_arg(dir)
 }
 
+/// The FluidAudio Core ML diarization set directory the shim loads
+/// `pyannote_segmentation.mlmodelc` + `wespeaker_v2.mlmodelc` from directly (one resolution
+/// shared with the download target via `diarization_coreml_dir`).
+pub fn fluid_diarization_dir_arg() -> CString {
+    let dir = crate::hf_repo::ModelRoots::ambient()
+        .map(|roots| crate::coreml_repo::diarization_coreml_dir(&roots));
+    path_arg(dir)
+}
+
 /// Parent directory containing the Sortformer and WeSpeaker model subdirectories.
 pub fn mlx_model_root_arg() -> CString {
     path_arg(ds_config::mlx_dir())

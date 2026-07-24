@@ -319,3 +319,148 @@ public func ds_fluid_asr_stream_shutdown() {
     fluidStreamAsr.manager = nil
     fluidStreamAsr.lock.unlock()
 }
+
+// MARK: - Diarization (FluidAudio pyannote + WeSpeaker Core ML) — "who spoke when"
+// Own manager+lock; emits the SAME JSON contract as the MLX diarizer
+// ({"segments":[...],"speakers":{...}}) so parse_output is shared. DiarizerManager is NOT an
+// actor, so a full-call NSLock guards every entry (init, diarize, embed), not just init.
+// Models pre-downloaded by DontSpeak; loaded offline via the offlineMode switch in init.
+
+private final class FluidDiarState: @unchecked Sendable {
+    let lock = NSLock()
+    var manager: DiarizerManager?
+}
+private let fluidDiar = FluidDiarState()
+
+/// Load the diarizer from a DontSpeak-populated set directory (the directory whose members are
+/// the two .mlmodelc bundles). clusteringThreshold <= 0 → FluidAudio's default (0.7; lower =
+/// more speakers). 0 = ok.
+@_cdecl("ds_fluid_diar_init")
+public func ds_fluid_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
+    fluidDiar.lock.lock()
+    defer { fluidDiar.lock.unlock() }
+    // debugMode → speakerDatabase embeddings for enrolled-name matching. `let` for @Sendable capture.
+    let config: DiarizerConfig = {
+        var c =
+            clusteringThreshold > 0
+            ? DiarizerConfig(clusteringThreshold: clusteringThreshold)
+            : DiarizerConfig()
+        c.debugMode = true
+        return c
+    }()
+    // offlineMode: load only — DontSpeak pre-downloads the diarization set.
+    ModelHub.offlineMode = true
+    let dir = fluidCString(modelDir).map { URL(fileURLWithPath: $0) }
+    switch fluidRunBlocking({ () -> DiarizerManager in
+        // The passed dir IS the set directory. CONTRACT: these two basenames match ds-model's
+        // coreml_repo DIARIZATION_* consts (a Rust guard cross-checks the literals) — keep literal.
+        guard let dir else { throw MlxShimError.nilDir }
+        let models = try DiarizerModels.load(
+            localSegmentationModel: dir.appendingPathComponent("pyannote_segmentation.mlmodelc"),
+            localEmbeddingModel: dir.appendingPathComponent("wespeaker_v2.mlmodelc")
+        )
+        let mgr = DiarizerManager(config: config)
+        mgr.initialize(models: models)
+        return mgr
+    }) {
+    case .success(let mgr):
+        fluidDiar.manager = mgr
+        return 0
+    case .failure(let e):
+        fluidLogErr("ds_fluid_diar_init error: \(e)")
+        return 1
+    }
+}
+
+/// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for the engine join. Empty →
+/// {"segments":[]}. Not initialized → rc 2.
+@_cdecl("ds_fluid_diarize")
+public func ds_fluid_diarize(
+    _ samples: UnsafePointer<Float>?,
+    _ n: Int,
+    _ sampleRate: Int32,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: MlxStrCb?
+) -> Int32 {
+    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
+    guard let cb else { return 4 }
+    // Full-call lock: DiarizerManager is not an actor (races if concurrent).
+    fluidDiar.lock.lock()
+    defer { fluidDiar.lock.unlock() }
+    guard let mgr = fluidDiar.manager else {
+        fluidLogErr("ds_fluid_diarize: not initialized")
+        return 2
+    }
+    guard let samples, n > 0 else {
+        "{\"segments\":[]}".withCString { cb(ctx, $0) }
+        return 0
+    }
+    let audio = Array(UnsafeBufferPointer(start: samples, count: n))
+    // performCompleteDiarization is synchronous (throwing) — no async bridge needed.
+    do {
+        let result = try mgr.performCompleteDiarization(audio)
+        let segs: [[String: Any]] = result.segments.map { seg in
+            [
+                "speaker": seg.speakerId,
+                "start": seg.startTimeSeconds,
+                "end": seg.endTimeSeconds,
+            ]
+        }
+        // Embeddings keyed by segment speakerId (same id-space as the engine's cluster join).
+        var speakers: [String: [Float]] = [:]
+        let db = result.speakerDatabase ?? [:]
+        for seg in result.segments {
+            let id = seg.speakerId
+            if speakers[id] == nil, let emb = db[id] {
+                speakers[id] = emb
+            }
+        }
+        let data = try JSONSerialization.data(withJSONObject: [
+            "segments": segs,
+            "speakers": speakers,
+        ])
+        String(decoding: data, as: UTF8.self).withCString { cb(ctx, $0) }
+        return 0
+    } catch {
+        fluidLogErr("ds_fluid_diarize error: \(error)")
+        return 1
+    }
+}
+
+/// WeSpeaker embedding for enrollment. Needs ds_fluid_diar_init (rc 2 otherwise). Empty → rc 3.
+@_cdecl("ds_fluid_diar_embed")
+public func ds_fluid_diar_embed(
+    _ samples: UnsafePointer<Float>?,
+    _ n: Int,
+    _ sampleRate: Int32,
+    _ ctx: UnsafeMutableRawPointer?,
+    _ cb: MlxPcmCb?
+) -> Int32 {
+    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
+    guard let cb else { return 4 }
+    // Full-call lock (non-actor manager).
+    fluidDiar.lock.lock()
+    defer { fluidDiar.lock.unlock() }
+    guard let mgr = fluidDiar.manager else {
+        fluidLogErr("ds_fluid_diar_embed: not initialized")
+        return 2
+    }
+    guard let samples, n > 0 else { return 3 }
+    let audio = Array(UnsafeBufferPointer(start: samples, count: n))
+    do {
+        let emb = try mgr.extractSpeakerEmbedding(from: audio)
+        // Borrow the embedding to the callback (sample_rate is irrelevant for an embedding).
+        emb.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, 0) }
+        return 0
+    } catch {
+        fluidLogErr("ds_fluid_diar_embed error: \(error)")
+        return 1
+    }
+}
+
+@_cdecl("ds_fluid_diar_shutdown")
+public func ds_fluid_diar_shutdown() {
+    fluidDiar.lock.lock()
+    fluidDiar.manager = nil
+    fluidDiar.lock.unlock()
+}

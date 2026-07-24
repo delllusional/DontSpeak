@@ -91,6 +91,28 @@ int32_t ds_fluid_asr_stream_finish(void *ctx, ds_mlx_str_cb cb);
 // ds_fluid_transcribe. ds_fluid_asr_shutdown owns model teardown.
 void ds_fluid_asr_stream_shutdown(void);
 
+// --- Diarization (pyannote + WeSpeaker, FluidAudio Core ML) — the `fluid` diarizer --------
+// Same dylib and borrowed-result callbacks as ds_mlx_*; Apple Silicon only. DiarizerManager is
+// not an actor, so the shim serializes every call. DontSpeak pre-downloads the diarization set;
+// the shim loads offline (ModelHub.offlineMode). Emits the SAME JSON contract as ds_mlx_diarize.
+
+// Load pyannote_segmentation.mlmodelc + wespeaker_v2.mlmodelc from a required local set
+// directory. clustering_threshold tunes speaker separation (0.1-0.9); <= 0 uses 0.7.
+int32_t ds_fluid_diar_init(const char *model_dir, float clustering_threshold);
+
+// Diarize 16 kHz mono f32 PCM → UTF-8 JSON, delivered to `cb`:
+//   {"segments":[{"speaker","start","end"},...], "speakers":{"<id>":[..floats..]}}.
+// `speakers` maps each cluster id to its WeSpeaker embedding (for enrolled-name matching).
+int32_t ds_fluid_diarize(const float *samples, size_t n, int32_t sample_rate,
+                         void *ctx, ds_mlx_str_cb cb);
+
+// Extract one WeSpeaker voiceprint from 16 kHz mono f32 PCM (enrollment), delivered to `cb`
+// (sample_rate is irrelevant for an embedding). Requires ds_fluid_diar_init first (rc 2).
+int32_t ds_fluid_diar_embed(const float *samples, size_t n, int32_t sample_rate,
+                            void *ctx, ds_mlx_pcm_cb cb);
+
+void ds_fluid_diar_shutdown(void);
+
 // --- ASR (Parakeet TDT, MLX) — the MLX STT backend -----------------------------
 
 // Load Parakeet TDT v2 (English-only) from a required local model directory.

@@ -59,4 +59,29 @@ final class FluidAbiTests: XCTestCase {
         let cb: MlxStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_transcribe(nil, 0, 16_000, nil, cb), 2)
     }
+
+    // Diarization ABI edges. `ds_fluid_diar_init` is never called (it would touch the ANE), so
+    // the manager stays nil and the not-initialized path is exercised deterministically. No
+    // model files, no network.
+
+    /// Diarizing before init returns the not-initialized rc (2), never a crash. The manager
+    /// check precedes the sample check, so a nil sample pointer still reaches rc 2.
+    func testDiarizeBeforeInitReportsNotInitialized() {
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_diarize(nil, 0, 16_000, nil, cb), 2)
+    }
+
+    /// Embedding before init likewise reports not-initialized (2), never a crash.
+    func testEmbedBeforeInitReportsNotInitialized() {
+        let cb: MlxPcmCb = { _, _, _, _ in }
+        XCTAssertEqual(ds_fluid_diar_embed(nil, 0, 16_000, nil, cb), 2)
+    }
+
+    /// Shutdown with no live manager is a safe no-op (idempotent), and a following diarize
+    /// still reports not-initialized rather than touching a freed manager.
+    func testDiarShutdownWithoutInitIsSafe() {
+        ds_fluid_diar_shutdown()
+        let cb: MlxStrCb = { _, _ in }
+        XCTAssertEqual(ds_fluid_diarize(nil, 0, 16_000, nil, cb), 2)
+    }
 }

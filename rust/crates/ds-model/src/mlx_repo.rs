@@ -748,7 +748,8 @@ mod tests {
 
         // Fluid.swift's ONLY ModelHub use is the offline switch that keeps it load-only:
         // every `ModelHub` occurrence must be a `ModelHub.offlineMode = true` (each init path --
-        // TTS, batch ASR, streaming ASR -- sets it), never a download or cache-management call.
+        // TTS, batch ASR, streaming ASR, diarizer -- sets it), never a download or
+        // cache-management call.
         assert!(
             fluid.contains("ModelHub.offlineMode = true"),
             "Fluid.swift must load offline"
