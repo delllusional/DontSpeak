@@ -17,6 +17,10 @@ use ds_config::{Paths, TtsArgPools, VoiceConfig, WiredAgent};
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
 
+/// The agent's language-less voice claim: the greeting takes it before any language is
+/// known, and `pick_for_language` falls back to it when no voice anywhere owns the language.
+const DEFAULT_VOICE_KEY: &str = "";
+
 struct HealingGuard(Arc<AtomicBool>);
 impl Drop for HealingGuard {
     fn drop(&mut self) {
@@ -177,6 +181,18 @@ fn pick_agent_voice(
             })
             .count()
     };
+    // The greeting claimed a voice before any language was known ([`DEFAULT_VOICE_KEY`]).
+    // The first language that can speak it adopts it, so the voice the greeting ANNOUNCED
+    // is the one that keeps speaking; a language it cannot speak still rolls its own.
+    // `load(claimed) == 0` keeps an agent that never greeted from doubling up on a voice it
+    // already rolled for this language while a spare sits free.
+    if !agent.1.is_empty()
+        && let Some(claimed) = assignments.get(&(agent.0, DEFAULT_VOICE_KEY.to_string()))
+        && pool.iter().any(|p| p == claimed)
+        && load(claimed) == 0
+    {
+        return claimed.clone();
+    }
     let free: Vec<&String> = pool.iter().filter(|v| load(v) == 0).collect();
     let candidates = if free.is_empty() {
         let min = pool.iter().map(|v| load(v)).min().unwrap_or(0);
@@ -1327,7 +1343,7 @@ impl TtsQueue {
         pool: &[String],
     ) -> String {
         let Some(language) = language else {
-            return self.assign_agent_voice(source, "", pool);
+            return self.assign_agent_voice(source, DEFAULT_VOICE_KEY, pool);
         };
         let catalog = catalog();
         let mut candidates = catalog.pool_for_language(pool, language);
@@ -1338,7 +1354,7 @@ impl TtsQueue {
             // No voice anywhere owns the language (fresh install, or a language the catalog
             // does not cover). Keep the agent's usual voice rather than drop the utterance:
             // synthesis still receives the detected language, so pronunciation stays right.
-            return self.assign_agent_voice(source, "", pool);
+            return self.assign_agent_voice(source, DEFAULT_VOICE_KEY, pool);
         }
         self.assign_agent_voice(source, language, &candidates)
     }
@@ -2263,6 +2279,41 @@ mod tests {
                 "4 agents over 2 voices must spread 2-and-2, not clump"
             );
         }
+    }
+
+    #[test]
+    fn greeting_claim_seeds_the_first_language_that_can_speak_it() {
+        // The greeting claims under the language-less key, then the first reply resolves under
+        // a concrete language: without the seed it would roll a FRESH voice and the announced
+        // name would never be heard again. The roll here would pick something else.
+        let claim = |agent| (Some(agent), String::new());
+        let en = vec!["af_sarah".to_string(), "am_adam".to_string()];
+
+        let mut a = HashMap::new();
+        a.insert(claim(WiredAgent::Codex), "af_sarah".to_string());
+        assert_eq!(
+            pick_agent_voice(&a, &en, &key(WiredAgent::Codex), &mut |n| n - 1),
+            "af_sarah"
+        );
+
+        // A language the claimed voice cannot speak rolls its own — the claim does not leak.
+        let italian = vec!["if_sara".to_string()];
+        assert_eq!(
+            pick_agent_voice(
+                &a,
+                &italian,
+                &(Some(WiredAgent::Codex), "it".to_string()),
+                &mut |n| n - 1
+            ),
+            "if_sara"
+        );
+
+        // Another agent already rolled that voice for this language: spreading still wins.
+        a.insert(key(WiredAgent::ClaudeCode), "af_sarah".to_string());
+        assert_eq!(
+            pick_agent_voice(&a, &en, &key(WiredAgent::Codex), &mut |n| n - 1),
+            "am_adam"
+        );
     }
 
     #[test]
@@ -5189,18 +5240,30 @@ mod tests {
             .get(&(Some(WiredAgent::Codex), String::new()))
             .cloned()
             .expect("greeting claims the agent voice at open");
-        // The queued greeting carries the claimed voice as its per-item override.
+        // The queued greeting carries the claimed voice as its per-item override, and
+        // ANNOUNCES that same voice by name — the two must never diverge.
         {
             let items = q.items.lock().unwrap();
             match &items[0].action {
                 QueueAction::Speech {
                     tts_args: Some(args),
+                    text,
                     ..
                 } => {
                     assert_eq!(
                         args.for_target(ds_config::TtsEngine::BuiltIn, ds_config::TtsModel::Kokoro)
                             .and_then(ds_config::TtsTargetArgs::voice),
                         Some(claimed.as_str())
+                    );
+                    let announced = ds_tts::enumerate::voice_display_name(
+                        ds_config::TtsEngine::BuiltIn,
+                        ds_config::TtsModel::Kokoro,
+                        &claimed,
+                    )
+                    .expect("Kokoro display names are pure");
+                    assert!(
+                        text.contains(&announced),
+                        "greeting must announce the claimed voice, got: {text}"
                     );
                 }
                 other => panic!("greeting must queue speech, got {other:?}"),
@@ -5211,6 +5274,15 @@ mod tests {
             .resolve_engine_voice(&cfg, Some(WiredAgent::Codex), None)
             .expect("Kokoro later reply");
         assert_eq!(later, claimed);
+        // The REAL reply path: `gate_item` always resolves under the detected language, so the
+        // announced voice only keeps speaking if the language-less claim seeds that key.
+        // Both pool entries are English, so `pool_for_language` is non-empty and the
+        // disk-reading borrow path is never taken.
+        assert_eq!(
+            q.resolve_engine_voice(&cfg, Some(WiredAgent::Codex), Some("en"))
+                .map(|(_, voice)| voice),
+            Some(claimed)
+        );
     }
 
     /// Solid English turn corpus: what a short digest falls back to when it cannot
