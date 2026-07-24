@@ -24,6 +24,30 @@ fn active_targets(downloads: &DownloadProg) -> Vec<DownloadTarget> {
         .collect()
 }
 
+/// Names WHAT still holds a referenced shared asset. One arm per
+/// [`ds_config::SHARED_ASSET_TOKENS`] entry, so no id inherits another's cause;
+/// `every_shared_token_names_its_own_cause` fails the build when a token arrives without one.
+fn shared_refusal(id: &str) -> String {
+    match id {
+        ds_config::ONNXRUNTIME_ASSET_TOKEN => format!(
+            "models: `{id}` is still needed by an installed or selected ONNX model — remove those models first"
+        ),
+        ds_config::KOKORO_FRONTEND_ASSET_TOKEN => {
+            format!("models: `{id}` is still needed by Kokoro — remove or deselect `kokoro` first")
+        }
+        ds_config::CUDA_ASSET_TOKEN => format!(
+            "models: `{id}` is the resolved compute provider — set_config provider without `cuda` first"
+        ),
+        _ => unnamed_shared_refusal(id),
+    }
+}
+
+/// Cause-free fallback for a shared id [`shared_refusal`] does not name — refuse without
+/// asserting a reason that may not apply.
+fn unnamed_shared_refusal(id: &str) -> String {
+    format!("models: `{id}` is shared and still referenced — remove or deselect what needs it")
+}
+
 /// Refuse a removal the engine would immediately undo, or that would break an installed
 /// model. `None` ⇒ the removal may proceed. First match wins.
 fn refusal(root: &Path, cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) -> Option<String> {
@@ -56,17 +80,7 @@ fn refusal(root: &Path, cfg: &VoiceConfig, id: &str, active: &[DownloadTarget]) 
         });
     }
     if ds_model::shared_asset_referenced(root, cfg, id) {
-        return Some(match id {
-            ds_config::ONNXRUNTIME_ASSET_TOKEN => format!(
-                "models: `{id}` is still needed by an installed or selected ONNX model — remove those models first"
-            ),
-            ds_config::KOKORO_FRONTEND_ASSET_TOKEN => format!(
-                "models: `{id}` is still needed by Kokoro — remove or deselect `kokoro` first"
-            ),
-            _ => format!(
-                "models: `{id}` is the resolved compute provider — set_config provider without `cuda` first"
-            ),
-        });
+        return Some(shared_refusal(id));
     }
     if ds_model::is_shared_asset(id) && !active.is_empty() {
         // `DownloadTarget::Onnxruntime` is never an engine download target — every ORT fetch
@@ -278,8 +292,18 @@ mod tests {
         assert!(!dylib.exists());
     }
 
-    /// The CUDA runtime is referenced by SELECTION alone, so this fixture must resolve a
-    /// built-in engine — with a model whose own row is not the one being removed.
+    /// Every shared token must name what holds it; the fallback names nothing, so a token
+    /// still answering with it is one this table has not been taught.
+    #[test]
+    fn every_shared_token_names_its_own_cause() {
+        for id in ds_config::SHARED_ASSET_TOKENS {
+            assert_ne!(shared_refusal(id), unnamed_shared_refusal(id), "{id}");
+        }
+    }
+
+    /// The CUDA runtime is referenced by SELECTION plus a driver to use it, so this fixture
+    /// must resolve a built-in engine — with a model whose own row is not the one being
+    /// removed — and split on whether this host actually has the driver.
     #[test]
     fn the_cuda_runtime_follows_the_resolved_provider() {
         let cfg = |provider: &str| {
@@ -304,15 +328,18 @@ mod tests {
 
         let (_config, paths) = fixture(&cfg("cuda"));
         let models = tempfile::tempdir().unwrap();
-        assert_eq!(
-            error_of(respond(
-                &paths,
-                &downloads(&[]),
-                models.path(),
-                Some("cuda")
-            )),
-            "models: `cuda` is the resolved compute provider — set_config provider without `cuda` first"
-        );
+        assert_fixture_is_isolated(models.path(), &models.path().join("cuda"));
+        let response = respond(&paths, &downloads(&[]), models.path(), Some("cuda"));
+        if ds_model::cuda_driver_available() {
+            assert_eq!(
+                error_of(response),
+                "models: `cuda` is the resolved compute provider — set_config provider without `cuda` first"
+            );
+        } else {
+            // No driver: the engine runs the CPU EP and never prefetches the runtime, so the
+            // ladder resolving to `cuda` must not strand ~1.4 GB on this host.
+            assert_eq!(payload(response)["removed"]["id"], "cuda");
+        }
 
         let (_config, paths) = fixture(&cfg("cpu"));
         let models = tempfile::tempdir().unwrap();

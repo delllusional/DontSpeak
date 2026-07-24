@@ -141,7 +141,7 @@ Removal takes every on-disk variant of one model (ONNX and MLX). It is refused w
   ``models: `onnxruntime` is still needed by an installed or selected ONNX model — remove those models first``
 - the Kokoro text frontend is still referenced —
   ``models: `kokoro_frontend` is still needed by Kokoro — remove or deselect `kokoro` first``
-- the CUDA runtime is still selected —
+- the CUDA runtime is the resolved provider on a machine with an NVIDIA driver —
   ``models: `cuda` is the resolved compute provider — set_config provider without `cuda` first``
 - a shared asset is asked for while any download runs —
   ``models: `onnxruntime` is shared and a download is in flight — try again when it finishes``
@@ -157,7 +157,9 @@ A shared asset (`kokoro_frontend`, `onnxruntime`, `cuda`) is reclaimable once no
 references it — nothing installed loads it, and the current config would not make the
 engine fetch it again. `reason: "shared"` means *still referenced*, not *never removable*.
 Reclaiming is therefore ordered: remove the models first, then `kokoro_frontend`, then
-`onnxruntime`; freeing `cuda` needs `set_config provider` without `cuda`. `removable` is
+`onnxruntime`; freeing `cuda` needs `set_config provider` without `cuda`. A host with no
+NVIDIA driver reclaims `cuda` outright whatever the provider ladder says — there the engine
+runs the CPU provider and never re-fetches the runtime. `removable` is
 also false while a download is in flight, where `reason` stays null (live download state
 belongs to `status`). Removing a model that was never downloaded succeeds and reclaims 0
 bytes; it may create empty cache directories and lock sidecars. Removal never changes the

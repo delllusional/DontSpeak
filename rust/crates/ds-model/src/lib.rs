@@ -68,9 +68,10 @@ pub use kokoro_frontend::{
     is_espeak_loader_present,
 };
 pub use ort::{
-    ONNXRUNTIME_VERSION, cuda_session_builder, ensure_onnxruntime_with_progress, ensure_ort_dylib,
-    ensure_ort_dylib_gpu, is_onnxruntime_dylib_version_ok, onnxruntime_dylib_file,
-    onnxruntime_dylib_path, set_ort_dylib_path,
+    ONNXRUNTIME_VERSION, cuda_driver_available, cuda_session_builder,
+    ensure_onnxruntime_with_progress, ensure_ort_dylib, ensure_ort_dylib_gpu,
+    is_onnxruntime_dylib_version_ok, onnxruntime_dylib_file, onnxruntime_dylib_path,
+    set_ort_dylib_path,
 };
 pub use read_retry::{read_model_file, read_model_file_to_string};
 pub use setup::{

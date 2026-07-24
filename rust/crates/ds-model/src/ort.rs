@@ -666,6 +666,26 @@ pub fn is_cuda_driver_present() -> bool {
     }
 }
 
+/// `is_cuda_driver_present` where a CUDA build exists, `false` on every other host — the
+/// portable spelling, mirroring [`crate::tts_assets::cuda_runtime_available`]. Callable from
+/// code that is not itself `#[cfg]`-gated to x86_64 Windows/Linux.
+pub fn cuda_driver_available() -> bool {
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    {
+        is_cuda_driver_present()
+    }
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
+    {
+        false
+    }
+}
+
 /// Download + extract the pinned CUDA runtime wheels into [`cuda_runtime_dir`]. Each wheel is
 /// a zip; we pull out every `*.dll`/`*.so`. Idempotent (a present runtime returns immediately).
 ///

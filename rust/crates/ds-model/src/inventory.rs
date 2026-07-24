@@ -384,10 +384,12 @@ fn sepformer_selected(cfg: &VoiceConfig) -> bool {
         && cfg.is_diarization_on()
 }
 
-/// Would this configuration load the CUDA EP? The ONE spelling of "a built-in engine
-/// resolves to the CUDA provider", read by the engine's boot prefetch (`apply_tts_provider`)
-/// and its warm-child reload (`download_needs_child_reload`), so a reclaimed runtime is never
-/// one the next pass re-fetches. Typed `Provider` throughout — never a `"cuda"` string.
+/// Does this configuration ask for the CUDA EP? The ONE spelling of "a built-in engine
+/// resolves to the CUDA provider", read by the engine's boot prefetch (`apply_tts_provider`),
+/// its warm-child reload (`download_needs_child_reload`) and [`shared_asset_referenced`], so
+/// a reclaimed runtime is never one the next pass re-fetches. Pure config — the live driver
+/// probe stays with the callers that gate on it. Typed `Provider` throughout — never a
+/// `"cuda"` string.
 pub fn cuda_runtime_wanted(cfg: &VoiceConfig) -> bool {
     (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
         && cfg.resolved_tts_provider() == ds_config::Provider::OrtCuda)
@@ -403,9 +405,13 @@ pub fn is_shared_asset(id: &str) -> bool {
 /// Does anything on this host still need shared asset `id`? Two independent reasons:
 /// something INSTALLED loads it (never break an installed model), or the current SELECTION
 /// would make the engine fetch it again (never remove what the next reload undoes).
-/// `false` for a model row and for an id this build does not list.
+/// `false` for a model row and for an id this build does not list; a shared row this table
+/// does not describe is referenced, so a reclaim can never outrun the arms below.
 pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool {
     let Some(row) = row(id) else { return false };
+    if !row.kind.is_shared() {
+        return false;
+    }
     match row.targets {
         [DownloadTarget::KokoroFrontend] => {
             any_installed(
@@ -423,10 +429,14 @@ pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool
                 || cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
                 || sepformer_selected(cfg)
         }
-        [DownloadTarget::Cuda] => cuda_runtime_wanted(cfg),
-        // Every model row, and any future multi-target shared row — which must then be
-        // given its own arm here.
-        _ => false,
+        // A driverless host loads the CPU EP instead ([`crate::ort::ensure_ort_dylib_gpu`])
+        // and its boot prefetch requires this same conjunct
+        // (`dontspeakd::downloads::should_prefetch_cuda`), so the ~1.4 GB runtime is
+        // reclaimable there whatever the provider ladder resolves to.
+        [DownloadTarget::Cuda] => cuda_runtime_wanted(cfg) && crate::ort::cuda_driver_available(),
+        // Fail closed: a shared row with no arm of its own reads as referenced rather than
+        // as free to delete. `every_shared_row_has_its_own_reference_arm` catches the drift.
+        _ => true,
     }
 }
 
@@ -871,6 +881,23 @@ mod tests {
         }
     }
 
+    /// Drift guard for [`shared_asset_referenced`]'s arms. With nothing installed and nothing
+    /// selected the only clause that can answer `true` is the fail-closed default, so a shared
+    /// row added without an arm of its own fails here instead of becoming silently
+    /// reclaimable while the engine still loads it.
+    #[test]
+    fn every_shared_row_has_its_own_reference_arm() {
+        let empty = tempfile::tempdir().unwrap();
+        let cfg = nothing_selected();
+        for row in ROWS.iter().filter(|row| row.kind.is_shared()) {
+            assert!(
+                !shared_asset_referenced(empty.path(), &cfg, row.id),
+                "`{}` has no arm in shared_asset_referenced",
+                row.id
+            );
+        }
+    }
+
     #[test]
     fn remove_deletes_only_what_the_asset_owns() {
         let root = tempfile::tempdir().unwrap();
@@ -1079,6 +1106,10 @@ mod tests {
     fn cuda_reference_follows_the_resolved_provider() {
         let root = tempfile::tempdir().unwrap();
         let has_row = DownloadTarget::Cuda.is_supported_on_this_host();
+        // Selection alone does not hold the runtime: with no NVIDIA driver the engine runs the
+        // CPU EP and `should_prefetch_cuda` never fetches it, so a driverless x86_64 host
+        // reclaims the ~1.4 GB even while the ladder still resolves to `cuda`.
+        let held = has_row && crate::ort::cuda_driver_available();
         let built_in_tts = |provider| VoiceConfig {
             tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
             stt_engine: Some(Vec::new()),
@@ -1090,7 +1121,8 @@ mod tests {
         assert!(!shared_asset_referenced(root.path(), &cpu, "cuda"));
 
         let cuda = built_in_tts(ds_config::Provider::OrtCuda);
-        assert_eq!(shared_asset_referenced(root.path(), &cuda, "cuda"), has_row);
+        assert_eq!(cuda_runtime_wanted(&cuda), has_row);
+        assert_eq!(shared_asset_referenced(root.path(), &cuda, "cuda"), held);
 
         // A CUDA STT alone keeps the runtime, even with TTS off (`5cf0c0b` made
         // `Provider::OrtCuda` usability arch-aware, so this tracks the row exactly).
@@ -1102,7 +1134,7 @@ mod tests {
         };
         assert_eq!(
             shared_asset_referenced(root.path(), &stt_cuda, "cuda"),
-            has_row
+            held
         );
 
         let off = VoiceConfig {
@@ -1230,9 +1262,10 @@ mod tests {
         assert_eq!(parakeet["removable"], true);
         assert_eq!(parakeet["capabilities"], Value::Null);
 
-        // Every shared row is referenced here: `kokoro_frontend` and `onnxruntime` on disk,
-        // and `cuda` by selection — the unset `provider` ladder resolves built-in TTS to
-        // `OrtCuda` wherever the row exists.
+        // `kokoro_frontend` and `onnxruntime` are referenced on disk here; `cuda` is referenced
+        // by selection — the unset `provider` ladder resolves built-in TTS to `OrtCuda` — but
+        // only where a driver would let the engine load it. The in-flight Qwen download blocks
+        // every shared row regardless, so only `reason` splits by host.
         for id in ds_config::SHARED_ASSET_TOKENS {
             let Some(shared) = assets.iter().find(|asset| asset["id"] == *id) else {
                 assert_eq!(
@@ -1241,8 +1274,18 @@ mod tests {
                 );
                 continue;
             };
+            let referenced =
+                *id != ds_config::CUDA_ASSET_TOKEN || crate::ort::cuda_driver_available();
             assert_eq!(shared["removable"], false, "{id}");
-            assert_eq!(shared["reason"], "shared", "{id}");
+            assert_eq!(
+                shared["reason"],
+                if referenced {
+                    json!("shared")
+                } else {
+                    Value::Null
+                },
+                "{id}"
+            );
             assert_eq!(shared["active"], false, "{id}");
         }
         // Deterministic order: TTS models, then STT, then the shared rows this host can hold.
