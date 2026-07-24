@@ -142,14 +142,20 @@ that owns it. Either way the candidates go through `pick_agent_voice`, keeping t
 random, the assignment sticky, and agents on distinct voices while spares remain.
 
 Assignments are keyed by `(agent, language)`: one voice per language per agent, so a reply
-that switches language does not re-roll the other. Nothing owning the language anywhere —
+that switches language does not re-roll the other. The greeting claims its voice before any
+language is known, and the first language that can speak it adopts that claim, so the
+announced voice is the one that keeps speaking. Nothing owning the language anywhere —
 a fresh install whose Kokoro ids are still the static English fallback — keeps the agent's
 usual voice; synthesis still receives the detected language, so pronunciation is right
 even when the voice is not, and `g2p` logs that mismatch.
 
-Pool membership is validated against routed languages, not English: Kokoro publishes
-German, Japanese, and Mandarin voices whose frontends this build does not ship, and those
-stay rejected.
+Voices are validated against routed languages, not English: Kokoro publishes Japanese and
+Mandarin voices whose frontends this build does not ship (and no German voices at all), and
+those stay rejected in a configured pool (`set_config`) and per utterance (`speak`'s
+`tts_args.kokoro.voice`) alike. An unrouted family reports its own language, so the router
+never mistakes it for a language-agnostic voice, and a hand-edited pool entry locked to such
+a language is dropped before the pool is used — including on the greeting path, which
+resolves before any language is known.
 
 ## Queue and focus
 
