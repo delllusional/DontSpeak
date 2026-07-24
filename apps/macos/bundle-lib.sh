@@ -94,6 +94,16 @@ ds_shim_families() {
 
 shim_dylib_name() { echo "libdontspeak_$1.dylib"; }
 
+# Xcode emits dynamic Swift package products as framework executables. Stage each one under
+# the filename the Rust loader and app bundle contract use.
+stage_shim_dylib() {
+  local family="$1" source="$2" swarch="$3"
+  local out="$BUNDLE_LIB_DIR/DontSpeakMLX/.build/shims-$swarch/$(shim_dylib_name "$family")"
+  mkdir -p "${out%/*}"
+  cp "$source" "$out"
+  echo "$out"
+}
+
 # shim_derived_dir FAMILY SWARCH -- the ONE naming rule for an xcodebuild product tree. Every
 # consumer (build, prebuilt check, resource harvest, licence harvest, CI cache path) derives
 # the same name from the pair, so no caller ever globs xcode-* and picks up another arch's or
@@ -201,7 +211,7 @@ build_shim() {
   # exact pins do -- reuse a verified prebuilt tree instead of rebuilding it every release.
   if shim_prebuilt_usable "$family" "$derived" "$swarch"; then
     echo "   reusing prebuilt $(shim_dylib_name "$family") ($swarch) <- $products" >&2
-    echo "$bin"
+    stage_shim_dylib "$family" "$bin" "$swarch"
     return 0
   fi
   if ! (cd "$pkg" && xcodebuild -scheme "dontspeak_$family" -destination 'generic/platform=macOS' \
@@ -212,7 +222,7 @@ build_shim() {
   fi
   # if/else not bare && -- missing file must not kill set -e with empty contract.
   if [ -f "$bin" ] && { [ "$family" != "mlx" ] || [ -f "$metallib" ]; }; then
-    echo "$bin"
+    stage_shim_dylib "$family" "$bin" "$swarch"
   else
     shim_missing "$family" "dylib or Metal library missing after $swarch build" || return 1
   fi

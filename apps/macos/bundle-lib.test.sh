@@ -177,12 +177,16 @@ fi
 
 out="$(DONTSPEAK_DIST=1 DONTSPEAK_SHIM_REUSE_PREBUILT=1 build_shim mlx arm64 2>"$stderr_file")" \
   || fail "matching prebuilt arm64 mlx tree was not reused"
-[ "$out" = "$mlx_prebuilt" ] || fail "mlx reuse returned '$out', want '$mlx_prebuilt'"
+mlx_staged="$test_dir/DontSpeakMLX/.build/shims-arm64/libdontspeak_mlx.dylib"
+[ "$out" = "$mlx_staged" ] || fail "mlx reuse returned '$out', want '$mlx_staged'"
+cmp "$out" "$mlx_prebuilt" || fail "staged mlx dylib differs from the cached product"
 
 # A fluid tree carries no metallib and must still be reusable; an mlx tree without one must not.
 out="$(DONTSPEAK_DIST=1 DONTSPEAK_SHIM_REUSE_PREBUILT=1 build_shim fluid arm64 2>"$stderr_file")" \
   || fail "metallib-less prebuilt fluid tree was rejected"
-[ "$out" = "$fluid_prebuilt" ] || fail "fluid reuse returned '$out', want '$fluid_prebuilt'"
+fluid_staged="$test_dir/DontSpeakMLX/.build/shims-arm64/libdontspeak_fluid.dylib"
+[ "$out" = "$fluid_staged" ] || fail "fluid reuse returned '$out', want '$fluid_staged'"
+cmp "$out" "$fluid_prebuilt" || fail "staged fluid dylib differs from the cached product"
 
 mv "$mlx_products/mlx-swift_Cmlx.bundle" "$test_dir/metallib-away"
 if DONTSPEAK_DIST=1 DONTSPEAK_SHIM_REUSE_PREBUILT=1 build_shim mlx arm64 >/dev/null 2>"$stderr_file"; then
