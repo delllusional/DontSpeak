@@ -39,8 +39,8 @@ serde_json = { workspace = true }
 kaldi-native-fbank = "0.1.0"
 
 # ── Parakeet local STT (the `parakeet` engine, macOS MLX Audio) ──────────────
-# dlopen libdontspeak_mlx.dylib (the MLX Audio shim) at runtime, like
-# the MLX TTS backend. Resolved via DONTSPEAK_MLX_DYLIB_PATH.
+# dlopen one libdontspeak_<family>.dylib per runtime family at runtime, like the native TTS
+# backends. Resolved via DONTSPEAK_{SYS,MLX,FLUID}_DYLIB_PATH.
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = { workspace = true }
 

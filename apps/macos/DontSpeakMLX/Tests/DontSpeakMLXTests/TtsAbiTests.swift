@@ -63,9 +63,6 @@ final class TtsAbiTests: XCTestCase {
         XCTAssertEqual(ds_mlx_transcribe(nil, 0, 16_000, nil, nil), 4)
         XCTAssertEqual(ds_mlx_asr_stream_push(nil, 0, 16_000, nil, nil), 4)
         XCTAssertEqual(ds_mlx_asr_stream_finish(nil, nil), 4)
-        XCTAssertEqual(ds_mlx_sys_transcribe(nil, 0, 16_000, nil, nil), 4)
-        XCTAssertEqual(ds_mlx_sys_stream_push(nil, 0, 16_000, nil, nil), 4)
-        XCTAssertEqual(ds_mlx_sys_stream_finish(nil, nil), 4)
         XCTAssertEqual(ds_mlx_diarize(nil, 0, 16_000, nil, nil), 4)
         XCTAssertEqual(ds_mlx_diar_embed(nil, 0, 16_000, nil, nil), 4)
     }

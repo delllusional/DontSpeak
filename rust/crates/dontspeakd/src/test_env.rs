@@ -22,8 +22,8 @@ const PHASE_VAR: &str = "DS_TEST_MODEL_ENV_PHASE";
 const RAN_VAR: &str = "DS_TEST_MODEL_ENV_RAN";
 
 /// The model environment one child run should see. `ort_dylib: None` clears the variable;
-/// `DONTSPEAK_MLX_DYLIB_PATH` is always cleared, so a host with a real MLX shim installed
-/// takes the same branch as CI.
+/// all three `DONTSPEAK_{SYS,MLX,FLUID}_DYLIB_PATH` variables are always cleared, so a host
+/// with real shim dylibs installed takes the same branch as CI.
 pub(crate) struct ChildEnv<'a> {
     pub(crate) phase: &'a str,
     pub(crate) model_dir: &'a Path,
@@ -43,7 +43,9 @@ pub(crate) fn run_child(test_path: &str, env: ChildEnv<'_>) {
         .env(PHASE_VAR, env.phase)
         .env(RAN_VAR, &sentinel)
         .env("DONTSPEAK_MODEL_DIR", env.model_dir)
-        .env_remove("DONTSPEAK_MLX_DYLIB_PATH");
+        .env_remove("DONTSPEAK_SYS_DYLIB_PATH")
+        .env_remove("DONTSPEAK_MLX_DYLIB_PATH")
+        .env_remove("DONTSPEAK_FLUID_DYLIB_PATH");
     match env.ort_dylib {
         Some(path) => command.env("ORT_DYLIB_PATH", path),
         None => command.env_remove("ORT_DYLIB_PATH"),

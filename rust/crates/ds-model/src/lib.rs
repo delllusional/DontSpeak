@@ -42,13 +42,13 @@ pub mod inventory;
 mod kokoro_frontend;
 pub mod libraries;
 pub mod mlx_repo;
-/// MLX Audio shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
-#[cfg(target_os = "macos")]
-pub mod mlx_shim;
 pub mod ort;
 mod parallel;
 mod read_retry;
 pub mod setup;
+/// Per-family macOS speech shim loader for `ds-stt` + `ds-tts` (no cross-crate dependency).
+#[cfg(target_os = "macos")]
+pub mod shim;
 pub mod spec;
 pub mod target;
 pub mod tts_assets;

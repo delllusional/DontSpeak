@@ -1,5 +1,5 @@
-//! MLX Parakeet TDT STT (macOS). Same `libdontspeak_mlx` shim as MLX TTS via
-//! `DONTSPEAK_MLX_DYLIB_PATH`. Lazy-load shape matches [`crate::parakeet::ParakeetTranscriber`]
+//! MLX Parakeet TDT STT (macOS). Same `libdontspeak_mlx` dylib as MLX TTS, opened through
+//! [`ds_model::shim`]. Lazy-load shape matches [`crate::parakeet::ParakeetTranscriber`]
 //! for [`crate::local::LocalTranscriber`].
 
 use std::ffi::{c_char, c_void};
@@ -7,10 +7,10 @@ use std::ffi::{c_char, c_void};
 use libloading::{Library, Symbol};
 
 use crate::streaming::{StreamingStt, timed};
-use ds_model::mlx_shim::StrCb;
+use ds_model::shim::StrCb;
 
 // Text-returning calls still BLOCK and return their status; the transcript comes back through a
-// borrowed callback (copied out by `ds_model::mlx_shim::collect_str`), so there's no out-param and no
+// borrowed callback (copied out by `ds_model::shim::collect_str`), so there's no out-param and no
 // `ds_mlx_free_str`. init/shutdown/start carry no buffer, so they keep the plain int32 ABI.
 type AsrInitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
 type TranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
@@ -38,7 +38,7 @@ impl MlxTranscriber {
 
     fn ensure_lib(&mut self) -> Result<(), String> {
         if self.lib.is_none() {
-            self.lib = Some(ds_model::mlx_shim::open()?);
+            self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Mlx)?);
         }
         Ok(())
     }
@@ -55,7 +55,7 @@ impl MlxTranscriber {
             let init: Symbol<AsrInitFn> = lib
                 .get(b"ds_mlx_asr_init\0")
                 .map_err(|e| format!("ds_mlx_asr_init symbol: {e}"))?;
-            let dir = ds_model::mlx_shim::parakeet_model_dir_arg();
+            let dir = ds_model::shim::parakeet_model_dir_arg();
             init(dir.as_ptr(), 0)
         };
         if rc != 0 {
@@ -92,7 +92,7 @@ impl MlxTranscriber {
             .map_err(|e| format!("ds_mlx_transcribe symbol: {e}"))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s
         // borrowed-result pair (dontspeak_mlx.h).
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
         .map_err(|rc| format!("ds_mlx_transcribe failed (rc={rc})"))
@@ -123,10 +123,10 @@ pub struct MlxStreamer {
 impl MlxStreamer {
     /// Open the shim and load the streaming model. `Err` lets the caller use offline fallback.
     pub fn new() -> Result<Self, String> {
-        let lib = ds_model::mlx_shim::open()?;
+        let lib = ds_model::shim::open(ds_model::shim::Shim::Mlx)?;
         let mut streamer = Self {
             lib,
-            model_dir: ds_model::mlx_shim::parakeet_model_dir_arg(),
+            model_dir: ds_model::shim::parakeet_model_dir_arg(),
             transcribe_ms: 0.0,
         };
         streamer.reset()?;
@@ -138,7 +138,7 @@ impl MlxStreamer {
         let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
             .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
         .map_err(|rc| format!("{} failed (rc={rc})", String::from_utf8_lossy(sym)))
@@ -190,7 +190,7 @@ impl StreamingStt for MlxStreamer {
             .map_err(|e| format!("ds_mlx_asr_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
             // SAFETY: `collect_str` pair; call takes no other pointers.
-            ds_model::mlx_shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
+            ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("ds_mlx_asr_stream_finish failed (rc={rc})"))
         });
         let text = result?;

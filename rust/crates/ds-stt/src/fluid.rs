@@ -1,6 +1,6 @@
 //! FluidAudio Parakeet TDT v2 STT on Core ML / the Neural Engine (macOS, Apple Silicon).
-//! Same `libdontspeak_mlx` shim as the FluidAudio TTS backend via `DONTSPEAK_MLX_DYLIB_PATH`
-//! ([`ds_model::mlx_shim`] is unchanged); only the resolved `ds_fluid_asr_*` symbols differ.
+//! Same `libdontspeak_fluid` dylib as the FluidAudio TTS backend, opened through
+//! [`ds_model::shim`]; only the resolved `ds_fluid_asr_*` symbols differ.
 //! Lazy-load shape matches [`crate::mlx::MlxTranscriber`] / [`crate::mlx::MlxStreamer`] so the
 //! helper drives it through the same [`crate::local::LocalTranscriber`] and streaming loop.
 
@@ -9,10 +9,10 @@ use std::ffi::{c_char, c_void};
 use libloading::{Library, Symbol};
 
 use crate::streaming::{StreamingStt, timed};
-use ds_model::mlx_shim::StrCb;
+use ds_model::shim::StrCb;
 
 // Text-returning calls BLOCK and return their status; the transcript comes back through a
-// borrowed callback (copied out by `ds_model::mlx_shim::collect_str`), so there is no out-param
+// borrowed callback (copied out by `ds_model::shim::collect_str`), so there is no out-param
 // and no free. init/shutdown/start carry no buffer, so they keep the plain int32 ABI.
 type AsrInitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
 type TranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
@@ -40,7 +40,7 @@ impl FluidTranscriber {
 
     fn ensure_lib(&mut self) -> Result<(), String> {
         if self.lib.is_none() {
-            self.lib = Some(ds_model::mlx_shim::open()?);
+            self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Fluid)?);
         }
         Ok(())
     }
@@ -57,7 +57,7 @@ impl FluidTranscriber {
             let init: Symbol<AsrInitFn> = lib
                 .get(b"ds_fluid_asr_init\0")
                 .map_err(|e| format!("ds_fluid_asr_init symbol: {e}"))?;
-            let dir = ds_model::mlx_shim::fluid_parakeet_dir_arg();
+            let dir = ds_model::shim::fluid_parakeet_dir_arg();
             init(dir.as_ptr(), 0)
         };
         if rc != 0 {
@@ -94,7 +94,7 @@ impl FluidTranscriber {
             .map_err(|e| format!("ds_fluid_transcribe symbol: {e}"))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s
         // borrowed-result pair (dontspeak_mlx.h).
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
         .map_err(|rc| format!("ds_fluid_transcribe failed (rc={rc})"))
@@ -126,10 +126,10 @@ impl FluidStreamer {
     /// Open the shim and load the streaming EOU model. `Err` lets the caller use the offline
     /// fallback.
     pub fn new() -> Result<Self, String> {
-        let lib = ds_model::mlx_shim::open()?;
+        let lib = ds_model::shim::open(ds_model::shim::Shim::Fluid)?;
         let mut streamer = Self {
             lib,
-            model_dir: ds_model::mlx_shim::fluid_parakeet_eou_dir_arg(),
+            model_dir: ds_model::shim::fluid_parakeet_eou_dir_arg(),
             transcribe_ms: 0.0,
         };
         streamer.reset()?;
@@ -141,7 +141,7 @@ impl FluidStreamer {
         let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
             .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
         .map_err(|rc| format!("{} failed (rc={rc})", String::from_utf8_lossy(sym)))
@@ -194,7 +194,7 @@ impl StreamingStt for FluidStreamer {
             .map_err(|e| format!("ds_fluid_asr_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
             // SAFETY: `collect_str` pair; call takes no other pointers.
-            ds_model::mlx_shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
+            ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("ds_fluid_asr_stream_finish failed (rc={rc})"))
         });
         let text = result?;

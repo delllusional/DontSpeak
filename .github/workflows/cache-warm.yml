@@ -89,39 +89,61 @@ jobs:
           $b = Resolve-BuildArch -Arch '${{ matrix.arch }}' -Repo $repo
           Invoke-CargoRelease -Repo $repo -CargoTargetArg $b.CargoTargetArg -RustTarget $b.RustTarget
 
-  # ── The Apple silicon MLX shim ──────────────────────────────────────────────
-  # mlx-swift + mlx-audio-swift from source is the single longest step in the release (~12 min).
-  # Its inputs are the pins in Package.resolved, the shim sources, and the Xcode toolchain, so
-  # this rebuilds only when one of those moves — most nights are a cache hit and cost seconds.
-  # Path + key are duplicated from release.yml's restore step ON PURPOSE (a composite action
+  # ── The Apple silicon shim dylibs (mlx + fluid) ─────────────────────────────
+  # mlx-swift + mlx-audio-swift from source is the single longest step in the release (~12 min);
+  # FluidAudio is much cheaper but rides the same derived-data machinery. Each family gets its
+  # own tree and its own cache entry, so a Fluid edit cannot invalidate the mlx-swift compile.
+  # The `sys` family gets no cache at all -- it is a ~40 s dependency-free swiftc call.
+  # Inputs are the pins in Package.resolved, that family's sources, and the Xcode toolchain.
+  # Known coarseness: Package.resolved is shared, so a FluidAudio pin bump still busts the MLX
+  # key. Correctness over granularity, and still finer than hashing all of Sources/**.
+  # Path + key are duplicated from release.yml's restore steps ON PURPOSE (a composite action
   # would hide the key); change them together.
-  mlx-dylib:
-    name: MLX shim dylib (arm64)
+  shim-dylibs:
+    name: Speech shim dylibs (arm64)
     runs-on: macos-26
     steps:
       - uses: actions/checkout@v7
 
-      - name: Xcode build (MLX cache key input)
+      - name: Xcode build (shim cache key input)
         id: xcode
         run: echo "id=$(xcodebuild -version | tr -d ' \n')" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v6
-        id: cache
+        id: mlx-cache
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-arm64/SourcePackages/checkouts
-          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakMLX/include/**') }}
+
+      - uses: actions/cache@v6
+        id: fluid-cache
+        with:
+          path: |
+            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/SourcePackages/checkouts
+          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakMLX/include/**') }}
 
       # Through bundle-lib.sh, so the cached tree is byte-for-byte what a release build makes.
-      # DONTSPEAK_DIST=1 makes a broken MLX build fail this job instead of silently caching a
+      # DONTSPEAK_DIST=1 makes a broken build fail this job instead of silently caching a
       # degraded (ONNX-CPU-only) result.
       - name: Build the MLX shim
-        if: steps.cache.outputs.cache-hit != 'true'
+        if: steps.mlx-cache.outputs.cache-hit != 'true'
         env:
           DONTSPEAK_DIST: '1'
           MACOSX_DEPLOYMENT_TARGET: '14.0'
         run: |
           set -euo pipefail
           source apps/macos/bundle-lib.sh
-          build_dontspeak_mlx_dylib arm64
+          build_shim mlx arm64
+
+      - name: Build the FluidAudio shim
+        if: steps.fluid-cache.outputs.cache-hit != 'true'
+        env:
+          DONTSPEAK_DIST: '1'
+          MACOSX_DEPLOYMENT_TARGET: '14.0'
+        run: |
+          set -euo pipefail
+          source apps/macos/bundle-lib.sh
+          build_shim fluid arm64

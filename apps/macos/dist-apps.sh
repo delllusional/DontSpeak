@@ -92,8 +92,8 @@ build_arch() {   # $1 display arch, $2 rust triple, $3 swift arch
   echo "    app:    $(file "$EXE" | sed 's/.*: //')"
   echo "    helper: $(file "$HELPER" | sed 's/.*: //')"
 
-  local DONTSPEAK_MLX_DYLIB; DONTSPEAK_MLX_DYLIB="$(build_dontspeak_mlx_dylib "$SWARCH")"
-  export DONTSPEAK_MLX_DYLIB
+  local DONTSPEAK_SHIM_DYLIBS; DONTSPEAK_SHIM_DYLIBS="$(build_shims "$SWARCH")"
+  export DONTSPEAK_SHIM_DYLIBS
 
   # Per-arch ORT: DONTSPEAK_ORT_DYLIB_<arch> else ORT_GLOBAL (not live env -- clobbered).
   local ORT_VAR="DONTSPEAK_ORT_DYLIB_${ARCH}"

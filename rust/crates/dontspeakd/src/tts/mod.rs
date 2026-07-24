@@ -490,26 +490,19 @@ impl TtsManager {
 
     /// Resolved EP the child will report (cuda only if runtime present — no restart loop).
     fn resolve_provider(which: &str, model: ds_config::TtsModel) -> ds_config::RealizedProvider {
-        #[cfg(target_os = "macos")]
-        let mlx_available = Some(
-            std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH")
-                .is_some_and(|path| std::path::Path::new(&path).exists()),
-        );
-        #[cfg(not(target_os = "macos"))]
-        let mlx_available = None;
-
         Self::resolve_provider_with_availability(
             which,
             model,
-            mlx_available,
+            crate::config_gate::NativeShims::probe(),
             ds_model::cuda_runtime_available(),
         )
     }
 
+    /// `shims` is `None` off macOS, where no native rung exists at all.
     fn resolve_provider_with_availability(
         which: &str,
         model: ds_config::TtsModel,
-        mlx_available: Option<bool>,
+        shims: Option<crate::config_gate::NativeShims>,
         cuda_available: bool,
     ) -> ds_config::RealizedProvider {
         use ds_config::RealizedProvider;
@@ -519,24 +512,25 @@ impl TtsManager {
         {
             return RealizedProvider::CoreMl;
         }
-        // Fluid before MLX (shared dylib, so `mlx_available` covers both). Only an explicit
-        // `fluid` token -- never `auto` -- selects the ANE Kokoro backend.
-        if let Some(shim_available) = mlx_available
+        // Fluid before MLX, and each reads only its OWN dylib -- they are separate files, so
+        // a Fluid-present/MLX-absent host must still realize Fluid. Only an explicit `fluid`
+        // token -- never `auto` -- selects the ANE Kokoro backend.
+        if let Some(shims) = shims
             && which.eq_ignore_ascii_case(ds_config::Provider::Fluid.as_str())
             && descriptor.supports_provider(ds_config::Provider::Fluid)
         {
-            return if shim_available {
+            return if shims.fluid {
                 RealizedProvider::Fluid
             } else {
                 RealizedProvider::Cpu
             };
         }
-        if let Some(mlx_available) = mlx_available
+        if let Some(shims) = shims
             && (which.eq_ignore_ascii_case(ds_config::Provider::Mlx.as_str())
                 || which.eq_ignore_ascii_case("auto"))
             && descriptor.supports_provider(ds_config::Provider::Mlx)
         {
-            return if mlx_available {
+            return if shims.mlx {
                 RealizedProvider::Mlx
             } else {
                 RealizedProvider::Cpu
@@ -2671,13 +2665,19 @@ mod status_gate_tests {
         assert!(!tts.stt_model.is_loaded());
     }
 
+    /// Both native dylibs present -- the resolve tests below pin the token half.
+    const BOTH_SHIMS: crate::config_gate::NativeShims = crate::config_gate::NativeShims {
+        mlx: true,
+        fluid: true,
+    };
+
     #[test]
     fn provider_resolution_is_deterministic_for_explicit_onnx_tokens() {
         assert_eq!(
             TtsManager::resolve_provider_with_availability(
                 "cpu",
                 ds_config::TtsModel::Kokoro,
-                Some(true),
+                Some(BOTH_SHIMS),
                 true,
             ),
             ds_config::RealizedProvider::Cpu
@@ -2725,6 +2725,35 @@ mod status_gate_tests {
                 "cuda",
                 ds_config::TtsModel::OmniVoice,
                 None,
+                false,
+            ),
+            ds_config::RealizedProvider::Cpu
+        );
+    }
+
+    /// The TTS mirror of `config_gate`'s cross-family matrix: `fluid` and `mlx` are separate
+    /// dylibs, so each token must read only its own. A shared bool would realize `Mlx` here
+    /// on a Fluid-only host and then fail at dlopen.
+    #[test]
+    fn provider_resolution_reads_only_the_selected_families_dylib() {
+        let fluid_only = crate::config_gate::NativeShims {
+            mlx: false,
+            fluid: true,
+        };
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "fluid",
+                ds_config::TtsModel::Kokoro,
+                Some(fluid_only),
+                false,
+            ),
+            ds_config::RealizedProvider::Fluid
+        );
+        assert_eq!(
+            TtsManager::resolve_provider_with_availability(
+                "mlx",
+                ds_config::TtsModel::Kokoro,
+                Some(fluid_only),
                 false,
             ),
             ds_config::RealizedProvider::Cpu

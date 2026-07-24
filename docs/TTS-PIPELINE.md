@@ -86,14 +86,14 @@ BART is frontend, not ONNX-synth-only — MLX still needs ORT
 **ONNX:** detected language + bounded chunk → model tokenizer/conditioning → shared ORT sessions → PCM
 commit per batch. Provider acceleration is enabled only where the registry declares it.
 
-**Apple MLX:** the shared `DontSpeakMLX` ABI loads only DontSpeak-populated model
+**Apple MLX:** `libdontspeak_mlx.dylib` loads only DontSpeak-populated model
 directories. Kokoro receives IPA; Chatterbox uses its pinned default conditioning; Qwen
 receives plain multilingual text and a speaker ID; OmniVoice receives a style instruct
 resolved from its preset id in Rust (`OMNIVOICE_PRESETS`) — `default` stays automatic
 voice design. All return 24 kHz PCM through the synchronous borrowed-buffer callback.
 
-**FluidAudio (`fluid`, Apple Silicon, Kokoro only, opt-in):** the same signed shim dylib
-exposes `ds_fluid_tts_*` over FluidAudio's ANE Kokoro. It receives the same Rust-owned IPA
+**FluidAudio (`fluid`, Apple Silicon, Kokoro only, opt-in):** its own signed
+`libdontspeak_fluid.dylib` exposes `ds_fluid_tts_*` over FluidAudio's ANE Kokoro. It receives the same Rust-owned IPA
 phonemes as every other Kokoro backend — DontSpeak skips FluidAudio's own G2P so the backends
 cannot drift. `KokoroAneManager(directory:)` takes the Core ML **root**, not the Kokoro set dir:
 FluidAudio appends the `.english` variant's whole `folderName` (`kokoro-82m-coreml/ANE`), so the

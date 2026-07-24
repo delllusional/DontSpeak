@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use ds_config::{Paths, Provider, VoiceConfig};
 use ds_model::DownloadTarget;
 
-use crate::config_gate::{mlx_shim_available, native_tts_active, stt_uses_onnx_runtime};
+use crate::config_gate::{NativeShims, native_tts_active, stt_uses_onnx_runtime};
 use crate::tts::TtsManager;
 
 /// Byte progress of one in-flight download target.
@@ -556,8 +556,11 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     );
     // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
-    let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
-    // The native STT rung shares the dylib; `resolved_stt_provider` picks exactly one set.
+    let stt_onnx_runtime = stt_uses_onnx_runtime(
+        cfg.resolved_stt_provider(),
+        NativeShims::probe().unwrap_or_default(),
+    );
+    // Each native STT rung has its own dylib; `resolved_stt_provider` picks exactly one set.
     let stt_native = stt_is_builtin && !stt_onnx_runtime;
     let stt_fluid = stt_native && cfg.resolved_stt_provider() == ds_config::Provider::Fluid;
     let parakeet_model = stt_is_builtin && stt_onnx_runtime && !ds_model::is_parakeet_present();

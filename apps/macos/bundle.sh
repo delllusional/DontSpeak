@@ -52,8 +52,8 @@ compile_icon "$ICONOUT"
 echo "==> 3. assemble + sign $APP"
 SIGN="$(resolve_sign_identity)"
 # Shim arch from built app binary (not uname -- Rosetta).
-DONTSPEAK_MLX_DYLIB="$(build_dontspeak_mlx_dylib "$(lipo -archs "$EXE" | awk '{print $1}')")"
-export DONTSPEAK_MLX_DYLIB
+DONTSPEAK_SHIM_DYLIBS="$(build_shims "$(lipo -archs "$EXE" | awk '{print $1}')")"
+export DONTSPEAK_SHIM_DYLIBS
 # Helper from install-engine dir; menubar svg at repo assets/.
 ds_lock_acquire "$APP"
 assemble_app "$APP" "$EXE" "$_bin_dir/ds-helper" \

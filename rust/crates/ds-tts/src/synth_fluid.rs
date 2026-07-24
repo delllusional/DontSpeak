@@ -1,17 +1,17 @@
 //! macOS FluidAudio (Core ML / ANE) Kokoro TTS through DontSpeak's load-only C ABI shim.
 //!
-//! Shares the one signed `libdontspeak_mlx.dylib` with the MLX backend ([`ds_model::mlx_shim`]
-//! is unchanged); only the resolved symbols differ. Rust owns G2P -- the shim takes validated
+//! Loads its own signed `libdontspeak_fluid.dylib` through [`ds_model::shim`], a peer of the
+//! MLX backend's dylib rather than the same file. Rust owns G2P -- the shim takes validated
 //! Kokoro phonemes, never text -- so ORT/MLX/Fluid Kokoro render from identical chunks. The ANE
 //! chain reads voice packs as `ANE/<voice>.bin` and throws (no `af_heart` fallback) when one is
 //! absent, so the requested pack is materialized on demand before the FFI call.
 
 use std::ffi::{CString, c_char, c_void};
 
-use ds_model::mlx_shim::PcmCb;
+use ds_model::shim::PcmCb;
 use libloading::{Library, Symbol};
 
-// model_dir, compute_units -- mirrors dontspeak_mlx.h.
+// model_dir, compute_units -- mirrors dontspeak_fluid.h.
 type InitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
 // phonemes, voice, speed, ctx, cb -- mirrors dontspeak_mlx.h.
 type SynthFn = unsafe extern "C" fn(*const c_char, *const c_char, f32, *mut c_void, PcmCb) -> i32;
@@ -24,8 +24,8 @@ pub struct FluidTts {
 
 impl FluidTts {
     pub fn load() -> Result<Self, String> {
-        let dir = ds_model::mlx_shim::fluid_kokoro_dir_arg();
-        let lib = ds_model::mlx_shim::open()?;
+        let dir = ds_model::shim::fluid_kokoro_dir_arg();
+        let lib = ds_model::shim::open(ds_model::shim::Shim::Fluid)?;
         let mut synth = Self {
             lib,
             initialized: false,
@@ -62,7 +62,7 @@ impl FluidTts {
         // with the `SynthFn` ABI; the CStrings outlive the synchronous call.
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_fluid_tts_synthesize_phonemes\0") }
             .map_err(|error| format!("ds_fluid_tts_synthesize_phonemes symbol: {error}"))?;
-        ds_model::mlx_shim::collect_pcm(|ctx, callback| {
+        ds_model::shim::collect_pcm(|ctx, callback| {
             // SAFETY: `collect_pcm` supplies a matching context/callback pair valid until the
             // call returns; the CStrings above outlive this synchronous call.
             unsafe { synth(phonemes.as_ptr(), voice.as_ptr(), speed, ctx, callback) }

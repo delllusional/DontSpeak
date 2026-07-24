@@ -1,6 +1,6 @@
 import XCTest
 
-@testable import DontSpeakMLX
+@testable import DontSpeakFluid
 
 /// FluidAudio TTS ABI edges only -- no model files, no ANE, no network. `ds_fluid_tts_init`
 /// is never called here (it would touch the ANE), so the manager stays nil for the whole
@@ -14,7 +14,7 @@ final class FluidAbiTests: XCTestCase {
     /// Synthesizing before init returns the not-initialized rc (2), never a crash. The manager
     /// check precedes the phoneme check, so a nil phoneme pointer still reaches rc 2.
     func testSynthesisBeforeInitReportsNotInitialized() {
-        let cb: MlxPcmCb = { _, _, _, _ in }
+        let cb: FluidPcmCb = { _, _, _, _ in }
         XCTAssertEqual(ds_fluid_tts_synthesize_phonemes(nil, nil, 1.0, nil, cb), 2)
     }
 
@@ -22,7 +22,7 @@ final class FluidAbiTests: XCTestCase {
     /// still reports not-initialized rather than touching a freed manager.
     func testShutdownWithoutInitIsSafe() {
         ds_fluid_tts_shutdown()
-        let cb: MlxPcmCb = { _, _, _, _ in }
+        let cb: FluidPcmCb = { _, _, _, _ in }
         XCTAssertEqual(ds_fluid_tts_synthesize_phonemes(nil, nil, 1.0, nil, cb), 2)
     }
 
@@ -33,13 +33,13 @@ final class FluidAbiTests: XCTestCase {
     /// Transcribing before init returns the not-initialized rc (2), never a crash. The manager
     /// check precedes the sample check, so a nil sample pointer still reaches rc 2.
     func testTranscribeBeforeInitReportsNotInitialized() {
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_transcribe(nil, 0, 16_000, nil, cb), 2)
     }
 
     /// Pushing a streaming chunk before start returns the not-started rc (2), never a crash.
     func testStreamPushBeforeStartReportsNotStarted() {
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_asr_stream_push(nil, 0, 16_000, nil, cb), 2)
     }
 
@@ -47,7 +47,7 @@ final class FluidAbiTests: XCTestCase {
     /// the callback), matching the shim's borrowed-empty contract — not a crash. The callback
     /// captures nothing (a `@convention(c)` closure cannot), so only the rc is asserted here.
     func testStreamFinishBeforeStartIsGracefulEmpty() {
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_asr_stream_finish(nil, cb), 0)
     }
 
@@ -56,7 +56,7 @@ final class FluidAbiTests: XCTestCase {
     func testAsrShutdownWithoutInitIsSafe() {
         ds_fluid_asr_shutdown()
         ds_fluid_asr_stream_shutdown()
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_transcribe(nil, 0, 16_000, nil, cb), 2)
     }
 
@@ -67,13 +67,13 @@ final class FluidAbiTests: XCTestCase {
     /// Diarizing before init returns the not-initialized rc (2), never a crash. The manager
     /// check precedes the sample check, so a nil sample pointer still reaches rc 2.
     func testDiarizeBeforeInitReportsNotInitialized() {
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_diarize(nil, 0, 16_000, nil, cb), 2)
     }
 
     /// Embedding before init likewise reports not-initialized (2), never a crash.
     func testEmbedBeforeInitReportsNotInitialized() {
-        let cb: MlxPcmCb = { _, _, _, _ in }
+        let cb: FluidPcmCb = { _, _, _, _ in }
         XCTAssertEqual(ds_fluid_diar_embed(nil, 0, 16_000, nil, cb), 2)
     }
 
@@ -81,7 +81,7 @@ final class FluidAbiTests: XCTestCase {
     /// still reports not-initialized rather than touching a freed manager.
     func testDiarShutdownWithoutInitIsSafe() {
         ds_fluid_diar_shutdown()
-        let cb: MlxStrCb = { _, _ in }
+        let cb: FluidStrCb = { _, _ in }
         XCTAssertEqual(ds_fluid_diarize(nil, 0, 16_000, nil, cb), 2)
     }
 }

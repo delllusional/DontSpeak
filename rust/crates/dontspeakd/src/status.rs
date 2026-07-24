@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use ds_config::{Paths, VoiceConfig};
 
 use crate::config_gate::{
-    caps_loop_enabled, mlx_shim_available, native_tts_active, parakeet_available,
+    NativeShims, caps_loop_enabled, native_tts_active, parakeet_available,
     parakeet_onnx_files_present, stt_uses_onnx_runtime, tts_model_files_present,
 };
 use crate::downloads::{DownloadProg, TargetState};
@@ -118,12 +118,12 @@ pub(crate) fn model_status_json(
     // many seconds. Correctness-critical sha checks stay in the load path
     // (load_synth / ParakeetModel::load), not here.
     // The TTS row reflects the active backend (mirrors the Parakeet row below).
-    let shim = mlx_shim_available();
+    let shims = NativeShims::probe().unwrap_or_default();
     let tts_uses_native = native_tts_active(&cfg);
     let tts_present = tts_model_files_present(&cfg);
     let parakeet_onnx_files = parakeet_onnx_files_present();
     // Same shim-aware ONNX downgrade as TTS.
-    let stt_uses_onnx = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), shim);
+    let stt_uses_onnx = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), shims);
     let parakeet_present = if stt_uses_onnx {
         parakeet_onnx_files
     } else {
@@ -332,10 +332,15 @@ pub(crate) fn model_status_json(
         },
         frac_for(DownloadTarget::DiarizationMlx).max(frac_for(DownloadTarget::SepformerModel)),
     );
+    // The diarizer rungs are separate dylibs too, so read the resolved provider's own.
+    let diar_shim = match cfg.resolved_diarizer() {
+        ds_config::DiarizerProvider::Mlx => shims.mlx,
+        ds_config::DiarizerProvider::Fluid => shims.fluid,
+    };
     let diarization_provider = diarization_provider_token(
         cfg.resolved_diarizer(),
         cfg.is_diarization_on(),
-        diar_present && shim,
+        diar_present && diar_shim,
     );
 
     let status = ModelStatus {

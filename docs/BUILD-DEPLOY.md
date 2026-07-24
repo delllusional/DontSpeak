@@ -12,8 +12,11 @@ installed.
 | `dontspeak` (CLI / MCP / hooks) | `install-engine.sh` → `~/.local/bin/dontspeak` | that path (live after install) |
 | `ds-helper` | `install-engine.sh` **and** `bundle.sh` → app bundle | **bundled** `Contents/MacOS/ds-helper` |
 | engine (`dontspeakd`) | `bundle.sh` → linked into app | **app binary** |
+| `libdontspeak_{sys,mlx,fluid}.dylib` | `bundle.sh` → app bundle | **bundled** `Contents/Frameworks/*` |
 
-Use `build-macos` skill.
+Use `build-macos` skill. The shim dylibs ride the host-app route ONLY: a rebuilt engine or CLI
+against a stale `.app` finds the per-family `DONTSPEAK_*_DYLIB_PATH` variables unset and
+correctly falls back to ONNX, which looks like the change did nothing.
 
 ### Windows
 

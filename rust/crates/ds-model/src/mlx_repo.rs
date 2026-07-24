@@ -708,7 +708,7 @@ mod tests {
         let shim =
             include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/shim.swift");
         let fluid =
-            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/Fluid.swift");
+            include_str!("../../../../apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/Fluid.swift");
 
         // Universal bans: no native model-download API in either shim.
         for (name, src) in [("shim.swift", shim), ("Fluid.swift", fluid)] {
@@ -738,12 +738,12 @@ mod tests {
                 "missing local model load: {required}"
             );
         }
-        // Section 4 boundary: the one-dylib-on-Intel decision rests on shim.swift never
-        // referencing a Fluid.swift symbol, so a FluidAudio reference outside
-        // `#if !SYSTEM_ONLY` would break the Intel build with no local test to catch it.
+        // Family boundary: shim.swift is the MLX target, whose SwiftPM manifest does not list
+        // FluidAudio at all. A reference here would fail the arm64 build outright; the
+        // artifact-level guard is bundle-lib.sh's verify_shim_isolation.
         assert!(
             !shim.contains("FluidAudio"),
-            "shim.swift must not reference FluidAudio (Intel compatibility-build boundary)"
+            "shim.swift must not reference FluidAudio (per-family dylib boundary)"
         );
 
         // Fluid.swift's ONLY ModelHub use is the offline switch that keeps it load-only:

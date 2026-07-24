@@ -6,16 +6,6 @@ use std::path::PathBuf;
 
 use crate::parakeet::ParakeetTranscriber;
 
-/// MLX Audio shim present (`DONTSPEAK_MLX_DYLIB_PATH`)? Gates `mlx` so a
-/// missing shim falls back to ONNX. Engine checks the SAME env
-/// (`mlx_shim_available`); helper inherits it so status row stays honest.
-#[cfg(target_os = "macos")]
-fn shim_available() -> bool {
-    std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH")
-        .map(|p| std::path::Path::new(&p).exists())
-        .unwrap_or(false)
-}
-
 /// Active local transcriber. Same lazy-load surface as [`ParakeetTranscriber`].
 pub enum LocalTranscriber {
     /// Parakeet transducer over `ort` (`cpu`/`cuda` provider). Boxed: avoids clippy
@@ -24,8 +14,8 @@ pub enum LocalTranscriber {
     /// macOS MLX Audio (`mlx` provider).
     #[cfg(target_os = "macos")]
     Mlx(crate::mlx::MlxTranscriber),
-    /// macOS FluidAudio Core ML / ANE (`fluid` provider). Apple Silicon only — the Intel
-    /// shim compiles `shim.swift` alone and exports no `ds_fluid_*` symbols (#211).
+    /// macOS FluidAudio Core ML / ANE (`fluid` provider). Apple Silicon only — no
+    /// `libdontspeak_fluid.dylib` is built for Intel (#211).
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     Fluid(crate::fluid::FluidTranscriber),
     /// macOS `SFSpeechRecognizer` (`system` engine) — DIFFERENT engine, not a Parakeet
@@ -34,35 +24,39 @@ pub enum LocalTranscriber {
     System(crate::sysspeech::SystemTranscriber),
 }
 
-/// Which local backend a resolved provider selects, given shim availability. Separated from
-/// construction (which is dlopen-free but per-arch) so the shim-vs-fall-through decision is
-/// unit-testable without touching the ANE or a real dlopen.
+/// Which local backend a resolved provider selects, given per-family dylib availability.
+/// Separated from construction (which is dlopen-free but per-arch) so the shim-vs-fall-through
+/// decision is unit-testable without touching the ANE or a real dlopen.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Backend {
     Onnx,
     Mlx,
-    /// Apple Silicon only — the Intel shim exports no `ds_fluid_*` (#211).
+    /// Apple Silicon only — no `libdontspeak_fluid.dylib` is built for Intel (#211).
     #[cfg(target_arch = "aarch64")]
     Fluid,
     System,
 }
 
-/// Pure selection: `"system"` → System; `"fluid"` → Fluid on Apple Silicon with the shim;
-/// `"mlx"` → MLX with the shim; anything else (incl. shim-absent `mlx`/`fluid`, and every
-/// `fluid` on Intel) → ONNX. `shim` is the live `DONTSPEAK_MLX_DYLIB_PATH` probe.
+/// Pure selection: `"system"` → System; `"fluid"` → Fluid on Apple Silicon with the Fluid
+/// dylib; `"mlx"` → MLX with the MLX dylib; anything else (incl. either dylib absent, and
+/// every `fluid` on Intel) → ONNX. `mlx`/`fluid` are the live per-family path probes; they
+/// are SEPARATE dylibs, so one answer must never stand for both (#241).
 #[cfg(target_os = "macos")]
-fn select_backend(provider: &str, shim: bool) -> Backend {
+fn select_backend(provider: &str, mlx: bool, fluid: bool) -> Backend {
     if provider.eq_ignore_ascii_case("system") {
         return Backend::System;
     }
-    // Fluid is Apple-Silicon-only: on Intel the shim has no `ds_fluid_*`, so `fluid` must fall
-    // through to ONNX rather than dlsym-fail (the #211 arch trap). Gated, not merely runtime.
+    // Fluid is Apple-Silicon-only: Intel builds no libdontspeak_fluid.dylib, so `fluid` must
+    // fall through to ONNX rather than dlsym-fail (the #211 arch trap). Gated, not merely
+    // runtime.
     #[cfg(target_arch = "aarch64")]
-    if provider.eq_ignore_ascii_case("fluid") && shim {
+    if provider.eq_ignore_ascii_case("fluid") && fluid {
         return Backend::Fluid;
     }
-    if provider.eq_ignore_ascii_case("mlx") && shim {
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = fluid;
+    if provider.eq_ignore_ascii_case("mlx") && mlx {
         return Backend::Mlx;
     }
     Backend::Onnx
@@ -70,13 +64,14 @@ fn select_backend(provider: &str, shim: bool) -> Backend {
 
 impl LocalTranscriber {
     /// Backend by RESOLVED provider token. `"system"` → `SFSpeechRecognizer`;
-    /// `"fluid"` → FluidAudio Core ML on Apple Silicon when the shim is present; `"mlx"` →
-    /// native MLX when shim present; anything else (incl. `"cpu"`) → portable ONNX Parakeet.
-    /// Shim-aware so the status row stays honest.
+    /// `"fluid"` → FluidAudio Core ML on Apple Silicon when its dylib is present; `"mlx"` →
+    /// native MLX when its dylib is present; anything else (incl. `"cpu"`) → portable ONNX
+    /// Parakeet. Shim-aware so the status row stays honest.
     pub fn for_provider(provider: &str, parakeet_dir: PathBuf) -> Self {
         #[cfg(target_os = "macos")]
         {
-            match select_backend(provider, shim_available()) {
+            use ds_model::shim::{Shim, available};
+            match select_backend(provider, available(Shim::Mlx), available(Shim::Fluid)) {
                 Backend::System => {
                     return LocalTranscriber::System(crate::sysspeech::SystemTranscriber::new());
                 }
@@ -174,31 +169,55 @@ fn warmup_audio() -> Vec<f32> {
 mod tests {
     use super::{Backend, select_backend};
 
-    /// `fluid` resolves to the Core ML backend ONLY where the shim can export `ds_fluid_*` —
+    /// `fluid` resolves to the Core ML backend ONLY where `libdontspeak_fluid.dylib` exists —
     /// Apple Silicon with the bundled dylib present. Everywhere else it falls through to ONNX.
     /// Pure selection, no dlopen: constructing a variant never touches the ANE.
     #[test]
     fn for_provider_selects_the_fluid_backend_only_with_the_shim() {
         #[cfg(target_arch = "aarch64")]
         {
-            // Apple Silicon: shim present → Fluid; shim absent → ONNX (never dlsym-fail).
-            assert_eq!(select_backend("fluid", true), Backend::Fluid);
-            assert_eq!(select_backend("FLUID", true), Backend::Fluid);
-            assert_eq!(select_backend("fluid", false), Backend::Onnx);
+            // Apple Silicon: dylib present → Fluid; absent → ONNX (never dlsym-fail).
+            assert_eq!(select_backend("fluid", true, true), Backend::Fluid);
+            assert_eq!(select_backend("FLUID", true, true), Backend::Fluid);
+            assert_eq!(select_backend("fluid", true, false), Backend::Onnx);
         }
         #[cfg(not(target_arch = "aarch64"))]
         {
-            // Intel macOS: the shim is System-STT-only (shim.swift alone, no `ds_fluid_*`), so
-            // `fluid` MUST fall through to ONNX even when a shim path is present — the #211
-            // arch trap the aarch64 gate on the `fluid` arm exists to close.
-            assert_eq!(select_backend("fluid", true), Backend::Onnx);
-            assert_eq!(select_backend("fluid", false), Backend::Onnx);
+            // Intel macOS: no libdontspeak_fluid.dylib is built at all, so `fluid` MUST fall
+            // through to ONNX even when a path is somehow present — the #211 arch trap the
+            // aarch64 gate on the `fluid` arm exists to close.
+            assert_eq!(select_backend("fluid", true, true), Backend::Onnx);
+            assert_eq!(select_backend("fluid", true, false), Backend::Onnx);
         }
-        // MLX still selects the native backend with the shim, both arches; without it, ONNX.
-        assert_eq!(select_backend("mlx", true), Backend::Mlx);
-        assert_eq!(select_backend("mlx", false), Backend::Onnx);
+        // MLX still selects the native backend with its dylib, both arches; without it, ONNX.
+        assert_eq!(select_backend("mlx", true, true), Backend::Mlx);
+        assert_eq!(select_backend("mlx", false, true), Backend::Onnx);
         // System and plain ONNX providers are shim-independent.
-        assert_eq!(select_backend("system", false), Backend::System);
-        assert_eq!(select_backend("cpu", true), Backend::Onnx);
+        assert_eq!(select_backend("system", false, false), Backend::System);
+        assert_eq!(select_backend("cpu", true, true), Backend::Onnx);
+    }
+
+    /// #241: after the dylib split a host can carry libdontspeak_fluid.dylib with NO MLX
+    /// dylib. A single shared bool would answer "no shim" for `fluid` here, drop it to ONNX,
+    /// and leave the status row reading a plausible-looking "ORT CPU". Pure selection, no
+    /// dlopen. macOS-gated like the module, so this runs only in the release full matrix;
+    /// `config_gate`'s cross-family matrix is the per-commit proof.
+    #[test]
+    fn each_native_rung_reads_only_its_own_dylib() {
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(select_backend("fluid", false, true), Backend::Fluid);
+            assert_eq!(select_backend("fluid", true, false), Backend::Onnx);
+            assert_eq!(select_backend("mlx", false, true), Backend::Onnx);
+            assert_eq!(select_backend("mlx", true, false), Backend::Mlx);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            // No fluid dylib is built for Intel, so the token never reaches the Fluid arm.
+            assert_eq!(select_backend("fluid", false, true), Backend::Onnx);
+            assert_eq!(select_backend("mlx", true, false), Backend::Mlx);
+        }
+        // System is selected by token alone; its own dylib gates at load, not here.
+        assert_eq!(select_backend("system", false, false), Backend::System);
     }
 }

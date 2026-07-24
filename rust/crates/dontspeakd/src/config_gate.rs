@@ -39,16 +39,40 @@ pub(crate) fn helper_uses_stt(cfg: &VoiceConfig) -> bool {
     )
 }
 
-/// macOS + `DONTSPEAK_MLX_DYLIB_PATH`. Pair with model-asset gates before advertising.
-#[cfg(target_os = "macos")]
-pub(crate) fn mlx_shim_available() -> bool {
-    std::env::var_os("DONTSPEAK_MLX_DYLIB_PATH")
-        .map(|p| std::path::Path::new(&p).exists())
-        .unwrap_or(false)
+/// Per-family shim presence on macOS; `None` off macOS (no native rung exists at all).
+/// Split per family: `fluid` and `mlx` ship as SEPARATE dylibs, so one bool cannot answer
+/// for both -- a Fluid-present/MLX-absent host would otherwise fall through to ONNX and
+/// report a plausible-looking "ORT CPU". Pair with model-asset gates before advertising.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NativeShims {
+    pub mlx: bool,
+    pub fluid: bool,
 }
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn mlx_shim_available() -> bool {
-    false
+
+impl NativeShims {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn probe() -> Option<Self> {
+        use ds_model::shim::{Shim, available};
+        Some(NativeShims {
+            mlx: available(Shim::Mlx),
+            fluid: available(Shim::Fluid),
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn probe() -> Option<Self> {
+        None
+    }
+}
+
+/// Presence of the dylib the given provider would actually dlopen. Everything else is an
+/// ONNX provider, which needs no shim.
+fn native_shim_present(provider: ds_config::Provider, shims: NativeShims) -> bool {
+    match provider {
+        ds_config::Provider::Mlx => shims.mlx,
+        ds_config::Provider::Fluid => shims.fluid,
+        _ => false,
+    }
 }
 
 /// The ambient roots, resolved once per gate. `None` (no resolvable model dir) reads as "no
@@ -57,18 +81,18 @@ fn roots() -> Option<ds_model::ModelRoots> {
     ds_model::ModelRoots::ambient()
 }
 
-/// Shim + MLX sets (same revision markers as downloader).
+/// MLX dylib + MLX sets (same revision markers as downloader).
 pub(crate) fn parakeet_available() -> bool {
-    mlx_shim_available()
+    NativeShims::probe().unwrap_or_default().mlx
         && roots().is_some_and(|roots| {
             ds_model::hf_repo::is_hf_set_present(&roots, &ds_model::mlx_repo::PARAKEET_MLX_SET)
         })
 }
 
-/// Shim + the FluidAudio Parakeet Core ML set (batch + streaming EOU), same markers as the
-/// downloader. Apple-Silicon-only rung, so the shim answer suffices as the platform gate.
+/// Fluid dylib + the FluidAudio Parakeet Core ML set (batch + streaming EOU), same markers as
+/// the downloader. Apple-Silicon-only rung, so the dylib answer suffices as the platform gate.
 pub(crate) fn parakeet_fluid_available() -> bool {
-    mlx_shim_available()
+    NativeShims::probe().unwrap_or_default().fluid
         && roots().is_some_and(|roots| {
             ds_model::hf_repo::is_hf_set_present(
                 &roots,
@@ -78,9 +102,12 @@ pub(crate) fn parakeet_fluid_available() -> bool {
 }
 
 /// Provider-aware Parakeet readiness: ONNX files versus the native set the selected provider
-/// loads (MLX or FluidAudio Core ML). Both native rungs share the one dylib.
+/// loads (MLX or FluidAudio Core ML), each behind its own dylib.
 pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
-    if stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available()) {
+    if stt_uses_onnx_runtime(
+        cfg.resolved_stt_provider(),
+        NativeShims::probe().unwrap_or_default(),
+    ) {
         ds_model::is_parakeet_present() // ONNX-CPU/CUDA: needs the downloaded model FILES
     } else if cfg.resolved_stt_provider() == ds_config::Provider::Fluid {
         parakeet_fluid_available() // FluidAudio: shim + its Core ML set
@@ -90,27 +117,23 @@ pub(crate) fn parakeet_present_for(cfg: &VoiceConfig) -> bool {
 }
 
 /// Built-in STT on ONNX (needs model files) vs a native shim rung. Native (`mlx`/`fluid`) is
-/// real only when the shared shim is present; else it downgrades to ONNX-CPU. Shared by
+/// real only when THAT family's dylib is present; else it downgrades to ONNX-CPU. Shared by
 /// presence + status.
-pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
-    !(matches!(
-        provider,
-        ds_config::Provider::Mlx | ds_config::Provider::Fluid
-    ) && shim_available)
+pub(crate) fn stt_uses_onnx_runtime(provider: ds_config::Provider, shims: NativeShims) -> bool {
+    !native_shim_present(provider, shims)
 }
 
-/// Genuine native TTS: supported model and platform plus the loaded shim. `Mlx` and `Fluid`
-/// share one dylib, so one `shim_available` answers for both.
+/// Genuine native TTS: supported model and platform plus that family's loaded dylib.
 pub(crate) fn native_tts_active(cfg: &VoiceConfig) -> bool {
     cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
-        && tts_uses_native_runtime(cfg.resolved_tts_provider(), mlx_shim_available())
+        && tts_uses_native_runtime(
+            cfg.resolved_tts_provider(),
+            NativeShims::probe().unwrap_or_default(),
+        )
 }
 
-fn tts_uses_native_runtime(provider: ds_config::Provider, shim_available: bool) -> bool {
-    matches!(
-        provider,
-        ds_config::Provider::Mlx | ds_config::Provider::Fluid
-    ) && shim_available
+fn tts_uses_native_runtime(provider: ds_config::Provider, shims: NativeShims) -> bool {
+    native_shim_present(provider, shims)
 }
 
 /// System STT usable (probe, no prompt). `build_stt` + status row.
@@ -413,44 +436,70 @@ pub(crate) fn debug_enabled() -> bool {
 mod tests {
     use super::*;
 
+    /// Both dylibs present, so this pins the provider half of the decision.
+    const BOTH: NativeShims = NativeShims {
+        mlx: true,
+        fluid: true,
+    };
+    const NEITHER: NativeShims = NativeShims {
+        mlx: false,
+        fluid: false,
+    };
+
     #[test]
     fn stt_uses_onnx_runtime_gates_on_the_shim_not_the_raw_provider() {
         use ds_config::Provider;
-        // MLX preference and shim presence select the MLX path
+        // MLX preference and MLX dylib presence select the MLX path
         // (NOT ONNX) ⇒ `parakeet_present_for` checks `parakeet_available()`, not the files.
-        assert!(!stt_uses_onnx_runtime(Provider::Mlx, true));
+        assert!(!stt_uses_onnx_runtime(Provider::Mlx, BOTH));
         // The Intel (and any no-shim) case downgrades to ONNX CPU
         // arch-blindly, but with no shim it DOWNGRADES to ONNX-CPU ⇒ needs the model FILES.
         // This is the regression that made dictation fall back to Claude Code on Intel.
-        assert!(stt_uses_onnx_runtime(Provider::Mlx, false));
+        assert!(stt_uses_onnx_runtime(Provider::Mlx, NEITHER));
         // Explicit ONNX providers are always the ONNX path, shim or not.
-        assert!(stt_uses_onnx_runtime(Provider::OrtCpu, false));
-        assert!(stt_uses_onnx_runtime(Provider::OrtCpu, true));
-        assert!(stt_uses_onnx_runtime(Provider::OrtCuda, false));
-        assert!(stt_uses_onnx_runtime(Provider::OrtCuda, true));
+        assert!(stt_uses_onnx_runtime(Provider::OrtCpu, NEITHER));
+        assert!(stt_uses_onnx_runtime(Provider::OrtCpu, BOTH));
+        assert!(stt_uses_onnx_runtime(Provider::OrtCuda, NEITHER));
+        assert!(stt_uses_onnx_runtime(Provider::OrtCuda, BOTH));
     }
 
-    /// The two native STT rungs share one dylib, so `stt_uses_onnx_runtime` must treat `mlx`
-    /// and `fluid` identically: native when the shim is present, ONNX-CPU downgrade otherwise —
-    /// exactly like the symmetric TTS gate `tts_uses_native_runtime`.
+    /// The two native rungs ship as SEPARATE dylibs, so each gate must read only its own
+    /// family's presence. The cross rows (`Mlx` with only the Fluid dylib, and vice versa)
+    /// are the regression the split exists to prevent: a shared bool would answer "shim
+    /// present" there, keep the native rung, and then fail at dlopen. This is the per-commit
+    /// proof of that — `ds-stt`'s matrix is macOS-gated and runs only in the release matrix.
     #[test]
-    fn stt_uses_onnx_runtime_treats_both_native_rungs_alike() {
+    fn native_gates_read_only_their_own_family_dylib() {
         use ds_config::Provider;
+        let mlx_only = NativeShims {
+            mlx: true,
+            fluid: false,
+        };
+        let fluid_only = NativeShims {
+            mlx: false,
+            fluid: true,
+        };
+        // (provider, shims, want_onnx_stt, want_native_tts)
         let cases = [
-            (Provider::Mlx, true, false),
-            (Provider::Mlx, false, true),
-            (Provider::Fluid, true, false),
-            (Provider::Fluid, false, true),
-            (Provider::OrtCpu, true, true),
-            (Provider::OrtCpu, false, true),
-            (Provider::OrtCuda, true, true),
-            (Provider::OrtCuda, false, true),
+            (Provider::Mlx, mlx_only, false, true),
+            (Provider::Mlx, fluid_only, true, false),
+            (Provider::Fluid, fluid_only, false, true),
+            (Provider::Fluid, mlx_only, true, false),
+            (Provider::OrtCpu, BOTH, true, false),
+            (Provider::OrtCpu, NEITHER, true, false),
+            (Provider::OrtCuda, BOTH, true, false),
+            (Provider::OrtCuda, NEITHER, true, false),
         ];
-        for (provider, shim, want_onnx) in cases {
+        for (provider, shims, want_onnx, want_native_tts) in cases {
             assert_eq!(
-                stt_uses_onnx_runtime(provider, shim),
+                stt_uses_onnx_runtime(provider, shims),
                 want_onnx,
-                "{provider:?} shim={shim}"
+                "stt {provider:?} shims={shims:?}"
+            );
+            assert_eq!(
+                tts_uses_native_runtime(provider, shims),
+                want_native_tts,
+                "tts {provider:?} shims={shims:?}"
             );
         }
     }
@@ -459,12 +508,11 @@ mod tests {
     fn tts_uses_native_runtime_gates_on_the_shim_not_the_raw_provider() {
         use ds_config::Provider;
 
-        // Both native rungs share the one dylib, so both gate on the loaded shim.
-        assert!(tts_uses_native_runtime(Provider::Mlx, true));
-        assert!(!tts_uses_native_runtime(Provider::Mlx, false));
-        assert!(tts_uses_native_runtime(Provider::Fluid, true));
-        assert!(!tts_uses_native_runtime(Provider::Fluid, false));
-        assert!(!tts_uses_native_runtime(Provider::OrtCpu, true));
+        assert!(tts_uses_native_runtime(Provider::Mlx, BOTH));
+        assert!(!tts_uses_native_runtime(Provider::Mlx, NEITHER));
+        assert!(tts_uses_native_runtime(Provider::Fluid, BOTH));
+        assert!(!tts_uses_native_runtime(Provider::Fluid, NEITHER));
+        assert!(!tts_uses_native_runtime(Provider::OrtCpu, BOTH));
     }
 
     /// Both phases run in a child process holding the fixture environment — see

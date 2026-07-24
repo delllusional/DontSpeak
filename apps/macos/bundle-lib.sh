@@ -62,152 +62,344 @@ compile_icon() {
   legacy_icns "$out"
 }
 
-# mlx_shim_missing WHY -- dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
-# DONTSPEAK_ALLOW_MISSING_MLX=1; dev builds warn and continue (rc 0).
-mlx_shim_missing() {
-  if [ "${DONTSPEAK_DIST:-0}" = "1" ] && [ -z "${DONTSPEAK_ALLOW_MISSING_MLX:-}" ]; then
-    echo "   ERROR: libdontspeak_mlx $1 -- dist build would ship without MLX backends" >&2
-    echo "          (BuiltIn TTS/STT silently degrade to ONNX-CPU on Apple Silicon)." >&2
-    echo "          Set DONTSPEAK_ALLOW_MISSING_MLX=1 to waive." >&2
-    return 1
+# ds_shim_families SWARCH -- families this build ships, in bundle order. arm64 gets all
+# three; Intel gets the dependency-free system shim only (no MLX/Core ML runtime there).
+# DONTSPEAK_SHIMS overrides for experiments; a dist build that drops one still needs the
+# DONTSPEAK_ALLOW_MISSING_SHIM waiver, so a release cannot quietly ship a subset.
+ds_shim_families() {
+  local swarch="$1" default="" family
+  case "$swarch" in
+    arm64)  default="sys mlx fluid" ;;
+    x86_64) default="sys" ;;
+    *)
+      echo "   ERROR: unsupported Swift architecture '$swarch' for the speech shims" >&2
+      return 2
+      ;;
+  esac
+  if [ -z "${DONTSPEAK_SHIMS:-}" ]; then
+    echo "$default"
+    return 0
   fi
-  echo "   WARN: libdontspeak_mlx $1 -- MLX backends unavailable in this build" >&2
-  echo "         (BuiltIn TTS/STT degrade to ONNX-CPU)" >&2
+  for family in $DONTSPEAK_SHIMS; do
+    case " $default " in
+      *" $family "*) ;;
+      *)
+        echo "   ERROR: DONTSPEAK_SHIMS names '$family', not a $swarch family ($default)" >&2
+        return 2
+        ;;
+    esac
+  done
+  echo "$DONTSPEAK_SHIMS"
 }
 
-# mlx_prebuilt_usable DERIVED SWARCH -- is a restored (CI-cached) Xcode product tree shippable?
-# Requires all three things assemble_app harvests: a dylib of the REQUESTED arch, MLX's Metal
-# library, and the dependency checkouts the license bundler reads -- a partial cache must
-# rebuild rather than ship a wrong-arch or license-less app. Opt-in via
-# DONTSPEAK_MLX_REUSE_PREBUILT: staleness is the cache key's problem (CI keys on
-# Package.resolved + the shim sources + the Xcode build), so local builds keep rebuilding.
-mlx_prebuilt_usable() {
-  local derived="$1" swarch="$2"
-  [ "${DONTSPEAK_MLX_REUSE_PREBUILT:-0}" = "1" ] || return 1
+shim_dylib_name() { echo "libdontspeak_$1.dylib"; }
+
+# shim_derived_dir FAMILY SWARCH -- the ONE naming rule for an xcodebuild product tree. Every
+# consumer (build, prebuilt check, resource harvest, licence harvest, CI cache path) derives
+# the same name from the pair, so no caller ever globs xcode-* and picks up another arch's or
+# another family's tree. Separate roots per family also keep a Fluid edit from invalidating
+# the ~12-minute mlx-swift tree.
+shim_derived_dir() { echo "$BUNDLE_LIB_DIR/DontSpeakMLX/.build/xcode-$1-$2"; }
+
+# shim_missing FAMILY WHY -- dist builds (DONTSPEAK_DIST=1) fail loud (rc 1) unless waived via
+# DONTSPEAK_ALLOW_MISSING_SHIM=1; dev builds warn and continue (rc 0).
+shim_missing() {
+  local family="$1" why="$2" degradation
+  case "$family" in
+    sys)   degradation="System STT is unavailable in this build" ;;
+    mlx)   degradation="MLX BuiltIn TTS/STT degrade to ONNX-CPU" ;;
+    fluid) degradation="Fluid BuiltIn TTS/STT degrade to ONNX-CPU" ;;
+    *)     degradation="that backend is unavailable" ;;
+  esac
+  if [ "${DONTSPEAK_DIST:-0}" = "1" ] && [ -z "${DONTSPEAK_ALLOW_MISSING_SHIM:-}" ]; then
+    echo "   ERROR: $(shim_dylib_name "$family") $why -- dist build would ship without the $family shim" >&2
+    echo "          ($degradation)." >&2
+    echo "          Set DONTSPEAK_ALLOW_MISSING_SHIM=1 to waive." >&2
+    return 1
+  fi
+  echo "   WARN: $(shim_dylib_name "$family") $why -- $family shim unavailable in this build" >&2
+  echo "         ($degradation)" >&2
+}
+
+# shim_prebuilt_usable FAMILY DERIVED SWARCH -- is a restored (CI-cached) Xcode product tree
+# shippable? Requires everything assemble_app harvests: a dylib of the REQUESTED arch, MLX's
+# Metal library (mlx only -- FluidAudio ships no metallib), and the dependency checkouts the
+# license bundler reads. A partial cache must rebuild rather than ship a wrong-arch or
+# license-less app. Opt-in via DONTSPEAK_SHIM_REUSE_PREBUILT, one flag for every
+# xcodebuild-backed family: it means "trust the restored derived-data trees", which is a
+# property of the JOB (a CI release build with restore-only caches), not of one family --
+# staleness is the cache key's problem. Local builds keep rebuilding.
+shim_prebuilt_usable() {
+  local family="$1" derived="$2" swarch="$3"
+  [ "${DONTSPEAK_SHIM_REUSE_PREBUILT:-0}" = "1" ] || return 1
   local products="$derived/Build/Products/Release"
-  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+  local bin="$products/PackageFrameworks/dontspeak_$family.framework/Versions/A/dontspeak_$family"
   [ -f "$bin" ] || return 1
-  [ -f "$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ] || return 1
+  if [ "$family" = "mlx" ]; then
+    [ -f "$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ] || return 1
+  fi
   [ -d "$derived/SourcePackages/checkouts" ] || return 1
   lipo -archs "$bin" 2>/dev/null | tr ' ' '\n' | grep -qx "$swarch"
 }
 
-# build_dontspeak_mlx_dylib SWARCH -- MLX on arm64; system-speech-only compatibility shim on Intel.
-# Built-in Intel models stay on ORT CPU. The small Intel dylib retains System STT without linking
-# MLX. MLX's Metal shaders are Xcode resources, so build the arm64 product through Xcode.
-build_dontspeak_mlx_dylib() {
-  local swarch="$1"
+# build_shim FAMILY SWARCH -- echo the built dylib path on stdout (empty when waived).
+# `sys` compiles with a bare swiftc call on ANY arch: it has no package dependencies, so no
+# SwiftPM resolution and no network (~40 s). `mlx` and `fluid` go through Xcode because
+# mlx-swift's default.metallib is an Xcode-only resource; `fluid` follows for uniformity with
+# the prebuilt-reuse / cache / license-harvest machinery, which is written against
+# derived-data trees.
+build_shim() {
+  local family="$1" swarch="$2"
+  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
   case "$swarch" in
-    arm64) ;;
-    x86_64)
-      local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
-      local source="$pkg/Sources/DontSpeakMLX/shim.swift"
-      local out="$pkg/.build/system-$swarch/libdontspeak_mlx.dylib"
-      mkdir -p "${out%/*}"
-      if ! xcrun swiftc -parse-as-library -O -whole-module-optimization -D SYSTEM_ONLY \
-          -target x86_64-apple-macosx14.0 -emit-library "$source" -o "$out" >&2; then
-        echo "   ERROR: Intel system-speech shim build failed" >&2
-        return 1
-      fi
-      [ -f "$out" ] || {
-        echo "   ERROR: Intel system-speech shim produced no dylib" >&2
-        return 1
-      }
-      echo "   Intel built-in models use ONNX CPU; bundled shim provides System STT" >&2
-      echo "$out"
-      return 0
-      ;;
+    arm64|x86_64) ;;
     *)
-      echo "   ERROR: unsupported Swift architecture '$swarch' for libdontspeak_mlx" >&2
+      echo "   ERROR: unsupported Swift architecture '$swarch' for $(shim_dylib_name "$family")" >&2
       return 2
       ;;
   esac
-  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
-  local derived="$pkg/.build/xcode-$swarch"
+  case "$family" in
+    sys)
+      local srcdir="$pkg/Sources/DontSpeakSys"
+      # Globbed, not enumerated, so adding a source to the target cannot silently drop it from
+      # the shipped dylib. A glob that matched nothing expands to the literal pattern and
+      # swiftc would fail with a confusing "no such file" -- name the directory instead.
+      local sources=("$srcdir"/*.swift)
+      [ -e "${sources[0]}" ] || {
+        echo "   ERROR: no Swift sources in $srcdir" >&2
+        return 1
+      }
+      local out="$pkg/.build/sys-$swarch/libdontspeak_sys.dylib"
+      mkdir -p "${out%/*}"
+      if ! xcrun swiftc -parse-as-library -O -whole-module-optimization \
+          -target "$swarch-apple-macosx14.0" -emit-library "${sources[@]}" -o "$out" >&2; then
+        shim_missing sys "$swarch build failed" || return 1
+        return 0
+      fi
+      if [ -f "$out" ]; then
+        echo "$out"
+      else
+        shim_missing sys "produced no dylib after the $swarch build" || return 1
+      fi
+      return 0
+      ;;
+    mlx|fluid) ;;
+    *)
+      echo "   ERROR: unknown shim family '$family'" >&2
+      return 2
+      ;;
+  esac
+  if [ "$swarch" != "arm64" ]; then
+    shim_missing "$family" "not built on Intel" || return 1
+    return 0
+  fi
+  local derived; derived="$(shim_derived_dir "$family" "$swarch")"
   local products="$derived/Build/Products/Release"
-  local bin="$products/PackageFrameworks/dontspeak_mlx.framework/Versions/A/dontspeak_mlx"
+  local bin="$products/PackageFrameworks/dontspeak_$family.framework/Versions/A/dontspeak_$family"
   local metallib="$products/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
   # mlx-swift + mlx-audio-swift compile from source (~12 min) and change only when their
   # exact pins do -- reuse a verified prebuilt tree instead of rebuilding it every release.
-  if mlx_prebuilt_usable "$derived" "$swarch"; then
-    echo "   reusing prebuilt libdontspeak_mlx ($swarch) <- $products" >&2
+  if shim_prebuilt_usable "$family" "$derived" "$swarch"; then
+    echo "   reusing prebuilt $(shim_dylib_name "$family") ($swarch) <- $products" >&2
     echo "$bin"
     return 0
   fi
-  if ! (cd "$pkg" && xcodebuild -scheme dontspeak_mlx -destination 'generic/platform=macOS' \
+  if ! (cd "$pkg" && xcodebuild -scheme "dontspeak_$family" -destination 'generic/platform=macOS' \
       -configuration Release -derivedDataPath "$derived" ARCHS="$swarch" ONLY_ACTIVE_ARCH=YES \
       build -quiet) >&2; then
-    mlx_shim_missing "$swarch build failed" || return 1
+    shim_missing "$family" "$swarch build failed" || return 1
     return 0
   fi
   # if/else not bare && -- missing file must not kill set -e with empty contract.
-  if [ -f "$bin" ] && [ -f "$metallib" ]; then
+  if [ -f "$bin" ] && { [ "$family" != "mlx" ] || [ -f "$metallib" ]; }; then
     echo "$bin"
   else
-    mlx_shim_missing "dylib or Metal library missing after $swarch build" || return 1
+    shim_missing "$family" "dylib or Metal library missing after $swarch build" || return 1
   fi
 }
 
-# Copy SwiftPM resource bundles generated beside the Xcode-built MLX shim. In addition to the
-# mandatory default.metallib this includes tokenizer/configuration and dependency resources.
+# build_shims SWARCH -- newline-separated dylib paths for ds_shim_families, in bundle order.
+build_shims() {
+  local swarch="$1" families defaults family path
+  families="$(ds_shim_families "$swarch")" || return $?
+  defaults="$(DONTSPEAK_SHIMS= ds_shim_families "$swarch")" || return $?
+  # A dist build that quietly drops a default family is exactly what the waiver is for.
+  for family in $defaults; do
+    case " $families " in
+      *" $family "*) ;;
+      *) shim_missing "$family" "excluded by DONTSPEAK_SHIMS" || return 1 ;;
+    esac
+  done
+  case " $families " in
+    *" mlx "*|*" fluid "*) ;;
+    *) echo "   built-in models use ONNX CPU; bundled shim provides System STT" >&2 ;;
+  esac
+  for family in $families; do
+    path="$(build_shim "$family" "$swarch")" || return $?
+    [ -n "$path" ] && echo "$path"
+  done
+  return 0
+}
+
+# shim_required_exports FAMILY -- the C ABI each dylib must expose (dontspeak_<family>.h).
+# Hand-maintained beside those headers: a @_cdecl string typo compiles clean in Swift, so
+# this list plus verify_shim_exports is the only thing that catches one.
+shim_required_exports() {
+  case "$1" in
+    sys)
+      echo "ds_sys_available ds_sys_authorize ds_sys_transcribe ds_sys_stream_start" \
+           "ds_sys_stream_push ds_sys_stream_finish ds_sys_set_log_cb"
+      ;;
+    mlx)
+      echo "ds_mlx_tts_init ds_mlx_tts_synthesize2 ds_mlx_tts_shutdown ds_mlx_asr_init" \
+           "ds_mlx_transcribe ds_mlx_asr_shutdown ds_mlx_asr_stream_start" \
+           "ds_mlx_asr_stream_push ds_mlx_asr_stream_finish ds_mlx_asr_stream_shutdown" \
+           "ds_mlx_diar_init ds_mlx_diarize ds_mlx_diar_embed ds_mlx_diar_shutdown" \
+           "ds_mlx_set_log_cb"
+      ;;
+    fluid)
+      echo "ds_fluid_tts_init ds_fluid_tts_synthesize_phonemes ds_fluid_tts_shutdown" \
+           "ds_fluid_asr_init ds_fluid_transcribe ds_fluid_asr_shutdown" \
+           "ds_fluid_asr_stream_start ds_fluid_asr_stream_push ds_fluid_asr_stream_finish" \
+           "ds_fluid_asr_stream_shutdown ds_fluid_diar_init ds_fluid_diarize" \
+           "ds_fluid_diar_embed ds_fluid_diar_shutdown ds_fluid_set_log_cb"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# verify_shim_exports FAMILY DYLIB -- every required symbol resolves as an exported text
+# symbol. grep -c not -q (pipefail + SIGPIPE -> false failure), same as require_engine_symbol.
+verify_shim_exports() {
+  local family="$1" dylib="$2" table symbol n
+  table="$(nm -gU "$dylib" 2>/dev/null || true)"
+  for symbol in $(shim_required_exports "$family"); do
+    n="$(printf '%s\n' "$table" | grep -cE " [Tt] _?$symbol\$" || true)"
+    [ "${n:-0}" -gt 0 ] || {
+      echo "   ERROR: $(basename "$dylib") does not export $symbol" >&2
+      return 1
+    }
+  done
+  echo "   verified $(basename "$dylib") exports $(shim_required_exports "$family" | wc -w | tr -d ' ') symbols"
+}
+
+# verify_shim_isolation FAMILY DYLIB -- the runtimes really are in separate images: `sys` links
+# neither heavy runtime, and neither native family carries the other's entry points.
+verify_shim_isolation() {
+  local family="$1" dylib="$2" n
+  case "$family" in
+    sys)
+      n="$(otool -L "$dylib" 2>/dev/null | grep -Ec 'mlx|Cmlx|FluidAudio' || true)"
+      [ "${n:-0}" -eq 0 ] || {
+        echo "   ERROR: $(basename "$dylib") links an MLX/FluidAudio runtime" >&2
+        return 1
+      }
+      ;;
+    mlx)
+      n="$(nm -gU "$dylib" 2>/dev/null | grep -c ' _ds_fluid_' || true)"
+      [ "${n:-0}" -eq 0 ] || {
+        echo "   ERROR: $(basename "$dylib") exports ds_fluid_* -- FluidAudio is still linked" >&2
+        return 1
+      }
+      ;;
+    fluid)
+      n="$(nm -gU "$dylib" 2>/dev/null | grep -c ' _ds_mlx_' || true)"
+      [ "${n:-0}" -eq 0 ] || {
+        echo "   ERROR: $(basename "$dylib") exports ds_mlx_* -- MLX is still linked" >&2
+        return 1
+      }
+      ;;
+    *)
+      echo "   ERROR: unknown shim family '$family'" >&2
+      return 1
+      ;;
+  esac
+}
+
+# bundle_swift_package_resources OUT SWARCH FAMILY... -- copy the SwiftPM resource bundles
+# generated beside each xcodebuild-backed family's product (mandatory default.metallib for
+# mlx, plus tokenizer/configuration and dependency resources). Each tree is COMPUTED from
+# (family, swarch) -- never globbed -- because dist-apps.sh loops arches in ONE process with a
+# constant BUNDLE_LIB_DIR, so a leftover arm64 tree would otherwise land in the Intel .app.
 bundle_swift_package_resources() {
-  local out="$1" mlx="$2"
-  local swarch products resource copied=0
-  swarch="$(lipo -archs "$mlx" 2>/dev/null | awk '{print $1}')"
-  if [ "$swarch" = "x86_64" ]; then
-    echo "   Intel system-speech shim has no MLX resource bundles"
+  local out="$1" swarch="$2"; shift 2
+  local family families="" products resource copied=0 wants_mlx=0
+  for family in "$@"; do
+    case "$family" in
+      mlx)   wants_mlx=1; families="$families $family" ;;
+      fluid) families="$families $family" ;;
+      *) ;;  # sys: bare swiftc, no derived data and no package resources
+    esac
+  done
+  if [ -z "$families" ]; then
+    echo "   system-speech-only build has no MLX resource bundles"
     return 0
   fi
-  products="$BUNDLE_LIB_DIR/DontSpeakMLX/.build/xcode-$swarch/Build/Products/Release"
   mkdir -p "$out"
-  for resource in "$products"/*.bundle; do
-    [ -d "$resource" ] || continue
-    cp -R "$resource" "$out/"
-    copied=$((copied + 1))
+  for family in $families; do
+    products="$(shim_derived_dir "$family" "$swarch")/Build/Products/Release"
+    [ -d "$products" ] || continue
+    for resource in "$products"/*.bundle; do
+      [ -d "$resource" ] || continue
+      # Shared transitive bundles appear in both trees with identical content (same pins),
+      # so an overwrite is a no-op rather than a conflict.
+      cp -R "$resource" "$out/"
+      copied=$((copied + 1))
+    done
   done
-  [ -f "$out/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ] || {
+  if [ "$wants_mlx" = 1 ] \
+     && [ ! -f "$out/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib" ]; then
     echo "   ERROR: MLX default.metallib was not bundled" >&2
     return 1
-  }
+  fi
   echo "   bundled $copied Swift package resource bundles"
 }
 
-# Copy the legal files for Swift packages linked into libdontspeak_mlx. SwiftSyntax is a
-# build-only macro dependency of mlx-swift-lm and is not linked into the shipped dylib.
+# bundle_swift_package_licenses OUT SWARCH FAMILY... -- the legal files for every Swift package
+# linked into the shipped dylibs. UNION of the per-family checkouts trees, deduped by package
+# name: stopping at the first match would silently drop one family's notices. SwiftSyntax is a
+# build-only macro dependency of mlx-swift-lm and is not linked into any shipped dylib.
 bundle_swift_package_licenses() {
-  local out="$1" mlx="${2:-}"
-  if [ -n "$mlx" ] && [ "$(lipo -archs "$mlx" 2>/dev/null | awk '{print $1}')" = "x86_64" ]; then
-    return 0
-  fi
-  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
-  local checkouts=""
-  local candidate
-  for candidate in "$pkg"/.build/xcode-*/SourcePackages/checkouts "$pkg/.build/checkouts"; do
-    if [ -d "$candidate" ]; then
-      checkouts="$candidate"
-      break
-    fi
+  local out="$1" swarch="$2"; shift 2
+  local family roots="" candidate
+  for family in "$@"; do
+    case "$family" in
+      mlx|fluid)
+        candidate="$(shim_derived_dir "$family" "$swarch")/SourcePackages/checkouts"
+        [ -d "$candidate" ] && roots="$roots $candidate"
+        ;;
+      *) ;;
+    esac
   done
-  [ -d "$checkouts" ] || return 0
+  local pkg="$BUNDLE_LIB_DIR/DontSpeakMLX"
+  # Last resort: a plain `swift build` tree, which has no per-family derived data.
+  if [ -z "$roots" ] && [ -d "$pkg/.build/checkouts" ]; then
+    roots="$pkg/.build/checkouts"
+  fi
+  [ -n "$roots" ] || return 0
   mkdir -p "$out"
-  local checkout_dir package_name legal_file legal_name copied=0
-  for checkout_dir in "$checkouts"/*; do
-    [ -d "$checkout_dir" ] || continue
-    package_name="${checkout_dir##*/}"
-    [ "$package_name" = "swift-syntax" ] && continue
-    for legal_file in "$checkout_dir"/LICENSE* "$checkout_dir"/NOTICE*; do
-      [ -f "$legal_file" ] || continue
-      legal_name="${legal_file##*/}"
-      cp "$legal_file" "$out/$package_name-$legal_name"
-      copied=$((copied + 1))
+  local checkouts checkout_dir package_name legal_file legal_name copied=0 seen=""
+  for checkouts in $roots; do
+    for checkout_dir in "$checkouts"/*; do
+      [ -d "$checkout_dir" ] || continue
+      package_name="${checkout_dir##*/}"
+      [ "$package_name" = "swift-syntax" ] && continue
+      case " $seen " in *" $package_name "*) continue ;; esac
+      seen="$seen $package_name"
+      for legal_file in "$checkout_dir"/LICENSE* "$checkout_dir"/NOTICE*; do
+        [ -f "$legal_file" ] || continue
+        legal_name="${legal_file##*/}"
+        cp "$legal_file" "$out/$package_name-$legal_name"
+        copied=$((copied + 1))
+      done
     done
   done
   echo "   bundled $copied Swift package license/notice files"
 }
 
 # strip_locals FILE -- drop local symbols from a bundled Mach-O (`-x` keeps every external
-# one, so `nm`'s `ds_engine_start` guard and the Rust side's `dlsym("ds_mlx_*")` still
-# resolve). Called on the copy inside the .app and always before codesign, so signatures
+# one, so `nm`'s `ds_engine_start` guard and the Rust side's `dlsym("ds_{sys,mlx,fluid}_*")`
+# still resolve). Called on the copy inside the .app and always before codesign, so signatures
 # cover the stripped bytes. Best-effort: a strip failure costs size, never correctness.
 # The Xcode-built MLX shim carries ~677k local symbols (~30 MB) -- by far the biggest win.
 strip_locals() {
@@ -222,7 +414,7 @@ strip_locals() {
 }
 
 # assemble_app: 1 app 2 exe 3 helper 4 car 5 icns 6 plist 7 menubar_svg 8 sign
-# Optional DONTSPEAK_MLX_DYLIB, DONTSPEAK_CLI_BIN.
+# Optional DONTSPEAK_SHIM_DYLIBS (newline-separated absolute paths), DONTSPEAK_CLI_BIN.
 assemble_app() {
   local app="$1" exe="$2" helper="$3" car="$4" icns="$5" plist="$6" mbsvg="$7" sign="$8"
   local repo; repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -239,13 +431,23 @@ assemble_app() {
     cp "$cli" "$app/Contents/Helpers/dontspeak"
     echo "   bundled dontspeak CLI <- $cli"
   fi
-  local mlx="${DONTSPEAK_MLX_DYLIB:-}"
-  if [ -n "$mlx" ] && [ -f "$mlx" ]; then
+  # One dylib per shim family. Verify the copy that will actually ship: after strip (so the
+  # check sees the shipped bytes), before codesign.
+  local shim_path shim_base shim_family bundled_families=""
+  local swarch; swarch="$(lipo -archs "$app/Contents/MacOS/DontSpeak" 2>/dev/null | awk '{print $1}')"
+  while IFS= read -r shim_path; do
+    [ -n "$shim_path" ] && [ -f "$shim_path" ] || continue
+    shim_base="$(basename "$shim_path")"
+    shim_family="${shim_base#libdontspeak_}"
+    shim_family="${shim_family%.dylib}"
     mkdir -p "$app/Contents/Frameworks"
-    cp "$mlx" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
-    strip_locals "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
-    echo "   bundled libdontspeak_mlx <- $mlx"
-  fi
+    cp "$shim_path" "$app/Contents/Frameworks/$shim_base"
+    strip_locals "$app/Contents/Frameworks/$shim_base"
+    verify_shim_exports "$shim_family" "$app/Contents/Frameworks/$shim_base" || return 1
+    verify_shim_isolation "$shim_family" "$app/Contents/Frameworks/$shim_base" || return 1
+    bundled_families="$bundled_families $shim_family"
+    echo "   bundled $shim_base <- $shim_path"
+  done <<<"${DONTSPEAK_SHIM_DYLIBS:-}"
   cp "$plist"  "$app/Contents/Info.plist"
   plutil -replace CFBundleShortVersionString -string "$(product_version)" "$app/Contents/Info.plist"
   plutil -replace CFBundleVersion -string "$(product_build_version)" "$app/Contents/Info.plist"
@@ -259,10 +461,10 @@ assemble_app() {
   cp "$repo/LICENSE" "$app/Contents/Resources/LICENSE"
   cp "$repo/NOTICE.md" "$app/Contents/Resources/NOTICE.md"
   cp "$repo/licenses/"* "$app/Contents/Resources/licenses/"
-  if [ -n "$mlx" ] && [ -f "$mlx" ]; then
-    bundle_swift_package_resources "$app/Contents/Resources" "$mlx"
-    bundle_swift_package_licenses "$app/Contents/Resources/licenses/swift" "$mlx"
-  fi
+  # Harvest from what SHIPPED, not from ds_shim_families: a family that failed to build and
+  # was waived (or dropped via DONTSPEAK_SHIMS) must not leave its resources or licences behind.
+  bundle_swift_package_resources "$app/Contents/Resources" "$swarch" $bundled_families
+  bundle_swift_package_licenses "$app/Contents/Resources/licenses/swift" "$swarch" $bundled_families
   if [ -f "$mbsvg" ]; then
     cp "$mbsvg" "$app/Contents/Resources/MenuBarIcon.svg"
     command -v rsvg-convert >/dev/null 2>&1 \
@@ -309,10 +511,11 @@ sign_app_dist() {
   fi
 
   local opts=(--force --options runtime --timestamp --sign "$sign")
-  [ -f "$app/Contents/Frameworks/libonnxruntime.dylib" ] &&
-    codesign "${opts[@]}" "$app/Contents/Frameworks/libonnxruntime.dylib"
-  [ -f "$app/Contents/Frameworks/libdontspeak_mlx.dylib" ] &&
-    codesign "${opts[@]}" "$app/Contents/Frameworks/libdontspeak_mlx.dylib"
+  # Every Frameworks member: onnxruntime plus one dylib per shim family.
+  local member
+  for member in "$app/Contents/Frameworks/"*.dylib; do
+    [ -f "$member" ] && codesign "${opts[@]}" "$member"
+  done
   codesign "${opts[@]}" --entitlements "$ent" "$app/Contents/MacOS/ds-helper"
   [ -f "$app/Contents/Helpers/dontspeak" ] &&
     codesign "${opts[@]}" "$app/Contents/Helpers/dontspeak"

@@ -234,7 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         registerLoginItem()
         useBundledOnnxRuntimeIfPresent()
-        useBundledMLXIfPresent()
+        useBundledShimsIfPresent()
         // In-process: caps loop + RPC + TTS on a bg thread. Accessibility / Input-Monitoring /
         // Mic all grant to this one signed bundle. MCP/hooks hit the socket we serve.
         _ = ds_engine_start()
@@ -259,12 +259,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         setenv("ORT_DYLIB_PATH", dylib.path, 1)
     }
 
-    /// MLX Audio shim for the MLX provider. Absent (for example Intel) → ONNX path.
-    private func useBundledMLXIfPresent() {
-        guard let dylib = Bundle.main.privateFrameworksURL?.appendingPathComponent("libdontspeak_mlx.dylib"),
-            FileManager.default.fileExists(atPath: dylib.path)
-        else { return }
-        setenv("DONTSPEAK_MLX_DYLIB_PATH", dylib.path, 1)
+    /// One speech shim dylib per runtime family. A family whose dylib is absent (mlx/fluid on
+    /// Intel) falls back to the ONNX path. UNSET rather than leave an inherited value: the
+    /// engine's cheap probe is "variable set AND path exists", so a stale ambient value would
+    /// make it claim a family is available while `open()` rejects it, and the status row lies.
+    private func useBundledShimsIfPresent() {
+        for (family, variable) in [
+            ("sys", "DONTSPEAK_SYS_DYLIB_PATH"),
+            ("mlx", "DONTSPEAK_MLX_DYLIB_PATH"),
+            ("fluid", "DONTSPEAK_FLUID_DYLIB_PATH"),
+        ] {
+            let dylib = Bundle.main.privateFrameworksURL?
+                .appendingPathComponent("libdontspeak_\(family).dylib")
+            if let dylib, FileManager.default.fileExists(atPath: dylib.path) {
+                setenv(variable, dylib.path, 1)
+            } else {
+                unsetenv(variable)
+            }
+        }
     }
 
     /// Login item via SMAppService. Fail-quiet if denied / standalone.

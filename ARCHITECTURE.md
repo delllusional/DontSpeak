@@ -85,12 +85,14 @@ references it (#220) — over `ds-ipc`, surfaced as the `models` MCP tool.
 `ort` is loaded dynamically; all ORT TTS models and Parakeet share one runtime. CUDA on demand
 (Windows/Linux x86_64); explicit ORT Core ML for Kokoro on macOS; MLX on Apple Silicon for every
 built-in model. The opt-in `fluid` provider (Apple Silicon) runs FluidAudio's own pinned Core ML
-sets — Kokoro TTS, Parakeet v2 STT, diarization — through the same signed shim dylib that hosts
-MLX; its model sets download and pin like every other asset, except Kokoro's G2P/lexicon set,
+sets — Kokoro TTS, Parakeet v2 STT, diarization — through its own signed `libdontspeak_fluid.dylib`,
+a peer of `libdontspeak_mlx.dylib` rather than the same file, so a host can carry either without
+the other; its model sets download and pin like every other asset, except Kokoro's G2P/lexicon set,
 which FluidAudio hardcodes to `~/.cache/fluidaudio` and which DontSpeak pre-fills there for
 `initialize()` only. Intel macOS never builds or bundles MLX or FluidAudio code; its built-in
-path remains ORT CPU when an Intel-compatible runtime is present. A dependency-free Swift shim
-retains Apple System STT on Intel. UI "Runtime" reflects the backend in use.
+path remains ORT CPU when an Intel-compatible runtime is present. The dependency-free
+`libdontspeak_sys.dylib` carries Apple System STT and ships on every macOS arch. UI "Runtime"
+reflects the backend in use.
 
 Kokoro English frontend uses checksum-pinned BART G2P (ORT) before backend selection —
 MLX and FluidAudio Kokoro still need that ORT dylib. See

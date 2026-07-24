@@ -1,26 +1,26 @@
 //! System STT: Apple on-device en-US (macOS). SpeechAnalyzer 26+, legacy
-//! `SFSpeechRecognizer` 14–25 (shim picks). The arm64 shim also hosts MLX backends; the Intel
-//! build contains only this system bridge. No model download — OS recognizer only; missing
-//! on-device locale → UNAVAILABLE.
+//! `SFSpeechRecognizer` 14–25 (shim picks). Its own dependency-free `libdontspeak_sys` dylib,
+//! bundled on every macOS arch. No model download — OS recognizer only; missing on-device
+//! locale → UNAVAILABLE.
 
 use std::ffi::c_void;
 
 use libloading::{Library, Symbol};
 
 use crate::streaming::{StreamingStt, timed};
-use ds_model::mlx_shim::StrCb;
+use ds_model::shim::StrCb;
 
 type SysAvailFn = unsafe extern "C" fn() -> i32;
 type SysAuthorizeFn = unsafe extern "C" fn() -> i32;
 // Text via borrowed callback (`collect_str`); no out-param / free.
 type SysTranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 
-// Streaming: `ds_mlx_sys_stream_*` (start/push/finish; no model-dir).
+// Streaming: `ds_sys_stream_*` (start/push/finish; no model-dir).
 type SysStreamStartFn = unsafe extern "C" fn() -> i32;
 type SysStreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type SysStreamFinishFn = unsafe extern "C" fn(*mut c_void, StrCb) -> i32;
 
-/// Usability of the System STT engine, mapped from the shim's `ds_mlx_sys_available` code.
+/// Usability of the System STT engine, mapped from the shim's `ds_sys_available` code.
 /// Mirrors Parakeet's present/warming/ready split so the status dot reads the same way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemState {
@@ -36,7 +36,7 @@ pub enum SystemState {
     Unavailable,
 }
 
-/// Turn a shim status code (see dontspeak_mlx.h) into a human reason for the unavailable
+/// Turn a shim status code (see dontspeak_sys.h) into a human reason for the unavailable
 /// cases; `0` (ready) and `1` (preparing) have no error reason.
 fn reason_for(rc: i32) -> Option<String> {
     match rc {
@@ -56,15 +56,15 @@ fn reason_for(rc: i32) -> Option<String> {
     }
 }
 
-/// Probe the shim's `ds_mlx_sys_available` WITHOUT prompting/downloading (safe for the
+/// Probe the shim's `ds_sys_available` WITHOUT prompting/downloading (safe for the
 /// frequent model-status poll). Shim absent (non-app build) ⇒ [`SystemState::Unavailable`].
 pub fn state() -> SystemState {
-    let Ok(lib) = ds_model::mlx_shim::open() else {
+    let Ok(lib) = ds_model::shim::open(ds_model::shim::Shim::Sys) else {
         return SystemState::Unavailable;
     };
-    // SAFETY: app-signed dylib whose C ABI matches dontspeak_mlx.h.
+    // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
     let rc = unsafe {
-        lib.get::<SysAvailFn>(b"ds_mlx_sys_available\0")
+        lib.get::<SysAvailFn>(b"ds_sys_available\0")
             .map(|f| f())
             .unwrap_or(-1)
     };
@@ -90,12 +90,12 @@ pub fn available() -> bool {
 /// when the config resolves to System via the default ladder — see
 /// `dontspeakd::boot::authorize_system_stt_if_needed`.
 pub fn authorize() -> Result<(), String> {
-    let lib = ds_model::mlx_shim::open()?;
-    // SAFETY: app-signed dylib whose C ABI matches dontspeak_mlx.h.
+    let lib = ds_model::shim::open(ds_model::shim::Shim::Sys)?;
+    // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
     let rc = unsafe {
         let f: Symbol<SysAuthorizeFn> = lib
-            .get(b"ds_mlx_sys_authorize\0")
-            .map_err(|e| format!("ds_mlx_sys_authorize symbol: {e}"))?;
+            .get(b"ds_sys_authorize\0")
+            .map_err(|e| format!("ds_sys_authorize symbol: {e}"))?;
         f()
     };
     match reason_for(rc) {
@@ -117,7 +117,7 @@ impl SystemTranscriber {
 
     fn ensure_lib(&mut self) -> Result<(), String> {
         if self.lib.is_none() {
-            self.lib = Some(ds_model::mlx_shim::open()?);
+            self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Sys)?);
         }
         Ok(())
     }
@@ -137,13 +137,13 @@ impl SystemTranscriber {
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
         // SAFETY: the shim exports this name with the `SysTranscribeFn` C ABI.
-        let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"ds_mlx_sys_transcribe\0") }
-            .map_err(|e| format!("ds_mlx_sys_transcribe symbol: {e}"))?;
+        let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"ds_sys_transcribe\0") }
+            .map_err(|e| format!("ds_sys_transcribe symbol: {e}"))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
-        .map_err(|rc| format!("ds_mlx_sys_transcribe failed (rc={rc})"))
+        .map_err(|rc| format!("ds_sys_transcribe failed (rc={rc})"))
     }
 }
 
@@ -164,7 +164,7 @@ pub struct SystemStreamer {
 impl SystemStreamer {
     /// Open shim; `Err` → offline fallback.
     pub fn new() -> Result<Self, String> {
-        let lib = ds_model::mlx_shim::open()?;
+        let lib = ds_model::shim::open(ds_model::shim::Shim::Sys)?;
         Ok(Self {
             lib,
             transcribe_ms: 0.0,
@@ -173,13 +173,13 @@ impl SystemStreamer {
 
     fn push(&self, pcm: &[f32]) -> Result<String, String> {
         // SAFETY: symbol matches `SysStreamPushFn`; Symbol borrows `self.lib`.
-        let f: Symbol<SysStreamPushFn> = unsafe { self.lib.get(b"ds_mlx_sys_stream_push\0") }
-            .map_err(|e| format!("ds_mlx_sys_stream_push symbol: {e}"))?;
+        let f: Symbol<SysStreamPushFn> = unsafe { self.lib.get(b"ds_sys_stream_push\0") }
+            .map_err(|e| format!("ds_sys_stream_push symbol: {e}"))?;
         // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-        ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+        ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
-        .map_err(|rc| format!("ds_mlx_sys_stream_push failed (rc={rc})"))
+        .map_err(|rc| format!("ds_sys_stream_push failed (rc={rc})"))
     }
 }
 
@@ -189,12 +189,12 @@ impl StreamingStt for SystemStreamer {
         let rc = unsafe {
             let f: Symbol<SysStreamStartFn> = self
                 .lib
-                .get(b"ds_mlx_sys_stream_start\0")
-                .map_err(|e| format!("ds_mlx_sys_stream_start symbol: {e}"))?;
+                .get(b"ds_sys_stream_start\0")
+                .map_err(|e| format!("ds_sys_stream_start symbol: {e}"))?;
             f()
         };
         if rc != 0 {
-            return Err(format!("ds_mlx_sys_stream_start failed (rc={rc})"));
+            return Err(format!("ds_sys_stream_start failed (rc={rc})"));
         }
         self.transcribe_ms = 0.0;
         Ok(())
@@ -209,13 +209,12 @@ impl StreamingStt for SystemStreamer {
 
     fn finalize(&mut self) -> Result<String, String> {
         // SAFETY: the shim exports this name with the `SysStreamFinishFn` C ABI.
-        let f: Symbol<SysStreamFinishFn> =
-            unsafe { self.lib.get(b"ds_mlx_sys_stream_finish\0") }
-                .map_err(|e| format!("ds_mlx_sys_stream_finish symbol: {e}"))?;
+        let f: Symbol<SysStreamFinishFn> = unsafe { self.lib.get(b"ds_sys_stream_finish\0") }
+            .map_err(|e| format!("ds_sys_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
             // SAFETY: `collect_str` pair; call takes no other pointers.
-            ds_model::mlx_shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
-                .map_err(|rc| format!("ds_mlx_sys_stream_finish failed (rc={rc})"))
+            ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
+                .map_err(|rc| format!("ds_sys_stream_finish failed (rc={rc})"))
         });
         let text = result?;
         self.transcribe_ms += elapsed_ms;

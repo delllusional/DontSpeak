@@ -148,7 +148,7 @@ mod mlx_impl {
     use libloading::{Library, Symbol};
 
     use super::{DiarizationOutput, Diarizer, parse_output};
-    use ds_model::mlx_shim::{PcmCb, StrCb};
+    use ds_model::shim::{PcmCb, StrCb};
 
     // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
@@ -187,7 +187,7 @@ mod mlx_impl {
 
         fn ensure_lib(&mut self) -> Result<(), String> {
             if self.lib.is_none() {
-                self.lib = Some(ds_model::mlx_shim::open()?);
+                self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Mlx)?);
             }
             Ok(())
         }
@@ -205,7 +205,7 @@ mod mlx_impl {
                 let init: Symbol<DiarInitFn> = lib
                     .get(b"ds_mlx_diar_init\0")
                     .map_err(|e| format!("ds_mlx_diar_init symbol: {e}"))?;
-                let dir = ds_model::mlx_shim::mlx_model_root_arg();
+                let dir = ds_model::shim::mlx_model_root_arg();
                 init(dir.as_ptr(), self.activity_threshold)
             };
             if rc != 0 {
@@ -225,7 +225,7 @@ mod mlx_impl {
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_mlx_diarize\0") }
                 .map_err(|e| format!("ds_mlx_diarize symbol: {e}"))?;
             // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-            let json = ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+            let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
             .map_err(|rc| format!("ds_mlx_diarize failed (rc={rc})"))?;
@@ -242,7 +242,7 @@ mod mlx_impl {
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_mlx_diar_embed\0") }
                 .map_err(|e| format!("ds_mlx_diar_embed symbol: {e}"))?;
             // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
-            let emb = ds_model::mlx_shim::collect_pcm(|ctx, cb| unsafe {
+            let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
             .map_err(|rc| format!("ds_mlx_diar_embed failed (rc={rc})"))?;
@@ -282,7 +282,7 @@ mod mlx_impl {
     }
 }
 
-/// FluidAudio pyannote + WeSpeaker (Core ML / ANE) via `libdontspeak_mlx` (macOS). Mirrors
+/// FluidAudio pyannote + WeSpeaker (Core ML / ANE) via `libdontspeak_fluid` (macOS). Mirrors
 /// [`MlxDiarizer`] exactly — same `Diarizer` trait, same borrowed-callback bridge — but resolves
 /// the `ds_fluid_diar_*` symbols and loads the Core ML diarization set. `DiarizerManager` is not
 /// an actor, so the shim takes a full-call lock; nothing here need reason about that.
@@ -293,7 +293,7 @@ mod fluid_impl {
     use libloading::{Library, Symbol};
 
     use super::{DiarizationOutput, Diarizer, parse_output};
-    use ds_model::mlx_shim::{PcmCb, StrCb};
+    use ds_model::shim::{PcmCb, StrCb};
 
     // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
@@ -332,7 +332,7 @@ mod fluid_impl {
 
         fn ensure_lib(&mut self) -> Result<(), String> {
             if self.lib.is_none() {
-                self.lib = Some(ds_model::mlx_shim::open()?);
+                self.lib = Some(ds_model::shim::open(ds_model::shim::Shim::Fluid)?);
             }
             Ok(())
         }
@@ -350,7 +350,7 @@ mod fluid_impl {
                 let init: Symbol<DiarInitFn> = lib
                     .get(b"ds_fluid_diar_init\0")
                     .map_err(|e| format!("ds_fluid_diar_init symbol: {e}"))?;
-                let dir = ds_model::mlx_shim::fluid_diarization_dir_arg();
+                let dir = ds_model::shim::fluid_diarization_dir_arg();
                 init(dir.as_ptr(), self.clustering_threshold)
             };
             if rc != 0 {
@@ -370,7 +370,7 @@ mod fluid_impl {
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_fluid_diarize\0") }
                 .map_err(|e| format!("ds_fluid_diarize symbol: {e}"))?;
             // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
-            let json = ds_model::mlx_shim::collect_str(|ctx, cb| unsafe {
+            let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
             .map_err(|rc| format!("ds_fluid_diarize failed (rc={rc})"))?;
@@ -387,7 +387,7 @@ mod fluid_impl {
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_fluid_diar_embed\0") }
                 .map_err(|e| format!("ds_fluid_diar_embed symbol: {e}"))?;
             // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
-            let emb = ds_model::mlx_shim::collect_pcm(|ctx, cb| unsafe {
+            let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
             .map_err(|rc| format!("ds_fluid_diar_embed failed (rc={rc})"))?;

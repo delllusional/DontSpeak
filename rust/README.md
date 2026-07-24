@@ -26,7 +26,7 @@ rust/crates/
   ds-platform/     # KeyInjector / FrontmostWindow / CapsKeyMonitor per OS
   ds-http/         # bounded blocking HTTP + native trust roots
   ds-agent-usage/  # read-only weekly/monthly coding-agent quotas
-  ds-model/        # parallel download + checksum; ORT session; MLX Audio + FluidAudio Core ML shim loader
+  ds-model/        # parallel download + checksum; ORT session; per-family macOS speech shim loader
   ds-voices/       # voice/language enum
   ds-tts/          # built-in TTS pipelines: Kokoro, Chatterbox, Qwen, OmniVoice
   ds-stt/          # Parakeet / ClaudeNative / SystemStt

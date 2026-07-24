@@ -51,9 +51,10 @@ windows = { workspace = true, features = ["Win32_System_LibraryLoader", "Win32_F
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
 libc = { workspace = true }
 
-# macOS: the shared MLX Audio shim loader (mlx_shim.rs) dlopens libdontspeak_mlx at
-# runtime (resolved via DONTSPEAK_MLX_DYLIB_PATH), like ort's load-dynamic onnxruntime. Both the
-# STT backends (ds-stt) and the MLX Kokoro TTS backend (ds-tts) go through it.
+# macOS: the shared speech shim loader (shim.rs) dlopens one libdontspeak_<family>.dylib per
+# runtime family at runtime (resolved via DONTSPEAK_{SYS,MLX,FLUID}_DYLIB_PATH), like ort's
+# load-dynamic onnxruntime. Both the STT backends (ds-stt) and the native TTS backends
+# (ds-tts) go through it.
 [target.'cfg(target_os = "macos")'.dependencies]
 libloading = { workspace = true }
 

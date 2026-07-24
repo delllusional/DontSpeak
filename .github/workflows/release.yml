@@ -293,16 +293,17 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kcpw" "$kc" >/dev/null
           rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
 
-      # ── Prebuilt MLX shim (arm64 only; the Intel shim is a ~40 s swiftc call) ──
-      # build_dontspeak_mlx_dylib compiles mlx-swift + mlx-audio-swift from source (~12 min).
-      # That output changes only with the Package.resolved pins, the shim sources, or the Xcode
-      # toolchain, so key on exactly those and restore the Xcode product tree instead — a
-      # toolchain bump still recompiles rather than shipping a dylib built by another Xcode.
-      # Restore-only (a tag ref cannot read back what it saved; cache-warm.yml writes this on
-      # main) and NO restore-keys — a partial match would hand a stale dylib to a build that
-      # ships it. bundle-lib.sh re-verifies arch + metallib + license checkouts and rebuilds
-      # when they don't hold. Keep the path/key in lockstep with cache-warm.yml.
-      - name: Xcode build (MLX cache key input)
+      # ── Prebuilt arm64 shim dylibs (the `sys` shim is a ~40 s swiftc call on any arch) ──
+      # `build_shim mlx` compiles mlx-swift + mlx-audio-swift from source (~12 min); `fluid`
+      # rides the same derived-data machinery. Each output changes only with the
+      # Package.resolved pins, that family's sources, or the Xcode toolchain, so key on exactly
+      # those and restore the Xcode product trees instead — a toolchain bump still recompiles
+      # rather than shipping a dylib built by another Xcode. Restore-only (a tag ref cannot
+      # read back what it saved; cache-warm.yml writes these on main) and NO restore-keys — a
+      # partial match would hand a stale dylib to a build that ships it. bundle-lib.sh
+      # re-verifies arch + metallib + license checkouts per family and rebuilds when they don't
+      # hold. Keep every path/key in lockstep with cache-warm.yml.
+      - name: Xcode build (shim cache key input)
         if: matrix.arch == 'arm64'
         id: xcode
         run: echo "id=$(xcodebuild -version | tr -d ' \n')" >> "$GITHUB_OUTPUT"
@@ -312,9 +313,18 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: |
-            apps/macos/DontSpeakMLX/.build/xcode-arm64/Build/Products/Release
-            apps/macos/DontSpeakMLX/.build/xcode-arm64/SourcePackages/checkouts
-          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/**', 'apps/macos/DontSpeakMLX/include/**') }}
+            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-mlx-arm64/SourcePackages/checkouts
+          key: mlx-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakMLX/**', 'apps/macos/DontSpeakMLX/include/**') }}
+
+      - name: Restore the prebuilt FluidAudio shim
+        if: matrix.arch == 'arm64'
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/Build/Products/Release
+            apps/macos/DontSpeakMLX/.build/xcode-fluid-arm64/SourcePackages/checkouts
+          key: fluid-dylib-arm64-${{ steps.xcode.outputs.id }}-${{ hashFiles('apps/macos/DontSpeakMLX/Package.resolved', 'apps/macos/DontSpeakMLX/Package.swift', 'apps/macos/DontSpeakMLX/Sources/DontSpeakFluid/**', 'apps/macos/DontSpeakMLX/include/**') }}
 
       # DONTSPEAK_DIST=1 → hardened-runtime sign inside-out with entitlements, then
       # notarize+staple the .app (via the APPLE_ID trio) and zip it. onnxruntime is not
@@ -325,9 +335,10 @@ jobs:
       - name: Build app zips (signed + notarized when configured)
         env:
           DONTSPEAK_DIST: ${{ steps.sign.outputs.on == 'true' && '1' || '0' }}
-          # Take the restored Xcode product tree above when it verifies; freshness is the
-          # cache key's job here, so this stays off for hand-run builds.
-          DONTSPEAK_MLX_REUSE_PREBUILT: '1'
+          # Take the restored Xcode product trees above when they verify; freshness is the
+          # cache key's job here, so this stays off for hand-run builds. One flag for every
+          # xcodebuild-backed family -- no job wants MLX reuse without FluidAudio reuse.
+          DONTSPEAK_SHIM_REUSE_PREBUILT: '1'
           # Headless runner: never auto-mint a self-signed local-dev cert + codesign with it —
           # that blocks on a keychain-authorization GUI prompt forever. Ad-hoc sign instead when
           # not doing a real Developer-ID dist build. (No-op in dist mode, which skips autosign.)

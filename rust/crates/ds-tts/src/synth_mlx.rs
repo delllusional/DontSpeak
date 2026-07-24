@@ -2,7 +2,7 @@
 
 use std::ffi::{CString, c_char, c_void};
 
-use ds_model::mlx_shim::PcmCb;
+use ds_model::shim::PcmCb;
 use libloading::{Library, Symbol};
 
 type InitFn = unsafe extern "C" fn(*const c_char, *const c_char) -> i32;
@@ -28,8 +28,8 @@ pub struct MlxTts {
 
 impl MlxTts {
     pub fn load(model: ds_config::TtsModel) -> Result<Self, String> {
-        let dir = ds_model::mlx_shim::tts_model_dir_arg(model);
-        let lib = ds_model::mlx_shim::open()?;
+        let dir = ds_model::shim::tts_model_dir_arg(model);
+        let lib = ds_model::shim::open(ds_model::shim::Shim::Mlx)?;
         let mut synth = Self {
             lib,
             model,
@@ -104,7 +104,7 @@ impl MlxTts {
         // this name with the `SynthFn` ABI.
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_mlx_tts_synthesize2\0") }
             .map_err(|error| format!("ds_mlx_tts_synthesize2 symbol: {error}"))?;
-        ds_model::mlx_shim::collect_pcm(|ctx, callback| {
+        ds_model::shim::collect_pcm(|ctx, callback| {
             // SAFETY: the CStrings outlive this synchronous call; `collect_pcm` supplies a
             // matching context/callback pair that remains valid until the call returns.
             unsafe {
