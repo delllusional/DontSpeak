@@ -74,6 +74,7 @@ jobs:
     name: hygiene (rustfmt + rustdoc)
     if: inputs.full-matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/linux-build-deps
@@ -105,6 +106,7 @@ jobs:
   lockfiles:
     name: Cargo.lock resolution
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -126,6 +128,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.setup.outputs.os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
@@ -164,6 +167,7 @@ jobs:
     name: cargo-deny (${{ matrix.graph }})
     if: inputs.full-matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -186,6 +190,7 @@ jobs:
   script-tests:
     name: script tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
       - name: node script tests
@@ -201,6 +206,7 @@ jobs:
   setup:
     name: test matrix
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       os: ${{ steps.pick.outputs.os }}
     steps:
@@ -220,6 +226,7 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.setup.outputs.os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
