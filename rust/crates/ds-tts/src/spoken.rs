@@ -110,21 +110,33 @@ fn strip_html_tags(html: &str) -> String {
 }
 
 fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
-    rendered
-        .split_whitespace()
-        .filter_map(spoken_token)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut spoken = String::with_capacity(rendered.len());
+    for token in rendered.split_whitespace().map(spoken_token) {
+        match token {
+            SpokenToken::Omitted => {}
+            SpokenToken::Attached(punctuation) => spoken.push_str(&punctuation),
+            SpokenToken::Separated(word) => {
+                if !spoken.is_empty() {
+                    spoken.push(' ');
+                }
+                spoken.push_str(&word);
+            }
+        }
+    }
+    spoken
 }
 
-/// Bare URL → "link", **keeping wrapped punctuation** (else "See https://…." →
-/// "See link" fuses sentences and breaks `batch` `.!?` boundaries).
-fn spoken_token(token: &str) -> Option<String> {
+/// Bare URLs become "link" with wrappers intact. Omitted hashes attach trailing
+/// prosody punctuation to preceding prose. Both preserve `batch` `.!?` boundaries.
+fn spoken_token(token: &str) -> SpokenToken {
     const OPENERS: &[char] = &['(', '[', '{', '<', '"', '\'', '‘', '“', '„', '«', '‹'];
     // '“' is English OPENER and German CLOSER — at token end only the closing role applies.
     const CLOSERS: &[char] = &[
         ')', ']', '}', '>', '"', '\'', '’', '”', '“', '»', '›', '.', ',', ';', ':', '!', '?', '…',
         '。', '，', '；', '：', '！', '？',
+    ];
+    const SPOKEN_PUNCTUATION: &[char] = &[
+        '.', ',', ';', ':', '!', '?', '…', '。', '，', '；', '：', '！', '？',
     ];
     // Speech heuristic: split at first unicode sentence boundary (may appear mid-URL).
     const UNICODE_BOUNDARIES: &[char] =
@@ -140,12 +152,29 @@ fn spoken_token(token: &str) -> Option<String> {
     let trailing = &after_open[url.len()..];
 
     if is_hash_like(token) {
-        None
+        let core_end = token
+            .trim_end_matches(|ch: char| !ch.is_ascii_alphanumeric())
+            .len();
+        let punctuation: String = token[core_end..]
+            .chars()
+            .filter(|ch| SPOKEN_PUNCTUATION.contains(ch))
+            .collect();
+        if punctuation.is_empty() {
+            SpokenToken::Omitted
+        } else {
+            SpokenToken::Attached(punctuation)
+        }
     } else if url.starts_with("https://") || url.starts_with("http://") || url.starts_with("www.") {
-        Some(format!("{leading}link{trailing}"))
+        SpokenToken::Separated(format!("{leading}link{trailing}"))
     } else {
-        Some(token.to_string())
+        SpokenToken::Separated(token.to_string())
     }
+}
+
+enum SpokenToken {
+    Omitted,
+    Attached(String),
+    Separated(String),
 }
 
 /// Hex token 7–40 chars carrying both a digit and an `a–f` letter — real hashes have
@@ -181,11 +210,27 @@ mod tests {
                 "Edit foo_bar in src/main at eedfc57; see src/pipeline.rs#shared-english-frontend."
             )
             .as_str(),
-            "Edit foo_bar in src/main at see src/pipeline.rs#shared-english-frontend."
+            "Edit foo_bar in src/main at; see src/pipeline.rs#shared-english-frontend."
         );
         assert_eq!(
             SpokenText::from_markdown("Line 1234567 of 2026 tests pass.").as_str(),
             "Line 1234567 of 2026 tests pass."
+        );
+    }
+
+    #[test]
+    fn dropped_hashes_preserve_trailing_punctuation_without_added_spaces() {
+        assert_eq!(
+            SpokenText::from_markdown("Fixed in eedfc57. Then run the tool.").as_str(),
+            "Fixed in. Then run the tool."
+        );
+        assert_eq!(
+            SpokenText::from_markdown("eedfc57. Then run the tool.").as_str(),
+            ". Then run the tool."
+        );
+        assert_eq!(
+            SpokenText::from_markdown("Use (eedfc57), then stop.").as_str(),
+            "Use, then stop."
         );
     }
 

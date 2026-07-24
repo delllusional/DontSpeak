@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn every_backend_uses_the_same_text_cleanup() {
         let source = "## Result\nUse **foo_bar** at eedfc57; see https://example.com.";
-        let prose = "Result Use foo_bar at see link.";
+        let prose = "Result Use foo_bar at; see link.";
         assert_eq!(normalize_spoken_text(source), prose);
         assert_eq!(normalize_kokoro_text(source), prose);
     }
