@@ -502,7 +502,9 @@ fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
 
 /// MLX diarization present — same completion markers as downloader.
 fn diarization_present() -> bool {
-    ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
+    ds_model::ModelRoots::ambient().is_some_and(|roots| {
+        ds_model::hf_repo::is_hf_set_present(&roots, &ds_model::mlx_repo::DIARIZATION_MLX_SET)
+    })
 }
 
 /// Row "downloading": own fetch, or Cuda while `!engine_loaded` on ONNX path.

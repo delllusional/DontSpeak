@@ -57,10 +57,10 @@ fn with_tts_languages(mut project: Value, model: ds_config::TtsModel) -> Value {
     project
 }
 
-/// One JSON entry for an MLX model set. The license lives with the files on
-/// [`MlxRepo`](crate::mlx_repo::MlxRepo), so this can't drift
-/// from what's downloaded. Each source-pinned file links to its immutable revision URL.
-fn mlx_project_obj(r: &crate::mlx_repo::MlxRepo) -> Value {
+/// One JSON entry for a self-managed Hugging Face model set. The license lives with the
+/// files on [`HfRepo`](crate::hf_repo::HfRepo), so this can't drift from what's downloaded.
+/// Each source-pinned file links to its immutable revision URL.
+fn hf_project_obj(r: &crate::hf_repo::HfRepo) -> Value {
     let homepage = format!("https://huggingface.co/{}", r.repo);
     let files: Vec<Value> = r
         .files
@@ -188,9 +188,9 @@ pub fn catalog() -> Value {
             projects.push(project_obj(p, files));
         }
     };
-    let push_mlx = |projects: &mut Vec<Value>, r: &crate::mlx_repo::MlxRepo| {
+    let push_mlx = |projects: &mut Vec<Value>, r: &crate::hf_repo::HfRepo| {
         if apple && !r.display_name.is_empty() {
-            projects.push(mlx_project_obj(r));
+            projects.push(hf_project_obj(r));
         }
     };
 

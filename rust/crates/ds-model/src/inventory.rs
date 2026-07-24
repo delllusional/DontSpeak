@@ -2,10 +2,9 @@
 //!
 //! Every entry is derived from the existing registries ([`crate::tts_assets`],
 //! [`crate::mlx_repo`], [`crate::spec`], [`crate::ort`]) — there is no second taxonomy to
-//! keep in sync. The whole API is parameterized on the model root; nothing here resolves
-//! [`ds_config::model_dir`], so a test can never scan or delete the developer's real cache.
-//! (`remove_at` still reads the ambient root INSIDE `with_destination_flight`, which picks
-//! its sweep root there — flight-entering tests carry the `sweep_root_of` guard, #204.)
+//! keep in sync. The whole API is parameterized on [`ModelRoots`]; nothing here resolves an
+//! ambient root, not even inside `remove_at`'s flights, so a test can never scan or delete
+//! the developer's real caches.
 //!
 //! `installed` is existence-based, matching the engine's cheap presence gate
 //! (`tts_model_files_present`): the files are present. The engine additionally verifies
@@ -22,7 +21,8 @@ use std::path::{Path, PathBuf};
 use ds_config::{TtsModel, VoiceConfig};
 use serde_json::{Value, json};
 
-use crate::download::with_destination_flight;
+use crate::download::with_destination_flight_in;
+use crate::hf_repo::{HfRepo, ModelRoots};
 use crate::target::DownloadTarget;
 
 /// Row category. Wire: `tts` | `stt` | `frontend` | `runtime`.
@@ -185,16 +185,16 @@ const KOKORO_G2P_FILES: [&str; 2] = [
     crate::spec::KOKORO_G2P_DECODER_FILE,
 ];
 
-fn mlx_dirs_under(root: &Path, repos: &[&'static crate::mlx_repo::MlxRepo]) -> Vec<PathBuf> {
-    repos
-        .iter()
-        .map(|repo| crate::mlx_repo::repo_dir_under(root, repo))
-        .collect()
+/// Each repo's directory under the root it declares. Total — [`ModelRoots::dir_for`] always
+/// answers — which is what lets one target own a set that spans two roots.
+fn hf_dirs(roots: &ModelRoots, repos: &[&'static HfRepo]) -> Vec<PathBuf> {
+    repos.iter().map(|repo| roots.dir_for(repo)).collect()
 }
 
-/// Everything one target owns under `root`. Files and directories both appear; a directory
+/// Everything one target owns under `roots`. Files and directories both appear; a directory
 /// entry is removed whole.
-pub fn owned_paths_under(root: &Path, target: DownloadTarget) -> Vec<PathBuf> {
+pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<PathBuf> {
+    let root = roots.model.as_path();
     let onnx_tts = |model: TtsModel| -> Vec<PathBuf> {
         match crate::tts_assets::tts_ort_asset_set(model).dir_name {
             Some(_) => vec![crate::tts_assets::tts_model_dir_under(root, model)],
@@ -212,15 +212,15 @@ pub fn owned_paths_under(root: &Path, target: DownloadTarget) -> Vec<PathBuf> {
         DownloadTarget::KokoroMlx
         | DownloadTarget::ChatterboxMlx
         | DownloadTarget::QwenMlx
-        | DownloadTarget::OmniVoiceMlx => mlx_dirs_under(
-            root,
+        | DownloadTarget::OmniVoiceMlx => hf_dirs(
+            roots,
             crate::mlx_repo::tts_mlx_set(target.tts_model().expect("mlx tts target has a model")),
         ),
         DownloadTarget::ParakeetModel => PARAKEET_ONNX_FILES
             .iter()
             .map(|name| root.join(name))
             .collect(),
-        DownloadTarget::ParakeetMlx => mlx_dirs_under(root, &crate::mlx_repo::PARAKEET_MLX_SET),
+        DownloadTarget::ParakeetMlx => hf_dirs(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
         DownloadTarget::KokoroFrontend => {
             let mut paths: Vec<PathBuf> = KOKORO_G2P_FILES
                 .iter()
@@ -257,10 +257,13 @@ pub fn dir_size_at(path: &Path) -> u64 {
         .fold(0u64, |sum, e| sum.saturating_add(dir_size_at(&e.path())))
 }
 
-fn mlx_set_installed(root: &Path, repos: &[&'static crate::mlx_repo::MlxRepo]) -> bool {
+/// Existence-based presence for a whole repo set, matching the engine's cheap gate: every
+/// repo's marker at the pinned revision plus every pinned file present. The checksum-aware
+/// answer is [`crate::hf_repo::is_hf_set_present`]'s.
+fn hf_set_installed(roots: &ModelRoots, repos: &[&'static HfRepo]) -> bool {
     repos.iter().all(|repo| {
-        let dir = crate::mlx_repo::repo_dir_under(root, repo);
-        crate::mlx_repo::ready_marker_matches(&dir, repo)
+        let dir = roots.dir_for(repo);
+        crate::hf_repo::ready_marker_matches(&dir, repo)
             && repo.files.iter().all(|file| dir.join(file.path).is_file())
     })
 }
@@ -272,7 +275,8 @@ fn onnx_tts_installed(root: &Path, model: TtsModel) -> bool {
         .all(|file| dir.join(file.file_name).is_file())
 }
 
-fn variant_installed(root: &Path, target: DownloadTarget) -> bool {
+fn variant_installed(roots: &ModelRoots, target: DownloadTarget) -> bool {
+    let root = roots.model.as_path();
     match target {
         DownloadTarget::KokoroModel => onnx_tts_installed(root, TtsModel::Kokoro),
         DownloadTarget::ChatterboxModel => onnx_tts_installed(root, TtsModel::Chatterbox),
@@ -281,14 +285,14 @@ fn variant_installed(root: &Path, target: DownloadTarget) -> bool {
         DownloadTarget::KokoroMlx
         | DownloadTarget::ChatterboxMlx
         | DownloadTarget::QwenMlx
-        | DownloadTarget::OmniVoiceMlx => mlx_set_installed(
-            root,
+        | DownloadTarget::OmniVoiceMlx => hf_set_installed(
+            roots,
             crate::mlx_repo::tts_mlx_set(target.tts_model().expect("mlx tts target has a model")),
         ),
         DownloadTarget::ParakeetModel => PARAKEET_ONNX_FILES
             .iter()
             .all(|name| root.join(name).is_file()),
-        DownloadTarget::ParakeetMlx => mlx_set_installed(root, &crate::mlx_repo::PARAKEET_MLX_SET),
+        DownloadTarget::ParakeetMlx => hf_set_installed(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
         DownloadTarget::KokoroFrontend => {
             KOKORO_G2P_FILES
                 .iter()
@@ -305,14 +309,14 @@ fn variant_installed(root: &Path, target: DownloadTarget) -> bool {
     }
 }
 
-fn variant_bytes(root: &Path, target: DownloadTarget) -> u64 {
-    owned_paths_under(root, target)
+fn variant_bytes(roots: &ModelRoots, target: DownloadTarget) -> u64 {
+    owned_paths_under(roots, target)
         .iter()
         .fold(0u64, |sum, path| sum.saturating_add(dir_size_at(path)))
 }
 
-/// Read-only walk of `root`. Creates nothing — not even `root` itself.
-pub fn scan_at(root: &Path) -> Vec<Asset> {
+/// Read-only walk of `roots`. Creates nothing — not even the roots themselves.
+pub fn scan_at(roots: &ModelRoots) -> Vec<Asset> {
     ROWS.iter()
         .filter_map(|row| {
             let variants: Vec<Variant> = row
@@ -322,8 +326,8 @@ pub fn scan_at(root: &Path) -> Vec<Asset> {
                 .filter(|target| target.is_supported_on_this_host())
                 .map(|target| Variant {
                     target,
-                    installed: variant_installed(root, target),
-                    bytes: variant_bytes(root, target),
+                    installed: variant_installed(roots, target),
+                    bytes: variant_bytes(roots, target),
                 })
                 .collect();
             if variants.is_empty() {
@@ -366,12 +370,12 @@ const ORT_CONSUMER_TARGETS: [DownloadTarget; 6] = [
     DownloadTarget::KokoroMlx,
 ];
 
-fn any_installed(root: &Path, targets: &[DownloadTarget]) -> bool {
+fn any_installed(roots: &ModelRoots, targets: &[DownloadTarget]) -> bool {
     targets
         .iter()
         .copied()
         .filter(|target| target.is_supported_on_this_host())
-        .any(|target| variant_installed(root, target))
+        .any(|target| variant_installed(roots, target))
 }
 
 /// macOS speaker-lock pulls the SepFormer separator, whose install ends in the same
@@ -407,7 +411,8 @@ pub fn is_shared_asset(id: &str) -> bool {
 /// would make the engine fetch it again (never remove what the next reload undoes).
 /// `false` for a model row and for an id this build does not list; a shared row this table
 /// does not describe is referenced, so a reclaim can never outrun the arms below.
-pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool {
+pub fn shared_asset_referenced(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> bool {
+    let root = roots.model.as_path();
     let Some(row) = row(id) else { return false };
     if !row.kind.is_shared() {
         return false;
@@ -415,13 +420,13 @@ pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool
     match row.targets {
         [DownloadTarget::KokoroFrontend] => {
             any_installed(
-                root,
+                roots,
                 &[DownloadTarget::KokoroModel, DownloadTarget::KokoroMlx],
             ) || (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
                 && cfg.tts_model == TtsModel::Kokoro)
         }
         [DownloadTarget::Onnxruntime] => {
-            any_installed(root, &ORT_CONSUMER_TARGETS)
+            any_installed(roots, &ORT_CONSUMER_TARGETS)
                 // Diarization has no inventory row while the feature is hidden (#77), so
                 // probe its file directly rather than through a row that does not exist.
                 || root.join(crate::spec::SEPFORMER_FILE).is_file()
@@ -440,7 +445,7 @@ pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool
     }
 }
 
-/// Delete every path `id` owns under `root`, returning the reclaimed bytes.
+/// Delete every path `id` owns under `roots`, returning the reclaimed bytes.
 ///
 /// Enforces exactly two gates, so a caller that skips `dontspeakd::models::refusal` still
 /// cannot break an install: `id` must be listed by this build, and a shared asset must be
@@ -454,28 +459,34 @@ pub fn shared_asset_referenced(root: &Path, cfg: &VoiceConfig, id: &str) -> bool
 /// download attempt leaves. Partial failure is surfaced, never repaired: on an `io::Error`
 /// the asset stays half-deleted and re-running this is the recovery (removal operates on
 /// paths present, not on `installed`).
-pub fn remove_at(root: &Path, cfg: &VoiceConfig, id: &str) -> std::io::Result<u64> {
+pub fn remove_at(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> std::io::Result<u64> {
     let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
     let targets =
         asset_targets(id).ok_or_else(|| invalid(format!("`{id}` is not a removable asset")))?;
-    if shared_asset_referenced(root, cfg, id) {
+    if shared_asset_referenced(roots, cfg, id) {
         return Err(invalid(format!("`{id}` is still referenced")));
     }
     let mut paths: Vec<PathBuf> = targets
         .iter()
-        .flat_map(|target| owned_paths_under(root, *target))
+        .flat_map(|target| owned_paths_under(roots, *target))
         .collect();
     paths.sort_unstable();
     paths.dedup();
     let mut reclaimed: u64 = 0;
     for path in &paths {
-        let bytes = with_destination_flight(path, |_| remove_locked(path))?;
+        // That flight footprint is fine inside our OWN cache and wrong outside it: a host
+        // that never enabled a third-party backend would have `models remove` MATERIALIZE
+        // that backend's cache just to lock an absent path.
+        if !path.exists() && !path.starts_with(&roots.model) {
+            continue;
+        }
+        let bytes = with_destination_flight_in(Some(roots), path, |_| remove_locked(path))?;
         reclaimed = reclaimed.saturating_add(bytes);
     }
     log::info!(
         target: "model",
         "removed asset `{id}`: reclaimed {reclaimed} bytes under {}",
-        root.display()
+        roots.model.display()
     );
     Ok(reclaimed)
 }
@@ -542,17 +553,17 @@ fn capabilities_json(model: TtsModel) -> Value {
 /// download is in flight. `reason` names only the durable cause (`active` / `shared`) —
 /// live download state belongs to `status`.
 pub fn inventory_json(
-    root: &Path,
+    roots: &ModelRoots,
     cfg: &VoiceConfig,
     active_downloads: &[DownloadTarget],
     removed: Option<(&str, u64)>,
 ) -> Value {
-    let assets: Vec<Value> = scan_at(root)
+    let assets: Vec<Value> = scan_at(roots)
         .into_iter()
         .map(|asset| {
             let shared = asset.kind.is_shared();
             let active = asset_in_use(cfg, asset.id);
-            let referenced = shared && shared_asset_referenced(root, cfg, asset.id);
+            let referenced = shared && shared_asset_referenced(roots, cfg, asset.id);
             // A shared row is off-limits while ANY fetch runs. Coarse on purpose: the precise
             // answer is "which `start_download` arms end in `ensure_onnxruntime_with_progress`",
             // a third table that would have to track those arms. Over-blocking costs one retry.
@@ -589,8 +600,8 @@ pub fn inventory_json(
         })
         .collect();
     let mut out = json!({
-        "model_dir": root.display().to_string(),
-        "total_bytes": dir_size_at(root),
+        "model_dir": roots.model.display().to_string(),
+        "total_bytes": dir_size_at(&roots.model),
         "assets": assets,
     });
     if let Some((id, bytes)) = removed {
@@ -603,6 +614,12 @@ pub fn inventory_json(
 mod tests {
     use super::*;
     use crate::download::sweep_root_of;
+
+    /// Every root inside one tempdir. A fixture seeds `roots.model` only, so any file that
+    /// shows up under `roots.fluid` is something the code under test created.
+    fn roots_under(dir: &Path) -> ModelRoots {
+        ModelRoots::under(dir)
+    }
 
     /// Guards a fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`: the flight
     /// would then take its sweep gate in the REAL model dir (#204).
@@ -632,7 +649,8 @@ mod tests {
 
     #[test]
     fn owned_paths_are_root_relative_and_split_the_frontend_from_kokoro() {
-        let root = Path::new("/models");
+        let roots = roots_under(Path::new("/roots"));
+        let root = roots.model.as_path();
         assert_eq!(
             flat_weight_files(TtsModel::Kokoro),
             vec![
@@ -641,18 +659,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            owned_paths_under(root, DownloadTarget::KokoroModel),
+            owned_paths_under(&roots, DownloadTarget::KokoroModel),
             vec![
                 root.join(crate::spec::KOKORO_ONNX_FILE),
                 root.join(crate::spec::KOKORO_VOICES_FILE),
             ]
         );
         assert_eq!(
-            owned_paths_under(root, DownloadTarget::ChatterboxModel),
+            owned_paths_under(&roots, DownloadTarget::ChatterboxModel),
             vec![root.join("chatterbox-multilingual")]
         );
         assert_eq!(
-            owned_paths_under(root, DownloadTarget::ChatterboxMlx),
+            owned_paths_under(&roots, DownloadTarget::ChatterboxMlx),
             vec![
                 root.join("mlx")
                     .join(crate::mlx_repo::CHATTERBOX_MLX_DIR_NAME),
@@ -661,14 +679,14 @@ mod tests {
             ]
         );
         assert_eq!(
-            owned_paths_under(root, DownloadTarget::ParakeetMlx),
+            owned_paths_under(&roots, DownloadTarget::ParakeetMlx),
             vec![
                 root.join("mlx")
                     .join(crate::mlx_repo::PARAKEET_MLX_DIR_NAME)
             ]
         );
         assert_eq!(
-            owned_paths_under(root, DownloadTarget::ParakeetModel),
+            owned_paths_under(&roots, DownloadTarget::ParakeetModel),
             vec![
                 root.join(crate::spec::PARAKEET_ENCODER_FILE),
                 root.join(crate::spec::PARAKEET_DECODER_FILE),
@@ -678,19 +696,19 @@ mod tests {
         );
 
         // The G2P graphs and the espeak runtime belong to the shared frontend row only.
-        let frontend = owned_paths_under(root, DownloadTarget::KokoroFrontend);
+        let frontend = owned_paths_under(&roots, DownloadTarget::KokoroFrontend);
         assert!(frontend.contains(&root.join(crate::spec::KOKORO_G2P_ENCODER_FILE)));
         assert!(frontend.contains(&root.join(crate::spec::KOKORO_G2P_DECODER_FILE)));
         assert!(frontend.contains(&crate::kokoro_frontend::espeak_dir_under(root)));
-        let kokoro = owned_paths_under(root, DownloadTarget::KokoroModel);
+        let kokoro = owned_paths_under(&roots, DownloadTarget::KokoroModel);
         for path in &frontend {
             assert!(!kokoro.contains(path), "{path:?} must not be a kokoro path");
         }
         assert!(
-            owned_paths_under(root, DownloadTarget::Onnxruntime)
+            owned_paths_under(&roots, DownloadTarget::Onnxruntime)
                 .contains(&root.join(crate::ort::onnxruntime_dylib_file()))
         );
-        assert!(owned_paths_under(root, DownloadTarget::DiarizationMlx).is_empty());
+        assert!(owned_paths_under(&roots, DownloadTarget::DiarizationMlx).is_empty());
     }
 
     /// A second flat (`dir_name: None`) set must own ITS files. Kokoro is the only flat set
@@ -734,7 +752,8 @@ mod tests {
     }
 
     /// Seeds one directory asset, one flat asset, and one MLX asset — the three shapes.
-    fn seed(root: &Path) {
+    fn seed(roots: &ModelRoots) {
+        let root = roots.model.as_path();
         let chatterbox = crate::tts_assets::tts_model_dir_under(root, TtsModel::Chatterbox);
         for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Chatterbox).files_for(false) {
             write(&chatterbox.join(file.file_name), b"chatterbox");
@@ -742,7 +761,7 @@ mod tests {
         for name in PARAKEET_ONNX_FILES {
             write(&root.join(name), b"parakeet");
         }
-        let kokoro_mlx = crate::mlx_repo::repo_dir_under(root, &crate::mlx_repo::KOKORO_MLX);
+        let kokoro_mlx = roots.dir_for(&crate::mlx_repo::KOKORO_MLX);
         for file in crate::mlx_repo::KOKORO_MLX.files {
             write(&kokoro_mlx.join(file.path), b"k");
         }
@@ -786,10 +805,12 @@ mod tests {
     #[test]
     fn scan_reports_presence_and_bytes_without_creating_anything() {
         let root = tempfile::tempdir().unwrap();
-        seed(root.path());
-        let before = entries(root.path());
-        let assets = scan_at(root.path());
-        assert_eq!(entries(root.path()), before, "scan_at must create nothing");
+        let roots = roots_under(root.path());
+        seed(&roots);
+        let before = entries(&roots.model);
+        let assets = scan_at(&roots);
+        assert_eq!(entries(&roots.model), before, "scan_at must create nothing");
+        assert!(!roots.fluid.exists(), "nor any root it does not read");
 
         let chatterbox = asset(&assets, "chatterbox");
         let onnx = variant(chatterbox, DownloadTarget::ChatterboxModel).unwrap();
@@ -809,10 +830,9 @@ mod tests {
                     "a seeded set at the pinned revision is ready"
                 );
                 // A stale marker invalidates the whole set without touching the files.
-                let dir =
-                    crate::mlx_repo::repo_dir_under(root.path(), &crate::mlx_repo::KOKORO_MLX);
+                let dir = roots.dir_for(&crate::mlx_repo::KOKORO_MLX);
                 std::fs::write(dir.join(".ds-ready"), "0000000").unwrap();
-                let stale = scan_at(root.path());
+                let stale = scan_at(&roots);
                 assert!(
                     !variant(asset(&stale, "kokoro"), DownloadTarget::KokoroMlx)
                         .unwrap()
@@ -830,10 +850,11 @@ mod tests {
     #[test]
     fn a_half_seeded_set_is_not_installed_but_still_reports_its_bytes() {
         let root = tempfile::tempdir().unwrap();
-        let dir = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Qwen);
+        let roots = roots_under(root.path());
+        let dir = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Qwen);
         let first = crate::tts_assets::tts_ort_asset_set(TtsModel::Qwen).files[0];
         write(&dir.join(first.file_name), b"partial download");
-        let assets = scan_at(root.path());
+        let assets = scan_at(&roots);
         let qwen = variant(asset(&assets, "qwen"), DownloadTarget::QwenModel).unwrap();
         assert!(!qwen.installed);
         assert_eq!(qwen.bytes, 16);
@@ -842,14 +863,18 @@ mod tests {
     #[test]
     fn scan_of_a_missing_root_is_all_zero_and_leaves_it_missing() {
         let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("never-created");
-        let assets = scan_at(&root);
+        let roots = roots_under(&parent.path().join("never-created"));
+        let assets = scan_at(&roots);
         assert!(!assets.is_empty());
         for asset in &assets {
             assert!(!asset.installed(), "{}", asset.id);
             assert_eq!(asset.bytes(), 0, "{}", asset.id);
         }
-        assert!(!root.exists(), "scan_at must not create the model root");
+        assert!(
+            !roots.model.exists(),
+            "scan_at must not create the model root"
+        );
+        assert!(!roots.fluid.exists(), "nor any other root");
     }
 
     #[test]
@@ -888,10 +913,11 @@ mod tests {
     #[test]
     fn every_shared_row_has_its_own_reference_arm() {
         let empty = tempfile::tempdir().unwrap();
+        let roots = roots_under(empty.path());
         let cfg = nothing_selected();
         for row in ROWS.iter().filter(|row| row.kind.is_shared()) {
             assert!(
-                !shared_asset_referenced(empty.path(), &cfg, row.id),
+                !shared_asset_referenced(&roots, &cfg, row.id),
                 "`{}` has no arm in shared_asset_referenced",
                 row.id
             );
@@ -901,28 +927,30 @@ mod tests {
     #[test]
     fn remove_deletes_only_what_the_asset_owns() {
         let root = tempfile::tempdir().unwrap();
-        seed(root.path());
-        let chatterbox = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let roots = roots_under(root.path());
+        seed(&roots);
+        let chatterbox = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &chatterbox);
-        let qwen = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Qwen);
+        let qwen = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Qwen);
         write(&qwen.join("keep.onnx"), b"another model");
-        let dylib = root.path().join(crate::ort::onnxruntime_dylib_file());
+        let dylib = roots.model.join(crate::ort::onnxruntime_dylib_file());
         write(&dylib, b"shared runtime");
         let expected = dir_size_at(&chatterbox);
 
         assert_eq!(
-            remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap(),
+            remove_at(&roots, &nothing_selected(), "chatterbox").unwrap(),
             expected
         );
         assert!(!chatterbox.exists());
         assert!(qwen.join("keep.onnx").is_file(), "a sibling model survives");
         assert!(dylib.is_file(), "the shared runtime is never removed");
         assert!(
-            root.path().is_dir(),
+            roots.model.is_dir(),
             "the model root itself is never removed"
         );
         assert!(
-            root.path()
+            roots
+                .model
                 .join(crate::spec::PARAKEET_ENCODER_FILE)
                 .is_file(),
             "a flat sibling asset survives"
@@ -935,10 +963,11 @@ mod tests {
     #[test]
     fn removing_an_absent_model_reclaims_nothing_and_creates_only_lock_scaffolding() {
         let root = tempfile::tempdir().unwrap();
-        let chatterbox = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let roots = roots_under(root.path());
+        let chatterbox = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &chatterbox);
         assert_eq!(
-            remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap(),
+            remove_at(&roots, &nothing_selected(), "chatterbox").unwrap(),
             0
         );
 
@@ -949,18 +978,17 @@ mod tests {
             "mlx".to_string(),
         ];
         expected.sort();
-        assert_eq!(entries(root.path()), expected);
-        let mlx = ds_config::mlx_dir_under(root.path());
+        assert_eq!(entries(&roots.model), expected);
+        let mlx = ds_config::mlx_dir_under(&roots.model);
         // CHATTERBOX_MLX_DIR_NAME nests, so its flight also creates the `mlx-audio` parent.
         assert_eq!(entries(&mlx), vec!["mlx-audio".to_string()]);
-        // A fixture outside the real model root resolves its sweep root to the lock's own
-        // parent; in production every gate collapses onto `<model_dir>/.orphan-sweep.gate`.
+        // Every gate collapses onto the model root's own `.orphan-sweep.gate`: the removal
+        // holds the roots, so a nested destination no longer falls back to its own parent.
         assert_eq!(
             entries(&mlx.join("mlx-audio")),
             vec![
                 ".mlx-community_S3TokenizerV2.lock".to_string(),
                 ".mlx-community_chatterbox-8bit.lock".to_string(),
-                ".orphan-sweep.gate".to_string(),
             ]
         );
     }
@@ -968,62 +996,68 @@ mod tests {
     #[test]
     fn remove_rejects_an_id_it_does_not_own() {
         let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
         for id in ["bogus", ""] {
-            let err = remove_at(root.path(), &nothing_selected(), id).unwrap_err();
+            let err = remove_at(&roots, &nothing_selected(), id).unwrap_err();
             assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{id}");
         }
-        assert!(!root.path().join("mlx").exists(), "a refusal locks nothing");
+        assert!(!roots.model.exists(), "a refusal locks nothing");
     }
 
     #[test]
     fn shared_references_follow_what_is_installed() {
         let cfg = nothing_selected();
         let empty = tempfile::tempdir().unwrap();
+        let empty_roots = roots_under(empty.path());
         for id in ds_config::SHARED_ASSET_TOKENS {
             assert!(
-                !shared_asset_referenced(empty.path(), &cfg, id),
+                !shared_asset_referenced(&empty_roots, &cfg, id),
                 "{id} on an empty root"
             );
         }
 
         let chatterbox = tempfile::tempdir().unwrap();
-        let dir = crate::tts_assets::tts_model_dir_under(chatterbox.path(), TtsModel::Chatterbox);
+        let chatterbox_roots = roots_under(chatterbox.path());
+        let dir =
+            crate::tts_assets::tts_model_dir_under(&chatterbox_roots.model, TtsModel::Chatterbox);
         for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Chatterbox).files_for(false) {
             write(&dir.join(file.file_name), b"chatterbox");
         }
         assert!(shared_asset_referenced(
-            chatterbox.path(),
+            &chatterbox_roots,
             &cfg,
             "onnxruntime"
         ));
         assert!(!shared_asset_referenced(
-            chatterbox.path(),
+            &chatterbox_roots,
             &cfg,
             "kokoro_frontend"
         ));
 
         let kokoro = tempfile::tempdir().unwrap();
-        seed_kokoro_onnx(kokoro.path());
-        assert!(shared_asset_referenced(kokoro.path(), &cfg, "onnxruntime"));
+        let kokoro_roots = roots_under(kokoro.path());
+        seed_kokoro_onnx(&kokoro_roots.model);
+        assert!(shared_asset_referenced(&kokoro_roots, &cfg, "onnxruntime"));
         assert!(shared_asset_referenced(
-            kokoro.path(),
+            &kokoro_roots,
             &cfg,
             "kokoro_frontend"
         ));
 
         // Diarization has no row (#77): only a direct file probe sees its ORT consumer.
         let sepformer = tempfile::tempdir().unwrap();
+        let sepformer_roots = roots_under(sepformer.path());
         write(
-            &sepformer.path().join(crate::spec::SEPFORMER_FILE),
+            &sepformer_roots.model.join(crate::spec::SEPFORMER_FILE),
             b"separator",
         );
         assert!(shared_asset_referenced(
-            sepformer.path(),
+            &sepformer_roots,
             &cfg,
             "onnxruntime"
         ));
         assert!(!shared_asset_referenced(
-            sepformer.path(),
+            &sepformer_roots,
             &cfg,
             "kokoro_frontend"
         ));
@@ -1031,7 +1065,8 @@ mod tests {
         // MLX Kokoro runs English G2P through the BART ONNX graph, so it needs the dylib.
         if DownloadTarget::KokoroMlx.is_supported_on_this_host() {
             let mlx = tempfile::tempdir().unwrap();
-            let dir = crate::mlx_repo::repo_dir_under(mlx.path(), &crate::mlx_repo::KOKORO_MLX);
+            let mlx_roots = roots_under(mlx.path());
+            let dir = mlx_roots.dir_for(&crate::mlx_repo::KOKORO_MLX);
             for file in crate::mlx_repo::KOKORO_MLX.files {
                 write(&dir.join(file.path), b"k");
             }
@@ -1039,14 +1074,15 @@ mod tests {
                 &dir.join(".ds-ready"),
                 crate::mlx_repo::KOKORO_MLX.revision.as_bytes(),
             );
-            assert!(shared_asset_referenced(mlx.path(), &cfg, "onnxruntime"));
-            assert!(shared_asset_referenced(mlx.path(), &cfg, "kokoro_frontend"));
+            assert!(shared_asset_referenced(&mlx_roots, &cfg, "onnxruntime"));
+            assert!(shared_asset_referenced(&mlx_roots, &cfg, "kokoro_frontend"));
         }
     }
 
     #[test]
     fn shared_references_follow_the_selection() {
         let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
         let built_in_tts = |model| VoiceConfig {
             tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
             tts_model: model,
@@ -1055,21 +1091,13 @@ mod tests {
         };
 
         let kokoro = built_in_tts(TtsModel::Kokoro);
-        assert!(shared_asset_referenced(root.path(), &kokoro, "onnxruntime"));
-        assert!(shared_asset_referenced(
-            root.path(),
-            &kokoro,
-            "kokoro_frontend"
-        ));
+        assert!(shared_asset_referenced(&roots, &kokoro, "onnxruntime"));
+        assert!(shared_asset_referenced(&roots, &kokoro, "kokoro_frontend"));
 
         let chatterbox = built_in_tts(TtsModel::Chatterbox);
-        assert!(shared_asset_referenced(
-            root.path(),
-            &chatterbox,
-            "onnxruntime"
-        ));
+        assert!(shared_asset_referenced(&roots, &chatterbox, "onnxruntime"));
         assert!(!shared_asset_referenced(
-            root.path(),
+            &roots,
             &chatterbox,
             "kokoro_frontend"
         ));
@@ -1079,15 +1107,11 @@ mod tests {
             stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
             ..VoiceConfig::default()
         };
-        assert!(shared_asset_referenced(
-            root.path(),
-            &stt_only,
-            "onnxruntime"
-        ));
+        assert!(shared_asset_referenced(&roots, &stt_only, "onnxruntime"));
 
         let off = nothing_selected();
         for id in ds_config::SHARED_ASSET_TOKENS {
-            assert!(!shared_asset_referenced(root.path(), &off, id), "{id}");
+            assert!(!shared_asset_referenced(&roots, &off, id), "{id}");
         }
 
         // Speaker-lock's SepFormer install ends in the same ensure-ORT step (#220 F7).
@@ -1097,7 +1121,7 @@ mod tests {
             ..nothing_selected()
         };
         assert_eq!(
-            shared_asset_referenced(root.path(), &diarizing, "onnxruntime"),
+            shared_asset_referenced(&roots, &diarizing, "onnxruntime"),
             DownloadTarget::SepformerModel.is_supported_on_this_host()
         );
     }
@@ -1105,6 +1129,7 @@ mod tests {
     #[test]
     fn cuda_reference_follows_the_resolved_provider() {
         let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
         let has_row = DownloadTarget::Cuda.is_supported_on_this_host();
         // Selection alone does not hold the runtime: with no NVIDIA driver the engine runs the
         // CPU EP and `should_prefetch_cuda` never fetches it, so a driverless x86_64 host
@@ -1118,11 +1143,11 @@ mod tests {
         };
 
         let cpu = built_in_tts(ds_config::Provider::OrtCpu);
-        assert!(!shared_asset_referenced(root.path(), &cpu, "cuda"));
+        assert!(!shared_asset_referenced(&roots, &cpu, "cuda"));
 
         let cuda = built_in_tts(ds_config::Provider::OrtCuda);
         assert_eq!(cuda_runtime_wanted(&cuda), has_row);
-        assert_eq!(shared_asset_referenced(root.path(), &cuda, "cuda"), held);
+        assert_eq!(shared_asset_referenced(&roots, &cuda, "cuda"), held);
 
         // A CUDA STT alone keeps the runtime, even with TTS off (`5cf0c0b` made
         // `Provider::OrtCuda` usability arch-aware, so this tracks the row exactly).
@@ -1132,31 +1157,29 @@ mod tests {
             provider: vec![ds_config::Provider::OrtCuda],
             ..VoiceConfig::default()
         };
-        assert_eq!(
-            shared_asset_referenced(root.path(), &stt_cuda, "cuda"),
-            held
-        );
+        assert_eq!(shared_asset_referenced(&roots, &stt_cuda, "cuda"), held);
 
         let off = VoiceConfig {
             provider: vec![ds_config::Provider::OrtCuda],
             ..nothing_selected()
         };
-        assert!(!shared_asset_referenced(root.path(), &off, "cuda"));
+        assert!(!shared_asset_referenced(&roots, &off, "cuda"));
     }
 
     #[test]
     fn an_unreferenced_shared_asset_is_removed() {
         let root = tempfile::tempdir().unwrap();
-        let dylib = root.path().join(crate::ort::onnxruntime_dylib_file());
+        let roots = roots_under(root.path());
+        let dylib = roots.model.join(crate::ort::onnxruntime_dylib_file());
         assert_fixture_is_isolated(root.path(), &dylib);
-        let paths = crate::ort::onnxruntime_paths_under(root.path());
+        let paths = crate::ort::onnxruntime_paths_under(&roots.model);
         for path in &paths {
             write(path, b"managed runtime");
         }
         let expected: u64 = paths.iter().map(|path| dir_size_at(path)).sum();
 
         assert_eq!(
-            remove_at(root.path(), &nothing_selected(), "onnxruntime").unwrap(),
+            remove_at(&roots, &nothing_selected(), "onnxruntime").unwrap(),
             expected
         );
         for path in &paths {
@@ -1167,14 +1190,15 @@ mod tests {
     #[test]
     fn remove_at_refuses_a_referenced_shared_asset() {
         let root = tempfile::tempdir().unwrap();
-        let dir = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let roots = roots_under(root.path());
+        let dir = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Chatterbox).files_for(false) {
             write(&dir.join(file.file_name), b"chatterbox");
         }
-        let dylib = root.path().join(crate::ort::onnxruntime_dylib_file());
+        let dylib = roots.model.join(crate::ort::onnxruntime_dylib_file());
         write(&dylib, b"managed runtime");
 
-        let err = remove_at(root.path(), &nothing_selected(), "onnxruntime").unwrap_err();
+        let err = remove_at(&roots, &nothing_selected(), "onnxruntime").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(dylib.is_file(), "a refusal deletes nothing");
     }
@@ -1216,10 +1240,11 @@ mod tests {
     #[test]
     fn payload_marks_the_active_model_and_the_shared_assets() {
         let root = tempfile::tempdir().unwrap();
-        seed(root.path());
+        let roots = roots_under(root.path());
+        seed(&roots);
         // `seed` installs Kokoro MLX only, which exists on Apple Silicon alone; the full ONNX
         // set makes `kokoro_frontend` referenced ON DISK on every host.
-        seed_kokoro_onnx(root.path());
+        seed_kokoro_onnx(&roots.model);
         // STT off explicitly: the default ladder resolves to `system` on macOS but falls
         // through to `built_in` on Linux/Windows, which would make `parakeet` the active
         // STT and flip the `removable` row below by host.
@@ -1229,8 +1254,8 @@ mod tests {
             stt_engine: Some(Vec::new()),
             ..VoiceConfig::default()
         };
-        let payload = inventory_json(root.path(), &cfg, &[DownloadTarget::QwenModel], None);
-        assert_eq!(payload["model_dir"], root.path().display().to_string());
+        let payload = inventory_json(&roots, &cfg, &[DownloadTarget::QwenModel], None);
+        assert_eq!(payload["model_dir"], roots.model.display().to_string());
         assert!(payload["total_bytes"].as_u64().unwrap() > 0);
         assert!(payload.get("removed").is_none());
 
@@ -1307,7 +1332,7 @@ mod tests {
 
         // Nothing installed and nothing selected: every shared row this host lists is free.
         let empty = tempfile::tempdir().unwrap();
-        let free = inventory_json(empty.path(), &nothing_selected(), &[], None);
+        let free = inventory_json(&roots_under(empty.path()), &nothing_selected(), &[], None);
         for shared in
             free["assets"].as_array().unwrap().iter().filter(|asset| {
                 ds_config::SHARED_ASSET_TOKENS.contains(&asset["id"].as_str().unwrap())
@@ -1321,13 +1346,14 @@ mod tests {
     #[test]
     fn a_removal_payload_reports_the_reclaimed_bytes() {
         let root = tempfile::tempdir().unwrap();
-        seed(root.path());
-        let chatterbox = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let roots = roots_under(root.path());
+        seed(&roots);
+        let chatterbox = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &chatterbox);
-        let bytes = remove_at(root.path(), &nothing_selected(), "chatterbox").unwrap();
+        let bytes = remove_at(&roots, &nothing_selected(), "chatterbox").unwrap();
         assert!(bytes > 0);
         let payload = inventory_json(
-            root.path(),
+            &roots,
             &VoiceConfig::default(),
             &[],
             Some(("chatterbox", bytes)),
@@ -1356,7 +1382,8 @@ mod tests {
         const CHILD_RELEASE: &str = "DS_MODEL_INVENTORY_CHILD_RELEASE";
 
         let root = tempfile::tempdir().unwrap();
-        let target = crate::tts_assets::tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let roots = roots_under(root.path());
+        let target = crate::tts_assets::tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         assert_fixture_is_isolated(root.path(), &target);
         std::fs::create_dir_all(&target).unwrap();
         std::fs::write(target.join("weights.onnx"), b"installed bytes").unwrap();
@@ -1384,10 +1411,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        let removal_root = root.path().to_path_buf();
+        let removal_roots = roots.clone();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
-            let bytes = remove_at(&removal_root, &nothing_selected(), "chatterbox").unwrap();
+            let bytes = remove_at(&removal_roots, &nothing_selected(), "chatterbox").unwrap();
             done_tx.send(bytes).unwrap();
         });
         assert!(
@@ -1416,7 +1443,7 @@ mod tests {
         let target = PathBuf::from(target);
         let ready = PathBuf::from(std::env::var_os("DS_MODEL_INVENTORY_CHILD_READY").unwrap());
         let release = PathBuf::from(std::env::var_os("DS_MODEL_INVENTORY_CHILD_RELEASE").unwrap());
-        with_destination_flight(&target, |_| {
+        with_destination_flight_in(None, &target, |_| {
             std::fs::write(&ready, b"locked")?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while !release.exists() {
@@ -1440,10 +1467,11 @@ mod tests {
 
         const BODY: &[u8] = b"a freshly downloaded kokoro graph";
         let root = tempfile::tempdir().unwrap();
-        let onnx = root.path().join(crate::spec::KOKORO_ONNX_FILE);
+        let roots = roots_under(root.path());
+        let onnx = roots.model.join(crate::spec::KOKORO_ONNX_FILE);
         assert_fixture_is_isolated(root.path(), &onnx);
-        let voices = root.path().join(crate::spec::KOKORO_VOICES_FILE);
-        std::fs::write(&voices, b"already installed voices").unwrap();
+        let voices = roots.model.join(crate::spec::KOKORO_VOICES_FILE);
+        write(&voices, b"already installed voices");
 
         let server = httpmock::MockServer::start();
         let mock = server.mock(|when, then| {
@@ -1458,7 +1486,7 @@ mod tests {
 
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let install_root = root.path().to_path_buf();
+        let install_root = roots.model.clone();
         let installer = std::thread::spawn(move || {
             // `download_to_network` reports progress at least twice for a small body; only
             // the first call is the rendezvous, inside the flight and before the rename.
@@ -1477,11 +1505,11 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the installer enters the flight");
 
-        let removal_root = root.path().to_path_buf();
+        let removal_roots = roots.clone();
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
             removed_tx
-                .send(remove_at(&removal_root, &nothing_selected(), "kokoro").unwrap())
+                .send(remove_at(&removal_roots, &nothing_selected(), "kokoro").unwrap())
                 .unwrap();
         });
         assert!(
@@ -1502,13 +1530,35 @@ mod tests {
         assert!(!onnx.exists(), "the removal deletes the finalized download");
         assert!(!voices.exists());
         assert!(reclaimed >= b"already installed voices".len() as u64);
-        assert!(!root.path().join(".kokoro-v1.0-fp32.onnx.part").exists());
+        assert!(!roots.model.join(".kokoro-v1.0-fp32.onnx.part").exists());
         assert!(
-            !root
-                .path()
+            !roots
+                .model
                 .join(".kokoro-v1.0-fp32.onnx.part.meta")
                 .exists()
         );
         mock.assert_calls(1);
+    }
+
+    /// R11 / #212: a host that never enabled a third-party backend must not have `models
+    /// remove` MATERIALIZE that backend's cache. `remove_at` enters a flight per path, and a
+    /// flight creates the destination's parent, the sweep root and two lock sidecars — so a
+    /// path outside our own root that does not already exist is skipped, not locked.
+    #[test]
+    fn removing_kokoro_creates_nothing_in_a_fluid_cache_that_does_not_exist() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
+        assert_fixture_is_isolated(
+            root.path(),
+            &roots.model.join(crate::spec::KOKORO_ONNX_FILE),
+        );
+        assert!(!roots.fluid.exists());
+
+        assert_eq!(remove_at(&roots, &nothing_selected(), "kokoro").unwrap(), 0);
+
+        assert!(
+            !roots.fluid.exists(),
+            "a removal must not create a third-party cache this host never used"
+        );
     }
 }

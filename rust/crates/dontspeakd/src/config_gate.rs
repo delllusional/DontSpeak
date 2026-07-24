@@ -51,10 +51,18 @@ pub(crate) fn mlx_shim_available() -> bool {
     false
 }
 
+/// The ambient roots, resolved once per gate. `None` (no resolvable model dir) reads as "no
+/// assets present", exactly as the per-repo target resolution behaved before roots were values.
+fn roots() -> Option<ds_model::ModelRoots> {
+    ds_model::ModelRoots::ambient()
+}
+
 /// Shim + MLX sets (same revision markers as downloader).
 pub(crate) fn parakeet_available() -> bool {
     mlx_shim_available()
-        && ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET)
+        && roots().is_some_and(|roots| {
+            ds_model::hf_repo::is_hf_set_present(&roots, &ds_model::mlx_repo::PARAKEET_MLX_SET)
+        })
 }
 
 /// Provider-aware Parakeet readiness: ONNX files versus shim plus MLX assets.
@@ -116,9 +124,12 @@ pub(crate) fn tts_model_files_present(cfg: &VoiceConfig) -> bool {
         let frontend_present =
             cfg.tts_model != ds_config::TtsModel::Kokoro || kokoro_g2p_files_present();
         frontend_present
-            && ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(
-                cfg.tts_model,
-            ))
+            && roots().is_some_and(|roots| {
+                ds_model::hf_repo::is_hf_set_present(
+                    &roots,
+                    ds_model::mlx_repo::tts_mlx_set(cfg.tts_model),
+                )
+            })
     } else {
         ds_model::tts_model_files_present(
             cfg.tts_model,

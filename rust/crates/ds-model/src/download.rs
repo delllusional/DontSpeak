@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::hash::{sha256_hex, verify_sha256};
+use crate::hf_repo::ModelRoots;
 use crate::model_path;
 use crate::spec::ModelSpec;
 
@@ -110,9 +111,20 @@ fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
 /// Run one persistent-destination operation under the shared process-local and
 /// cross-process locks. The operation must recheck destination readiness after entry.
 /// The flight also holds its sweep root's gate for its whole run, so no orphan sweep can
-/// reclaim a temp artifact the operation still owns; resolving that root reads ambient
-/// `DONTSPEAK_MODEL_DIR`/HOME via [`sweep_root_of`].
+/// reclaim a temp artifact the operation still owns; resolving that root reads
+/// [`ModelRoots::ambient`].
 pub(crate) fn with_destination_flight<T>(
+    final_path: &Path,
+    operation: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    with_destination_flight_in(ModelRoots::ambient().as_ref(), final_path, operation)
+}
+
+/// [`with_destination_flight`] against roots the caller already owns. A caller that took a
+/// `&ModelRoots` must pass it: resolving ambiently here would make the containment arm of
+/// [`orphan_sweep_root`] dead in every rooted test, which is the one place it is exercised.
+pub(crate) fn with_destination_flight_in<T>(
+    roots: Option<&ModelRoots>,
     final_path: &Path,
     operation: impl FnOnce(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
@@ -122,7 +134,7 @@ pub(crate) fn with_destination_flight<T>(
     std::fs::create_dir_all(parent)?;
     // The sweep root can be `final_path` itself (a directory destination), which
     // `create_dir_all(parent)` does not cover.
-    let sweep_root = sweep_root_of(final_path).unwrap_or_else(|| parent.to_path_buf());
+    let sweep_root = orphan_sweep_root(final_path, roots).unwrap_or_else(|| parent.to_path_buf());
     std::fs::create_dir_all(&sweep_root)?;
     #[cfg(debug_assertions)]
     {
@@ -143,7 +155,7 @@ pub(crate) fn with_destination_flight<T>(
     operation(parent)
 }
 
-/// Acquisition order for [`with_destination_flights`]: sorted so two processes locking
+/// Acquisition order for [`with_destination_flights_in`]: sorted so two processes locking
 /// overlapping sets always acquire in the same order and cannot deadlock, deduped because
 /// nesting a flight inside itself blocks on its own destination lock forever.
 fn ordered_flight_paths(paths: &[PathBuf]) -> Vec<&Path> {
@@ -153,23 +165,28 @@ fn ordered_flight_paths(paths: &[PathBuf]) -> Vec<&Path> {
     ordered
 }
 
-/// [`with_destination_flight`] over several destinations at once (a multi-directory asset,
+/// [`with_destination_flight_in`] over several destinations at once (a multi-directory asset,
 /// or a set installer covering every directory it writes), in [`ordered_flight_paths`] order.
-pub(crate) fn with_destination_flights<T>(
+/// Rooted only: every caller is a set installer that already holds its [`ModelRoots`].
+pub(crate) fn with_destination_flights_in<T>(
+    roots: Option<&ModelRoots>,
     paths: &[PathBuf],
     operation: impl FnOnce() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
     let ordered = ordered_flight_paths(paths);
     fn recurse<T>(
+        roots: Option<&ModelRoots>,
         rest: &[&Path],
         operation: impl FnOnce() -> std::io::Result<T>,
     ) -> std::io::Result<T> {
         match rest.split_first() {
             None => operation(),
-            Some((first, tail)) => with_destination_flight(first, |_| recurse(tail, operation)),
+            Some((first, tail)) => {
+                with_destination_flight_in(roots, first, |_| recurse(roots, tail, operation))
+            }
         }
     }
-    recurse(&ordered, operation)
+    recurse(roots, &ordered, operation)
 }
 
 fn copy_prefetched(local: &Path, dest: &Path, progress: &dyn Fn(u64, u64)) -> std::io::Result<()> {
@@ -223,7 +240,7 @@ pub(crate) fn ensure_at(
     progress: &dyn Fn(u64, u64),
 ) -> std::io::Result<()> {
     if let Some(sweep_root) = sweep_root_of(final_path) {
-        sweep_orphans_once(&ORPHAN_SWEEP_DONE, &sweep_root);
+        sweep_orphans_once(orphan_sweep_done(), &sweep_root);
     }
     with_destination_flight(final_path, |_| {
         ensure_at_locked(final_path, spec, retries, progress)
@@ -389,22 +406,36 @@ fn remove_resume_files(partial: &Path, metadata: &Path) {
     let _ = std::fs::remove_file(metadata);
 }
 
-fn orphan_sweep_root(final_path: &Path, model_root: Option<PathBuf>) -> Option<PathBuf> {
+fn orphan_sweep_root(final_path: &Path, roots: Option<&ModelRoots>) -> Option<PathBuf> {
     let parent = final_path.parent()?.to_path_buf();
-    Some(
-        model_root
-            .filter(|root| final_path.starts_with(root))
-            .unwrap_or(parent),
-    )
+    Some(match roots {
+        // Under a THIRD-PARTY cache DontSpeak only PRE-FILLS: confine the gate and the
+        // recursive walk to the one subdirectory we own. A `.tmp*` sibling elsewhere under
+        // that cache is not ours to delete. Bound to the FIRST component under the root, not
+        // to `final_path`: `ensure_at` takes this flight per FILE, and a sweep root at a file
+        // path would `create_dir_all` a directory where the file must land. Tested before the
+        // model arm so a fluid root nested under an overridden model root still confines.
+        Some(r) if final_path.starts_with(&r.fluid) => r.fluid.join(
+            final_path
+                .strip_prefix(&r.fluid)
+                .ok()?
+                .components()
+                .next()?,
+        ),
+        // Under DontSpeak's own cache: sweep from the model root.
+        Some(r) if final_path.starts_with(&r.model) => r.model.clone(),
+        _ => parent,
+    })
 }
 
 /// Single resolution of a destination's sweep root, so the flight that registers on the
-/// gate and the sweep that claims it can never disagree about which root that is.
+/// gate and the sweep that claims it can never disagree about which root that is. The
+/// ambient form; a caller holding a [`ModelRoots`] enters its flights rooted instead.
 /// Public so flight-entering tests — here, in `inventory`, and in the engine's `models`
 /// backend — can assert their fixture is not shadowed by an ambient `DONTSPEAK_MODEL_DIR`,
 /// which would move the gate into the real cache (#204).
 pub fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
-    orphan_sweep_root(final_path, ds_config::model_dir())
+    orphan_sweep_root(final_path, ModelRoots::ambient().as_ref())
 }
 
 /// 4xx → permanent `NotFound`; other non-success → transient `TimedOut`.
@@ -834,22 +865,35 @@ fn open_sweep_gate_file(root: &Path) -> std::io::Result<std::fs::File> {
         .open(sweep_gate_path(root))
 }
 
-static ORPHAN_SWEEP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Roots this process has already walked. Keyed exactly as [`sweep_gate`] keys its counter,
+/// because production now has MORE than one root: DontSpeak's own cache and the third-party
+/// cache it pre-fills. A process-global flag would let the first walk on either one consume
+/// the other's single attempt (#199).
+type SweepLatch = std::sync::Mutex<std::collections::HashSet<PathBuf>>;
 
-/// One completed walk per attempt that observed `done` unset. A skipped attempt (missing root,
-/// live flight, lock failure) does not latch, so the next `ensure_at` retries instead of losing
-/// the process's only attempt. `done` is a parameter rather than a read of the static so a test
-/// can drive the latch on its own flag: the static is latched by whichever `ensure_at` test the
-/// parallel `ds-model` binary happens to run first. The flag is global while the gate is
-/// per-root: production has exactly one model root, and a second root only appears when
-/// `model_dir()` is `None` or a destination sits outside it.
-fn sweep_orphans_once(done: &std::sync::atomic::AtomicBool, root: &Path) {
-    use std::sync::atomic::Ordering;
-    if done.load(Ordering::Relaxed) {
+fn orphan_sweep_done() -> &'static SweepLatch {
+    static DONE: std::sync::OnceLock<SweepLatch> = std::sync::OnceLock::new();
+    DONE.get_or_init(SweepLatch::default)
+}
+
+/// One completed walk per root per attempt that observed the root unlatched. A skipped attempt
+/// (missing root, live flight, lock failure) does not latch, so the next `ensure_at` retries
+/// instead of losing the process's only attempt for that root. `done` is a parameter rather
+/// than a read of the static so a test can drive the latch on its own set: the static is
+/// latched by whichever `ensure_at` test the parallel `ds-model` binary happens to run first.
+fn sweep_orphans_once(done: &SweepLatch, root: &Path) {
+    let latched = |set: &SweepLatch| {
+        set.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(root)
+    };
+    if latched(done) {
         return;
     }
     if sweep_orphaned_temp_files(root) {
-        done.store(true, Ordering::Relaxed);
+        done.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(root.to_path_buf());
     }
 }
 
@@ -1934,17 +1978,36 @@ mod tests {
         assert!(!is_permanent_error(&err));
     }
 
-    /// The process-wide once guard must cover every per-model subdirectory.
+    /// The once guard must cover every per-model subdirectory of DontSpeak's own root, and
+    /// must NOT spread over a third-party cache DontSpeak only pre-fills: there the sweep root
+    /// is the one subdirectory we own, for the directory flight and for every nested file
+    /// (a file-shaped sweep root would be `create_dir_all`'d over the file itself).
     #[test]
-    fn orphan_sweep_starts_at_the_model_root_for_nested_assets() {
-        let root = std::path::PathBuf::from("models");
-        let nested = root.join("qwen3-tts").join("model.safetensors");
-        assert_eq!(orphan_sweep_root(&nested, Some(root.clone())), Some(root));
+    fn orphan_sweep_starts_at_the_owning_root_and_confines_third_party_ones() {
+        let roots = ModelRoots::under(Path::new("roots"));
+        let nested = roots.model.join("qwen3-tts").join("model.safetensors");
+        assert_eq!(
+            orphan_sweep_root(&nested, Some(&roots)),
+            Some(roots.model.clone())
+        );
 
         let isolated = std::path::PathBuf::from("fixture").join("model.onnx");
         assert_eq!(
-            orphan_sweep_root(&isolated, Some(std::path::PathBuf::from("models"))),
+            orphan_sweep_root(&isolated, Some(&roots)),
             Some(std::path::PathBuf::from("fixture"))
+        );
+
+        let owned = roots.fluid.join("kokoro");
+        assert_eq!(
+            orphan_sweep_root(&owned, Some(&roots)),
+            Some(owned.clone()),
+            "the directory flight sweeps only the subdirectory we pre-fill"
+        );
+        let file = owned.join("G2P").join("model.mlmodelc").join("weights.bin");
+        assert_eq!(
+            orphan_sweep_root(&file, Some(&roots)),
+            Some(owned),
+            "a nested file resolves to the same subdirectory, never to itself"
         );
     }
 
@@ -2182,12 +2245,12 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let paths = vec![target.clone(), target];
-            let _ = done_tx.send(with_destination_flights(&paths, || Ok(())));
+            let _ = done_tx.send(with_destination_flights_in(None, &paths, || Ok(())));
         });
         match done_rx.recv_timeout(std::time::Duration::from_secs(5)) {
             Ok(Ok(())) => {}
             Ok(Err(err)) => panic!("flights failed: {err}"),
-            Err(_) => panic!("with_destination_flights self-deadlocked on a duplicate path"),
+            Err(_) => panic!("with_destination_flights_in self-deadlocked on a duplicate path"),
         }
         worker.join().unwrap();
     }
@@ -2268,17 +2331,17 @@ mod tests {
     }
 
     /// #199: a sweep that did not walk must not burn the process's one attempt. Driven through a
-    /// local flag — the production static is latched by whichever `ensure_at` test runs first.
+    /// local latch — the production one is latched by whichever `ensure_at` test runs first.
     #[test]
     fn a_skipped_sweep_does_not_latch_the_once_guard() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let done = AtomicBool::new(false);
+        let done = SweepLatch::default();
+        let latched = |root: &Path| done.lock().unwrap().contains(root);
 
         let parent = tempfile::tempdir().unwrap();
         let missing = parent.path().join("not-created-yet");
         sweep_orphans_once(&done, &missing);
         assert!(
-            !done.load(Ordering::Relaxed),
+            !latched(&missing),
             "a model root that does not exist yet must not burn the process's only sweep"
         );
 
@@ -2287,30 +2350,31 @@ mod tests {
         let flight = enter_sweep_gate(root.path());
         sweep_orphans_once(&done, root.path());
         assert!(
-            !done.load(Ordering::Relaxed),
+            !latched(root.path()),
             "a sweep deferred by a live flight must not burn the process's only sweep"
         );
         assert!(orphan.is_file());
 
         drop(flight);
         sweep_orphans_once(&done, root.path());
-        assert!(
-            done.load(Ordering::Relaxed),
-            "the retry runs the walk and latches"
-        );
+        assert!(latched(root.path()), "the retry runs the walk and latches");
         assert!(!orphan.exists(), "the retried sweep reclaims the orphan");
     }
 
-    /// The latch is real: one completed walk per process, not one per `ensure_at`.
+    /// The latch is real — one completed walk per process — and PER ROOT: DontSpeak's own
+    /// cache and the third-party cache it pre-fills each get their own attempt, or the first
+    /// walk silently disables the sweep of the other.
     #[test]
-    fn a_completed_sweep_latches_the_once_guard() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        let done = AtomicBool::new(false);
+    fn a_completed_sweep_latches_the_once_guard_for_that_root_only() {
+        let done = SweepLatch::default();
         let root = tempfile::tempdir().unwrap();
 
         let first = aged_orphan(root.path(), ".tmpFIRST");
         sweep_orphans_once(&done, root.path());
-        assert!(done.load(Ordering::Relaxed), "a completed walk latches");
+        assert!(
+            done.lock().unwrap().contains(root.path()),
+            "a completed walk latches"
+        );
         assert!(!first.exists());
 
         let second = aged_orphan(root.path(), ".tmpSECOND");
@@ -2318,6 +2382,14 @@ mod tests {
         assert!(
             second.is_file(),
             "the latch suppresses a second walk in the same process"
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        let elsewhere = aged_orphan(other.path(), ".tmpOTHERROOT");
+        sweep_orphans_once(&done, other.path());
+        assert!(
+            !elsewhere.exists(),
+            "a second root keeps its own attempt (#199)"
         );
     }
 

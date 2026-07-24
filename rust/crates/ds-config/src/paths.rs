@@ -333,6 +333,50 @@ pub fn mlx_dir() -> Option<PathBuf> {
     Some(mlx_dir_under(&model_dir()?))
 }
 
+/// Sub-directory of the model root holding every Core ML repository DontSpeak hands an
+/// explicit directory to.
+pub const COREML_DIR_NAME: &str = "coreml";
+
+/// Root-relative form of [`coreml_dir`], for callers that own their model root.
+pub fn coreml_dir_under(root: &Path) -> PathBuf {
+    root.join(COREML_DIR_NAME)
+}
+
+/// Core ML model cache under [`model_dir`]/coreml.
+pub fn coreml_dir() -> Option<PathBuf> {
+    Some(coreml_dir_under(&model_dir()?))
+}
+
+/// FluidAudio's OWN TTS cache: `~/.cache/fluidaudio/Models`. Platform-neutral path math, not
+/// a macOS lookup — the directory only ever holds files on Apple Silicon, but it must resolve
+/// everywhere so `ds_model::ModelRoots::dir_for` stays total.
+///
+/// Override: absolute `DONTSPEAK_FLUID_MODELS_DIR`, the test seam a child process needs
+/// because `Command::env` cannot redirect `getpwuid` (issue #212). Read EXACTLY ONCE, by
+/// `ds_model::ModelRoots::ambient`; everything below that takes the resolved value.
+pub fn fluidaudio_models_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("DONTSPEAK_FLUID_MODELS_DIR")
+        && !d.is_empty()
+    {
+        let path = PathBuf::from(d);
+        if path.is_absolute() && path.is_dir() {
+            return Some(path);
+        }
+        log::warn!(
+            target: "config",
+            "ignoring DONTSPEAK_FLUID_MODELS_DIR={} because it is not an existing absolute directory",
+            path.display()
+        );
+    }
+    Some(
+        BaseDirs::new()?
+            .home_dir()
+            .join(".cache")
+            .join("fluidaudio")
+            .join("Models"),
+    )
+}
+
 /// Our local machine STATE/runtime root — `stats.toml`, pidfiles, the IPC socket, and
 /// (via [`log_path`]) logs. Machine-specific, never roamed:
 ///   Windows: `%LOCALAPPDATA%\DontSpeak`

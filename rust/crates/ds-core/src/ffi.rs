@@ -608,7 +608,7 @@ mod tests {
         let root = std::path::Path::new("__ds_core_models_schema_guard__/no-such-model-root");
         assert!(!root.exists());
         let payload = ds_model::inventory_json(
-            root,
+            &ds_model::ModelRoots::under(root),
             &ds_config::VoiceConfig::default(),
             &[],
             Some(("kokoro", 0)),

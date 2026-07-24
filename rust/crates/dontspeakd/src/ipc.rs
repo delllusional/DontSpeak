@@ -46,8 +46,8 @@ fn models_response(
     downloads: &crate::downloads::DownloadProg,
     remove: Option<&str>,
 ) -> ds_ipc::Response {
-    match ds_config::model_dir() {
-        Some(root) => crate::models::respond(paths, downloads, &root, remove),
+    match ds_model::ModelRoots::ambient() {
+        Some(roots) => crate::models::respond(paths, downloads, &roots, remove),
         None => ds_ipc::Response::error("models: cannot resolve the model directory"),
     }
 }

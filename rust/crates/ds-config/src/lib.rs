@@ -51,7 +51,8 @@ pub use grok_sessions::{
 };
 pub use narration::{DEFAULT_NARRATION_SPEC, all_blockquotes, all_blockquotes_state};
 pub use paths::{
-    MLX_DIR_NAME, Paths, brew_onnxruntime_dylib, data_dir, mlx_dir, mlx_dir_under, model_dir,
+    COREML_DIR_NAME, MLX_DIR_NAME, Paths, brew_onnxruntime_dylib, coreml_dir, coreml_dir_under,
+    data_dir, fluidaudio_models_dir, mlx_dir, mlx_dir_under, model_dir,
 };
 pub use pidfile::{evict_stale_engine, is_engine_pid_alive, is_pid_alive, read_engine_pid};
 pub use speakers::{Speaker, SpeakerStore};

@@ -7,6 +7,13 @@
 pub(crate) fn run_prefetch(what: &str) -> i32 {
     log::info!(target: "helper", "ds-helper: prefetch '{what}' started");
     let p = |_done: u64, _total: u64| {};
+    // One ambient resolution for every set fetch below (the installer boundary); an
+    // unresolvable model dir is the same hard error the per-file path already reports.
+    let hf_repos = |set: &[&'static ds_model::HfRepo]| -> std::io::Result<()> {
+        let roots = ds_model::ModelRoots::ambient()
+            .ok_or_else(|| std::io::Error::other("cannot resolve the model directory"))?;
+        ds_model::hf_repo::ensure_hf_repos(&roots, set, &p)
+    };
     let models = || -> std::io::Result<()> {
         ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())?;
         ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
@@ -60,26 +67,23 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
             | DownloadTarget::OmniVoiceMlx),
         ) => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                ds_model::mlx_repo::ensure_mlx_repos(
-                    ds_model::mlx_repo::tts_mlx_set(
-                        target.tts_model().expect("MLX TTS target has a model"),
-                    ),
-                    &p,
-                )
+                hf_repos(ds_model::mlx_repo::tts_mlx_set(
+                    target.tts_model().expect("MLX TTS target has a model"),
+                ))
             } else {
                 Ok(())
             }
         }
         Some(DownloadTarget::ParakeetMlx) => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                ds_model::mlx_repo::ensure_mlx_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET, &p)
+                hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET)
             } else {
                 Ok(())
             }
         }
         Some(DownloadTarget::DiarizationMlx) => {
             if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                ds_model::mlx_repo::ensure_mlx_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET, &p)
+                hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
             } else {
                 Ok(())
             }

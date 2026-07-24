@@ -777,8 +777,9 @@ mod tests {
     #[test]
     fn a_directory_set_install_blocks_a_concurrent_removal_of_the_same_model() {
         let root = tempfile::tempdir().unwrap();
+        let roots = crate::hf_repo::ModelRoots::under(root.path());
         let set = tts_ort_asset_set(TtsModel::Chatterbox);
-        let dir = tts_model_dir_under(root.path(), TtsModel::Chatterbox);
+        let dir = tts_model_dir_under(&roots.model, TtsModel::Chatterbox);
         assert!(
             crate::download::sweep_root_of(&dir)
                 .is_some_and(|resolved| resolved.starts_with(root.path())),
@@ -804,13 +805,13 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the installer enters the set flight");
 
-        let removal_root = root.path().to_path_buf();
+        let removal_roots = roots.clone();
         let (removed_tx, removed_rx) = std::sync::mpsc::channel();
         let remover = std::thread::spawn(move || {
             removed_tx
                 .send(
                     crate::inventory::remove_at(
-                        &removal_root,
+                        &removal_roots,
                         &ds_config::VoiceConfig::default(),
                         "chatterbox",
                     )

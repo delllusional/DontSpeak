@@ -250,6 +250,14 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 )
             })
         };
+        // The set installers take their roots as a value; resolve once here so
+        // `ModelRoots::ambient` stays at the engine boundary.
+        #[cfg(target_os = "macos")]
+        let hf_repos = |set: &[&'static ds_model::HfRepo]| -> std::io::Result<()> {
+            let roots = ds_model::ModelRoots::ambient()
+                .ok_or_else(|| std::io::Error::other("cannot resolve the model directory"))?;
+            ds_model::hf_repo::ensure_hf_repos(&roots, set, &prog)
+        };
         // One shared host gate — not per-arm cfg error strings (uniform red-dot path).
         let result: std::io::Result<()> = if !which.is_supported_on_this_host() {
             Err(std::io::Error::other(format!(
@@ -299,26 +307,19 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 }
                 // MLX diarization — engine-managed fetch (real %), offline shim load.
                 #[cfg(target_os = "macos")]
-                DownloadTarget::DiarizationMlx => ds_model::mlx_repo::ensure_mlx_repos(
-                    &ds_model::mlx_repo::DIARIZATION_MLX_SET,
-                    &prog,
-                ),
+                DownloadTarget::DiarizationMlx => {
+                    hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
+                }
                 // MLX sets: standard path (not helper self-fetch).
                 #[cfg(target_os = "macos")]
                 target @ (DownloadTarget::KokoroMlx
                 | DownloadTarget::ChatterboxMlx
                 | DownloadTarget::QwenMlx
-                | DownloadTarget::OmniVoiceMlx) => ds_model::mlx_repo::ensure_mlx_repos(
-                    ds_model::mlx_repo::tts_mlx_set(
-                        target.tts_model().expect("MLX TTS target has a model"),
-                    ),
-                    &prog,
-                ),
+                | DownloadTarget::OmniVoiceMlx) => hf_repos(ds_model::mlx_repo::tts_mlx_set(
+                    target.tts_model().expect("MLX TTS target has a model"),
+                )),
                 #[cfg(target_os = "macos")]
-                DownloadTarget::ParakeetMlx => ds_model::mlx_repo::ensure_mlx_repos(
-                    &ds_model::mlx_repo::PARAKEET_MLX_SET,
-                    &prog,
-                ),
+                DownloadTarget::ParakeetMlx => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
                 // SepFormer speaker-lock — re-resolved per dictation; no warm-child restart.
                 #[cfg(target_os = "macos")]
                 DownloadTarget::SepformerModel => {
@@ -472,6 +473,14 @@ pub(crate) fn apply_provider_and_autofetch(
 /// Live probe: which model sets need fetching. Impure; [`fetch_plan`] is the pure part.
 fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
+    // One resolution for every set probe below; `None` reads as "nothing present", which
+    // queues the fetch that then fails loudly on the same unresolvable root.
+    let roots = ds_model::ModelRoots::ambient();
+    let set_present = |set: &[&'static ds_model::HfRepo]| {
+        roots
+            .as_ref()
+            .is_some_and(|roots| ds_model::hf_repo::is_hf_set_present(roots, set))
+    };
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
     let mlx_active = builtin_tts && mlx_tts_active(cfg);
     let kokoro_selected = builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro;
@@ -481,7 +490,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let tts_model = if !builtin_tts {
         None
     } else if mlx_active {
-        (!ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(cfg.tts_model)))
+        (!set_present(ds_model::mlx_repo::tts_mlx_set(cfg.tts_model)))
             .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))
     } else {
         let target = DownloadTarget::portable_for_tts(cfg.tts_model);
@@ -501,13 +510,12 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), mlx_shim_available());
     let parakeet_model = stt_is_builtin && stt_onnx_runtime && !ds_model::is_parakeet_present();
-    let parakeet_mlx = stt_is_builtin
-        && !stt_onnx_runtime
-        && !ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
+    let parakeet_mlx =
+        stt_is_builtin && !stt_onnx_runtime && !set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
     let diarization_mlx = diarization_mlx_needed(
         DownloadTarget::DiarizationMlx.is_supported_on_this_host(),
         cfg.is_diarization_on(),
-        ds_model::mlx_repo::is_mlx_set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
+        set_present(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
     );
     // Speaker-lock on + model absent: without it lock fails open (unfiltered).
     let sepformer_model = cfg!(target_os = "macos")

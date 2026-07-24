@@ -543,7 +543,12 @@ impl TtsManager {
             let frontend_ready = model != ds_config::TtsModel::Kokoro
                 || crate::config_gate::kokoro_g2p_files_present();
             frontend_ready
-                && ds_model::mlx_repo::is_mlx_set_present(ds_model::mlx_repo::tts_mlx_set(model))
+                && ds_model::ModelRoots::ambient().is_some_and(|roots| {
+                    ds_model::hf_repo::is_hf_set_present(
+                        &roots,
+                        ds_model::mlx_repo::tts_mlx_set(model),
+                    )
+                })
         } else {
             ds_model::tts_model_files_present(
                 model,

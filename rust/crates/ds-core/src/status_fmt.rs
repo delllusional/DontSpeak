@@ -16,7 +16,7 @@ fn fill(key: &str, pairs: &[(&str, &str)]) -> String {
 /// `state` is a model-status token via [`ds_status::EngineState`] (note for
 /// `Missing`/`Warming`/`Blocked`/`Downloading`/`Failed`); ready/unrecognized → "".
 /// `progress` is the overall 0..1 byte-weighted download fraction (not per-file; see
-/// `ds_model::mlx_repo::ensure_mlx_repos`). `why` is the failure reason (empty →
+/// [`ds_model::hf_repo::ensure_hf_repos`]). `why` is the failure reason (empty →
 /// generic default). ONE cross-platform path via [`crate::ffi::ds_engine_state_word`].
 pub fn engine_state_word(state: &str, progress: f64, why: &str) -> String {
     use ds_status::EngineState;

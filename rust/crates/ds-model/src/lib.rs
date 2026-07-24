@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 mod archive;
 pub mod download;
 pub mod hash;
+pub mod hf_repo;
 pub mod inventory;
 mod kokoro_frontend;
 pub mod libraries;
@@ -59,6 +60,7 @@ pub use download::{
     sweep_root_of, url_basename,
 };
 pub use hash::{sha256_file, sha256_hex, verify_sha256};
+pub use hf_repo::{HfFile, HfRepo, ModelRoots, RepoRoot};
 pub use inventory::{
     Asset, AssetKind, Variant, asset_in_use, asset_targets, cuda_runtime_wanted, inventory_json,
     is_shared_asset, remove_at, scan_at, shared_asset_referenced,
