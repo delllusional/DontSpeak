@@ -6,11 +6,11 @@
 //! ambient root, not even inside `remove_at`'s flights, so a test can never scan or delete
 //! the developer's real caches.
 //!
-//! `installed` is existence-based, matching the engine's cheap presence gate
-//! (`tts_model_files_present`): the files are present. The engine additionally verifies
-//! checksums when it loads, so a corrupt-but-present set reports installed here and fails
-//! at load. Sizes are logical bytes (`symlink_metadata().len()`), never block usage, and
-//! symlinks are not followed — the same walk shape as the orphan sweep.
+//! `installed` matches each engine's cheap presence gate: required files and pinned completion
+//! markers are present. The engine additionally verifies model checksums when it loads, so a
+//! corrupt-but-present set reports installed here and fails at load. Sizes are logical bytes
+//! (`symlink_metadata().len()`), never block usage, and symlinks are not followed — the same
+//! walk shape as the orphan sweep.
 //!
 //! Diarization (`diarization_mlx`, `diarization_fluid`, `sepformer_model`) is deliberately
 //! unlisted while the feature is hidden (#77); enabling it must add its row here.
@@ -324,7 +324,7 @@ fn variant_installed(roots: &ModelRoots, target: DownloadTarget) -> bool {
                     .is_file()
         }
         DownloadTarget::Onnxruntime => root.join(crate::ort::onnxruntime_dylib_file()).is_file(),
-        DownloadTarget::Cuda => crate::ort::cuda_runtime_dir_under(root).is_dir(),
+        DownloadTarget::Cuda => crate::ort::is_cuda_runtime_present_under(root),
         DownloadTarget::DiarizationMlx
         | DownloadTarget::DiarizationFluid
         | DownloadTarget::SepformerModel
@@ -910,6 +910,62 @@ mod tests {
         assert!(
             !assets.iter().any(|asset| asset.id == "diarization"),
             "diarization stays unlisted while the feature is hidden (#77)"
+        );
+    }
+
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn cuda_inventory_requires_current_marker_and_runtime_files() {
+        let root = tempfile::tempdir().unwrap();
+        let roots = roots_under(root.path());
+        let dir = crate::ort::cuda_runtime_dir_under(&roots.model);
+        std::fs::create_dir_all(&dir).unwrap();
+        let installed = || {
+            let assets = scan_at(&roots);
+            variant(asset(&assets, "cuda"), DownloadTarget::Cuda)
+                .unwrap()
+                .installed
+        };
+
+        assert!(!installed(), "an empty cuda directory is not installed");
+
+        #[cfg(target_os = "windows")]
+        for name in [
+            "onnxruntime.dll",
+            "onnxruntime_providers_cuda.dll",
+            "cudnn64_9.dll",
+        ] {
+            write(&dir.join(name), b"runtime");
+        }
+        #[cfg(target_os = "linux")]
+        for name in [
+            "libonnxruntime.so.1.26.0",
+            "libonnxruntime_providers_cuda.so",
+            "libcudnn.so.9",
+        ] {
+            write(&dir.join(name), b"runtime");
+        }
+
+        let marker = crate::ort::cuda_version_marker(&dir);
+        write(&marker, b"");
+        assert!(!installed(), "an empty fingerprint is not installed");
+
+        write(&marker, b"stale");
+        assert!(!installed(), "a stale fingerprint is not installed");
+
+        write(&marker, crate::ort::cuda_version_fingerprint().as_bytes());
+        assert!(installed(), "the current complete runtime is installed");
+
+        #[cfg(target_os = "windows")]
+        std::fs::remove_file(dir.join("onnxruntime_providers_cuda.dll")).unwrap();
+        #[cfg(target_os = "linux")]
+        std::fs::remove_file(dir.join("libonnxruntime_providers_cuda.so")).unwrap();
+        assert!(
+            !installed(),
+            "a current marker cannot hide a partial runtime"
         );
     }
 

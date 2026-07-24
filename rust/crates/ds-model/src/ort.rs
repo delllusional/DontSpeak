@@ -517,11 +517,7 @@ pub fn cuda_runtime_dir() -> Option<PathBuf> {
     model_path(CUDA_DIR_NAME)
 }
 
-#[cfg(all(
-    any(target_os = "windows", target_os = "linux"),
-    target_arch = "x86_64"
-))]
-fn cuda_version_marker(dir: &Path) -> PathBuf {
+pub(crate) fn cuda_version_marker(dir: &Path) -> PathBuf {
     dir.join(".dontspeak-cuda-runtime")
 }
 
@@ -529,12 +525,23 @@ fn cuda_version_marker(dir: &Path) -> PathBuf {
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
 ))]
-fn cuda_version_fingerprint() -> String {
+pub(crate) fn cuda_version_fingerprint() -> String {
     CUDA_WHEELS
         .iter()
         .map(|(url, sha)| format!("{url} {sha}"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(any(
+    test,
+    all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )
+))]
+fn cuda_version_marker_matches(dir: &Path, expected: &str) -> bool {
+    std::fs::read_to_string(cuda_version_marker(dir)).is_ok_and(|s| s == expected)
 }
 
 /// The GPU onnxruntime path (set `ORT_DYLIB_PATH` to this for CUDA). Windows: a fixed
@@ -576,42 +583,60 @@ fn cuda_core_runtime_so(dir: &std::path::Path) -> Option<PathBuf> {
         })
 }
 
+fn is_cuda_runtime_present_at(dir: &Path) -> bool {
+    #[cfg(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    ))]
+    {
+        if !cuda_version_marker_matches(dir, &cuda_version_fingerprint()) {
+            return false;
+        }
+        #[cfg(target_os = "windows")]
+        {
+            dir.join("onnxruntime.dll").is_file()
+                && dir.join("onnxruntime_providers_cuda.dll").is_file()
+                && dir.join("cudnn64_9.dll").is_file()
+        }
+        #[cfg(target_os = "linux")]
+        {
+            // The core runtime + the CUDA provider plugin + a cuDNN 9 lib all extracted.
+            cuda_core_runtime_so(dir).is_some()
+                && dir.join("libonnxruntime_providers_cuda.so").is_file()
+                && std::fs::read_dir(dir)
+                    .map(|rd| {
+                        rd.filter_map(|e| e.ok()).any(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|n| n.starts_with("libcudnn.so"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+        }
+    }
+    #[cfg(not(all(
+        any(target_os = "windows", target_os = "linux"),
+        target_arch = "x86_64"
+    )))]
+    {
+        let _ = cuda_version_marker(dir);
+        false
+    }
+}
+
+/// Root-relative CUDA presence gate used by inventory scans.
+pub(crate) fn is_cuda_runtime_present_under(root: &Path) -> bool {
+    is_cuda_runtime_present_at(&cuda_runtime_dir_under(root))
+}
+
 /// Is the CUDA GPU runtime already fetched (cheap presence check)?
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
 ))]
 pub fn is_cuda_runtime_present() -> bool {
-    let Some(dir) = cuda_runtime_dir() else {
-        return false;
-    };
-    if !std::fs::read_to_string(cuda_version_marker(&dir))
-        .is_ok_and(|s| s == cuda_version_fingerprint())
-    {
-        return false;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        dir.join("onnxruntime.dll").is_file()
-            && dir.join("onnxruntime_providers_cuda.dll").is_file()
-            && dir.join("cudnn64_9.dll").is_file()
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // The core runtime + the CUDA provider plugin + a cuDNN 9 lib all extracted.
-        cuda_core_runtime_so(&dir).is_some()
-            && dir.join("libonnxruntime_providers_cuda.so").is_file()
-            && std::fs::read_dir(&dir)
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok()).any(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|n| n.starts_with("libcudnn.so"))
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-    }
+    cuda_runtime_dir().is_some_and(|dir| is_cuda_runtime_present_at(&dir))
 }
 
 /// Whether an NVIDIA GPU **driver** is installed — the cheap, side-effect-free pre-check that
@@ -788,6 +813,25 @@ mod tests {
             cuda_runtime_dir(),
             ds_config::model_dir().map(|root| cuda_runtime_dir_under(&root))
         );
+    }
+
+    #[test]
+    fn cuda_version_marker_rejects_missing_empty_and_stale_values() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = cuda_runtime_dir_under(root.path());
+        let marker = cuda_version_marker(&dir);
+
+        assert!(!cuda_version_marker_matches(&dir, "current"));
+
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&marker, "").unwrap();
+        assert!(!cuda_version_marker_matches(&dir, "current"));
+
+        std::fs::write(&marker, "stale").unwrap();
+        assert!(!cuda_version_marker_matches(&dir, "current"));
+
+        std::fs::write(&marker, "current").unwrap();
+        assert!(cuda_version_marker_matches(&dir, "current"));
     }
 
     #[test]
