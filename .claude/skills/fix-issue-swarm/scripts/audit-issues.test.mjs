@@ -27,14 +27,18 @@ process.exit(99);
     );
     chmodSync(fakeGh, 0o755);
 
-    const result = spawnSync(process.execPath, [script], {
+    const result = spawnSync(
+      process.execPath,
+      [script, "--login", "axy-yanchenko"],
+      {
       encoding: "utf8",
       env: {
         ...process.env,
         FAKE_GH_LOG: log,
         PATH: `${fixture}${process.platform === "win32" ? ";" : ":"}${process.env.PATH}`,
       },
-    });
+      },
+    );
 
     assert.equal(result.status, 1);
     assert.match(result.stderr, /axy-yanchenko is prohibited/);
