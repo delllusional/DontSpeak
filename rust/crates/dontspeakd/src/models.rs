@@ -46,6 +46,10 @@ fn unnamed_shared_refusal(id: &str) -> String {
     format!("models: `{id}` is shared and still referenced — remove or deselect what needs it")
 }
 
+fn unavailable_refusal(id: &str) -> String {
+    format!("models: `{id}` is not available on this platform")
+}
+
 /// Refuse a removal the engine would immediately undo, or that would break an installed
 /// model. `None` ⇒ the removal may proceed. First match wins.
 fn refusal(
@@ -67,7 +71,7 @@ fn refusal(
     {
         // The remove enum is one platform-independent list while `scan_at` drops a row this
         // host cannot hold; without this the answer is a confusing 0-byte "success".
-        return Some(format!("models: `{id}` is not available on this platform"));
+        return Some(unavailable_refusal(id));
     }
     if ds_model::asset_in_use(cfg, id) {
         // Distinct texts: on Windows and Linux the STT ladder resolves to built_in by
@@ -135,6 +139,16 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
+    const MCP_TOOLS_DOC: &str = include_str!("../../../../docs/MCP-TOOLS.md");
+
+    fn normalize(s: &str) -> String {
+        s.replace('`', "")
+            .replace(['—', '–'], "--")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// Guards a fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`: the flight would
     /// then take its sweep gate in the REAL model dir (#204).
     fn assert_fixture_is_isolated(root: &Path, path: &Path) {
@@ -194,6 +208,60 @@ mod tests {
             ds_ipc::Response::Models { models } => models,
             other => panic!("expected a models payload, got {other:?}"),
         }
+    }
+
+    /// The docs quote these user-facing refusals; keep the examples tied to the engine
+    /// branches that produce them.
+    #[test]
+    fn mcp_tools_doc_matches_models_refusals() {
+        let doc = normalize(MCP_TOOLS_DOC);
+        let documented = |message: String| {
+            assert!(
+                doc.contains(&normalize(&message)),
+                "docs/MCP-TOOLS.md is missing the models refusal:\n{message}"
+            );
+        };
+
+        let (_config, paths) =
+            fixture("tts_engine = \"built_in\"\ntts_model = \"kokoro\"\nstt_engine = []\n");
+        let models = tempfile::tempdir().unwrap();
+        let roots = ModelRoots::under(models.path());
+        documented(refusal(&roots, &VoiceConfig::load(&paths), "kokoro", &[]).unwrap());
+
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = \"built_in\"\n");
+        documented(refusal(&roots, &VoiceConfig::load(&paths), "parakeet", &[]).unwrap());
+
+        let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");
+        let cfg = VoiceConfig::load(&paths);
+        documented(
+            refusal(
+                &roots,
+                &cfg,
+                "chatterbox",
+                &[DownloadTarget::ChatterboxModel],
+            )
+            .unwrap(),
+        );
+
+        let referenced_models = tempfile::tempdir().unwrap();
+        let referenced_roots = ModelRoots::under(referenced_models.path());
+        seed_onnx_set(&referenced_roots.model, ds_config::TtsModel::Chatterbox);
+        documented(refusal(&referenced_roots, &cfg, "onnxruntime", &[]).unwrap());
+        seed_onnx_set(&referenced_roots.model, ds_config::TtsModel::Kokoro);
+        documented(refusal(&referenced_roots, &cfg, "kokoro_frontend", &[]).unwrap());
+
+        documented(shared_refusal("cuda"));
+        documented(unavailable_refusal("cuda"));
+        documented(
+            refusal(
+                &roots,
+                &cfg,
+                "onnxruntime",
+                &[DownloadTarget::ChatterboxModel],
+            )
+            .unwrap(),
+        );
+        documented(refusal(&roots, &cfg, "<id>", &[]).unwrap());
     }
 
     #[test]
