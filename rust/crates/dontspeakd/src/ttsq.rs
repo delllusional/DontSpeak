@@ -615,7 +615,7 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(None);
         }
-        let herdr_pane = self.herdr_pane_for_session(&session);
+        let (session, herdr_pane) = self.route_herdr_speech(session, source);
         self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
         // Standalone chunk (MCP Speak / greeting) — language from text alone.
         self.enqueue_action(
@@ -888,6 +888,40 @@ impl TtsQueue {
         ds_config::herdr_pane_id(real)
             .map(str::to_string)
             .or_else(|| self.herdr_aliases.lock().unwrap().get(real).cloned())
+    }
+
+    /// Bind an MCP tool call that lost `HERDR_PANE_ID` to the active pane of the
+    /// same client. Codex launches its MCP child with a scrubbed environment, but
+    /// its hook has already made the pane queue the authoritative active session.
+    /// Never guess across clients or without an active Herdr pane.
+    fn route_herdr_speech(
+        &self,
+        session: Option<String>,
+        source: Option<WiredAgent>,
+    ) -> (Option<String>, Option<String>) {
+        let pane = self.herdr_pane_for_session(&session);
+        if pane.is_some()
+            || !session
+                .as_deref()
+                .is_some_and(|value| value.starts_with("dontspeak:mcp:"))
+        {
+            return (session, pane);
+        }
+        let active = self.active.lock().unwrap().effective();
+        let Some(pane_id) = self.herdr_pane_for_session(&active) else {
+            return (session, None);
+        };
+        let record = self.herdr_sessions.lock().unwrap().get(&pane_id).cloned();
+        let Some(record) = record else {
+            return (session, None);
+        };
+        if record.source != source {
+            return (session, None);
+        }
+        let Some(queue_session) = record.queue_session else {
+            return (session, None);
+        };
+        (Some(queue_session), Some(pane_id))
     }
 
     fn register_herdr_pane(
@@ -3359,6 +3393,27 @@ mod tests {
         assert_eq!(b.queued, 1);
         assert!(b.blocked);
         assert_eq!(b.voice.as_deref(), Some(voice_b.as_str()));
+    }
+
+    #[test]
+    fn mcp_speak_uses_the_active_matching_herdr_pane() {
+        let q = mk_queue();
+        let pane = ds_config::herdr_queue_scope("pane-a");
+        q.link_sessions(Some("logical-a"), Some(&pane), Some(WiredAgent::Codex));
+        q.set_active_session(Some(pane.clone()));
+
+        q.enqueue(
+            "speak from the MCP child".into(),
+            None,
+            Some(WiredAgent::Codex),
+            Some("dontspeak:mcp:codex:42:0".into()),
+        )
+        .unwrap();
+
+        let items = q.items.lock().unwrap();
+        let item = items.front().unwrap();
+        assert_eq!(item.session.as_deref(), Some(pane.as_str()));
+        assert_eq!(item.herdr_pane.as_deref(), Some("pane-a"));
     }
 
     /// Stand in for the worker's claim so the record tests can drive resolution and fate
