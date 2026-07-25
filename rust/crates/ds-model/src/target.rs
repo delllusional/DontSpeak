@@ -5,6 +5,8 @@
 //! (CLI); in-process APIs take the enum. Naming: `<brand>_<flavor>` for models,
 //! bare nouns for runtimes/groups. Platform gate: [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host).
 
+use ds_config::host::{Arch, Os};
+
 /// Download/prefetch target. [`as_str`](DownloadTarget::as_str) is the stable wire form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DownloadTarget {
@@ -152,9 +154,11 @@ impl DownloadTarget {
             | DownloadTarget::DiarizationMlx
             | DownloadTarget::KokoroFluid
             | DownloadTarget::ParakeetFluid
-            | DownloadTarget::DiarizationFluid => ds_config::host::is_apple_silicon(),
-            DownloadTarget::SepformerModel => ds_config::host::is_macos(),
-            DownloadTarget::Cuda => ds_config::host::is_cuda_host(),
+            | DownloadTarget::DiarizationFluid => {
+                ds_config::host::apple_silicon(Os::this(), Arch::this())
+            }
+            DownloadTarget::SepformerModel => Os::this() == Os::MacOs,
+            DownloadTarget::Cuda => ds_config::host::cuda_host(Os::this(), Arch::this()),
             DownloadTarget::Onnxruntime
             | DownloadTarget::KokoroModel
             | DownloadTarget::KokoroFrontend

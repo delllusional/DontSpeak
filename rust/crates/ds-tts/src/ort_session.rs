@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use ds_config::host::{Arch, Os};
+
 use ort::session::Session;
 use ort::session::builder::SessionBuilder;
 
@@ -70,7 +72,7 @@ impl OrtSessions {
         // `DONTSPEAK_PROVIDER=coreml` and the full-duplex auto-upgrade below both bypass the
         // config ladder, so the host gate is re-asked here — same predicate, not a second
         // spelling of it.
-        if ds_config::host::is_apple_silicon()
+        if ds_config::host::apple_silicon(Os::this(), Arch::this())
             && descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
             && (self
                 .preference

@@ -6,6 +6,8 @@
 use ds_client::WiredAgent;
 use serde::{Deserialize, Deserializer};
 
+use crate::host::{Arch, Os};
+
 // Scalar engine enums: fail-open `de_*` (typo/absent → default). Set/ladder fields are
 // Vecs with their own deserializers; element enums here are the building blocks.
 
@@ -49,11 +51,11 @@ impl SttEngine {
     /// Static only — runtime model/auth still apply. `built_in` needs MLX or ONNX; `system`
     /// macOS-only; `claude_code` always.
     pub fn is_stt_usable(self) -> bool {
-        self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+        self.stt_usable_on(Os::this(), Arch::this())
     }
 
     /// Pure `(os, arch)` form of [`is_stt_usable`](SttEngine::is_stt_usable).
-    pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
+    pub(crate) fn stt_usable_on(self, os: Os, arch: Arch) -> bool {
         match self {
             SttEngine::BuiltIn => built_in_usable_on(os, arch),
             SttEngine::System => system_stt_buildable_on(os, arch),
@@ -93,11 +95,11 @@ impl TtsEngine {
     /// Usable on this build/platform? ([`crate::VoiceConfig::resolved_tts`]).
     /// `built_in` needs MLX or ONNX; `system` macOS+Windows only.
     pub fn is_tts_usable(self) -> bool {
-        self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+        self.tts_usable_on(Os::this(), Arch::this())
     }
 
     /// Pure `(os, arch)` form of [`is_tts_usable`](TtsEngine::is_tts_usable).
-    pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
+    pub(crate) fn tts_usable_on(self, os: Os, arch: Arch) -> bool {
         match self {
             TtsEngine::BuiltIn => built_in_usable_on(os, arch),
             TtsEngine::System => system_tts_buildable_on(os),
@@ -168,14 +170,14 @@ impl DiarizerProvider {
     /// `ds_stt::diarize::ensure_backend` defers to it rather than keeping a second `cfg!`, so
     /// the rung config calls usable is exactly the rung that maps to a backend.
     pub fn is_diarizer_usable(self) -> bool {
-        self.diarizer_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+        self.diarizer_usable_on(Os::this(), Arch::this())
     }
 
     /// Pure `(os, arch)` form of [`is_diarizer_usable`](DiarizerProvider::is_diarizer_usable) —
     /// the shape `Provider` already has (`stt_usable_on`/`tts_usable_on`), so the cross-platform
     /// matrix can pin `fluid` off Apple Silicon without a second `cfg!` (the drift #211 caught).
     /// MLX Sortformer and FluidAudio's Core ML chains alike run only on the Neural Engine.
-    pub(crate) fn diarizer_usable_on(self, os: &str, arch: &str) -> bool {
+    pub(crate) fn diarizer_usable_on(self, os: Os, arch: Arch) -> bool {
         match self {
             DiarizerProvider::Mlx | DiarizerProvider::Fluid => crate::host::apple_silicon(os, arch),
         }
@@ -235,26 +237,26 @@ impl Provider {
 
     /// STT usable on this platform? See `resolved_stt_provider`.
     pub(crate) fn is_stt_usable(self) -> bool {
-        self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+        self.stt_usable_on(Os::this(), Arch::this())
     }
 
     /// Pure `(os, arch)` form of STT usability. The two ladders differ on ONE rung — ORT's
     /// Core ML EP is wired for TTS graphs only — so deriving STT from TTS keeps the four
     /// shared rungs from drifting apart the way a second copy of the match would.
-    pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
+    pub(crate) fn stt_usable_on(self, os: Os, arch: Arch) -> bool {
         self != Provider::OrtCoreMl && self.tts_usable_on(os, arch)
     }
 
     /// TTS usable on this platform?
     pub(crate) fn is_tts_usable(self) -> bool {
-        self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
+        self.tts_usable_on(Os::this(), Arch::this())
     }
 
     /// Pure `(os, arch)` form of TTS usability, and the base
     /// [`stt_usable_on`](Provider::stt_usable_on) narrows. MLX's Metal kernels, FluidAudio's
     /// ANE chains, and ORT's Core ML EP all die off Apple Silicon — the last of them only at
     /// `Session::run` (#250).
-    pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
+    pub(crate) fn tts_usable_on(self, os: Os, arch: Arch) -> bool {
         match self {
             Provider::OrtCpu => true,
             Provider::Mlx | Provider::Fluid | Provider::OrtCoreMl => {
@@ -641,17 +643,17 @@ where
 // See VoiceConfig::resolved_tts / resolved_stt. Pure (os, arch) helpers for cross-platform tests.
 /// Every target has an ONNX Runtime it can fetch — Intel macOS on Microsoft's last x86_64
 /// build, the rest on the current pin (see ds-model's `onnxruntime_dist`).
-fn built_in_usable_on(_os: &str, _arch: &str) -> bool {
+fn built_in_usable_on(_os: Os, _arch: Arch) -> bool {
     true
 }
 /// System STT is macOS-any-arch (static); runtime probe handles auth/locale.
-fn system_stt_buildable_on(os: &str, arch: &str) -> bool {
+fn system_stt_buildable_on(os: Os, arch: Arch) -> bool {
     let _ = arch;
-    os == "macos"
+    os == Os::MacOs
 }
 /// System TTS (`say`/SAPI) on macOS+Windows only.
-fn system_tts_buildable_on(os: &str) -> bool {
-    os == "macos" || os == "windows"
+fn system_tts_buildable_on(os: Os) -> bool {
+    matches!(os, Os::MacOs | Os::Windows)
 }
 
 /// Default TTS ladder: built_in → system. `[]` = off.
@@ -868,10 +870,10 @@ mod tests {
     /// Intel macOS stopped being a runtime special case once ds-model pinned it a dist.
     #[test]
     fn engine_usability_is_the_static_matrix_on_every_target() {
-        assert!(TtsEngine::BuiltIn.tts_usable_on("macos", "x86_64"));
-        assert!(SttEngine::BuiltIn.stt_usable_on("macos", "x86_64"));
+        assert!(TtsEngine::BuiltIn.tts_usable_on(Os::MacOs, Arch::X64));
+        assert!(SttEngine::BuiltIn.stt_usable_on(Os::MacOs, Arch::X64));
 
-        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let (os, arch) = (Os::this(), Arch::this());
         for e in TtsEngine::ALL.iter().copied() {
             assert_eq!(e.is_tts_usable(), e.tts_usable_on(os, arch), "{e:?}");
         }
@@ -888,76 +890,76 @@ mod tests {
         // (Parakeet) engines for both TTS and STT; macOS (any arch) prefers the OS recognizer
         // for STT (`system` is macOS-only-usable and now sits first in the STT ladder) and
         // Kokoro for TTS.
-        let resolve_tts = |os: &str, arch: &str| -> Option<TtsEngine> {
+        let resolve_tts = |os: Os, arch: Arch| -> Option<TtsEngine> {
             default_tts_engine_ladder()
                 .into_iter()
                 .find(|e| e.tts_usable_on(os, arch))
         };
-        let resolve_stt = |os: &str, arch: &str| -> Option<SttEngine> {
+        let resolve_stt = |os: Os, arch: Arch| -> Option<SttEngine> {
             default_stt_engine_ladder()
                 .into_iter()
                 .find(|e| e.stt_usable_on(os, arch))
         };
         let cases = [
             (
-                "macos",
-                "aarch64",
+                Os::MacOs,
+                Arch::Arm64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::System),
             ),
             // Intel macOS reaches built-in TTS now that it has a pinned ONNX Runtime; STT
             // still prefers the system recognizer, same as Apple silicon.
             (
-                "macos",
-                "x86_64",
+                Os::MacOs,
+                Arch::X64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::System),
             ),
             (
-                "windows",
-                "x86_64",
+                Os::Windows,
+                Arch::X64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
-                "windows",
-                "aarch64",
+                Os::Windows,
+                Arch::Arm64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
-                "linux",
-                "x86_64",
+                Os::Linux,
+                Arch::X64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
             (
-                "linux",
-                "aarch64",
+                Os::Linux,
+                Arch::Arm64,
                 Some(TtsEngine::BuiltIn),
                 Some(SttEngine::BuiltIn),
             ),
         ];
         for (os, arch, want_tts, want_stt) in cases {
-            assert_eq!(resolve_tts(os, arch), want_tts, "TTS on {os}/{arch}");
-            assert_eq!(resolve_stt(os, arch), want_stt, "STT on {os}/{arch}");
+            assert_eq!(resolve_tts(os, arch), want_tts, "TTS on {os:?}/{arch:?}");
+            assert_eq!(resolve_stt(os, arch), want_stt, "STT on {os:?}/{arch:?}");
         }
         // Invariant across every target: claude_code is always a usable STT rung (so the
         // default STT ladder never dead-ends).
         for (os, arch) in [
-            ("macos", "x86_64"),
-            ("windows", "x86_64"),
-            ("linux", "aarch64"),
+            (Os::MacOs, Arch::X64),
+            (Os::Windows, Arch::X64),
+            (Os::Linux, Arch::Arm64),
         ] {
             assert!(SttEngine::ClaudeCode.stt_usable_on(os, arch));
         }
         // System STT is macOS any-arch (legacy SFSpeechRecognizer covers Intel/pre-26);
         // System TTS is macOS + Windows only.
-        assert!(SttEngine::System.stt_usable_on("macos", "aarch64"));
-        assert!(SttEngine::System.stt_usable_on("macos", "x86_64"));
-        assert!(!SttEngine::System.stt_usable_on("windows", "x86_64"));
-        assert!(!SttEngine::System.stt_usable_on("linux", "aarch64"));
-        assert!(!TtsEngine::System.tts_usable_on("linux", "x86_64"));
+        assert!(SttEngine::System.stt_usable_on(Os::MacOs, Arch::Arm64));
+        assert!(SttEngine::System.stt_usable_on(Os::MacOs, Arch::X64));
+        assert!(!SttEngine::System.stt_usable_on(Os::Windows, Arch::X64));
+        assert!(!SttEngine::System.stt_usable_on(Os::Linux, Arch::Arm64));
+        assert!(!TtsEngine::System.tts_usable_on(Os::Linux, Arch::X64));
     }
 
     #[test]
@@ -968,35 +970,43 @@ mod tests {
         use Provider::*;
         let cases = [
             // MLX — Apple Silicon only, identically for STT and TTS.
-            (Mlx, "macos", "aarch64", true, true),
-            (Mlx, "macos", "x86_64", false, false),
-            (Mlx, "windows", "x86_64", false, false),
-            (Mlx, "linux", "aarch64", false, false),
+            (Mlx, Os::MacOs, Arch::Arm64, true, true),
+            (Mlx, Os::MacOs, Arch::X64, false, false),
+            (Mlx, Os::Windows, Arch::X64, false, false),
+            (Mlx, Os::Linux, Arch::Arm64, false, false),
             // CPU — the universal rung, every platform, both axes.
-            (OrtCpu, "macos", "x86_64", true, true),
-            (OrtCpu, "macos", "aarch64", true, true),
-            (OrtCpu, "windows", "x86_64", true, true),
-            (OrtCpu, "linux", "aarch64", true, true),
+            (OrtCpu, Os::MacOs, Arch::X64, true, true),
+            (OrtCpu, Os::MacOs, Arch::Arm64, true, true),
+            (OrtCpu, Os::Windows, Arch::X64, true, true),
+            (OrtCpu, Os::Linux, Arch::Arm64, true, true),
             // CUDA — x86_64 Windows/Linux GPU EP only, both axes; never ARM64 or macOS.
-            (OrtCuda, "windows", "x86_64", true, true),
-            (OrtCuda, "linux", "x86_64", true, true),
-            (OrtCuda, "windows", "aarch64", false, false),
-            (OrtCuda, "linux", "aarch64", false, false),
-            (OrtCuda, "macos", "aarch64", false, false),
+            (OrtCuda, Os::Windows, Arch::X64, true, true),
+            (OrtCuda, Os::Linux, Arch::X64, true, true),
+            (OrtCuda, Os::Windows, Arch::Arm64, false, false),
+            (OrtCuda, Os::Linux, Arch::Arm64, false, false),
+            (OrtCuda, Os::MacOs, Arch::Arm64, false, false),
             // Core ML is an Apple-Silicon TTS-only ONNX Runtime provider. On Intel Macs the EP
             // registers and then fails every run, so x86_64 must skip it (issue #250).
-            (OrtCoreMl, "macos", "aarch64", false, true),
-            (OrtCoreMl, "macos", "x86_64", false, false),
-            (OrtCoreMl, "windows", "x86_64", false, false),
+            (OrtCoreMl, Os::MacOs, Arch::Arm64, false, true),
+            (OrtCoreMl, Os::MacOs, Arch::X64, false, false),
+            (OrtCoreMl, Os::Windows, Arch::X64, false, false),
             // FluidAudio — Apple Silicon only, like MLX, identically for STT and TTS.
-            (Fluid, "macos", "aarch64", true, true),
-            (Fluid, "macos", "x86_64", false, false),
-            (Fluid, "windows", "x86_64", false, false),
-            (Fluid, "linux", "aarch64", false, false),
+            (Fluid, Os::MacOs, Arch::Arm64, true, true),
+            (Fluid, Os::MacOs, Arch::X64, false, false),
+            (Fluid, Os::Windows, Arch::X64, false, false),
+            (Fluid, Os::Linux, Arch::Arm64, false, false),
         ];
         for (p, os, arch, want_stt, want_tts) in cases {
-            assert_eq!(p.stt_usable_on(os, arch), want_stt, "stt {p:?} {os}/{arch}");
-            assert_eq!(p.tts_usable_on(os, arch), want_tts, "tts {p:?} {os}/{arch}");
+            assert_eq!(
+                p.stt_usable_on(os, arch),
+                want_stt,
+                "stt {p:?} {os:?}/{arch:?}"
+            );
+            assert_eq!(
+                p.tts_usable_on(os, arch),
+                want_tts,
+                "tts {p:?} {os:?}/{arch:?}"
+            );
         }
     }
 
@@ -1007,21 +1017,25 @@ mod tests {
     fn diarizer_usability_matches_the_provider_matrix() {
         use DiarizerProvider::*;
         let cases = [
-            (Mlx, "macos", "aarch64", true),
-            (Mlx, "macos", "x86_64", false),
-            (Mlx, "windows", "x86_64", false),
-            (Mlx, "linux", "aarch64", false),
-            (Fluid, "macos", "aarch64", true),
-            (Fluid, "macos", "x86_64", false),
-            (Fluid, "windows", "x86_64", false),
-            (Fluid, "linux", "aarch64", false),
+            (Mlx, Os::MacOs, Arch::Arm64, true),
+            (Mlx, Os::MacOs, Arch::X64, false),
+            (Mlx, Os::Windows, Arch::X64, false),
+            (Mlx, Os::Linux, Arch::Arm64, false),
+            (Fluid, Os::MacOs, Arch::Arm64, true),
+            (Fluid, Os::MacOs, Arch::X64, false),
+            (Fluid, Os::Windows, Arch::X64, false),
+            (Fluid, Os::Linux, Arch::Arm64, false),
         ];
         for (p, os, arch, want) in cases {
-            assert_eq!(p.diarizer_usable_on(os, arch), want, "{p:?} {os}/{arch}");
+            assert_eq!(
+                p.diarizer_usable_on(os, arch),
+                want,
+                "{p:?} {os:?}/{arch:?}"
+            );
         }
         // Host agreement: the pub `is_diarizer_usable` (which the live diarizer walks) must
         // match the pure form for THIS (os, arch), so the two spellings never drift.
-        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let (os, arch) = (Os::this(), Arch::this());
         for p in DiarizerProvider::ALL.iter().copied() {
             assert_eq!(
                 p.is_diarizer_usable(),
@@ -1039,7 +1053,7 @@ mod tests {
     fn fluid_is_skipped_when_the_model_does_not_support_it() {
         use crate::TtsModel;
         let ladder = [Provider::Fluid, Provider::Mlx, Provider::OrtCpu];
-        let resolve = |model: TtsModel, os: &str, arch: &str| {
+        let resolve = |model: TtsModel, os: Os, arch: Arch| {
             let descriptor = model.descriptor();
             ladder
                 .iter()
@@ -1048,12 +1062,12 @@ mod tests {
                 .unwrap_or(Provider::OrtCpu)
         };
         assert_eq!(
-            resolve(TtsModel::Kokoro, "macos", "aarch64"),
+            resolve(TtsModel::Kokoro, Os::MacOs, Arch::Arm64),
             Provider::Fluid
         );
         for model in [TtsModel::Chatterbox, TtsModel::Qwen, TtsModel::OmniVoice] {
             assert_eq!(
-                resolve(model, "macos", "aarch64"),
+                resolve(model, Os::MacOs, Arch::Arm64),
                 Provider::Mlx,
                 "{} has no FluidAudio export and must fall through",
                 model.as_str()
@@ -1061,8 +1075,8 @@ mod tests {
         }
         // Intel macOS has no ANE, so even Kokoro skips the rung.
         for model in TtsModel::ALL.iter().copied() {
-            assert_eq!(resolve(model, "macos", "x86_64"), Provider::OrtCpu);
-            assert_eq!(resolve(model, "windows", "x86_64"), Provider::OrtCpu);
+            assert_eq!(resolve(model, Os::MacOs, Arch::X64), Provider::OrtCpu);
+            assert_eq!(resolve(model, Os::Windows, Arch::X64), Provider::OrtCpu);
         }
     }
 
@@ -1090,26 +1104,26 @@ mod tests {
         // cross-platform analogue of the live `model_status` check (which showed `cpu` on macOS).
         let ladder = [Provider::OrtCuda, Provider::OrtCpu];
         // Pin x86_64 here; the full provider matrix above covers the ARM64 CUDA gate.
-        let resolve_tts = |os: &str| {
+        let resolve_tts = |os: Os| {
             ladder
                 .iter()
                 .copied()
-                .find(|p| p.tts_usable_on(os, "x86_64"))
+                .find(|p| p.tts_usable_on(os, Arch::X64))
         };
-        let resolve_stt = |os: &str| {
+        let resolve_stt = |os: Os| {
             ladder
                 .iter()
                 .copied()
-                .find(|p| p.stt_usable_on(os, "x86_64"))
+                .find(|p| p.stt_usable_on(os, Arch::X64))
         };
         // Windows + Linux: CUDA is usable → it WINS (no fallback).
-        for os in ["windows", "linux"] {
-            assert_eq!(resolve_tts(os), Some(Provider::OrtCuda), "tts {os}");
-            assert_eq!(resolve_stt(os), Some(Provider::OrtCuda), "stt {os}");
+        for os in [Os::Windows, Os::Linux] {
+            assert_eq!(resolve_tts(os), Some(Provider::OrtCuda), "tts {os:?}");
+            assert_eq!(resolve_stt(os), Some(Provider::OrtCuda), "stt {os:?}");
         }
         // macOS: CUDA is NOT usable → fall back to the next rung, `cpu`.
-        assert_eq!(resolve_tts("macos"), Some(Provider::OrtCpu));
-        assert_eq!(resolve_stt("macos"), Some(Provider::OrtCpu));
+        assert_eq!(resolve_tts(Os::MacOs), Some(Provider::OrtCpu));
+        assert_eq!(resolve_stt(Os::MacOs), Some(Provider::OrtCpu));
         // A lone `["cuda"]` ladder dead-ends on macOS — the RESOLVER (`resolved_*_provider`)
         // is what supplies the `OrtCpu` default there; the raw `find` returns None, confirming
         // CUDA itself is genuinely unusable (not silently treated as usable).
@@ -1118,15 +1132,14 @@ mod tests {
             cuda_only
                 .iter()
                 .copied()
-                .find(|p| p.tts_usable_on("macos", "aarch64")),
+                .find(|p| p.tts_usable_on(Os::MacOs, Arch::Arm64)),
             None
         );
         // (The MLX Apple-Silicon rule and full per-provider matrix live in
         // `provider_usability_matches_across_stt_and_tts` — one table, both axes.)
         // Host agreement: the cfg-gated host fns must match the pure `_on` for THIS (os, arch),
         // so the two never drift (the live engine walks the host fns).
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
+        let (os, arch) = (Os::this(), Arch::this());
         for p in Provider::ALL.iter().copied() {
             assert_eq!(p.is_stt_usable(), p.stt_usable_on(os, arch), "stt {p:?}");
             assert_eq!(p.is_tts_usable(), p.tts_usable_on(os, arch), "tts {p:?}");
