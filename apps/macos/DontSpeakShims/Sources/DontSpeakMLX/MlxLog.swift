@@ -61,4 +61,5 @@ let mlxLogSink = MlxLogSink()
 public func ds_mlx_set_log_cb(_ cb: MlxLogCb?) { mlxLogSink.set(cb) }
 
 func logErr(_ s: String) { mlxLogSink.emit(MlxLogLevel.error, s) }
+func logInfo(_ s: String) { mlxLogSink.emit(MlxLogLevel.info, s) }
 func logWarn(_ s: String) { mlxLogSink.emit(MlxLogLevel.warn, s) }

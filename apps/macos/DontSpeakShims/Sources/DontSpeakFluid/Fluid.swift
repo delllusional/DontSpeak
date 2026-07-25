@@ -322,8 +322,15 @@ public func ds_fluid_asr_stream_finish(
 @_cdecl("ds_fluid_asr_stream_shutdown")
 public func ds_fluid_asr_stream_shutdown() {
     fluidStreamAsr.lock.lock()
+    let mgr = fluidStreamAsr.manager
     fluidStreamAsr.manager = nil
     fluidStreamAsr.lock.unlock()
+    if let mgr {
+        _ = fluidRunBlocking({
+            await mgr.cleanup()
+            return true
+        })
+    }
 }
 
 // MARK: - Diarization (FluidAudio pyannote + WeSpeaker Core ML) — "who spoke when"
@@ -467,6 +474,8 @@ public func ds_fluid_diar_embed(
 @_cdecl("ds_fluid_diar_shutdown")
 public func ds_fluid_diar_shutdown() {
     fluidDiar.lock.lock()
+    let mgr = fluidDiar.manager
     fluidDiar.manager = nil
     fluidDiar.lock.unlock()
+    mgr?.cleanup()
 }

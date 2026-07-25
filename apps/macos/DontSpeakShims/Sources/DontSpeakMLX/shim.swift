@@ -175,11 +175,12 @@ public func ds_mlx_tts_init(
     _ modelName: UnsafePointer<CChar>?,
     _ modelDir: UnsafePointer<CChar>?
 ) -> Int32 {
-    state.lock.lock()
-    defer { state.lock.unlock() }
     guard let name = cString(modelName) else { return 3 }
     guard let path = cString(modelDir) else { return 3 }
     guard let kind = TtsKind(rawValue: name) else { return 3 }
+    configureMlxMemoryPolicy()
+    state.lock.lock()
+    defer { state.lock.unlock() }
     let dir = URL(fileURLWithPath: path)
     state.tts = nil
     state.ttsKind = nil
@@ -209,6 +210,7 @@ public func ds_mlx_tts_init(
     case .success(let model):
         state.tts = model
         state.ttsKind = kind
+        logMlxMemory(phase: "tts_init")
         return 0
     case .failure(let error):
         logErr("ds_mlx_tts_init \(name) error: \(error)")
@@ -312,9 +314,11 @@ public func ds_mlx_tts_synthesize2(
         samples.withUnsafeBufferPointer {
             cb(ctx, $0.baseAddress, $0.count, Int32(sampleRate))
         }
+        logMlxMemory(phase: "tts_synthesize")
         return 0
     case .failure(let error):
         logErr("ds_mlx_tts_synthesize2 error: \(error)")
+        logMlxMemory(phase: "tts_synthesize_error")
         return 1
     }
 }
@@ -325,6 +329,7 @@ public func ds_mlx_tts_shutdown() {
     state.tts = nil
     state.ttsKind = nil
     state.lock.unlock()
+    clearMlxCacheAndLog(phase: "tts_shutdown")
 }
 
 // MARK: - ASR (Parakeet TDT v3, multilingual, MLX)
@@ -359,10 +364,12 @@ private func transcribe(_ model: ParakeetModel, _ samples: [Float]) -> String {
 @_cdecl("ds_mlx_asr_init")
 public func ds_mlx_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     _ = computeUnits
+    configureMlxMemoryPolicy()
     asr.lock.lock()
     defer { asr.lock.unlock() }
     do {
         asr.model = try loadParakeet(modelDir)
+        logMlxMemory(phase: "asr_init")
         return 0
     } catch {
         logErr("ds_mlx_asr_init error: \(error)")
@@ -395,6 +402,7 @@ public func ds_mlx_transcribe(
     let text = transcribe(model, audio)
     asr.lock.unlock()
     text.withCString { cb(ctx, $0) }
+    logMlxMemory(phase: "asr_transcribe")
     return 0
 }
 
@@ -406,6 +414,7 @@ public func ds_mlx_asr_shutdown() {
     asr.streamSamplesAtLastDecode = 0
     asr.streamText = ""
     asr.lock.unlock()
+    clearMlxCacheAndLog(phase: "asr_shutdown")
 }
 
 /// End buffered streaming state without unloading the shared warm Parakeet model.
@@ -425,6 +434,7 @@ public func ds_mlx_asr_stream_shutdown() {
 /// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
 @_cdecl("ds_mlx_asr_stream_start")
 public func ds_mlx_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
+    configureMlxMemoryPolicy()
     asr.lock.lock()
     defer { asr.lock.unlock() }
     do {
@@ -432,6 +442,7 @@ public func ds_mlx_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 
         asr.streamSamples.removeAll(keepingCapacity: true)
         asr.streamSamplesAtLastDecode = 0
         asr.streamText = ""
+        logMlxMemory(phase: "asr_stream_start")
         return 0
     } catch {
         logErr("ds_mlx_asr_stream_start error: \(error)")
@@ -493,6 +504,7 @@ public func ds_mlx_asr_stream_finish(
     asr.streamSamplesAtLastDecode = 0
     asr.lock.unlock()
     text.withCString { cb(ctx, $0) }
+    logMlxMemory(phase: "asr_stream_finish")
     return 0
 }
 
@@ -540,6 +552,7 @@ func exclusiveRanges(
 @_cdecl("ds_mlx_diar_init")
 public func ds_mlx_diar_init(_ modelDir: UnsafePointer<CChar>?, _ activityThreshold: Float) -> Int32 {
     guard let path = cString(modelDir) else { return 3 }
+    configureMlxMemoryPolicy()
     let root = URL(fileURLWithPath: path)
     do {
         let model = try SortformerModel.fromModelDirectory(
@@ -554,6 +567,7 @@ public func ds_mlx_diar_init(_ modelDir: UnsafePointer<CChar>?, _ activityThresh
         diar.encoder = encoder
         diar.threshold = threshold
         diar.lock.unlock()
+        logMlxMemory(phase: "diar_init")
         return 0
     } catch {
         logErr("ds_mlx_diar_init error: \(error)")
@@ -623,15 +637,18 @@ public func ds_mlx_diarize(
             let json = String(decoding: data, as: UTF8.self)
             diar.lock.unlock()
             json.withCString { cb(ctx, $0) }
+            logMlxMemory(phase: "diarize")
             return 0
         } catch {
             diar.lock.unlock()
             logErr("ds_mlx_diarize JSON error: \(error)")
+            logMlxMemory(phase: "diarize_error")
             return 1
         }
     case .failure(let error):
         diar.lock.unlock()
         logErr("ds_mlx_diarize error: \(error)")
+        logMlxMemory(phase: "diarize_error")
         return 1
     }
 }
@@ -642,6 +659,7 @@ public func ds_mlx_diar_shutdown() {
     diar.model = nil
     diar.encoder = nil
     diar.lock.unlock()
+    clearMlxCacheAndLog(phase: "diar_shutdown")
 }
 
 /// WeSpeaker embedding for enrollment. Needs `ds_mlx_diar_init`. Empty → rc 3.
@@ -670,10 +688,12 @@ public func ds_mlx_diar_embed(
         let emb = try encoder.embed(audio)
         diar.lock.unlock()
         emb.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, 0) }
+        logMlxMemory(phase: "diar_embed")
         return 0
     } catch {
         diar.lock.unlock()
         logErr("ds_mlx_diar_embed error: \(error)")
+        logMlxMemory(phase: "diar_embed_error")
         return 1
     }
 }

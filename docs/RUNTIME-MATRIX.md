@@ -30,6 +30,10 @@ falls back to the CPU EP.
 The macOS app packages three peer dylibs. `libdontspeak_sys.dylib` has no package
 dependencies and ships on both architectures. The MLX and FluidAudio dylibs are independent,
 Apple-Silicon-only families, so either can be absent without loading symbols from the other.
+The MLX shim keeps warm model weights resident, caps its recyclable allocator cache at 256 MiB,
+clears that cache when a model family unloads, and logs active, cached, and peak MLX bytes after
+model and inference boundaries. FluidAudio has no equivalent process-wide allocator cache;
+DontSpeak calls each upstream Core ML manager's cleanup API when that model family unloads.
 
 ## Built-in TTS models
 
