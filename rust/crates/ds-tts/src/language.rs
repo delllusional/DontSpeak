@@ -10,7 +10,7 @@ use whatlang::{Detector, Info, Lang};
 pub const DEFAULT_LANGUAGE: &str = "en";
 
 /// Single source for [`language_code`] / [`lang_for_code`] / [`full_range`] (639-1;
-//! whatlang's own codes are 639-3). `ms`/`sw` lack whatlang variants — absent here.
+/// whatlang's own codes are 639-3). `ms`/`sw` lack whatlang variants — absent here.
 const LANG_CODES: &[(Lang, &str)] = &[
     (Lang::Ara, "ar"),
     (Lang::Cmn, "zh"),
