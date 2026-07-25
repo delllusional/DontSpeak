@@ -75,6 +75,14 @@ Build a small external Herdr plugin that:
    plugin:dontspeak-voice --token dontspeak_voice=<text> --ttl-ms <value>`;
 4. clears the token when a pane disappears or Don’t Speak no longer reports it.
 
+Long polling is deliberately the first transport, not the final event model: each
+request waits for the monotonic status sequence to change, so the idle path does
+not periodically fetch snapshots. A follow-up should add a persistent local IPC
+subscription with an initial snapshot, coalesced change notifications,
+back-pressure handling, and reconnect/resync by sequence. Do not make Don’t
+Speak call back into Herdr directly: that would couple the voice service to one
+consumer instead of keeping the event source reusable.
+
 Users add `$dontspeak_voice` to `[ui.sidebar.agents].rows`. Suggested compact,
 priority-ordered values:
 
