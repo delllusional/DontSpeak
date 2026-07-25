@@ -1,19 +1,16 @@
-//! ds-tts — text-to-speech synthesis stages for dontspeak.
+//! TTS synthesis stages for dontspeak.
 //!
-//! The warm `ds-helper` process owns speaking and playback; this crate supplies the
-//! pure stages it runs plus the one System-TTS command seam,
-//! [`system::speech_command`] (empty prose is a successful no-op).
+//! Warm `ds-helper` owns speak/playback; this crate supplies pure stages plus
+//! [`system::speech_command`] (empty prose = successful no-op).
 //!
-//! Helper pipeline: markdown → prose ([`spoken`]) → numbers → G2P ([`g2p`]) → vocab
-//! tokens → clause batches ([`batch`]) → synth ([`synth`] / MLX) → trim →
-//! play. Pure stages unit-tested without audio/model/network.
+//! Pipeline: markdown → prose ([`spoken`]) → numbers → G2P → vocab → batches
+//! ([`batch`]) → synth → trim → play. Pure stages unit-tested without audio/model/network.
 
-/// FluidAudio ANE Kokoro voice-pack materialization. macOS only.
+/// FluidAudio ANE Kokoro voice-pack materialization (macOS).
 #[cfg(target_os = "macos")]
 pub mod ane_voices;
 /// Model-bounded phoneme batching (helper bin).
 pub mod batch;
-/// Chatterbox Multilingual AR backend.
 pub mod chatterbox;
 pub mod g2p;
 mod language;
@@ -27,10 +24,10 @@ pub mod qwen;
 pub mod sink;
 pub mod spoken;
 pub mod synth;
-/// FluidAudio Core ML / ANE Kokoro. macOS Apple Silicon only.
+/// FluidAudio Core ML / ANE Kokoro (macOS aarch64).
 #[cfg(target_os = "macos")]
 pub mod synth_fluid;
-/// MLX Audio Kokoro. macOS Apple Silicon only.
+/// MLX Audio Kokoro (macOS aarch64).
 #[cfg(target_os = "macos")]
 pub mod synth_mlx;
 pub mod system;
@@ -44,26 +41,23 @@ pub use language::{
 };
 pub use vocab::SAMPLE_RATE;
 
-/// Re-export from `ds-voices` (issue #5) — CLI lists voices without this heavy crate.
+/// Re-export from `ds-voices` (#5) — CLI lists voices without this heavy crate.
 pub use ds_voices::enumerate;
 pub use ds_voices::{Gender, Quality, SpeakerVoice};
-// Private: ONNX synthesis uses `crate::voices` for the npz parser.
+// ONNX synthesis uses `crate::voices` for the npz parser.
 pub(crate) use ds_voices::voices;
 
-/// Canonical agent-text cleanup used by every speech backend.
+/// Canonical agent-text cleanup for every speech backend.
 pub fn normalize_spoken_text(text: &str) -> String {
     spoken::SpokenText::from_markdown(text).into_string()
 }
 
-/// Normalize rendered English before Kokoro G2P. Idempotent so backends may call it
-/// defensively outside the helper.
+/// English normalize before Kokoro G2P. Idempotent for defensive backend calls.
 pub fn normalize_kokoro_text(text: &str) -> String {
     numbers::expand_numbers(&normalize_spoken_text(text))
 }
 
-/// Map a normalized `rate` (1.0 = normal) to a system-TTS words-per-minute
-/// value. Clamped to the 0.5..=2.0 range; 1.0 maps to a 175 wpm baseline
-/// (macOS `say`'s default-ish speaking rate), scaling linearly. PURE + tested.
+/// Normalized rate (1.0 = normal) → system-TTS WPM. Clamped 0.5..=2.0; 1.0 → 175 wpm.
 pub fn rate_to_wpm(rate: f32) -> u16 {
     const BASELINE_WPM: f32 = 175.0;
     let clamped = rate.clamp(0.5, 2.0);
@@ -91,8 +85,7 @@ mod tests {
         );
         assert_eq!(
             normalize_spoken_text("Build 57 next."),
-            "Build 57 next.",
-            "OS voices expand digits themselves"
+            "Build 57 next." // OS voices expand digits themselves
         );
         assert_eq!(
             normalize_spoken_text("Read https://example.com now."),

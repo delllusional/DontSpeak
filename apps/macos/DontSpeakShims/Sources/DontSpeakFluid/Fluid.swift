@@ -1,19 +1,16 @@
-// libdontspeak_fluid -- C ABI over FluidAudio's Core ML / ANE stack: Kokoro TTS (IPA phonemes
-// -> 24 kHz mono f32), Parakeet ASR, and pyannote + WeSpeaker diarization. Its own dylib and
-// SwiftPM target, so nothing else links FluidAudio. Rust owns the text frontend and
-// pre-downloads every model; the shim loads offline (see the offlineMode switch below).
-// Namespaced ds_fluid_* so it cannot collide with the other families. See dontspeak_fluid.h.
-// 0 = success. Helper calls are serial; a lock guards the shared manager.
+// libdontspeak_fluid -- C ABI over FluidAudio Core ML / ANE (Kokoro TTS, Parakeet ASR,
+// pyannote + WeSpeaker diarization). Own dylib so nothing else links FluidAudio. Rust owns
+// text frontend + downloads; shim loads offline (ModelHub.offlineMode). See dontspeak_fluid.h.
+// 0 = success. Serial helper calls; locks guard shared managers.
 import AVFoundation
 import FluidAudio
 import Foundation
 
-// MARK: - async -> blocking bridge (called from a Rust worker thread, never a Swift Task)
+// MARK: - async -> blocking bridge (Rust worker thread only; Swift Task deadlocks the pool)
 
 private final class FluidBox<T>: @unchecked Sendable { var value: Result<T, Error>? }
 
-/// Park the calling thread until `op` completes. C entry from a Rust worker only --
-/// never from a Swift Task (cooperative-pool deadlock risk).
+/// Park calling thread until `op` completes. C entry from Rust worker only.
 private func fluidRunBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
     let sem = DispatchSemaphore(value: 0)
     let box = FluidBox<T>()
@@ -29,9 +26,8 @@ enum FluidShimError: Error {
     case noResult, nilDir, badAudio
 }
 
-// MARK: - borrowed-result callbacks
-// Success path: fire cb once on this thread with a borrowed buffer; Rust copies out -- no
-// free. Still blocking via fluidRunBlocking; status is the C return. Mirrors dontspeak_shim.h.
+// MARK: - borrowed-result callbacks (see dontspeak_shim.h)
+// Success: fire cb once with borrowed buffer; Rust copies out. Status is the C return.
 public typealias FluidPcmCb =
     @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
 public typealias FluidStrCb =
@@ -53,13 +49,11 @@ private let fluidTts = FluidTtsState()
 
 @_cdecl("ds_fluid_tts_init")
 public func ds_fluid_tts_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
-    // ABI-reserved to mirror the deleted shim; this slice pins the recommended `.default`
-    // preset (ANE-resident RNN stages + GPU fp32 tail).
+    // ABI-reserved; pins KokoroAneComputeUnits.default (ANE RNN + GPU fp32 tail).
     _ = computeUnits
     fluidTts.lock.lock()
     defer { fluidTts.lock.unlock() }
-    // offlineMode: load only. DontSpeak pre-downloads (integrity + % UI) and pre-fills the
-    // G2P/lexicon set `initialize()` ensures from FluidAudio's own hardcoded cache path.
+    // Load only; Rust pre-downloads models and G2P/lexicon into FluidAudio's cache path.
     ModelHub.offlineMode = true
     let dir = fluidCString(modelDir).map { URL(fileURLWithPath: $0) }
     let mgr = KokoroAneManager(
@@ -96,12 +90,11 @@ public func ds_fluid_tts_synthesize_phonemes(
     }
     guard let p = fluidCString(phonemes) else { return 3 }
     let v = fluidCString(voice)
-    // Rust owns G2P; this skips FluidAudio's own G2P so ORT/MLX/Fluid receive identical phonemes.
+    // Rust owns G2P so ORT/MLX/Fluid render identical phoneme chunks.
     switch fluidRunBlocking({
         try await mgr.synthesizeFromPhonemesDetailed(p, voice: v, speed: speed)
     }) {
     case .success(let r):
-        // Borrow the samples to the callback (it copies them out); no ownership transfer.
         r.samples.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, Int32(r.sampleRate)) }
         return 0
     case .failure(let e):
@@ -124,8 +117,7 @@ public func ds_fluid_tts_shutdown() {
     }
 }
 
-// MARK: - ASR (Parakeet TDT v2, English, Core ML / ANE) — the `fluid` STT backend
-// Own lock and state, independent of the TTS chain above.
+// MARK: - ASR (Parakeet TDT v2 English, Core ML / ANE) — fluid STT
 
 private final class FluidAsrState: @unchecked Sendable {
     let lock = NSLock()
@@ -133,20 +125,18 @@ private final class FluidAsrState: @unchecked Sendable {
 }
 private let fluidAsr = FluidAsrState()
 
-/// Load Parakeet TDT v2 (English-only; mirrors ONNX — not v3 multilingual). 0 = ok.
+/// Load Parakeet TDT v2 (English-only, mirrors ONNX). 0 = ok.
 @_cdecl("ds_fluid_asr_init")
 public func ds_fluid_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
-    // ABI-reserved to mirror the TTS init; the loader pins the ANE-first defaults this release.
+    // ABI-reserved; loader pins ANE-first defaults.
     _ = computeUnits
     fluidAsr.lock.lock()
     defer { fluidAsr.lock.unlock() }
-    // offlineMode: load only. DontSpeak pre-downloads the Parakeet set (idempotent — TTS may
-    // have set it already, but ASR-only load paths must be offline too).
     ModelHub.offlineMode = true
     let dir = fluidCString(modelDir).map { URL(fileURLWithPath: $0) }
     switch fluidRunBlocking({ () -> AsrManager in
-        // load(from:version:.v2): the loader strips the last path component and re-appends the
-        // v2 repo folder (parakeet-tdt-0.6b-v2), so DontSpeak hands it that exact set directory.
+        // load(from:version:.v2) strips the last path component and re-appends the v2 repo
+        // folder (parakeet-tdt-0.6b-v2) — pass that set directory.
         guard let dir else { throw FluidShimError.nilDir }
         let models = try await AsrModels.load(from: dir, version: .v2)
         let mgr = AsrManager(config: .default)
@@ -162,7 +152,7 @@ public func ds_fluid_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits:
     }
 }
 
-/// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty input → "" (rc 0). Not initialized → rc 2.
+/// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty → "" (rc 0). Not initialized → rc 2.
 @_cdecl("ds_fluid_transcribe")
 public func ds_fluid_transcribe(
     _ samples: UnsafePointer<Float>?,
@@ -213,8 +203,8 @@ public func ds_fluid_asr_shutdown() {
 }
 
 // MARK: - Streaming ASR (StreamingEouAsrManager)
-// Chunk feed with encoder cache; same start/push/finish shape as the MLX/ONNX streamers.
-// process() returns "" mid-stream — use getPartialTranscript() for the live overlay.
+// start/push/finish like MLX/ONNX streamers. process() is "" mid-stream — partials via
+// getPartialTranscript().
 
 private final class FluidStreamAsrState: @unchecked Sendable {
     let lock = NSLock()
@@ -222,12 +212,12 @@ private final class FluidStreamAsrState: @unchecked Sendable {
 }
 private let fluidStreamAsr = FluidStreamAsrState()
 
-/// Start/reset a streaming utterance (modelDir consulted only on first load). 0 = ok.
+/// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
 @_cdecl("ds_fluid_asr_stream_start")
 public func ds_fluid_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 {
     fluidStreamAsr.lock.lock()
     defer { fluidStreamAsr.lock.unlock() }
-    ModelHub.offlineMode = true  // DontSpeak pre-downloads the streaming model set
+    ModelHub.offlineMode = true
     let dir = fluidCString(modelDir).map { URL(fileURLWithPath: $0) }
     switch fluidRunBlocking({ () -> StreamingEouAsrManager in
         if let mgr = fluidStreamAsr.manager {
@@ -235,7 +225,7 @@ public func ds_fluid_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int3
             return mgr
         }
         guard let dir else { throw FluidShimError.nilDir }
-        let mgr = StreamingEouAsrManager(chunkSize: .ms160)  // lowest latency (~6 partials/sec)
+        let mgr = StreamingEouAsrManager(chunkSize: .ms160)  // ~6 partials/sec
         try await mgr.loadModels(from: dir)
         await mgr.reset()
         return mgr
@@ -249,8 +239,7 @@ public func ds_fluid_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int3
     }
 }
 
-/// Push a chunk; cb gets getPartialTranscript() (process() returns "" mid-stream). Not
-/// started → rc 2.
+/// Push chunk; cb gets getPartialTranscript(). Not started → rc 2.
 @_cdecl("ds_fluid_asr_stream_push")
 public func ds_fluid_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
@@ -266,7 +255,7 @@ public func ds_fluid_asr_stream_push(
         fluidLogErr("ds_fluid_asr_stream_push: not started")
         return 2
     }
-    // Build the non-Sendable AVAudioPCMBuffer INSIDE the @Sendable closure (never capture it).
+    // Build non-Sendable AVAudioPCMBuffer inside the @Sendable closure (never capture it).
     let audio = samples.map { Array(UnsafeBufferPointer(start: $0, count: n)) } ?? []
     let rate = Double(sampleRate)
     switch fluidRunBlocking({ () -> String in
@@ -282,7 +271,6 @@ public func ds_fluid_asr_stream_push(
         if !audio.isEmpty, let dst = buffer.floatChannelData {
             audio.withUnsafeBufferPointer { dst[0].update(from: $0.baseAddress!, count: audio.count) }
         }
-        // process() yields "" until finish/EOU — pull the partial via getPartialTranscript().
         _ = try await mgr.process(audioBuffer: buffer)
         return await mgr.getPartialTranscript()
     }) {
@@ -295,7 +283,7 @@ public func ds_fluid_asr_stream_push(
     }
 }
 
-/// Finish the stream; cb borrows the final transcript. No live stream → "" (rc 0).
+/// Finish stream; cb borrows final transcript. No live stream → "" (rc 0).
 @_cdecl("ds_fluid_asr_stream_finish")
 public func ds_fluid_asr_stream_finish(
     _ ctx: UnsafeMutableRawPointer?,
@@ -318,7 +306,7 @@ public func ds_fluid_asr_stream_finish(
     }
 }
 
-/// Drop buffered streaming state; the batch warm model (ds_fluid_transcribe) is untouched.
+/// Drop stream state; batch warm model (ds_fluid_transcribe) stays loaded.
 @_cdecl("ds_fluid_asr_stream_shutdown")
 public func ds_fluid_asr_stream_shutdown() {
     fluidStreamAsr.lock.lock()
@@ -333,11 +321,9 @@ public func ds_fluid_asr_stream_shutdown() {
     }
 }
 
-// MARK: - Diarization (FluidAudio pyannote + WeSpeaker Core ML) — "who spoke when"
-// Own manager+lock; emits the SAME JSON contract as the MLX diarizer
-// ({"segments":[...],"speakers":{...}}) so parse_output is shared. DiarizerManager is NOT an
-// actor, so a full-call NSLock guards every entry (init, diarize, embed), not just init.
-// Models pre-downloaded by DontSpeak; loaded offline via the offlineMode switch in init.
+// MARK: - Diarization (pyannote + WeSpeaker Core ML)
+// Same JSON as MLX diarizer for shared parse_output. DiarizerManager is not an actor —
+// full-call NSLock on every entry (init/diarize/embed). Models offline-loaded.
 
 private final class FluidDiarState: @unchecked Sendable {
     let lock = NSLock()
@@ -345,14 +331,12 @@ private final class FluidDiarState: @unchecked Sendable {
 }
 private let fluidDiar = FluidDiarState()
 
-/// Load the diarizer from a DontSpeak-populated set directory (the directory whose members are
-/// the two .mlmodelc bundles). clusteringThreshold <= 0 → FluidAudio's default (0.7; lower =
-/// more speakers). 0 = ok.
+/// Load from set dir (two .mlmodelc). clusteringThreshold <= 0 → 0.7. 0 = ok.
 @_cdecl("ds_fluid_diar_init")
 public func ds_fluid_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringThreshold: Float) -> Int32 {
     fluidDiar.lock.lock()
     defer { fluidDiar.lock.unlock() }
-    // debugMode → speakerDatabase embeddings for enrolled-name matching. `let` for @Sendable capture.
+    // debugMode fills speakerDatabase for enrolled-name matching. `let` for @Sendable capture.
     let config: DiarizerConfig = {
         var c =
             clusteringThreshold > 0
@@ -361,12 +345,10 @@ public func ds_fluid_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringTh
         c.debugMode = true
         return c
     }()
-    // offlineMode: load only — DontSpeak pre-downloads the diarization set.
     ModelHub.offlineMode = true
     let dir = fluidCString(modelDir).map { URL(fileURLWithPath: $0) }
     switch fluidRunBlocking({ () -> DiarizerManager in
-        // The passed dir IS the set directory. CONTRACT: these two basenames match ds-model's
-        // coreml_repo DIARIZATION_* consts (a Rust guard cross-checks the literals) — keep literal.
+        // Basenames must match ds-model coreml_repo DIARIZATION_* (Rust guard cross-checks).
         guard let dir else { throw FluidShimError.nilDir }
         let models = try DiarizerModels.load(
             localSegmentationModel: dir.appendingPathComponent("pyannote_segmentation.mlmodelc"),
@@ -385,8 +367,7 @@ public func ds_fluid_diar_init(_ modelDir: UnsafePointer<CChar>?, _ clusteringTh
     }
 }
 
-/// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for the engine join. Empty →
-/// {"segments":[]}. Not initialized → rc 2.
+/// 16 kHz mono f32 → JSON {segments, speakers}. Empty → {"segments":[]}. Not init → rc 2.
 @_cdecl("ds_fluid_diarize")
 public func ds_fluid_diarize(
     _ samples: UnsafePointer<Float>?,
@@ -395,9 +376,8 @@ public func ds_fluid_diarize(
     _ ctx: UnsafeMutableRawPointer?,
     _ cb: FluidStrCb?
 ) -> Int32 {
-    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
+    _ = sampleRate  // Caller resamples to 16 kHz mono upstream.
     guard let cb else { return 4 }
-    // Full-call lock: DiarizerManager is not an actor (races if concurrent).
     fluidDiar.lock.lock()
     defer { fluidDiar.lock.unlock() }
     guard let mgr = fluidDiar.manager else {
@@ -409,7 +389,7 @@ public func ds_fluid_diarize(
         return 0
     }
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
-    // performCompleteDiarization is synchronous (throwing) — no async bridge needed.
+    // performCompleteDiarization is synchronous — no async bridge.
     do {
         let result = try mgr.performCompleteDiarization(audio)
         let segs: [[String: Any]] = result.segments.map { seg in
@@ -419,7 +399,7 @@ public func ds_fluid_diarize(
                 "end": seg.endTimeSeconds,
             ]
         }
-        // Embeddings keyed by segment speakerId (same id-space as the engine's cluster join).
+        // Embeddings keyed by segment speakerId (engine cluster-join id-space).
         var speakers: [String: [Float]] = [:]
         let db = result.speakerDatabase ?? [:]
         for seg in result.segments {
@@ -440,7 +420,7 @@ public func ds_fluid_diarize(
     }
 }
 
-/// WeSpeaker embedding for enrollment. Needs ds_fluid_diar_init (rc 2 otherwise). Empty → rc 3.
+/// WeSpeaker embedding for enrollment. Needs diar_init (rc 2). Empty → rc 3.
 @_cdecl("ds_fluid_diar_embed")
 public func ds_fluid_diar_embed(
     _ samples: UnsafePointer<Float>?,
@@ -449,9 +429,8 @@ public func ds_fluid_diar_embed(
     _ ctx: UnsafeMutableRawPointer?,
     _ cb: FluidPcmCb?
 ) -> Int32 {
-    _ = sampleRate  // FluidAudio expects 16 kHz mono; the caller resamples upstream.
+    _ = sampleRate  // Caller resamples to 16 kHz mono upstream.
     guard let cb else { return 4 }
-    // Full-call lock (non-actor manager).
     fluidDiar.lock.lock()
     defer { fluidDiar.lock.unlock() }
     guard let mgr = fluidDiar.manager else {
@@ -462,7 +441,6 @@ public func ds_fluid_diar_embed(
     let audio = Array(UnsafeBufferPointer(start: samples, count: n))
     do {
         let emb = try mgr.extractSpeakerEmbedding(from: audio)
-        // Borrow the embedding to the callback (sample_rate is irrelevant for an embedding).
         emb.withUnsafeBufferPointer { cb(ctx, $0.baseAddress, $0.count, 0) }
         return 0
     } catch {

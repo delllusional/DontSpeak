@@ -1,9 +1,7 @@
-//! Background model-download state + auto-fetch / provider-apply orchestration.
+//! Background download state + auto-fetch / provider-apply.
 //!
-//! Targets fetch in PARALLEL (own thread + progress entry each). Single-flight per
-//! target: a re-request ATTACHES (progress via `model_status`) rather than retriggering.
-//! Shared files (onnxruntime dylib, voices npz) are deduped by ds-model's per-path
-//! flight lock.
+//! Targets fetch in parallel (own thread each). Single-flight per target: re-request
+//! attaches via `model_status`. Shared files deduped by ds-model per-path flight lock.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,17 +32,13 @@ impl DownloadProgress {
     }
 }
 
-/// One target's lifecycle. Absent from the map = never started this session
-/// (absence IS idle — no `Idle` variant, which would reintroduce ambiguity).
+/// Per-target lifecycle. Absent = never started this session (absence is idle).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TargetState {
-    /// In flight with live byte progress (parallel targets each own theirs).
     Active(DownloadProgress),
-    /// Last fetch failed; kept until a new download for this target starts.
+    /// Kept until a new download for this target starts.
     Failed(String),
-    /// Last fetch succeeded — keep final progress so the row's ring doesn't fall
-    /// through to an unrelated still-live fetch (e.g. Cuda). Replaced on a fresh
-    /// [`begin_download`].
+    /// Keep final % so the row ring doesn't fall through to another live fetch (e.g. Cuda).
     Done(DownloadProgress),
 }
 
@@ -57,33 +51,25 @@ enum RetryGate {
 const AUTO_RETRY_BASE: Duration = Duration::from_secs(20);
 const AUTO_RETRY_CAP: Duration = Duration::from_secs(15 * 60);
 
-/// Background download progress for `model_status` (orange ring / red failed dot).
+/// Download progress for `model_status` (orange ring / red failed dot).
 #[derive(Default)]
 pub(crate) struct DownloadState {
-    /// Per-target lifecycle (Active XOR Failed XOR Done). See [`TargetState`].
+    /// See [`TargetState`].
     pub targets: HashMap<DownloadTarget, TargetState>,
     retry_gates: HashMap<DownloadTarget, RetryGate>,
-    /// First timed sample, excluding already-present bytes from rate estimates.
+    /// First timed sample (excludes already-present bytes from rate estimates).
     pub transfer_start: HashMap<DownloadTarget, (Instant, u64)>,
-    /// Warm-child self-heal hook (wired once at boot via [`wire`]). On success,
-    /// [`start_download`] restarts the child iff it hosts the new model
-    /// ([`download_needs_child_reload`]). `None` until boot / in tests.
+    /// Warm-child reload hook ([`wire`]); restart on success iff [`download_needs_child_reload`].
     pub warm: Option<Arc<TtsManager>>,
     pub paths: Option<Paths>,
-    /// Same `reload_requested` the boot loop reads. On success, set so the daemon
-    /// re-runs `build_stt`/`build_tts`: selection at startup may have fallen to the
-    /// inert `ds-engines` placeholder when the model was absent (no silent
-    /// substitution). Without this, dictation stays inert after download.
+    /// Boot-loop `reload_requested`: rebuild Stt/Tts after download (placeholder → real model).
     pub reload: Option<Arc<AtomicBool>>,
-    /// Same `running` flag `ds-core`'s `engine_stop()` clears. Detached downloads can
-    /// finish after stop — completion then skips warm-child restart / reload nudge.
-    /// `None` ⇒ unconditional (tests / unwired callers).
+    /// `engine_stop` running flag; completion skips side effects when stopped. `None` = always run.
     pub shutdown: Option<Arc<AtomicBool>>,
 }
 
 impl DownloadState {
-    /// Any target in flight — poll loop's "nudge status gate" predicate.
-    /// Not `targets.is_empty()`: Done/Failed persist after fetch ends.
+    /// Any Active target (Done/Failed persist — not `targets.is_empty()`).
     pub fn any_active(&self) -> bool {
         self.targets
             .values()
@@ -93,15 +79,13 @@ impl DownloadState {
 
 pub(crate) type DownloadProg = Arc<Mutex<DownloadState>>;
 
-/// Engine-lifetime flags for [`wire`] — named so the two same-typed `Arc<AtomicBool>`s
-/// can't be transposed (same hazard as `RowState`/`SpawnPrefs`/`ListenerShared`).
+/// Engine-lifetime flags for [`wire`] (named to avoid same-typed Arc transpose).
 pub(crate) struct DownloadFlags {
     pub reload: Arc<AtomicBool>,
     pub running: Arc<AtomicBool>,
 }
 
-/// Wire warm-child reload + shutdown observer once at boot (after the warm child exists).
-/// One call / one mutex take for both fields. See [`DownloadState`] field docs.
+/// Wire warm + shutdown once at boot (one mutex take). See [`DownloadState`].
 pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags: DownloadFlags) {
     let mut s = dl.lock().unwrap_or_else(|e| e.into_inner());
     s.warm = Some(warm);
@@ -110,13 +94,10 @@ pub(crate) fn wire(dl: &DownloadProg, warm: Arc<TtsManager>, paths: Paths, flags
     s.shutdown = Some(flags.running);
 }
 
-/// Restart warm child after a completed download so it loads the new model(s).
+/// Whether the warm child hosts this completed download.
 pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceConfig) -> bool {
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
-    // Shim-aware and provider-aware (same predicates as [`compute_needs`]): the warm child
-    // hosts the ONNX, MLX, or Fluid flavor per the resolved provider, so the target's flavor
-    // must match on BOTH native axes for the fetch to be the one it can load. A `provider=mlx`
-    // without the loaded shim runs ONNX, so both flavors read false and the ONNX target matches.
+    // Same native-axis match as [`compute_needs`] (missing shim → ONNX).
     let provider = cfg.resolved_tts_provider();
     let native = native_tts_active(cfg);
     let mlx_tts = native && provider == ds_config::Provider::Mlx;
@@ -125,7 +106,7 @@ pub(crate) fn download_needs_child_reload(target: DownloadTarget, cfg: &VoiceCon
         && target.is_mlx_tts() == mlx_tts
         && target.is_fluid_tts() == fluid_tts;
     (builtin_tts && tts_target_matches)
-        // eSpeak/G2P/JA assets are loaded by the warm helper — both ONNX and MLX Kokoro.
+        // Kokoro frontend assets load in the warm helper (ONNX + MLX).
         || (builtin_tts
             && cfg.tts_model == ds_config::TtsModel::Kokoro
             && target == DownloadTarget::KokoroFrontend)
@@ -169,7 +150,7 @@ fn retry_delay(failures: u32) -> Duration {
         .min(AUTO_RETRY_CAP)
 }
 
-/// Retire `which`: Err → Failed always; Ok only Active → Done (keeps final %).
+/// Err → Failed always; Ok only Active → Done (keeps final %).
 fn finish_download_at(
     s: &mut DownloadState,
     which: DownloadTarget,
@@ -218,15 +199,14 @@ fn download_event_msg(which: DownloadTarget, phase: &str, detail: Option<&str>) 
     }
 }
 
-/// Kick off a background download for `which` (returns immediately; see crate doc).
+/// Background download (returns immediately; see crate doc).
 pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     if !begin_download(&mut dl.lock().unwrap_or_else(|e| e.into_inner()), which) {
-        return; // this target is already downloading — attach, don't retrigger
+        return; // attach, don't retrigger
     }
     log::info!(target: "engine", "{}", download_event_msg(which, "started", None));
     let dl = dl.clone();
     std::thread::spawn(move || {
-        // Hooks cloned under lock; used only after fetch completes.
         let (warm, paths, reload, shutdown) = {
             let s = dl.lock().unwrap_or_else(|e| e.into_inner());
             (
@@ -237,7 +217,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             )
         };
         let prog = |done: u64, total: u64| {
-            // Only this target; late callbacks after finish no longer match Active.
+            // Late callbacks after finish no longer match Active.
             let mut state = dl.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(state.targets.get(&which), Some(TargetState::Active(_))) {
                 state
@@ -249,7 +229,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 }
             }
         };
-        // Match compute_needs or boot will requeue an incompletely fetched target forever.
+        // Match compute_needs or boot requeues incomplete forever.
         let cuda_assets = |model: ds_config::TtsModel| {
             paths.as_ref().is_some_and(|paths| {
                 ds_model::tts_wants_cuda_assets(
@@ -258,15 +238,14 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 )
             })
         };
-        // The set installers take their roots as a value; resolve once here so
-        // `ModelRoots::ambient` stays at the engine boundary.
+        // Resolve roots once; keep `ModelRoots::ambient` at the engine boundary.
         #[cfg(target_os = "macos")]
         let hf_repos = |set: &[&'static ds_model::HfRepo]| -> std::io::Result<()> {
             let roots = ds_model::ModelRoots::ambient()
                 .ok_or_else(|| std::io::Error::other("cannot resolve the model directory"))?;
             ds_model::hf_repo::ensure_hf_repos(&roots, set, &prog)
         };
-        // One shared host gate — not per-arm cfg error strings (uniform red-dot path).
+        // Host gate once (uniform red-dot path).
         let result: std::io::Result<()> = if !which.is_supported_on_this_host() {
             Err(std::io::Error::other(format!(
                 "'{}' is not available on this platform",
@@ -274,13 +253,11 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             )))
         } else {
             match which {
-                // Full portable Kokoro: synth weights + voices + English G2P + eSpeak NG
-                // loader (es/fr/hi/it/pt) + ORT. Matches Misaki/MLX Audio multilingual
-                // frontend assets (Kokoro has no cuda_files extras).
+                // Full portable Kokoro (weights + frontend + ORT).
                 DownloadTarget::KokoroModel => {
                     ds_model::run_setup_kokoro_with_progress(&prog).map(|_| ())
                 }
-                // Shared frontend only (MLX Kokoro, or ONNX when weights already present).
+                // Shared frontend only (MLX, or ONNX when weights already present).
                 DownloadTarget::KokoroFrontend => {
                     ds_model::run_setup_kokoro_frontend_with_progress(&prog).map(|_| ())
                 }
@@ -305,7 +282,6 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                     &prog,
                 )
                 .map(|_| ()),
-                // Shared CUDA EP runtime (~1.4 GB) — same completion hook as model fetch.
                 #[cfg(all(
                     any(target_os = "windows", target_os = "linux"),
                     target_arch = "x86_64"
@@ -313,12 +289,10 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::Cuda => {
                     ds_model::ensure_cuda_runtime_with_progress(&prog).map(|_| ())
                 }
-                // MLX diarization — engine-managed fetch (real %), offline shim load.
                 #[cfg(target_os = "macos")]
                 DownloadTarget::DiarizationMlx => {
                     hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
                 }
-                // MLX sets: standard path (not helper self-fetch).
                 #[cfg(target_os = "macos")]
                 target @ (DownloadTarget::KokoroMlx
                 | DownloadTarget::ChatterboxMlx
@@ -328,11 +302,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 )),
                 #[cfg(target_os = "macos")]
                 DownloadTarget::ParakeetMlx => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
-                // FluidAudio Core ML sets: same engine-managed fetch, offline shim load. The
-                // Kokoro set spans two roots (ours plus FluidAudio's own cache); one
-                // `ensure_hf_repos` call covers both. The shared `voices-v1.0.bin` the ANE
-                // chain materializes packs from stays owned by `KokoroModel`, so fetch it
-                // here without re-attributing it (see `compute_needs`' fluid TTS branch).
+                // Fluid Kokoro: shared voices npz (owned by KokoroModel) + Core ML set.
                 #[cfg(target_os = "macos")]
                 DownloadTarget::KokoroFluid => {
                     ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &prog)
@@ -346,7 +316,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 DownloadTarget::DiarizationFluid => {
                     hf_repos(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
                 }
-                // SepFormer speaker-lock — re-resolved per dictation; no warm-child restart.
+                // Per-dictation re-resolve; no warm-child restart.
                 #[cfg(target_os = "macos")]
                 DownloadTarget::SepformerModel => {
                     ds_model::run_setup_sepformer_with_progress(&prog).map(|_| ())
@@ -372,21 +342,17 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
             which,
             &result,
         );
-        // Detached thread can outlive `ds_engine_stop()` — re-check shutdown before
-        // side effects. `None` (unwired) reads as still running. See `DownloadState::shutdown`.
+        // Detached thread can outlive stop — re-check; `None` = still running.
         let still_running = shutdown
             .as_ref()
             .map(|s| s.load(Ordering::Relaxed))
             .unwrap_or(true);
-        // Self-heal: restart warm child if it hosts this target (config read LIVE).
         if result.is_ok()
             && still_running
             && let (Some(tts), Some(paths)) = (warm, paths)
         {
             let cfg = VoiceConfig::load(&paths);
-            // Refresh the preload pref first: the pre-download pref was computed with
-            // the model absent (tts_preload=false), so restarting with it would leave
-            // TTS unloaded and force a second restart on the daemon-reload pass below.
+            // Pre-download pref had model absent (tts_preload=false); refresh before restart.
             tts.set_tts_wanted(crate::config_gate::helper_preloads_tts(&cfg));
             if download_needs_child_reload(which, &cfg) && tts.reload_models() {
                 log::info!(
@@ -396,8 +362,7 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
                 );
             }
         }
-        // Daemon reload: rebuild Stt/Tts selection (inert placeholder → real model).
-        // Separate from warm-child reload above (inference child vs engine Stt object).
+        // Separate from warm-child reload (engine Stt/Tts objects).
         if result.is_ok()
             && still_running
             && let Some(flag) = reload
@@ -407,21 +372,13 @@ pub(crate) fn start_download(dl: &DownloadProg, which: DownloadTarget) {
     });
 }
 
-/// A diarization set is fetched only on hosts that can run it (Apple Silicon) — elsewhere an
-/// enabled diarizer must not loop a doomed fetch on an unsupported target. Shared by both rungs
-/// (`caller` selects the set by the resolved provider). Pure for tests.
+/// Host-gated diarization fetch (unsupported hosts must not loop). Pure.
 fn diarization_needed(host_supported: bool, diarization_on: bool, set_present: bool) -> bool {
     host_supported && diarization_on && !set_present
 }
 
-/// Kokoro multilingual text frontend (English G2P + eSpeak NG loader + JA dict + ORT).
-///
-/// Needed whenever Kokoro is selected and those assets are missing. Pure for tests.
-///
-/// - **MLX**: synth weights are a separate download; always request `KokoroFrontend` here.
-/// - **ONNX**: `KokoroModel` already installs the full frontend — skip a second fetch when
-///   that target is already queued. If weights are present but eSpeak/JA/G2P are not,
-///   request `KokoroFrontend` alone (the bug that left Italian/Spanish silent).
+/// Kokoro frontend missing while selected. Pure.
+/// MLX always requests it; ONNX skips when full `KokoroModel` is already queued.
 fn needs_kokoro_frontend(
     tts_is_kokoro: bool,
     frontend_assets_present: bool,
@@ -430,8 +387,7 @@ fn needs_kokoro_frontend(
     tts_is_kokoro && !frontend_assets_present && !downloading_full_kokoro_onnx
 }
 
-/// "Enabled but files missing" flags → download targets. Named (not positional) so needs
-/// can't transpose. ONNX vs MLX are mutually exclusive via `mlx_active`.
+/// Enabled-but-missing flags (named fields — no positional transpose).
 #[derive(Default)]
 struct DownloadNeeds {
     tts_model: Option<DownloadTarget>,
@@ -474,8 +430,7 @@ fn needed_downloads(need: &DownloadNeeds) -> Vec<DownloadTarget> {
     targets
 }
 
-/// Boot/reload fetch plan: CUDA first when wanted (gates both engines; old single-flight
-/// could drop it when a model won the race), then missing models. Pure, pinned by test.
+/// CUDA first when wanted, then missing models. Pure (pinned by test).
 fn fetch_plan(prefetch_cuda: bool, need: &DownloadNeeds) -> Vec<DownloadTarget> {
     let mut plan = Vec::new();
     if prefetch_cuda {
@@ -485,15 +440,14 @@ fn fetch_plan(prefetch_cuda: bool, need: &DownloadNeeds) -> Vec<DownloadTarget> 
     plan
 }
 
-/// Auto-fetch missing models for enabled engines (no manual Download button).
-/// Idempotent; the per-target gate latches permanent errors and backs off transient ones.
+/// Auto-fetch missing models (per-target permanent latch / transient backoff).
 pub(crate) fn auto_download_missing(downloads: &DownloadProg, cfg: &VoiceConfig) {
     for which in fetch_plan(false, &compute_needs(cfg)) {
         start_download(downloads, which);
     }
 }
 
-/// Boot/reload: apply TTS provider, then full [`fetch_plan`] (only CUDA-folding caller).
+/// Apply TTS provider, then [`fetch_plan`] (only CUDA-folding caller).
 pub(crate) fn apply_provider_and_autofetch(
     tts: &Arc<TtsManager>,
     downloads: &DownloadProg,
@@ -505,11 +459,10 @@ pub(crate) fn apply_provider_and_autofetch(
     }
 }
 
-/// Live probe: which model sets need fetching. Impure; [`fetch_plan`] is the pure part.
+/// Live probe of missing sets. Impure; [`fetch_plan`] is pure.
 fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     let exists = |p: Option<std::path::PathBuf>| p.map(|p| p.is_file()).unwrap_or(false);
-    // One resolution for every set probe below; `None` reads as "nothing present", which
-    // queues the fetch that then fails loudly on the same unresolvable root.
+    // One roots resolve; `None` queues a fetch that fails on the same root.
     let roots = ds_model::ModelRoots::ambient();
     let set_present = |set: &[&'static ds_model::HfRepo]| {
         roots
@@ -518,18 +471,15 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     };
     let builtin_tts = cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn);
     let native_active = builtin_tts && native_tts_active(cfg);
-    // Both native rungs share the dylib; `resolved_tts_provider` picks exactly one.
     let fluid_active = native_active && cfg.resolved_tts_provider() == ds_config::Provider::Fluid;
     let mlx_active = native_active && !fluid_active;
     let kokoro_selected = builtin_tts && cfg.tts_model == ds_config::TtsModel::Kokoro;
-    // Full Misaki-compatible stack (G2P graphs + espeakng-loader + ORT), not merely
-    // "encoder.onnx exists" — that left eSpeak uninstalled on the ONNX path.
+    // Full frontend stack, not merely encoder.onnx (eSpeak gap on ONNX).
     let frontend_present = ds_model::is_kokoro_frontend_present();
     let tts_model = if !builtin_tts {
         None
     } else if fluid_active {
-        // Fluid Kokoro needs the Core ML set AND the shared voices npz (through `roots`, not
-        // ambient — #212); a half-fetched state re-queues rather than looping.
+        // Core ML set + shared voices via `roots` (#212); half-fetched re-queues.
         let present = set_present(&ds_model::coreml_repo::KOKORO_COREML_SET)
             && roots
                 .as_ref()
@@ -542,7 +492,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             .then(|| DownloadTarget::mlx_for_tts(cfg.tts_model))
     } else {
         let target = DownloadTarget::portable_for_tts(cfg.tts_model);
-        // Must match start_download's effective-provider predicate.
+        // Match start_download's cuda-assets predicate.
         let cuda_assets = ds_model::tts_wants_cuda_assets(cfg.tts_model, cfg.tts_provider_token());
         (!(ds_model::tts_model_files_present(cfg.tts_model, cuda_assets)
             && exists(ds_model::onnxruntime_dylib_path())))
@@ -554,22 +504,18 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
         frontend_present,
         downloading_full_kokoro_onnx,
     );
-    // Same arch-blind trap for STT; `stt_uses_onnx_runtime` is the shim-aware truth.
     let stt_is_builtin = cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn);
     let stt_onnx_runtime = stt_uses_onnx_runtime(
         cfg.resolved_stt_provider(),
         NativeShims::probe().unwrap_or_default(),
     );
-    // Each native STT rung has its own dylib; `resolved_stt_provider` picks exactly one set.
     let stt_native = stt_is_builtin && !stt_onnx_runtime;
     let stt_fluid = stt_native && cfg.resolved_stt_provider() == ds_config::Provider::Fluid;
     let parakeet_model = stt_is_builtin && stt_onnx_runtime && !ds_model::is_parakeet_present();
     let parakeet_mlx =
         stt_native && !stt_fluid && !set_present(&ds_model::mlx_repo::PARAKEET_MLX_SET);
     let parakeet_fluid = stt_fluid && !set_present(&ds_model::coreml_repo::PARAKEET_COREML_SET);
-    // Fetch only the resolved rung's set — a `diarizer=["fluid"]` config pulls the Core ML
-    // diarization set, not MLX's (and vice versa). Off-Apple-Silicon `resolved_diarizer` falls
-    // back to `Mlx`, whose host gate is false there, so neither loops a doomed fetch.
+    // Only the resolved diarizer rung's set (host gate stops off-Apple loops).
     let diar_provider = cfg.resolved_diarizer();
     let diarization_on = cfg.is_diarization_on();
     let diarization_mlx = diar_provider == ds_config::DiarizerProvider::Mlx
@@ -584,7 +530,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             diarization_on,
             set_present(&ds_model::coreml_repo::DIARIZATION_COREML_SET),
         );
-    // Speaker-lock on + model absent: without it lock fails open (unfiltered).
+    // Speaker-lock without SepFormer fails open.
     let sepformer_model = DownloadTarget::SepformerModel.is_supported_on_this_host()
         && cfg.speaker_lock
         && cfg.is_diarization_on()
@@ -601,9 +547,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
     }
 }
 
-/// Prefetch the ~1.4 GB CUDA runtime only when a built-in engine resolves to CUDA
-/// ([`ds_model::cuda_runtime_wanted`]) plus a real driver and a missing runtime.
-/// `auto` excluded (never silent large pull). Pure; caller supplies live probe results.
+/// Prefetch CUDA runtime only when wanted + driver + missing (`auto` never pulls). Pure.
 #[cfg(all(
     any(target_os = "windows", target_os = "linux"),
     target_arch = "x86_64"
@@ -612,10 +556,9 @@ fn should_prefetch_cuda(wanted: bool, driver_present: bool, runtime_present: boo
     wanted && driver_present && !runtime_present
 }
 
-/// Apply provider to warm child; report whether CUDA runtime should enter [`fetch_plan`].
-/// Always false off x86_64 Windows/Linux.
+/// Apply provider; whether CUDA should enter [`fetch_plan`] (false off x86_64 Win/Linux).
 fn apply_tts_provider(tts: &Arc<TtsManager>, cfg: &VoiceConfig, which: Provider) -> bool {
-    // Token string only at the child/FFI edge; gating uses typed Provider.
+    // Token string only at the child edge; gating uses typed Provider.
     tts.set_provider(which.as_str());
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),

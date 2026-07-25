@@ -1,6 +1,5 @@
-//! `tools/call` router and `call_*` handlers (strict arg structs). Most bridge to the
-//! engine over `ds-ipc`; `voices`/`set_config` are direct. Read-only `status`/`usage`
-//! never spawn the engine; usage falls back to a local probe while the engine is down.
+//! `tools/call` router + `call_*` (strict arg structs). Most via `ds-ipc`;
+//! `voices`/`set_config` direct. `status`/`usage` never spawn; usage local-probes when down.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -103,22 +102,21 @@ pub(crate) fn tools_call_cancellable(
         SPEAK_NAME, STATUS_NAME, STOP_NAME, USAGE_NAME, VOICES_NAME,
     };
     let result: Result<ToolSuccess, String> = match name {
-        // Config-direct; no engine.
         n if n == VOICES_NAME => match Paths::resolve() {
             Some(paths) => call_voices(&paths, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // config.toml write; mtime-watch or Reload nudge. Engine need not be up.
+        // config.toml write; engine optional.
         n if n == SET_CONFIG_NAME => match Paths::resolve() {
             Some(paths) => call_set_config(&paths, &args).map(ToolSuccess::Text),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Read-only; must not spawn engine / start playback.
+        // Read-only — no spawn / playback.
         n if n == STATUS_NAME => match Paths::resolve() {
             Some(paths) => call_status(&paths, sock, &args).map(ToolSuccess::Structured),
             None => Err("Cannot resolve data paths.".into()),
         },
-        // Prefer the app-hosted engine so macOS keychain ACL authorization applies.
+        // Prefer app-hosted engine (macOS keychain ACL).
         n if n == USAGE_NAME => call_usage(sock, &args).map(ToolSuccess::Structured),
         n if n == SPEAK_NAME
             || n == STOP_NAME
@@ -163,7 +161,7 @@ enum ToolSuccess {
     Structured(Value),
 }
 
-// Arg structs: deny_unknown_fields; fields == schema (pinned by tool_schemas_match_arg_structs).
+// Arg structs: deny_unknown_fields; fields == schema (tool_schemas_match_arg_structs).
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -249,13 +247,13 @@ fn call_voices_from(
     let a: VoicesArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid voices arguments: {e}"))?;
     let cfg = VoiceConfig::load(paths);
-    // Explicit arg, else resolved TTS ladder (catalog still available when speech is off).
+    // Explicit arg, else resolved ladder (catalog still listed when speech is off).
     let engine = a
         .tts_engine
         .or_else(|| cfg.resolved_tts())
         .unwrap_or(ds_config::TtsEngine::BuiltIn);
     let model = a.tts_model.unwrap_or(cfg.tts_model);
-    // Normalize the explicit arg (parity with set_config); empty after trim = unset.
+    // Empty after trim = unset (parity with set_config).
     let requested = a
         .language
         .as_deref()
@@ -266,8 +264,7 @@ fn call_voices_from(
         (None, ds_config::TtsEngine::BuiltIn) => {
             Some(model.descriptor().default_language.to_string())
         }
-        // System with no explicit language: NO filter — never inherit the built-in
-        // model default (OmniVoice's "auto" would filter every system voice out).
+        // System: no default filter (built-in "auto" would drop every OS voice).
         (None, ds_config::TtsEngine::System) => None,
     };
     if engine == ds_config::TtsEngine::BuiltIn {
@@ -313,25 +310,20 @@ fn call_voices_from(
             json!({ "language": subtag, "voices": voices })
         })
         .collect();
-    // The per-model capability catalog lives in `models` now — one array of model ids, not two.
     let mut out = json!({
         "engine": engine.as_str(),
         "model": (engine == ds_config::TtsEngine::BuiltIn).then(|| model.as_str()),
         "language": language,
         "languages": languages,
     });
-    // `active` marks the pool actually in effect, so say which configured entries were
-    // dropped to get there — they are absent from `languages` too (`kokoro_choices_from`
-    // filters them), and a bare substituted default would otherwise look like the config.
-    // Not narrowed by the `language` filter: this is a config-level fact, not a listing.
+    // Config-level ignored pool entries (not narrowed by language filter).
     if !ignored_voices.is_empty() {
         out["ignored_voices"] = json!(ignored_voices);
     }
     Ok(out)
 }
 
-/// Engine-backed on-disk inventory. The scan and the removal both run in the engine: it is
-/// the process that downloads, so its process-local flight map serializes them.
+/// Engine inventory/remove (flight map serializes against downloads).
 fn call_models(sock: &Path, args: &Value) -> Result<Value, String> {
     let a: ModelsArgs = serde_json::from_value(args.clone())
         .map_err(|e| format!("invalid models arguments: {e}"))?;
@@ -354,13 +346,12 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         return Err("status: `timeout_ms` requires `since`".into());
     }
     let cfg = VoiceConfig::load(paths);
-    // Share one probe between concise and detailed output; `since` selects engine long-poll.
+    // One probe for concise + detail; `since` → long-poll.
     let probe = probe_engine(sock, a.since, a.timeout_ms.unwrap_or(30_000));
-    // Keyed "state" not "engine" — serde_json keeps only the last of a duplicate key
-    // (previously silently dropped the configured engine name).
+    // Keyed "state" not "engine" (duplicate JSON keys keep only the last).
     let state = match &probe {
         EngineProbe::Live(status) => {
-            // muted in concise status: narration path never calls a tool that reports it.
+            // Concise includes muted (narration path has no other mute reporter).
             json!({
                 "running": true,
                 "seq": status.seq,
@@ -406,7 +397,6 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         "agents": cfg.agents,
         "state": state,
     });
-    // Only when the router dropped something: `voices` alone would look like plain config.
     if !ignored_voices.is_empty() {
         out["ignored_voices"] = json!(ignored_voices);
     }

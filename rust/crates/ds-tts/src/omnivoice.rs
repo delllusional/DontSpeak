@@ -1,6 +1,5 @@
-//! Classifier-free-guided iterative unmasking for OmniVoice's bidirectional ONNX export.
-//! Ported from `_generate_iterative` at k2-fsa/OmniVoice 468e927; transcribed formulas
-//! cite their upstream locations.
+//! CFG iterative unmasking for OmniVoice's bidirectional ONNX export.
+//! Ported from `_generate_iterative` (k2-fsa/OmniVoice 468e927); formulas cite upstream.
 
 use half::f16;
 use ort::session::{Session, SessionInputValue};
@@ -49,23 +48,20 @@ fn float_input(
 const CODEBOOKS: usize = 8;
 const CODEBOOK_SIZE: usize = 1024;
 const MASK_TOKEN: i64 = 1024;
-// Head logits append the MASK class after the code entries.
+// Head logits append MASK after code entries.
 const VOCAB: usize = CODEBOOK_SIZE + 1;
-// Smaller pieces bound time-to-first-audio: each costs `2 * steps` LLM forwards whose
-// cost grows with sequence length. Pre-splitting prevents truncation at this limit.
+// Cap frames so TTFA stays bounded (`2 * steps` LLM forwards grow with seq length).
 const MAX_FRAMES: usize = 200;
-// Upstream guidance_scale (omnivoice.py:178), used as `w` in `c + w*(c - u)`.
+// Upstream guidance_scale (omnivoice.py:178): `w` in `c + w*(c - u)`.
 const GUIDANCE_SCALE: f32 = 2.0;
 // Upstream t_shift (omnivoice.py:179).
 const T_SHIFT: f64 = 0.1;
 // Upstream layer_penalty_factor (omnivoice.py:180, 1407).
 const LAYER_PENALTY: f32 = 5.0;
-// Upstream position_temperature (omnivoice.py:181, 1409, 1632). Scaling Gumbel noise
-// instead of scores preserves selection order and leaves confidence units unchanged.
+// Upstream position_temperature (omnivoice.py:181, 1409, 1632). Noise on Gumbel, not scores.
 const GUMBEL_SCALE: f32 = 5.0;
 
-/// Presets use the upstream voice-design vocabulary; a test pins registry order.
-/// `default` omits the ORT instruct block and maps to nil in MLX.
+/// Upstream voice-design presets; test pins registry order. `default` omits ORT instruct.
 pub const OMNIVOICE_PRESETS: &[(&str, &str)] = &[
     ("default", ""),
     ("young_woman", "female, young adult, moderate pitch"),
@@ -92,7 +88,7 @@ fn preset_instruct(voice: &str) -> Option<&'static str> {
         .map(|(_, instruct)| *instruct)
 }
 
-/// Resolve presets for MLX; default becomes nil in the shim and raw instructs pass through.
+/// MLX voice arg: preset → instruct (default → nil in shim); raw instructs pass through.
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn mlx_voice_arg(voice: &str) -> &str {
     match preset_instruct(voice) {
@@ -110,12 +106,11 @@ pub struct OmniVoiceSynth {
     decoder: Session,
     tokenizer: tokenizers::Tokenizer,
     hidden_output: usize,
-    /// Realized backbone EP, even when the Higgs decoder runs on CPU.
+    /// Realized backbone EP (Higgs decoder may still run CPU).
     provider: ds_config::RealizedProvider,
 }
 
-/// #165: the FP16 higgs_decoder NaNs under the CUDA EP; decode it on CPU until #165
-/// closes. Every other backbone EP decodes in place.
+/// #165: FP16 higgs_decoder NaNs on CUDA EP → decode on CPU; other EPs in place.
 fn decoder_provider(backbone: ds_config::RealizedProvider) -> ds_config::RealizedProvider {
     if backbone == ds_config::RealizedProvider::Cuda {
         ds_config::RealizedProvider::Cpu
@@ -146,7 +141,7 @@ impl OmniVoiceSynth {
         let outputs: Vec<&str> = llm.outputs().iter().map(|output| output.name()).collect();
         check_llm_contract(&inputs, &outputs)?;
         let heads = sessions.load_file(&dir.join("audio_heads_decoder.onnx"))?;
-        // The decoder's explicit EP must not drift during fallback.
+        // Pin decoder EP so fallback cannot drift it.
         let provider = sessions.provider();
         let mut decoder_sessions = crate::ort_session::OrtSessions::from_realized(
             ds_config::TtsModel::OmniVoice,
@@ -182,12 +177,10 @@ impl OmniVoiceSynth {
         let model = ds_config::TtsModel::OmniVoice;
         let language = model.descriptor().runtime_language(language).to_string();
         let steps = params.int(model, "steps") as usize;
-        // Unknown non-empty values remain raw instructs; empty omits the block.
+        // Unknown non-empty → raw instruct; empty omits the block.
         let instruct = preset_instruct(voice).unwrap_or(voice);
-        // Text stays out of the derived seed: with the noise stream fixed per
-        // language + voice, the sampled speaker holds across sentences and split
-        // pieces instead of drifting per utterance. Non-negative config values
-        // override the derivation.
+        // Seed from language+voice only so speaker holds across split pieces;
+        // non-negative config seed overrides.
         let seed = u64::try_from(params.int(model, "seed"))
             .unwrap_or_else(|_| stable_seed(&language, instruct));
         let mut waveform = Vec::new();
@@ -237,8 +230,7 @@ impl OmniVoiceSynth {
         let total = CODEBOOKS * frames;
 
         let mut cond_ids = prompt.ids.clone();
-        // Upstream unconditional pass: target region only, with audio_mask true
-        // (omnivoice.py:1342-1344).
+        // Uncond pass: target region only, audio_mask true (omnivoice.py:1342-1344).
         let uncond_mask = vec![true; frames];
         let mut remaining_mask = vec![true; total];
         let mut remaining = total;
@@ -262,9 +254,9 @@ impl OmniVoiceSynth {
             }
             let uncond_logits = self.run_pass(&uncond_ids, &uncond_mask, frames)?;
 
-            // The conditional and unconditional passes have different sequence lengths:
-            //   cond index (c, f)   = ((c*cond_seq) + cond_len + f) * VOCAB
-            //   uncond index (c, f) = ((c*frames) + f) * VOCAB
+            // Cond/uncond have different seq lengths:
+            //   cond (c,f)   = ((c*cond_seq) + cond_len + f) * VOCAB
+            //   uncond (c,f) = ((c*frames) + f) * VOCAB
             let mut guided = vec![f32::NEG_INFINITY; total * VOCAB];
             for cell in 0..total {
                 if !remaining_mask[cell] {
@@ -294,7 +286,7 @@ impl OmniVoiceSynth {
             }
         }
 
-        // MASK_TOKEN is outside the decoder codebook range.
+        // MASK_TOKEN is outside decoder codebook range.
         let mut codes = Vec::with_capacity(total);
         for codebook in 0..CODEBOOKS {
             let start = codebook * seq + cond_len;

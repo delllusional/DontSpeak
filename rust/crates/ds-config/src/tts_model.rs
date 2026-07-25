@@ -18,8 +18,7 @@ pub enum TtsModel {
 impl TtsModel {
     pub const ALL: &'static [Self] = &[Self::Kokoro, Self::Chatterbox, Self::Qwen, Self::OmniVoice];
 
-    /// `ALL`'s wire tokens, in the same order, for const contexts that cannot call
-    /// [`TtsModel::as_str`] (MCP schema enums). Pinned to the descriptors by
+    /// Wire tokens in `ALL` order for const contexts (MCP schemas). Pinned by
     /// `registry_order_matches_enum_discriminants`.
     pub const TOKENS: &'static [&'static str] = &["kokoro", "chatterbox", "qwen", "omnivoice"];
 
@@ -45,30 +44,25 @@ impl TtsModel {
 serialize_as_str!(TtsModel);
 strict_de!(TtsModel, "kokoro|chatterbox|qwen|omnivoice");
 
-/// Wire token of the built-in STT model's on-disk asset. Not a [`TtsModel`]; it is the
-/// STT half of [`MODEL_ASSET_TOKENS`].
+/// Built-in STT asset token (not a [`TtsModel`]). STT half of [`MODEL_ASSET_TOKENS`].
 pub const STT_MODEL_TOKEN: &str = "parakeet";
 
-/// Every on-disk model asset, by id — the model half of [`REMOVABLE_ASSET_TOKENS`].
-/// Hand-written like [`TtsModel::TOKENS`] because MCP schema enums are const contexts;
-/// `model_asset_tokens_are_the_tts_models_then_the_stt_model` pins the composition.
+/// On-disk model assets (model half of [`REMOVABLE_ASSET_TOKENS`]). Hand-written for const
+/// MCP schemas; composition pinned by tests.
 pub const MODEL_ASSET_TOKENS: &[&str] = &["kokoro", "chatterbox", "qwen", "omnivoice", "parakeet"];
 
 pub const KOKORO_FRONTEND_ASSET_TOKEN: &str = "kokoro_frontend";
 pub const ONNXRUNTIME_ASSET_TOKEN: &str = "onnxruntime";
 pub const CUDA_ASSET_TOKEN: &str = "cuda";
 
-/// Shared on-disk assets, in inventory row order. Reclaimable only while nothing
-/// references them (#220).
+/// Shared assets, inventory order. Reclaimable only while unreferenced (#220).
 pub const SHARED_ASSET_TOKENS: &[&str] = &[
     KOKORO_FRONTEND_ASSET_TOKEN,
     ONNXRUNTIME_ASSET_TOKEN,
     CUDA_ASSET_TOKEN,
 ];
 
-/// Every id the `models` tool's `remove` accepts: the model sets, then the shared assets.
-/// Hand-written for the same const-context reason as [`MODEL_ASSET_TOKENS`]; composition
-/// pinned by `removable_asset_tokens_are_the_models_then_the_shared_assets`.
+/// `models remove` ids: models then shared. Composition pinned by tests.
 pub const REMOVABLE_ASSET_TOKENS: &[&str] = &[
     "kokoro",
     "chatterbox",
@@ -138,8 +132,7 @@ impl std::fmt::Display for TtsParamValue {
     }
 }
 
-/// `honored_ort`/`honored_mlx` feed capability metadata. Swift mirrors this registry;
-/// update its map and the Rust/Swift literal drift tests together.
+/// Param registry entry. Swift mirrors this; update both sides + drift tests together.
 #[derive(Debug)]
 pub struct TtsParamDescriptor {
     pub key: &'static str,
@@ -525,11 +518,9 @@ pub fn validate_tts_param(
     }
 }
 
-// Japanese and Mandarin are dropped: their frontends cost ~3.6 MiB in every binary and
-// a 27 MiB dictionary download for a pipeline eSpeak cannot stand in for.
+// JA/ZH frontends dropped (~3.6 MiB + 27 MiB dict; eSpeak cannot stand in).
 const KOKORO_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "pt"];
-// Kokoro v1.0 publishes eight languages. American and British English are separate
-// voice families but one language in the upstream release count.
+// Upstream publishes eight languages (en-US/en-GB are one language count).
 const KOKORO_MODEL_LANGUAGES: &[&str] = &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"];
 const CHATTERBOX_LANGUAGES: &[&str] = &[
     "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl", "no",
@@ -831,8 +822,6 @@ mod tests {
             assert_eq!(model as usize, index);
             assert_eq!(model.descriptor().model, model);
             assert_eq!(TtsModel::parse(model.as_str()), Some(model));
-            // TOKENS is hand-written for const contexts; it must stay the descriptors'
-            // ids in ALL's order, or MCP schemas advertise a model that cannot parse.
             assert_eq!(TtsModel::TOKENS[index], model.as_str());
             assert_eq!(
                 model.descriptor().supports_rate,
@@ -842,14 +831,12 @@ mod tests {
             );
         }
         assert_eq!(TtsModel::TOKENS.len(), TtsModel::ALL.len());
-        // parse trims + lowercases like every other config-token enum; unknown stays None.
         assert_eq!(TtsModel::parse("Qwen"), Some(TtsModel::Qwen));
         assert_eq!(TtsModel::parse(" KOKORO "), Some(TtsModel::Kokoro));
         assert_eq!(TtsModel::parse("bogus"), None);
     }
 
-    /// The `models` tool's remove enum is the four TTS tokens then the STT token; a new
-    /// built-in model must extend both lists or the tool advertises an id it cannot map.
+    /// Remove enum = TTS tokens then STT; new models must extend both lists.
     #[test]
     fn model_asset_tokens_are_the_tts_models_then_the_stt_model() {
         assert_eq!(
@@ -863,8 +850,7 @@ mod tests {
         assert!(!TtsModel::TOKENS.contains(&STT_MODEL_TOKEN));
     }
 
-    /// The remove enum is the model tokens then the shared assets, disjoint: a new row on
-    /// either side must extend its own list, and neither id space may shadow the other.
+    /// Models then shared, disjoint id spaces.
     #[test]
     fn removable_asset_tokens_are_the_models_then_the_shared_assets() {
         assert_eq!(
@@ -919,7 +905,6 @@ mod tests {
             &["en", "es", "fr", "hi", "it", "ja", "pt", "zh"]
         );
         assert_eq!(kokoro.supported_language_count(), 8);
-        // Published upstream, not routed here — the JA/ZH frontends were dropped.
         for dropped in ["ja", "zh"] {
             assert!(!kokoro.supports_language(dropped));
             assert!(!kokoro.accepts_detected_language(dropped));
@@ -963,9 +948,7 @@ mod tests {
 
     #[test]
     fn default_language_is_a_supported_code() {
-        // The warm-helper clamp falls an unsupported code back to `default_language`, so it
-        // must itself be supported. OmniVoice's default is the `auto` sentinel the clamp
-        // never returns (it accepts every code), so it is exempt.
+        // Warm-helper falls back to `default_language` — must be supported (OmniVoice: `auto`).
         for model in TtsModel::ALL.iter().copied() {
             if model == TtsModel::OmniVoice {
                 continue;

@@ -1,14 +1,12 @@
-//! Installer/setup hooks: headless model/runtime prefetch via ds-model (single
-//! source of pinned URLs/SHAs). Arg dispatch for `--prefetch` /
-//! `--install-prefetched` / `--print-manifest` lives in [`crate::main`].
+//! Headless model/runtime prefetch via ds-model (pinned URLs/SHAs).
+//! Arg dispatch for `--prefetch` / `--install-prefetched` / `--print-manifest` is in
+//! [`crate::main`].
 
-/// Headless installer prefetch. Exit code 0/1. `what` = wire token or unknown
-/// (including no-arg `"all"`) ⇒ models + CUDA.
+/// Installer prefetch. Exit 0/1. Wire token, or unknown/`"all"` → models + CUDA.
 pub(crate) fn run_prefetch(what: &str) -> i32 {
     log::info!(target: "helper", "ds-helper: prefetch '{what}' started");
     let p = |_done: u64, _total: u64| {};
-    // One ambient resolution for every set fetch below (the installer boundary); an
-    // unresolvable model dir is the same hard error the per-file path already reports.
+    // One ambient ModelRoots for every set fetch (installer boundary).
     let hf_repos = |set: &[&'static ds_model::HfRepo]| -> std::io::Result<()> {
         let roots = ds_model::ModelRoots::ambient()
             .ok_or_else(|| std::io::Error::other("cannot resolve the model directory"))?;
@@ -18,9 +16,8 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())?;
         ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
     };
-    // `#[cfg]` rather than the shared host gate below: `ensure_cuda_runtime_with_progress`
-    // does not COMPILE off x86_64 Windows/Linux. The no-arg `"all"` arm reaches this without
-    // a `DownloadTarget`, so the off-platform no-op closure has to exist.
+    // `#[cfg]`: `ensure_cuda_runtime_with_progress` only compiles on x86_64 Win/Linux.
+    // `"all"` reaches here without a DownloadTarget, so off-platform needs a no-op.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
@@ -34,16 +31,13 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
     let cuda = || -> std::io::Result<()> { Ok(()) };
     use ds_model::DownloadTarget;
     let r = match DownloadTarget::parse(what) {
-        // ONE host gate for every named target, ahead of the fetch arms — the per-arm
-        // `cfg!` copies this replaces were where the Apple-Silicon and macOS-any-arch
-        // spellings drifted apart. Off-platform is a quiet `Ok(())` (installer semantics),
-        // unlike the engine's per-target error.
+        // Shared host gate before fetch arms (replaces per-arm cfg! drift).
+        // Off-platform → quiet Ok (installer semantics, not engine errors).
         Some(target) if !target.is_supported_on_this_host() => Ok(()),
         Some(DownloadTarget::Onnxruntime) => {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
-        // Full portable Kokoro set (ONNX + voices + G2P + eSpeak loader + ORT).
-        // Installers have no host CUDA probe; Kokoro has no cuda_files extras.
+        // Portable Kokoro set (ONNX + voices + G2P + eSpeak loader + ORT).
         Some(DownloadTarget::KokoroModel) => {
             ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())
         }
@@ -75,8 +69,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         )),
         Some(DownloadTarget::ParakeetMlx) => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
         Some(DownloadTarget::DiarizationMlx) => hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
-        // The shared voices npz (owned by KokoroModel) the ANE chain materializes packs
-        // from, plus the two-root Core ML set.
+        // Shared voices npz + Core ML two-root set (ANE materialize source).
         Some(DownloadTarget::KokoroFluid) => {
             ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &p)
                 .and_then(|_| hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET))
@@ -92,7 +85,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         }
         Some(DownloadTarget::Models) => models(),
         Some(DownloadTarget::Cuda) => cuda(),
-        // Unknown (incl. no-arg "all") ⇒ models + CUDA, historical installer default.
+        // Unknown / no-arg "all" → models + CUDA (installer default).
         None => models().and_then(|_| cuda()),
     };
     match r {
@@ -103,8 +96,7 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         Err(e) => {
             let msg = format!("ds-helper: prefetch '{what}' failed: {e}");
             log::warn!(target: "helper", "{msg}");
-            // GUI subsystem discards stderr; leave a diagnosable on-disk trace
-            // when the unified log sink is not yet readable.
+            // GUI may discard stderr; leave an on-disk trace.
             let _ = std::fs::write(std::env::temp_dir().join("ds-prefetch-error.log"), &msg);
             1
         }

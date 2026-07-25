@@ -1,7 +1,5 @@
-//! System STT: Apple on-device en-US (macOS). SpeechAnalyzer 26+, legacy
-//! `SFSpeechRecognizer` 14–25 (shim picks). Its own dependency-free `libdontspeak_sys` dylib,
-//! bundled on every macOS arch. No model download — OS recognizer only; missing on-device
-//! locale → UNAVAILABLE.
+//! System STT: Apple on-device en-US (macOS). SpeechAnalyzer 26+, SFSpeechRecognizer 14–25
+//! (shim picks). Own `libdontspeak_sys` dylib, all macOS arches. OS recognizer only.
 
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -13,16 +11,16 @@ use ds_model::shim::StrCb;
 
 type SysAvailFn = unsafe extern "C" fn() -> i32;
 type SysAuthorizeFn = unsafe extern "C" fn() -> i32;
-// Text via borrowed callback (`collect_str`); no out-param / free.
+// Text via collect_str.
 type SysTranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 
-// Streaming: `ds_sys_stream_*` (start/push/finish; no model-dir).
+// Streaming: start/push/finish (no model-dir).
 type SysStreamStartFn = unsafe extern "C" fn() -> i32;
 type SysStreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type SysStreamFinishFn = unsafe extern "C" fn(*mut c_void, StrCb) -> i32;
 
-// Cache rejection too: the host sets the path before engine start and its signed bundle is
-// immutable for this process, while retrying would put `codesign` back on every status poll.
+// Cache rejection too: signed bundle path is fixed for the process; retry would re-codesign
+// every status poll.
 static SYSTEM_SHIM: OnceLock<Result<Library, String>> = OnceLock::new();
 
 fn cached<T>(
@@ -32,32 +30,25 @@ fn cached<T>(
     slot.get_or_init(init).as_ref().map_err(Clone::clone)
 }
 
-/// One verified `dlopen` for the process lifetime. Status polls and System STT consumers share
-/// this handle, so the app-bundle `codesign` gate runs at most once instead of once per poll.
+/// Process-lifetime verified dlopen; codesign gate runs at most once.
 fn system_shim() -> Result<&'static Library, String> {
     cached(&SYSTEM_SHIM, || {
         ds_model::shim::open(ds_model::shim::Shim::Sys)
     })
 }
 
-/// Usability of the System STT engine, mapped from the shim's `ds_sys_available` code.
-/// Mirrors Parakeet's present/warming/ready split so the status dot reads the same way.
+/// Usability from `ds_sys_available` — same present/warming/ready status-dot shape as Parakeet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemState {
-    /// Ready to transcribe now (green dot) — on-device model installed (macOS 26+) /
-    /// permission granted (macOS 14–25).
+    /// Transcribe now (green) — model installed (26+) / permission granted (14–25).
     Ready,
-    /// Locale supported but a one-time step is pending — the on-device model download
-    /// (macOS 26+) or the Speech-Recognition permission prompt (14–25). Either runs on
-    /// the authorize gate, or on demand on the first dictation. Orange dot, same as
-    /// Parakeet warming.
+    /// Locale ok; pending on-device download (26+) or Speech permission (14–25). Orange.
     Preparing,
-    /// Locale unsupported, permission denied, or the shim is absent — cannot run.
+    /// Unsupported locale, permission denied, or shim absent.
     Unavailable,
 }
 
-/// Turn a shim status code (see dontspeak_sys.h) into a human reason for the unavailable
-/// cases; `0` (ready) and `1` (preparing) have no error reason.
+/// Shim status code → human reason for unavailable; ready/preparing have none.
 fn reason_for(rc: i32) -> Option<String> {
     match rc {
         0 | 1 => None,
@@ -76,13 +67,13 @@ fn reason_for(rc: i32) -> Option<String> {
     }
 }
 
-/// Probe the shim's `ds_sys_available` WITHOUT prompting/downloading (safe for the
-/// frequent model-status poll). Shim absent (non-app build) ⇒ [`SystemState::Unavailable`].
+/// Probe `ds_sys_available` without prompt/download (status-poll safe).
+/// Shim absent ⇒ [`SystemState::Unavailable`].
 pub fn state() -> SystemState {
     let Ok(lib) = system_shim() else {
         return SystemState::Unavailable;
     };
-    // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
+    // SAFETY: app-signed dylib; ABI matches dontspeak_sys.h.
     let rc = unsafe {
         lib.get::<SysAvailFn>(b"ds_sys_available\0")
             .map(|f| f())
@@ -95,23 +86,18 @@ pub fn state() -> SystemState {
     }
 }
 
-/// Is on-device system STT usable at all right now (ready OR preparing — the model
-/// downloads on demand)? The `build_stt` gate: true ⇒ route Caps dictation through the
-/// helper; false ⇒ the inert engine (no silent fallback). `Preparing` counts as usable so
-/// the engine goes live (orange) and the first dictation triggers the on-demand download.
+/// Ready or Preparing (model downloads on demand). `build_stt` gate: true → Caps
+/// dictation via helper; false → inert engine (no silent fallback).
 pub fn available() -> bool {
     state() != SystemState::Unavailable
 }
 
-/// Request Speech Recognition authorization (prompts on first use), BLOCKING, then
-/// re-check. `Ok(())` when usable afterwards; `Err(reason)` otherwise. Called both when
-/// the user explicitly opts into `stt_engine=system` (so the prompt is attributed to
-/// DontSpeak.app and enabling never silently degrades) and automatically at boot/reload
-/// when the config resolves to System via the default ladder — see
-/// `dontspeakd::boot::authorize_system_stt_if_needed`.
+/// Blocking Speech Recognition authorize + re-check. Used on explicit `stt_engine=system`
+/// and at boot when the ladder resolves to System
+/// (`dontspeakd::boot::authorize_system_stt_if_needed`).
 pub fn authorize() -> Result<(), String> {
     let lib = system_shim()?;
-    // SAFETY: app-signed dylib whose C ABI matches dontspeak_sys.h.
+    // SAFETY: app-signed dylib; ABI matches dontspeak_sys.h.
     let rc = unsafe {
         let f: Symbol<SysAuthorizeFn> = lib
             .get(b"ds_sys_authorize\0")
@@ -124,9 +110,7 @@ pub fn authorize() -> Result<(), String> {
     }
 }
 
-/// Apple System Speech ASR behind the C ABI: SpeechAnalyzer on macOS 26+, with
-/// SFSpeechRecognizer on 14–25. The OS owns the models, so `preload` only opens the
-/// shim and `unload` is a no-op.
+/// Apple System Speech ASR. OS owns models: `preload` opens the shim; `unload` is a no-op.
 pub struct SystemTranscriber {
     lib: Option<&'static Library>,
 }
@@ -157,10 +141,9 @@ impl SystemTranscriber {
         }
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
-        // SAFETY: the shim exports this name with the `SysTranscribeFn` C ABI.
+        // SAFETY: `SysTranscribeFn`; `pcm` + collect_str outlive the call.
         let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"ds_sys_transcribe\0") }
             .map_err(|e| format!("ds_sys_transcribe symbol: {e}"))?;
-        // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -174,8 +157,8 @@ impl Default for SystemTranscriber {
     }
 }
 
-/// Streaming system STT ([`StreamingStt`]); same session loop as ONNX/MLX.
-/// Borrows the process-lifetime shim handle. Auth/availability stay in [`state`]/[`authorize`].
+/// Streaming system STT ([`StreamingStt`]); process-lifetime shim.
+/// Auth/availability: [`state`] / [`authorize`].
 pub struct SystemStreamer {
     lib: &'static Library,
     /// Wall ms in `push`/`finish` for the current utterance (STTSTATS).
@@ -193,10 +176,9 @@ impl SystemStreamer {
     }
 
     fn push(&self, pcm: &[f32]) -> Result<String, String> {
-        // SAFETY: symbol matches `SysStreamPushFn`; Symbol borrows `self.lib`.
+        // SAFETY: `SysStreamPushFn`; Symbol borrows `self.lib`.
         let f: Symbol<SysStreamPushFn> = unsafe { self.lib.get(b"ds_sys_stream_push\0") }
             .map_err(|e| format!("ds_sys_stream_push symbol: {e}"))?;
-        // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -206,7 +188,7 @@ impl SystemStreamer {
 
 impl StreamingStt for SystemStreamer {
     fn reset(&mut self) -> Result<(), String> {
-        // SAFETY: symbol matches `SysStreamStartFn` (no args).
+        // SAFETY: `SysStreamStartFn` (no args).
         let rc = unsafe {
             let f: Symbol<SysStreamStartFn> = self
                 .lib
@@ -229,11 +211,10 @@ impl StreamingStt for SystemStreamer {
     }
 
     fn finalize(&mut self) -> Result<String, String> {
-        // SAFETY: the shim exports this name with the `SysStreamFinishFn` C ABI.
+        // SAFETY: `SysStreamFinishFn` + collect_str.
         let f: Symbol<SysStreamFinishFn> = unsafe { self.lib.get(b"ds_sys_stream_finish\0") }
             .map_err(|e| format!("ds_sys_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
-            // SAFETY: `collect_str` pair; call takes no other pointers.
             ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("ds_sys_stream_finish failed (rc={rc})"))
         });

@@ -17,8 +17,7 @@ use ds_config::{Paths, TtsArgPools, VoiceConfig, WiredAgent};
 use crate::status::StatusGate;
 use crate::tts::TtsManager;
 
-/// The agent's language-less voice claim: the greeting takes it before any language is
-/// known, and `pick_for_language` falls back to it when no voice anywhere owns the language.
+/// Language-less voice claim (greeting / `pick_for_language` fallback).
 const DEFAULT_VOICE_KEY: &str = "";
 
 struct HealingGuard(Arc<AtomicBool>);
@@ -33,11 +32,9 @@ impl Drop for HealingGuard {
 struct PlayingClaim {
     source: Option<WiredAgent>,
     session: Option<String>,
-    /// Speech, not a cue — the in-flight half of the depth the status reports.
+    /// Speech (not cue) — contributes to status depth.
     speech: bool,
-    /// Record for this utterance: id from admit, voice/language filled once the play gate
-    /// resolves them, `outcome` only when it is written to [`TtsQueue::utterances`].
-    /// `None` for a cue, which has no utterance to report.
+    /// Admit-time id; voice/language filled at play; `outcome` written to the ring. Cues: `None`.
     utterance: Option<ds_status::UtteranceStatus>,
 }
 
@@ -60,9 +57,7 @@ static GREET_ROTATION: AtomicUsize = AtomicUsize::new(0);
 /// Admission IDs outlive playback (producer retry); SessionEnd prunes; cap bounds leaks.
 const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
 
-/// Terminal utterance records kept for `model_status`. Deep enough that a producer polling
-/// after its own `speak` still finds its handle behind a reply's worth of narration chunks,
-/// shallow enough to ride every status push.
+/// Terminal utterance ring for `model_status` (producer poll after `speak` must still hit).
 const RECENT_UTTERANCES_MAX: usize = 16;
 
 #[derive(Default)]
@@ -93,8 +88,7 @@ impl AcceptedNarrations {
 /// Per-item text cap (IPC + in-process) — enforced here so wire can't bypass.
 pub(crate) const MAX_SPEAK_BYTES: usize = 10 * 1024;
 
-/// The detection corpus rides the same wire line as spoken text, so the producer-side cap
-/// must not exceed what this queue accepts. Enforced, not just documented.
+/// Detection corpus shares the speak wire line — producer cap must match.
 const _: () = assert!(ds_narrate::DETECTION_TEXT_MAX_BYTES == MAX_SPEAK_BYTES);
 
 /// Pending bounds under stalled focus/mic (speech vs cue quotas).
@@ -160,8 +154,7 @@ fn apply_tts_arg_params(
 }
 
 /// Reuse if still in `pool`; else free; else least-loaded. `pool` non-empty; `roll(n) < n`.
-/// Load is counted only among agents holding a voice for the SAME language, so spreading
-/// voices across agents stays independent per language.
+/// Load counted only among agents holding a voice for the same language.
 fn pick_agent_voice(
     assignments: &HashMap<(Option<WiredAgent>, String), String>,
     pool: &[String],
@@ -181,11 +174,7 @@ fn pick_agent_voice(
             })
             .count()
     };
-    // The greeting claimed a voice before any language was known ([`DEFAULT_VOICE_KEY`]).
-    // The first language that can speak it adopts it, so the voice the greeting ANNOUNCED
-    // is the one that keeps speaking; a language it cannot speak still rolls its own.
-    // `load(claimed) == 0` keeps an agent that never greeted from doubling up on a voice it
-    // already rolled for this language while a spare sits free.
+    // Adopt greeting's language-less claim ([`DEFAULT_VOICE_KEY`]) when free for this language.
     if !agent.1.is_empty()
         && let Some(claimed) = assignments.get(&(agent.0, DEFAULT_VOICE_KEY.to_string()))
         && pool.iter().any(|p| p == claimed)
@@ -203,11 +192,7 @@ fn pick_agent_voice(
     candidates[roll(candidates.len())].clone()
 }
 
-/// Activity-log line for configured pool entries the router locks out, or `None` when there
-/// is nothing new to say: the built-in engine is not the one resolved, the pool is unchanged
-/// from `previous`, or every entry routes. Pure so the wording and the once-per-change rule
-/// are testable without a global logger. Warn + source `config` to match `VoiceConfig::load`'s
-/// other "your hand-edit is being ignored" diagnostics.
+/// Once-per-change activity-log line for pool entries the router locks out. Pure (test wording).
 fn locked_out_pool_warning(previous: Option<&VoiceConfig>, cfg: &VoiceConfig) -> Option<String> {
     if cfg.resolved_tts() != Some(ds_config::TtsEngine::BuiltIn) {
         return None;
@@ -232,7 +217,7 @@ fn locked_out_pool_warning(previous: Option<&VoiceConfig>, cfg: &VoiceConfig) ->
 enum QueueAction {
     Speech {
         text: String,
-        /// ISO code detected for this chunk at admit; clamped to the live model at play.
+        /// Detected at admit; clamped to the live model at play.
         language: String,
         tts_args: Option<Box<TtsArgPools>>,
     },
@@ -263,14 +248,13 @@ impl QueueAction {
 /// Ordered audio. Earcons share session/cancel path (cannot overtake narration).
 struct Item {
     action: QueueAction,
-    /// Producer → `activity.speaker` while in flight.
+    /// → `activity.speaker` while in flight.
     source: Option<WiredAgent>,
-    /// Session tag (`None` = global). Voice keys off `source`.
+    /// `None` = global. Voice keys off `source`.
     session: Option<String>,
-    /// Batch resume high-water (`PROGRESS`). Record-barge resume sends as `skip`.
+    /// `PROGRESS` high-water; barge resume sends as `skip`.
     resume_skip: usize,
-    /// Handle `speak` hands back, and the key of this utterance's terminal record.
-    /// `None` for a cue. Survives a requeue so a resumed utterance keeps its handle.
+    /// `speak` handle / ring key. Cues: `None`. Survives requeue.
     utterance_id: Option<u64>,
 }
 
@@ -284,8 +268,7 @@ pub(crate) struct TtsStatusSample {
     pub recent_utterances: Vec<ds_status::UtteranceStatus>,
 }
 
-/// Pending utterances in `q`. Earcons are cues rather than things to say, so they are not
-/// counted: the depth the status reports is "how much is there left to speak".
+/// Pending speech depth (earcons excluded).
 fn speech_depth(q: &VecDeque<Item>) -> usize {
     q.iter()
         .filter(|item| item.action.speech_text().is_some())
@@ -338,8 +321,7 @@ fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     }
 }
 
-/// Drop what `keep` rejects, returning the handles of the utterances that will never be
-/// spoken — oldest first, so pushing them onto the record ring in order leaves newest first.
+/// Drop what `keep` rejects; return discarded handles oldest-first (ring push keeps newest first).
 fn discard_items(q: &mut VecDeque<Item>, keep: impl Fn(&Item) -> bool) -> Vec<u64> {
     let mut discarded = Vec::new();
     q.retain(|it| {
@@ -417,25 +399,21 @@ fn test_kokoro_voice_ids() -> Vec<String> {
 }
 
 pub struct TtsQueue {
-    /// Every mutation must publish the new depth via [`TtsQueue::publish_queue_depth`]
-    /// before releasing the guard — `queue_depth` mirrors [`speech_depth`].
+    /// Mutate → [`publish_queue_depth`] before release (`queue_depth` mirrors [`speech_depth`]).
     items: Mutex<VecDeque<Item>>,
-    /// Lock-free mirror of pending SPEECH depth for status reads. `items` is held across
-    /// helper-child I/O (`hard_cancel_in_flight` → `stop_fade`), so a status read that
-    /// took the lock would stall behind a wedged helper.
+    /// Lock-free speech depth for status (`items` spans helper I/O — don't stall status).
     queue_depth: AtomicU64,
     /// Lock before `items` (see enqueue_narration).
     accepted_narrations: Mutex<AcceptedNarrations>,
     cv: Condvar,
     /// Barge/pause gen; worker abandons when gen advances.
     generation: AtomicU64,
-    /// One lock so barge can't relabel Dictation during pause→`set_stt_active` race.
+    /// One lock so barge can't relabel Dictation during pause→`set_stt_active`.
     paused: Mutex<PausedState>,
-    /// Requeue intent by cancel's pre-bump gen (`true` = record-barge). Lookup uses that
-    /// gen (not live `paused`) so a later pause can't resurrect a cleared item.
+    /// Requeue intent by cancel's pre-bump gen (`true` = record-barge); not live `paused`.
     cancel_kind: Mutex<HashMap<u64, bool>>,
     tts_active: AtomicBool,
-    /// Readiness/mic holds set this; focus holds leave it idle (always-listen off-terminal).
+    /// Readiness/mic holds; focus holds leave idle.
     in_flight: AtomicBool,
     /// Poll thread → worker (NSWorkspace not worker-safe). Init true.
     terminal_front: AtomicBool,
@@ -444,21 +422,19 @@ pub struct TtsQueue {
     /// Focus gate. Init false; first poll applies config.
     pause_bg: AtomicBool,
     config: Mutex<VoiceConfig>,
-    /// Lazy pool roll; SessionEnd keeps assignment. Keyed per language so an agent holds one
-    /// voice per language it speaks instead of flapping when a reply switches language.
-    /// Bounded by wired-client cardinality plus one unwired bucket × languages spoken.
+    /// Lazy pool roll per (agent, language); SessionEnd keeps assignment.
     agent_voices: Mutex<HashMap<(Option<WiredAgent>, String), String>>,
-    /// `say -v ?` enumeration, read once per process for System language matching.
+    /// `say -v ?` once per process.
     system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
-    /// Fixed unit-test catalog; production retains live disk enumeration.
+    /// Test catalog; production uses live disk enumeration.
     #[cfg(test)]
     kokoro_voice_ids: Vec<String>,
     /// Always acquired inside `items`.
     active: Mutex<ActiveSel>,
     playing: Mutex<Option<PlayingClaim>>,
-    /// Monotonic per process; `0` is never issued, so it cannot be confused with a default.
+    /// Monotonic; never issues `0`.
     next_utterance_id: AtomicU64,
-    /// Terminal records, most recent first, capped at [`RECENT_UTTERANCES_MAX`].
+    /// Terminal records, newest first, capped at [`RECENT_UTTERANCES_MAX`].
     utterances: Mutex<VecDeque<ds_status::UtteranceStatus>>,
     tts: Arc<TtsManager>,
     gate: Arc<StatusGate>,
@@ -586,8 +562,7 @@ impl TtsQueue {
         self.tts_active.store(on, Ordering::SeqCst);
     }
 
-    /// Enqueue speech (empty ignored). Optional target args; `source` → `activity.speaker`.
-    /// `Ok(None)` = nothing to say, so no handle exists.
+    /// Enqueue speech (empty → `Ok(None)`). `source` → `activity.speaker`.
     pub fn enqueue(
         &self,
         text: String,
@@ -601,7 +576,7 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(None);
         }
-        // MCP Speak / greeting: the chunk is all there is, so it stands on its own text.
+        // Standalone chunk (MCP Speak / greeting) — language from text alone.
         self.enqueue_action(
             QueueAction::Speech {
                 language: self.chunk_language(&text, None),
@@ -624,17 +599,9 @@ impl TtsQueue {
             .map(|_| ())
     }
 
-    /// Route earcon: ordered queue by default.
-    /// Exception: needs-input under focus hold + idle → immediate detached play
-    /// (alert when user left the terminal). Idle gate required: focus holds only at
-    /// item boundaries; oob must not mix over in-flight speech. Thread re-checks
-    /// before play and falls back to queue on TOCTOU (speak starting mid-dispatch).
-    ///
-    /// Bypass properties:
-    /// * one `oob_cue` thread (bursts coalesce)
-    /// * does not set `tts_active`/`in_flight` (`is_busy` must stay false under hold)
-    /// * not a queue item / not in `playing` — only global cancel/mute/stopfade stops it
-    /// * no warm child → same "TTS child not running" as queued path
+    /// Ordered queue by default. Needs-input under focus hold + idle → detached oob play
+    /// (idle gate: focus holds only at item boundaries). Single `oob_cue` thread; re-check
+    /// before play (TOCTOU → queue). Does not set `tts_active`/`in_flight`.
     pub fn dispatch_earcon(
         self: &Arc<Self>,
         event: ds_earcon::EarconEvent,
@@ -693,7 +660,7 @@ impl TtsQueue {
         self.enqueue_earcon(event, source, session)
     }
 
-    /// `Ok(Some(id))` for admitted speech; `Ok(None)` for a cue, which has no handle.
+    /// `Ok(Some(id))` admitted speech; `Ok(None)` cue.
     fn enqueue_action(
         &self,
         action: QueueAction,
@@ -756,7 +723,7 @@ impl TtsQueue {
             ));
         }
         self.note_recent(&session);
-        // Issued only past admission, so a rejected enqueue never burns a handle.
+        // Past admission only — rejected enqueues must not burn a handle.
         let utterance_id = action
             .speech_text()
             .is_some()
@@ -774,8 +741,8 @@ impl TtsQueue {
         Ok(utterance_id)
     }
 
-    /// Admit narration by id once. Dup id → Ok even if queue full; rejected first stays retryable.
-    /// Optional `detection_text` is the turn corpus behind this chunk's language.
+    /// Admit narration by id once. Dup → Ok even if full; rejected first stays retryable.
+    /// `detection_text` = turn corpus for language when the chunk can't self-classify.
     pub fn enqueue_narration(
         &self,
         text: String,
@@ -790,8 +757,7 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(());
         }
-        // Re-cap the detection corpus (an old or hand-rolled producer may not have);
-        // never reject on detection size alone.
+        // Re-cap detection (old producers); never reject on detection size alone.
         let detection_text = detection_text
             .filter(|s| !s.trim().is_empty())
             .map(ds_narrate::cap_detection_text);
@@ -815,8 +781,7 @@ impl TtsQueue {
         Ok(())
     }
 
-    /// Fresh in-flight record for a claimed item: the handle is known at admit, the
-    /// resolution only once the play gate runs.
+    /// In-flight record for a claim (id at admit; voice/language at play).
     fn claimed_utterance(item: &Item) -> Option<ds_status::UtteranceStatus> {
         item.utterance_id.map(|id| ds_status::UtteranceStatus {
             id,
@@ -827,10 +792,9 @@ impl TtsQueue {
         })
     }
 
-    /// Language for one chunk, decided at admit so the queued item carries it. `corpus` is
-    /// the turn text the producer sent, used only when the chunk cannot classify itself.
+    /// Language at admit. `corpus` used only when the chunk cannot self-classify.
     fn chunk_language(&self, text: &str, corpus: Option<&str>) -> String {
-        // Config Copy, so the lock drops before detection runs (same as play_speech).
+        // Config is Copy — drop lock before detection (same as play_speech).
         let cfg = self.config.lock().unwrap();
         match cfg.resolved_tts() {
             Some(ds_config::TtsEngine::System) => ds_tts::chunk_language_any(text, corpus),
@@ -845,12 +809,9 @@ impl TtsQueue {
             .forget_session(session);
     }
 
-    /// Claim under `items`: publish `playing` so clears can't race mid-claim.
-    /// The caller snapshots the cancel generation under this same guard BEFORE its pause
-    /// check — any bump between that snapshot and the claim invalidates the claim, which is
-    /// intended: only `pause_with_cause` bumps without holding `items` (clear /
-    /// clear_session / cancel_for_submit / hard_cancel_in_flight_locked all hold it).
-    /// Do not load the generation here — that is what absorbed the pause's bump.
+    /// Claim under `items` (publish `playing`). Caller snapshots cancel gen under the same
+    /// guard before its pause check — only `pause_with_cause` bumps without holding `items`.
+    /// Do not load generation here (would absorb the pause bump).
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> Item {
         let before = speech_depth(q);
         let item = q.remove(pos).expect("select_pos returns a valid index");
@@ -875,8 +836,7 @@ impl TtsQueue {
         self.tts.set_muted(on);
     }
 
-    /// Hard-cancel in-flight: clear tts_active, gen bump, drop intent, fade.
-    /// Does not touch `items`/`paused`. `skip_current` skips the tts_active toggle.
+    /// Hard-cancel in-flight (gen bump + fade). Leaves `items`/`paused`.
     fn hard_cancel_in_flight(&self) {
         self.set_tts_active(false);
         let gen0 = self.generation.fetch_add(1, Ordering::SeqCst);
@@ -884,7 +844,7 @@ impl TtsQueue {
         self.tts.stop_fade();
     }
 
-    /// Like hard cancel; `_items` witnesses prune + playing snapshot + bump share one section.
+    /// Hard cancel under held `items` (prune + playing + bump one section).
     fn hard_cancel_in_flight_locked(&self, _items: &MutexGuard<'_, VecDeque<Item>>) {
         self.hard_cancel_in_flight();
     }
@@ -896,27 +856,25 @@ impl TtsQueue {
         let discarded = discard_items(&mut items, |_| false);
         self.publish_queue_depth(before, speech_depth(&items));
         drop(items);
-        // Never while holding `items`: that guard spans helper I/O, and status reads the
-        // record ring.
+        // Not under `items` (spans helper I/O; status reads the ring).
         self.record_discarded(&discarded);
         *self.paused.lock().unwrap() = PausedState::default();
         self.hard_cancel_in_flight();
         self.cv.notify_one();
     }
 
-    /// Skip in-flight only (caps double-tap). Keeps queue; no-op if nothing playing.
+    /// Skip in-flight only (caps double-tap). Keeps queue.
     pub fn skip_current(&self) {
-        // Leave items/paused/tts_active alone — worker re-asserts on next dequeue.
+        // Leave items/paused/tts_active — worker re-asserts on next dequeue.
         let gen0 = self.generation.fetch_add(1, Ordering::SeqCst);
         self.record_cancel_kind(gen0, false);
         self.tts.stop_fade();
         self.cv.notify_one();
     }
 
-    /// Per-window barge: drop this session's queue; cancel in-flight only if matching.
-    /// `Stop { session: None }` → [`clear`](Self::clear).
+    /// Drop session queue; cancel in-flight only if matching. `session: None` → [`clear`].
     pub fn clear_session(&self, session: Option<String>) {
-        // items → playing same order as worker; prune + snapshot under one lock.
+        // items → playing (worker order); prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
         let discarded = prune_session(&mut items, &session);
@@ -940,13 +898,9 @@ impl TtsQueue {
         self.active.lock().unwrap().effective()
     }
 
-    /// Apply `clear_on_input` against one resolved `target`. No-op if `target` is None
-    /// or neither scope requested.
-    ///
-    /// `current`: prune target (+ sticky) and hard-cancel in-flight iff it is the target's
-    /// ([`session_belongs_to_real`] — the same set the prune removes).
-    /// Gate on `playing`, never `tts_active`: a record-barge pause clears `tts_active` while
-    /// the item is still claimed, so a `tts_active` gate would leak.
+    /// Apply `clear_on_input` for resolved `target`. `current` prunes target (+ sticky) and
+    /// hard-cancels in-flight iff [`session_belongs_to_real`]. Gate on `playing`, not
+    /// `tts_active` (barge pause clears the flag while still claimed).
     /// `other`: retain only target (+ sticky); cancel in-flight iff not target's.
     /// Both scopes together empty the queue.
     pub fn cancel_for_submit(

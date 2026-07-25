@@ -51,22 +51,20 @@ fn main() -> glib::ExitCode {
 
 fn on_activate(app: &adw::Application, status_thread: Rc<RefCell<Option<status::StatusThread>>>) {
     // activate re-fires on relaunch / tray Settings. Close only hides — re-show main panel.
-    // Do not use windows().first(): dictation overlay is also an app window and often first;
-    // presenting it looks like Settings did nothing.
+    // windows().first() is often the dictation overlay; presenting it looks like Settings no-op.
     if present_main_window(app) {
         return;
     }
 
     let widgets = ui::build_window(app);
-    // No sync prime: model_status_json blocks (up to 120s) on the GTK main thread.
+    // No sync prime: model_status_json can block ~120s on the GTK thread.
     // Blank one frame; status::spawn_push delivers within its 1s poll.
 
-    // Tray-resident: hide_on_close so the process stays up.
+    // Tray-resident: hide_on_close keeps the process up.
     let _hold = app.hold();
     widgets.window.set_hide_on_close(true);
 
-    // One-shot update check off-UI — only network-touching ds-core entry (blocking HTTP).
-    // Failures/`{}` → pill stays hidden.
+    // One-shot update check off-UI (only network-touching ds-core entry). Failures/`{}` → hide pill.
     {
         let w = widgets.clone();
         let (tx, rx) = async_channel::bounded::<String>(1);

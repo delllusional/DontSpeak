@@ -4,9 +4,9 @@ import XCTest
 @testable import DontSpeakMLX
 @testable import DontSpeakSys
 
-// `@convention(c)` closures capture nothing, so the probes count through file-scope globals.
-// The takeover cases are single-threaded; the concurrency cases below register no-op probes
-// precisely so they never touch these.
+// `@convention(c)` closures capture nothing — probes count via file-scope globals.
+// Takeover cases are single-threaded; concurrency cases register no-op probes so they
+// never touch these.
 private nonisolated(unsafe) var sysHits = 0
 private nonisolated(unsafe) var mlxHits = 0
 private nonisolated(unsafe) var fluidHits = 0
@@ -15,17 +15,13 @@ private let sysProbe: SysLogCb = { _, _ in sysHits += 1 }
 private let mlxProbe: MlxLogCb = { _, _ in mlxHits += 1 }
 private let fluidProbe: FluidLogCb = { _, _ in fluidHits += 1 }
 
-/// The per-family log sinks: a registered callback takes every line, and clearing it restores
-/// the stderr fallback. Observed through each sink's fallback counter rather than by
-/// redirecting the shared XCTest process's fd 2, which cannot deadlock on a full pipe.
+/// Per-family log sinks: registered cb takes every line; clear restores stderr fallback.
+/// Observed via fallback counter (not fd 2 redirect, which can deadlock on a full pipe).
 ///
-/// One file can import all three modules only because every module-visible name in the three
-/// targets is disjoint (`SysLogSink` / `MlxLogSink` / `FluidLogSink`, ...). If that ever
-/// breaks, split this into three files -- one module each -- rather than reintroducing shared
-/// names or papering over it with module qualification.
+/// One file imports all three modules only because module-visible names are disjoint.
+/// If that breaks, split into three files rather than reintroducing shared names.
 final class LogSinkTests: XCTestCase {
-    /// The sinks are PROCESS-GLOBAL: a leaked one would change what SysAbiTests and
-    /// FluidAbiTests do when they log.
+    /// Sinks are process-global — a leak would change what SysAbiTests/FluidAbiTests log.
     override func tearDown() {
         ds_sys_set_log_cb(nil)
         ds_mlx_set_log_cb(nil)
@@ -72,11 +68,9 @@ final class LogSinkTests: XCTestCase {
         XCTAssertEqual(fluidLogSink.fallbackCount(), before + 1)
     }
 
-    // Reentrancy: `emit` copies the callback pointer under the lock and releases the lock
-    // before invoking it, so a sink can legitimately fire just after being deregistered. That
-    // is benign (the Rust thunk is 'static in the Rust image) but it must never deadlock or
-    // crash. The probes here are no-ops on purpose -- concurrent `@convention(c)` invocations
-    // touching an unsynchronized counter would be a data race.
+    // Reentrancy: emit copies the cb under the lock and unlocks before invoke, so a sink
+    // may fire just after deregister (benign; Rust thunk is 'static). Must not deadlock.
+    // Probes are no-ops — concurrent @convention(c) on an unsync counter would race.
 
     func testSysSinkSurvivesConcurrentRegistrationAndEmit() {
         let probe: SysLogCb = { _, _ in }

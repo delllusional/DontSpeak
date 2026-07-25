@@ -48,8 +48,7 @@ internal static class AgentUsageModel
         }
     }
 
-    /// <summary>An explicit authorization result is authoritative, including an empty
-    /// result after keychain access succeeds but the credential itself is rejected.</summary>
+    /// <summary>Authorization results are authoritative (including empty after keychain reject).</summary>
     internal static bool Replaces(
         UsageCardDto? painted,
         UsageCardDto updated,

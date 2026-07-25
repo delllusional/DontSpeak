@@ -13,14 +13,14 @@ use crate::spec::ModelSpec;
 
 pub(crate) const DEFAULT_RETRIES: u32 = 3;
 
-// Connect fail-fast; 60s per-read inactivity; no total timeout (vs agent-usage Some(total)).
+// Connect fail-fast; 60s per-read inactivity; no total timeout (large models).
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_DOWNLOAD_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 /// Cap endless tiny ranges before outer retry.
 const MAX_RANGE_SEGMENTS_PER_ATTEMPT: u32 = 64;
 
-/// Auth-less CDN GET: redirects on, total timeout None. Never attach Authorization.
+/// Auth-less CDN GET: redirects on, no total timeout. Never attach Authorization.
 pub(crate) fn http_get_builder(url: &str) -> attohttpc::RequestBuilder {
     const MAX_CDN_REDIRECTIONS: u32 = 5;
     ds_http::request(
@@ -49,10 +49,8 @@ pub fn url_basename(url: &str) -> &str {
     trimmed.rsplit('/').next().unwrap_or(trimmed)
 }
 
-/// Installer staging key: URL-hash prefix + basename. Several assets deliberately share
-/// an on-disk basename (`config.json`, `tokenizer.json`, … across per-model subdirs), so
-/// staging by bare basename would cross-wire them. `prefetch_items` manifests save under
-/// this key and [`set_prefetch_source`] lookups match it — the two must stay identical.
+/// Installer staging key: URL-hash prefix + basename. Bare basename collides across
+/// per-model subdirs (`config.json`, …). Manifests and [`set_prefetch_source`] must match.
 pub fn prefetch_key(url: &str) -> String {
     format!(
         "{}-{}",
@@ -108,11 +106,9 @@ fn lock_destination(final_path: &Path) -> std::io::Result<std::fs::File> {
     Ok(lock)
 }
 
-/// Run one persistent-destination operation under the shared process-local and
-/// cross-process locks. The operation must recheck destination readiness after entry.
-/// The flight also holds its sweep root's gate for its whole run, so no orphan sweep can
-/// reclaim a temp artifact the operation still owns; resolving that root reads
-/// [`ModelRoots::ambient`].
+/// Persistent-destination op under process-local + cross-process locks. Recheck readiness
+/// after entry. Holds the sweep-root gate for the whole run (no orphan reclaim mid-flight);
+/// ambient roots via [`ModelRoots::ambient`].
 pub(crate) fn with_destination_flight<T>(
     final_path: &Path,
     operation: impl FnOnce(&Path) -> std::io::Result<T>,
@@ -120,9 +116,8 @@ pub(crate) fn with_destination_flight<T>(
     with_destination_flight_in(ModelRoots::ambient().as_ref(), final_path, operation)
 }
 
-/// [`with_destination_flight`] against roots the caller already owns. A caller that took a
-/// `&ModelRoots` must pass it: resolving ambiently here would make the containment arm of
-/// [`orphan_sweep_root`] dead in every rooted test, which is the one place it is exercised.
+/// Like [`with_destination_flight`] with caller-owned roots. Rooted callers must pass them —
+/// ambient resolve would leave [`orphan_sweep_root`]'s containment arm untested.
 pub(crate) fn with_destination_flight_in<T>(
     roots: Option<&ModelRoots>,
     final_path: &Path,
@@ -155,9 +150,7 @@ pub(crate) fn with_destination_flight_in<T>(
     operation(parent)
 }
 
-/// Acquisition order for [`with_destination_flights_in`]: sorted so two processes locking
-/// overlapping sets always acquire in the same order and cannot deadlock, deduped because
-/// nesting a flight inside itself blocks on its own destination lock forever.
+/// Sorted + deduped flight paths — same order across processes (no deadlock); no self-nest.
 fn ordered_flight_paths(paths: &[PathBuf]) -> Vec<&Path> {
     let mut ordered: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
     ordered.sort_unstable();
@@ -165,9 +158,8 @@ fn ordered_flight_paths(paths: &[PathBuf]) -> Vec<&Path> {
     ordered
 }
 
-/// [`with_destination_flight_in`] over several destinations at once (a multi-directory asset,
-/// or a set installer covering every directory it writes), in [`ordered_flight_paths`] order.
-/// Rooted only: every caller is a set installer that already holds its [`ModelRoots`].
+/// Multi-destination form of [`with_destination_flight_in`] ([`ordered_flight_paths`] order).
+/// Rooted only — set installers already hold [`ModelRoots`].
 pub(crate) fn with_destination_flights_in<T>(
     roots: Option<&ModelRoots>,
     paths: &[PathBuf],
@@ -218,10 +210,8 @@ pub fn ensure_with_progress(
     Ok(final_path)
 }
 
-/// [`ensure_with_progress`] into an EXPLICIT directory instead of the flat `model_dir()` — the
-/// per-model subdirectory assets. Same flight-lock /
-/// Range-resume / sha-verify / atomic-rename path; creates `dir`. This is also the
-/// httpmock seam: tests point a spec's URL at a mock server and `dir` at a tempdir.
+/// [`ensure_with_progress`] into an explicit dir (per-model subdirs). Same flight/resume/
+/// verify path. Also the httpmock seam (`dir` = tempdir, URL = mock).
 pub fn ensure_in_dir(
     dir: &Path,
     spec: &ModelSpec,
@@ -409,12 +399,9 @@ fn remove_resume_files(partial: &Path, metadata: &Path) {
 fn orphan_sweep_root(final_path: &Path, roots: Option<&ModelRoots>) -> Option<PathBuf> {
     let parent = final_path.parent()?.to_path_buf();
     Some(match roots {
-        // Under a THIRD-PARTY cache DontSpeak only PRE-FILLS: confine the gate and the
-        // recursive walk to the one subdirectory we own. A `.tmp*` sibling elsewhere under
-        // that cache is not ours to delete. Bound to the FIRST component under the root, not
-        // to `final_path`: `ensure_at` takes this flight per FILE, and a sweep root at a file
-        // path would `create_dir_all` a directory where the file must land. Tested before the
-        // model arm so a fluid root nested under an overridden model root still confines.
+        // Third-party pre-fill cache: confine sweep to the first component under the root
+        // (not `final_path` — a file path would `create_dir_all` where the file must land).
+        // Checked before model so nested fluid under an overridden model root still confines.
         Some(r) if final_path.starts_with(&r.fluid) => r.fluid.join(
             final_path
                 .strip_prefix(&r.fluid)
@@ -428,12 +415,9 @@ fn orphan_sweep_root(final_path: &Path, roots: Option<&ModelRoots>) -> Option<Pa
     })
 }
 
-/// Single resolution of a destination's sweep root, so the flight that registers on the
-/// gate and the sweep that claims it can never disagree about which root that is. The
-/// ambient form; a caller holding a [`ModelRoots`] enters its flights rooted instead.
-/// Public so flight-entering tests — here, in `inventory`, and in the engine's `models`
-/// backend — can assert their fixture is not shadowed by an ambient `DONTSPEAK_MODEL_DIR`,
-/// which would move the gate into the real cache (#204).
+/// Ambient sweep root for a destination — flight and sweep must agree. Rooted callers
+/// enter flights with their own [`ModelRoots`]. Public so tests can assert fixtures are not
+/// shadowed by ambient `DONTSPEAK_MODEL_DIR` (#204).
 pub fn sweep_root_of(final_path: &Path) -> Option<PathBuf> {
     orphan_sweep_root(final_path, ModelRoots::ambient().as_ref())
 }
@@ -615,8 +599,7 @@ pub fn is_permanent_error(e: &std::io::Error) -> bool {
     )
 }
 
-/// One download attempt: GET → temp file → verify → atomic rename. The temp file
-/// is cleaned up automatically on any early return.
+/// One attempt: GET → temp → verify → rename. Temp cleaned on early return.
 #[cfg(test)]
 fn download_once(
     url: &str,
@@ -800,15 +783,12 @@ fn download_to_network(
     }
 }
 
-// Orphan `.tmp*` sweep: tempfile's default prefix; Drop skips SIGKILL. Every destination
-// flight registers on its sweep root for its whole run and holds `.orphan-sweep.gate` shared;
-// the sweep walks only a root with no live flight in this process and no shared lock from
-// another one, so it can never unlink an artifact a live download still needs. Counting rather
-// than `RwLock`: flights nest (frontend install -> `ensure_in_dir`) on one thread, and
-// `RwLock::read` documents a possible panic when the current thread already holds the lock.
-// The gate uses `.gate` (not `.{name}.lock`) so it never collides with a destination lock (#214).
+// Orphan `.tmp*` sweep (tempfile prefix; Drop skips SIGKILL). Flights hold
+// `.orphan-sweep.gate` shared for the whole run; sweep only walks a root with no live
+// flight and no foreign shared lock. Counting gate (not `RwLock`) — flights nest on one
+// thread. `.gate` stays outside the `.{name}.lock` namespace (#214).
 
-/// Only age ≥ this is swept (in-flight downloads stay).
+/// Min age before sweep (in-flight downloads stay).
 const MIN_ORPHAN_AGE: std::time::Duration = std::time::Duration::from_secs(3600);
 
 fn sweep_gate(root: &Path) -> std::sync::Arc<std::sync::Mutex<usize>> {
@@ -865,10 +845,8 @@ fn open_sweep_gate_file(root: &Path) -> std::io::Result<std::fs::File> {
         .open(sweep_gate_path(root))
 }
 
-/// Roots this process has already walked. Keyed exactly as [`sweep_gate`] keys its counter,
-/// because production now has MORE than one root: DontSpeak's own cache and the third-party
-/// cache it pre-fills. A process-global flag would let the first walk on either one consume
-/// the other's single attempt (#199).
+/// Per-root walk latch (same keys as [`sweep_gate`]). A process-global flag would let the
+/// first walk consume the other root's only attempt (#199).
 type SweepLatch = std::sync::Mutex<std::collections::HashSet<PathBuf>>;
 
 fn orphan_sweep_done() -> &'static SweepLatch {
@@ -876,11 +854,9 @@ fn orphan_sweep_done() -> &'static SweepLatch {
     DONE.get_or_init(SweepLatch::default)
 }
 
-/// One completed walk per root per attempt that observed the root unlatched. A skipped attempt
-/// (missing root, live flight, lock failure) does not latch, so the next `ensure_at` retries
-/// instead of losing the process's only attempt for that root. `done` is a parameter rather
-/// than a read of the static so a test can drive the latch on its own set: the static is
-/// latched by whichever `ensure_at` test the parallel `ds-model` binary happens to run first.
+/// One completed walk per root while unlatched. Skipped attempts (missing root, live flight,
+/// lock fail) do not latch. `done` is injectable so tests own their latch (static is shared
+/// with every parallel `ensure_at` test).
 fn sweep_orphans_once(done: &SweepLatch, root: &Path) {
     let latched = |set: &SweepLatch| {
         set.lock()
@@ -897,8 +873,7 @@ fn sweep_orphans_once(done: &SweepLatch, root: &Path) {
     }
 }
 
-/// Recursive best-effort remove of `.tmp*` older than [`MIN_ORPHAN_AGE`], under an exclusive
-/// claim on the sweep gate. Returns whether the walk ran.
+/// Best-effort recursive remove of aged `.tmp*` under exclusive gate claim. `true` if walked.
 pub(crate) fn sweep_orphaned_temp_files(root: &Path) -> bool {
     if !root.is_dir() {
         return false;
@@ -976,8 +951,7 @@ mod tests {
     const SWEEP_CHILD_READY: &str = "DS_MODEL_SWEEP_CHILD_READY";
     const SWEEP_CHILD_RELEASE: &str = "DS_MODEL_SWEEP_CHILD_RELEASE";
 
-    /// A `.tmp*` artifact aged past [`MIN_ORPHAN_AGE`], with its handle closed — an open
-    /// handle would fail `remove_file` on Windows and pass a sweep test vacuously.
+    /// Aged `.tmp*` with handle closed (open handle would fail `remove_file` on Windows).
     fn aged_orphan(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, b"an abandoned partial").unwrap();

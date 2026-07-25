@@ -1,17 +1,9 @@
-//! Model-path fixtures for tests, delivered by process spawn instead of environment
-//! mutation.
+//! Model-path fixtures via child spawn — not in-process env mutation.
 //!
-//! The gates under test resolve through `ds_config::model_dir()` and the ORT/MLX dylib
-//! paths, so a test needs `DONTSPEAK_MODEL_DIR` and friends pointed at a tempdir. Setting
-//! them in-process is unsound here: edition 2024 made `set_var` unsafe because `setenv`
-//! can replace the whole `environ` array, so ANY concurrent `getenv` — every
-//! `tempfile::tempdir()` in this binary reads `TMPDIR` — can read freed memory. A mutex
-//! shared by the writers never fixed that, because the readers never took it (#216).
-//!
-//! `Command::env` writes the child's environment block before it starts, so the fixture
-//! costs this process no mutation at all. Each converted test keeps one body: the parent
-//! run builds the fixture and re-executes the same test by name, the child run sees the
-//! environment and asserts.
+//! Gates under test need `DONTSPEAK_MODEL_DIR` (and friends) on a tempdir. Edition 2024
+//! made `set_var` unsafe: `setenv` can replace `environ` while concurrent `getenv`
+//! (every `tempfile::tempdir()` reads `TMPDIR`) races (#216). `Command::env` mutates only
+//! the child. Parent builds fixture + re-exec by name; child asserts under the env.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,17 +13,14 @@ const PHASE_VAR: &str = "DS_TEST_MODEL_ENV_PHASE";
 /// Where the child records that it really ran.
 const RAN_VAR: &str = "DS_TEST_MODEL_ENV_RAN";
 
-/// The model environment one child run should see. `ort_dylib: None` clears the variable;
-/// all three `DONTSPEAK_{SYS,MLX,FLUID}_DYLIB_PATH` variables are always cleared, so a host
-/// with real shim dylibs installed takes the same branch as CI.
+/// Child model env. `ort_dylib: None` clears ORT; SYS/MLX/FLUID dylib paths always cleared.
 pub(crate) struct ChildEnv<'a> {
     pub(crate) phase: &'a str,
     pub(crate) model_dir: &'a Path,
     pub(crate) ort_dylib: Option<&'a Path>,
 }
 
-/// Re-runs `test_path` — the full `module::tests::name` path libtest prints — in a child
-/// process holding `env`. Panics unless that child both ran and passed.
+/// Re-exec `test_path` (`module::tests::name`) under `env`. Panics if child didn't run/pass.
 pub(crate) fn run_child(test_path: &str, env: ChildEnv<'_>) {
     let sentinel_dir = tempfile::tempdir().expect("sentinel dir");
     let sentinel = sentinel_dir.path().join("child-ran");
@@ -51,8 +40,7 @@ pub(crate) fn run_child(test_path: &str, env: ChildEnv<'_>) {
         None => command.env_remove("ORT_DYLIB_PATH"),
     };
     let status = command.status().expect("spawn the child test run");
-    // Order matters: an empty filter exits 0 with nothing run, so the sentinel is what
-    // separates "passed" from "never matched".
+    // Empty filter exits 0 with nothing run — sentinel separates pass from no-match.
     assert!(
         sentinel.is_file(),
         "no test matched `{test_path}` — the child ran nothing, so the path is stale"
@@ -73,8 +61,7 @@ pub(crate) fn child_run() -> Option<ChildRun> {
     Some(ChildRun { phase, sentinel })
 }
 
-/// Proof for the parent that a test matched its `--exact` filter. Dropping it records the
-/// run — including on panic, where the child's exit status is what reports the failure.
+/// Sentinel that the `--exact` filter matched. Drop records the run (also on panic).
 pub(crate) struct ChildRun {
     phase: String,
     sentinel: PathBuf,
@@ -88,8 +75,7 @@ impl ChildRun {
 
 impl Drop for ChildRun {
     fn drop(&mut self) {
-        // Panicking in `Drop` during a test panic aborts, which would replace the child's
-        // real failure output with a signal.
+        // Don't panic in Drop during a test panic (would abort over the real failure).
         let _ = std::fs::write(&self.sentinel, b"ran");
     }
 }

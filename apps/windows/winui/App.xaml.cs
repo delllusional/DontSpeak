@@ -66,14 +66,13 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Only user-facing string outside <see cref="Loc.T(string)"/>: Loc.T P/Invokes ds_core, and
-    /// this path only runs when that DLL is unloadable. Permanent exception to "no hardcoded UI
-    /// strings".
+    /// Only user-facing string outside <see cref="Loc.T(string)"/>: Loc.T P/Invokes ds_core,
+    /// and this path only runs when that DLL is unloadable.
     /// </summary>
     private static string DllLoadFailureMessage() =>
         CultureInfo.CurrentUICulture.TwoLetterISOLanguageName switch
         {
-            // ds_core unreachable here — English only unless this message is ever translated.
+            // ds_core unreachable — English only.
             _ => "ds_core.dll was not found next to the app, so the voice engine cannot start.\n\n" +
                  "Reinstall DontSpeak (irm https://github.com/delllusional/DontSpeak/releases/latest/download/install.ps1 | iex). Building from " +
                  "source? Build the Rust engine first — see apps/windows/installer/build-portable.ps1.",

@@ -1,10 +1,5 @@
-//! Single source for DontSpeak's tool catalog.
-//!
-//! Tools + params authored once (`TOOLS`); consumers generated:
-//! * [`catalog`] — MCP schemas + annotations
-//! * [`catalog_ui`] — ordered `params` for app FFI (authored order, not property key order)
-//!
-//! Pure catalog data; dispatch is in the MCP server.
+//! Tool catalog single source (`TOOLS` → [`catalog`] / [`catalog_ui`]).
+//! Dispatch lives in the MCP server.
 
 use serde_json::{Map, Value, json};
 
@@ -14,9 +9,7 @@ use descriptions::*;
 
 pub use set_config::{SetConfigArgs, TtsParamUpdates, TtsVoiceUpdates};
 
-/// Visibility gate (#77): hide diarize from MCP/list/UI; dispatch/config still work if called.
-/// Turning it on must also add the diarization row to `ds_model::inventory`, which omits it
-/// for the same reason.
+/// #77: hide diarize from MCP/list/UI (dispatch still works). Keep `ds_model::inventory` in sync.
 pub const DIARIZATION_ENABLED: bool = false;
 
 const HIDDEN_TOOLS: &[&str] = &[DIARIZE_NAME, MANAGE_SPEAKERS_NAME];
@@ -30,12 +23,10 @@ enum PType {
     Int(i64, i64),
     Bool,
     EnumArray(&'static [&'static str]),
-    /// Nested per-engine/model string-array voice pools.
     VoicePools,
     ParamPools,
-    /// Per-engine/model arguments for one utterance.
     TtsArgs,
-    /// `capture_gain`: `"auto"` OR a number `0.5–20` (`oneOf`).
+    /// `capture_gain`: `"auto"` or 0.5–20 (`oneOf`).
     Gain,
 }
 
@@ -46,7 +37,7 @@ struct Param {
     description: &'static str,
 }
 
-/// `min_one` ⇒ `minProperties: 1` (for `set_config`).
+/// `min_one` ⇒ `minProperties: 1` (`set_config`).
 struct Tool {
     name: &'static str,
     description: &'static str,
@@ -90,7 +81,7 @@ const fn p(name: &'static str, ty: PType, required: bool, description: &'static 
     }
 }
 
-/// Display order (Tools window): speak·listen, stop·mute, read-only, diarize, set_config last.
+/// Tools-window display order (set_config last).
 static TOOLS: &[Tool] = &[
     Tool {
         name: SPEAK_NAME,
@@ -187,7 +178,7 @@ static TOOLS: &[Tool] = &[
         annotations: annotations(false, true, true),
         output: Some(Output::Models),
     },
-    // Hidden when DIARIZATION_ENABLED is false (visibility only).
+    // Visibility-gated by DIARIZATION_ENABLED.
     Tool {
         name: DIARIZE_NAME,
         description: DIARIZE,
@@ -216,7 +207,6 @@ static TOOLS: &[Tool] = &[
     Tool {
         name: SET_CONFIG_NAME,
         description: SET_CONFIG,
-        // Grouped by concern — Tools window order.
         params: &[
             p(
                 TTS_ENGINE,
@@ -275,7 +265,6 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_PROVIDER,
             ),
-            // Diarization (hidden when gate off).
             p(
                 DIARIZER,
                 PType::EnumArray(&["mlx", "fluid"]),
@@ -309,7 +298,7 @@ static TOOLS: &[Tool] = &[
     },
 ];
 
-/// `agents` = config `agents` gate: hides `usage` when off (diarization gating unchanged).
+/// Config `agents` gate hides `usage`; diarization gate separate.
 fn is_visible(t: &Tool, agents: bool) -> bool {
     if t.name == USAGE_NAME {
         return agents;
@@ -324,7 +313,7 @@ fn visible_params(t: &Tool) -> Vec<&Param> {
         .collect()
 }
 
-/// Visible primary catalog names. MCP dispatch pins via `router_handles_every_catalog_tool`.
+/// Visible catalog names (`router_handles_every_catalog_tool` pins dispatch).
 pub fn tool_names(agents: bool) -> impl Iterator<Item = &'static str> {
     TOOLS
         .iter()
@@ -332,7 +321,7 @@ pub fn tool_names(agents: bool) -> impl Iterator<Item = &'static str> {
         .map(|t| t.name)
 }
 
-/// Validate against advertised `inputSchema`. Unknown/hidden → unavailable.
+/// Validate against advertised `inputSchema`.
 pub fn validate_arguments(name: &str, arguments: &Value, agents: bool) -> Result<(), String> {
     let tool = TOOLS
         .iter()
@@ -441,7 +430,7 @@ fn voice_pools_valid(value: &Value) -> bool {
     })
 }
 
-/// Validate `tts_params` against the same descriptors that generate its schema.
+/// `tts_params` against the schema descriptors.
 fn tts_param_pools_valid(value: &Value) -> bool {
     let Some(pools) = value.as_object().filter(|pools| !pools.is_empty()) else {
         return false;

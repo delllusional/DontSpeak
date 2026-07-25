@@ -3,12 +3,12 @@ import XCTest
 @testable import DontSpeakMLX
 
 final class TtsAbiTests: XCTestCase {
-    /// Success promises exactly one callback, so a missing callback must fail before model work.
+    /// Missing cb must fail before model work (success promises exactly one callback).
     func testSynthesisRejectsNullCallback() {
         XCTAssertEqual(ds_mlx_tts_synthesize2(nil, nil, nil, 1.0, nil, nil, nil), 4)
     }
 
-    /// Literal pin for the hand-maintained Rust-registry mirror.
+    /// Hand-maintained Rust-registry mirror pin.
     func testTtsParamMirrorPinsDeclaredKeysPerModel() {
         XCTAssertEqual(Set(ttsParamMirror.keys), ["kokoro", "chatterbox", "qwen", "omnivoice"])
         XCTAssertEqual(ttsParamMirror["kokoro"], [:])

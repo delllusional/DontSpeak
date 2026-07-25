@@ -1,8 +1,6 @@
-//! Registry-driven `dontspeak <client>` launchers. Makes the resident host available before
-//! start; preserves the child's argv, cwd, stdio, and exit status. Codex interactive commands
-//! are the exception: they ask the engine to attach its narration subscriber, then receive the
-//! endpoint via `--remote`. A host that never comes up degrades the integration for this launch
-//! only — never gates the wrapped client; thin passthrough, not a health check.
+//! Registry `dontspeak <client>` launchers. Best-effort host ready; preserves argv/cwd/
+//! stdio/exit. Codex interactive: attach narration → `--remote`. Host failure degrades
+//! integration only — never blocks the wrapped client.
 
 use std::path::Path;
 use std::process::Command;
@@ -54,7 +52,7 @@ fn run_codex(spec: &ClientSpec, args: &[String], paths: &Paths, configured_bin: 
                 remote_args.extend_from_slice(args);
                 run_resolved(spec, &remote_args, &bin)
             }
-            // Host/engine failure never blocks Codex — Stop-only narration, same as bare `codex`.
+            // Degrade to Stop-only (same as bare `codex`).
             None => run_resolved(spec, args, &bin),
         },
     }
@@ -72,7 +70,7 @@ fn resolve_codex_launch_bins(
     Some((bin, app_server_bin))
 }
 
-/// Best-effort Codex narration prep; failure does not block launch.
+/// Best-effort Codex narration prep (failure does not block launch).
 fn prepare_codex_stream(paths: &Paths, codex_bin: &Path) -> Option<String> {
     if !ensure_engine(&paths.engine_sock) {
         eprintln!(
@@ -111,7 +109,7 @@ fn run_direct(
     configured_bin: &str,
     ensure_host: bool,
 ) -> i32 {
-    // Host failure degrades integration only; never keeps the wrapped client from starting.
+    // Host failure never blocks the client.
     if ensure_host && !information_only(args) && !ensure_engine(&paths.engine_sock) {
         eprintln!(
             "dontspeak {}: the DontSpeak host did not become ready; launching without DontSpeak integration",
@@ -164,9 +162,8 @@ enum CodexInvocation {
     CustomRemote,
 }
 
-/// Interactive TUI only accepts `--remote` for base TUI, `resume`, and `fork`. Management /
-/// noninteractive commands pass through. Global option values are skipped so
-/// `codex -C path exec …` classifies on `exec`, not `path`.
+/// Narrated for base TUI / resume / fork; direct for management. Skip option values
+/// so `codex -C path exec` classifies on `exec`.
 fn codex_invocation(args: &[String]) -> CodexInvocation {
     if args
         .iter()
@@ -187,7 +184,7 @@ fn codex_invocation(args: &[String]) -> CodexInvocation {
         | "app-server" | "remote-control" | "app" | "completion" | "update" | "doctor"
         | "sandbox" | "debug" | "apply" | "a" | "archive" | "delete" | "unarchive" | "cloud"
         | "exec-server" | "features" | "help" => CodexInvocation::Direct,
-        // Unrecognized positional = base TUI's optional initial prompt.
+        // Unrecognized positional = base TUI initial prompt.
         _ => CodexInvocation::Narrated,
     }
 }

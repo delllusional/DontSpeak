@@ -1,9 +1,9 @@
 //! Canonical download / installer-prefetch targets.
 //!
-//! ONE enum every dispatcher matches (`prefetch_items`, `run_prefetch`, engine download
-//! manager) so wire tokens can't typo-fallthrough. Parse only at the process boundary
-//! (CLI); in-process APIs take the enum. Naming: `<brand>_<flavor>` for models,
-//! bare nouns for runtimes/groups. Platform gate: [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host).
+//! One enum every dispatcher matches so wire tokens cannot typo-fallthrough. Parse only
+//! at the process boundary (CLI); in-process APIs take the enum. Naming: `<brand>_<flavor>`
+//! for models, bare nouns for runtimes/groups. Platform gate:
+//! [`is_supported_on_this_host`](DownloadTarget::is_supported_on_this_host).
 
 use ds_config::host::{Arch, Os};
 
@@ -73,13 +73,12 @@ impl DownloadTarget {
         ),
     ];
 
-    /// The FluidAudio Core ML flavor is PARTIAL — Kokoro only — so it is its own table
-    /// rather than a fourth column of [`Self::TTS_TARGETS`], which every built-in TTS model
-    /// must fill.
+    /// FluidAudio Core ML is partial (Kokoro only), so not a fourth column of
+    /// [`Self::TTS_TARGETS`] (every built-in TTS model must fill that table).
     const FLUID_TTS_TARGETS: [(ds_config::TtsModel, Self); 1] =
         [(ds_config::TtsModel::Kokoro, Self::KokoroFluid)];
 
-    /// The stable wire token for this target (what the IPC / CLI / installer pass).
+    /// Stable wire token (IPC / CLI / installer).
     pub fn as_str(self) -> &'static str {
         match self {
             DownloadTarget::Onnxruntime => "onnxruntime",
@@ -104,8 +103,7 @@ impl DownloadTarget {
         }
     }
 
-    /// Parse a wire token into a target. Each target has exactly one canonical token.
-    /// Returns `None` for an unknown token.
+    /// Parse a wire token. One canonical token per target; unknown → `None`.
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "onnxruntime" => DownloadTarget::Onnxruntime,
@@ -131,19 +129,14 @@ impl DownloadTarget {
         })
     }
 
-    /// Can this target actually be fetched on the RUNNING platform? The ONE spelling of
-    /// every target's platform gate — the `#[cfg]`-gated fetch arms in each dispatcher
-    /// (the engine's `start_download`, [`crate::spec::prefetch_items`], ds-helper's
-    /// `run_prefetch`) must mirror this matrix, which maps each target onto a
-    /// [`ds_config::host`] gate rather than restating the `(os, arch)` terms:
+    /// Fetchable on the running platform? One spelling of the gate — dispatchers
+    /// (`start_download`, [`crate::spec::prefetch_items`], `run_prefetch`) must mirror it
+    /// via [`ds_config::host`] rather than restating `(os, arch)`:
     ///
-    /// * the MLX sets (`kokoro_mlx` / `parakeet_mlx` / `diarization_mlx`) and the FluidAudio
-    ///   Core ML sets (`kokoro_fluid` / `parakeet_fluid` / `diarization_fluid`) exist only
-    ///   where the native shim runs and the Neural Engine ships — Apple-Silicon macOS;
-    /// * `sepformer_model` is macOS-only too (the speaker-lock is macOS code), though it
-    ///   is plain ONNX, not MLX;
-    /// * `cuda` (the ONNX CUDA EP wheels) exists only on x86_64 Windows/Linux;
-    /// * everything else (the onnxruntime dylib and the ONNX model sets) is universal.
+    /// * MLX + FluidAudio Core ML sets — Apple-Silicon macOS only
+    /// * `sepformer_model` — macOS any arch (plain ONNX speaker-lock)
+    /// * `cuda` — x86_64 Windows/Linux only
+    /// * else (ORT dylib, ONNX model sets, `models` group) — universal
     pub fn is_supported_on_this_host(self) -> bool {
         match self {
             DownloadTarget::KokoroMlx
@@ -200,21 +193,18 @@ impl DownloadTarget {
             .expect("every TTS model has a portable target")
     }
 
-    /// Whether this target is one of the four built-in MLX TTS sets.
     pub fn is_mlx_tts(self) -> bool {
         Self::TTS_TARGETS.iter().any(|(_, _, mlx)| *mlx == self)
     }
 
-    /// FluidAudio Core ML download target for one built-in TTS model, or `None` where that
-    /// backend has no set — fallible unlike [`Self::mlx_for_tts`], because the flavor is
-    /// partial.
+    /// FluidAudio Core ML target for a built-in TTS model, or `None` when that backend has
+    /// no set. Fallible unlike [`Self::mlx_for_tts`] — the flavor is partial.
     pub fn fluid_for_tts(model: ds_config::TtsModel) -> Option<Self> {
         Self::FLUID_TTS_TARGETS
             .iter()
             .find_map(|(candidate, fluid)| (*candidate == model).then_some(*fluid))
     }
 
-    /// Whether this target is a built-in FluidAudio Core ML TTS set.
     pub fn is_fluid_tts(self) -> bool {
         Self::FLUID_TTS_TARGETS
             .iter()
@@ -253,9 +243,8 @@ mod tests {
         }
     }
 
-    /// The FluidAudio TTS flavor is partial, so `fluid_for_tts` is fallible where
-    /// `mlx_for_tts` is total — and `tts_model` must still answer for the one target that
-    /// exists, or a completed `kokoro_fluid` fetch would look like nobody's model.
+    /// Partial Fluid TTS: `fluid_for_tts` fallible where `mlx_for_tts` is total;
+    /// `tts_model` must still map the one target that exists.
     #[test]
     fn fluid_targets_exist_only_for_kokoro() {
         assert_eq!(
@@ -292,13 +281,11 @@ mod tests {
         assert_eq!(DownloadTarget::parse(""), None);
     }
 
-    // The platform-support matrix, pinned as LITERAL per-OS expectations (not re-evaluated
-    // `cfg!` expressions, which would be tautological) — a drifted gate shows up on that
-    // platform's CI leg rather than silently mis-routing a dispatcher.
+    // Literal per-OS expectations (not re-evaluated `cfg!` — that would be tautological);
+    // a drifted gate fails on that platform's CI leg.
     #[test]
     fn platform_support_matrix() {
         use DownloadTarget::*;
-        // Universal targets: fetchable everywhere.
         for t in [
             Onnxruntime,
             KokoroModel,
@@ -311,8 +298,7 @@ mod tests {
         ] {
             assert!(t.is_supported_on_this_host(), "{t:?} must be universal");
         }
-        // The MLX and FluidAudio Core ML sets are Apple-Silicon-only; the plain-ONNX
-        // speaker-lock separator is macOS on ANY arch — the split matters on Intel macOS.
+        // MLX/Fluid: Apple Silicon only. SepFormer: macOS any arch (matters on Intel).
         let apple_silicon_only = [
             KokoroMlx,
             ChatterboxMlx,

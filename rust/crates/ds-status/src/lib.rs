@@ -1,7 +1,4 @@
-//! Typed `model_status` — engine → app contract (single source).
-//!
-//! Engine builds [`ModelStatus`]; UIs hand-mirror closed-set tokens. Unknown enum
-//! values fail closed. `Option<_>` → JSON `null` (always present).
+//! Typed `model_status` (engine → app). Unknown enums fail closed; `Option` → JSON `null`.
 
 mod dictation_state;
 mod engines;
@@ -25,25 +22,24 @@ mod finite_f64_or_zero {
     }
 }
 
-/// Engine row. `state` = [`EngineState`] wire token.
+/// Engine row (`state` = [`EngineState`] wire token).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EngineStatus {
     pub state: EngineState,
-    /// Download fraction 0..1; `0.0` unless downloading.
+    /// 0..1 while downloading; else `0.0`.
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub progress: f64,
     pub error: Option<String>,
 }
 
-/// Raw counters let clients derive rate and ETA without duplicating wire values.
+/// Raw transfer counters (clients derive rate/ETA).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DownloadStatus {
     pub target: String,
     pub done_bytes: u64,
     pub total_bytes: u64,
-    /// Bytes already complete at the first timed sample.
+    /// Bytes already complete at first timed sample.
     pub start_bytes: u64,
-    /// Whole seconds since that sample.
     pub elapsed_seconds: u64,
 }
 
@@ -53,103 +49,89 @@ pub enum UtteranceWarning {
     VoiceLanguageMismatch,
 }
 
-/// How an utterance ended. The producer's terminal ACK: `speak` hands back an
-/// [`UtteranceStatus::id`], and this says what became of it.
+/// Terminal ACK for a `speak` handle ([`UtteranceStatus::id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UtteranceOutcome {
-    /// Playback returned without error.
     Spoken,
-    /// Synthesis or playback failed; at most a prefix was heard.
+    /// Synth/playback failed; at most a prefix heard.
     Failed,
-    /// Stop, barge, or a queue clear ended it early.
+    /// Stop, barge, or queue clear.
     Cancelled,
-    /// Never reached playback: speech off, or the model stayed unavailable.
+    /// Never reached playback (speech off / model unavailable).
     Dropped,
 }
 
-/// What one utterance resolved to and how it ended. `id` is the handle `speak` returns,
-/// so a producer can correlate what it queued with what was actually said.
+/// One utterance resolution + outcome. `id` is the `speak` handle.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UtteranceStatus {
     pub id: u64,
-    /// `null` until the play gate resolves one — an utterance dropped before it never has one.
+    /// `null` until play resolves (never set if dropped before play).
     pub voice: Option<String>,
-    /// Language the utterance was synthesized in: detected (or explicitly requested) at
-    /// admit, clamped to the live model at play. `null` alongside a `null` voice.
+    /// Detected/requested at admit; clamped at play. `null` with null voice.
     pub language: Option<String>,
     pub warning: Option<UtteranceWarning>,
-    /// `null` while the utterance is still in flight.
+    /// `null` while in flight.
     pub outcome: Option<UtteranceOutcome>,
 }
 
-/// Selected TTS engine, its realized provider, and its lifecycle status.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TtsStatus {
     pub engine: StatusTtsEngine,
-    /// Selected built-in model; `null` for system/off.
+    /// Built-in model; `null` for system/off.
     pub model: Option<StatusTtsModel>,
-    /// Resolved built-in model language; `null` for system/off.
+    /// Built-in language; `null` for system/off.
     pub language: Option<String>,
-    /// `null` for system (`say`) / off engines, and for built_in until a child reports a
-    /// realized backend.
+    /// `null` for system/off, or built_in until realized.
     pub provider: Option<String>,
     /// `null` when speech is off.
     pub status: Option<EngineStatus>,
-    /// Utterances that have ended, most recent first, capped by the engine. Retained while
-    /// idle so a producer that polls after playback still finds its `speak` handle.
+    /// Ended utterances, newest first; retained idle so post-play poll finds the handle.
     pub recent_utterances: Vec<UtteranceStatus>,
 }
 
-/// Selected STT engine, its realized provider, and its lifecycle status.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SttStatus {
     pub engine: StatusSttEngine,
-    /// `null` for system/claude_code/off engines, and for built_in until a child
-    /// reports a realized backend.
+    /// `null` for system/claude_code/off, or built_in until realized.
     pub provider: Option<String>,
     /// `null` when dictation is off.
     pub status: Option<EngineStatus>,
-    /// Bound Claude Code voice key; `null` for other engines or an unusable binding.
+    /// Claude Code voice key; else `null`.
     pub voice_key: Option<String>,
 }
 
-/// Diarization lifecycle and UI details in one domain object.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiarizationStatus {
     pub status: EngineStatus,
     pub enabled: bool,
-    /// `null` until a diarization backend is realized.
+    /// `null` until a backend is realized.
     pub provider: Option<String>,
     pub speakers: Vec<String>,
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub activity_threshold: f64,
 }
 
-/// Live app activity; names match what hosts render instead of implementation details.
+/// Live activity (host-facing field names).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Activity {
     pub caps: bool,
     pub caps_active: bool,
     pub recording: bool,
     pub speaking: bool,
-    /// Wired client for the in-flight TTS utterance. `null` when idle or unattributed.
+    /// In-flight TTS client; `null` idle/unattributed.
     pub speaker: Option<ds_client::WiredAgent>,
-    /// `speak` handle of the in-flight utterance. `null` while idle or for a cue.
+    /// In-flight `speak` handle; `null` idle/cue.
     pub utterance_id: Option<u64>,
-    /// `null` while idle.
     pub voice: Option<String>,
-    /// `null` while idle.
     pub language: Option<String>,
-    /// `null` while idle or when no mismatch is known.
     pub warning: Option<UtteranceWarning>,
     pub muted: bool,
 }
 
-/// Dictation confirm-panel content and canonical [`DictationState`] mode.
+/// Confirm-panel content + [`DictationState`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Dictation {
-    /// Panel shown when not [`DictationState::Hidden`].
     pub state: DictationState,
     pub text: String,
     pub can_paste: bool,
@@ -174,10 +156,7 @@ pub struct TtsSnapshot {
     #[serde(serialize_with = "finite_f64_or_zero::serialize")]
     pub audio_secs: f64,
     pub failures: u64,
-    /// Utterances still outstanding: those waiting plus the one being spoken. Cues are not
-    /// counted, so this is "how much is left to say" — `0` exactly when speech has stopped.
-    /// Instantaneous, unlike its cumulative siblings; the engine fills it from the TTS queue,
-    /// not from `TtsStats::snapshot`.
+    /// Pending speech depth (cues excluded). Instantaneous from the TTS queue, not `TtsStats`.
     pub queued: u64,
 }
 
@@ -211,10 +190,10 @@ pub struct Stats {
     pub lifetime: LifetimeSnapshot,
 }
 
-/// Full `model_status` payload — engine → app status contract.
+/// Full `model_status` payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelStatus {
-    /// Push sequence echoed by `WaitModelStatus` clients.
+    /// `WaitModelStatus` sequence.
     pub seq: u64,
     pub activity: Activity,
     pub tts: TtsStatus,
@@ -223,9 +202,9 @@ pub struct ModelStatus {
     pub dictation: Dictation,
     pub stats: Stats,
     pub tray: Vec<StatusTrayKind>,
-    /// Active transfers only, sorted by stable target token.
+    /// Active transfers, sorted by target token.
     pub downloads: Vec<DownloadStatus>,
-    /// Agents feature gate from config `agents`; hosts show/hide the Agents tab live.
+    /// Config `agents` gate (live Agents tab).
     pub agents: bool,
 }
 
@@ -293,7 +272,7 @@ mod tests {
         }
     }
 
-    /// Pin wire byte-shape: nullable fields → `null` (never omitted), stats nested, round-trip.
+    /// Wire shape: nullables present as `null`; nested stats; round-trip.
     #[test]
     fn json_contract_round_trips() {
         let v = serde_json::to_value(sample()).unwrap();

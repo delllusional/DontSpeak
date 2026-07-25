@@ -1,16 +1,13 @@
 //! Real Windows sharing semantics for the installer's destination lock (#198).
 //!
-//! NAMING CONSTRAINT — do NOT put `install`/`setup`/`update` in this file's name; see the
-//! module doc of `packaging_sync.rs` for why (Windows Installer Detection force-elevates such
-//! test binaries, which then can't launch at all).
+//! NAMING CONSTRAINT — do NOT put `install`/`setup`/`update` in this file's name
+//! (see packaging_sync.rs module doc).
 //!
-//! `packaging_sync.rs` can only pin the installer's *text*. This runs the shipped
-//! `Enter-DestinationLock` bytes in two real processes, which is the only check that a waiter
-//! actually waits — a filter reading the `MethodInvocationException` wrapper's `HResult`
-//! instead of the inner `IOException`'s keeps every pinned substring and still aborts
-//! instantly. Per-commit CI is Linux-only (`.github/workflows/ci.yml` selects `ubuntu-latest`
-//! unless `full-matrix: true`), so this guard runs on the release matrix; treat
-//! `Enter-DestinationLock` as effectively unpinned per-commit when reviewing changes to it.
+//! packaging_sync can only pin installer *text*. This runs shipped Enter-DestinationLock
+//! bytes in two real processes — the only check that a waiter actually waits (filtering
+//! the wrapper HResult instead of the inner IOException keeps every pinned substring and
+//! still aborts instantly). Per-commit CI is Linux-only, so this runs on the release
+//! matrix; treat Enter-DestinationLock as unpinned per-commit when reviewing it.
 #![cfg(windows)]
 
 use std::fs;
@@ -23,7 +20,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-/// The shipped lock function plus a driver, so the test exercises installer bytes.
+/// Shipped lock function plus a driver — exercises installer bytes.
 fn harness(dir: &Path) -> PathBuf {
     let source = fs::read_to_string(repo_root().join("scripts/install/web/install.ps1"))
         .expect("read install.ps1")
@@ -98,10 +95,9 @@ fn text(output: &Output) -> String {
 fn destination_lock_serializes_separate_installer_processes() {
     let dir = tempfile::tempdir().expect("tempdir");
     let script = harness(dir.path());
-    // Inside the tempdir, never %LOCALAPPDATA%\Programs\DontSpeak: the lock file is
-    // deliberately never deleted, so a real destination would plant a permanent artifact in
-    // the runner's actual install location. The parent exists already — Enter-DestinationLock
-    // does not create it, and a missing one is a DirectoryNotFoundException it rethrows.
+    // Tempdir destination only — lock file is deliberately never deleted, so a real
+    // install path would leave a permanent artifact. Parent must exist (Enter-DestinationLock
+    // does not create it).
     let destination = dir.path().join("DontSpeak");
     let lock = dir.path().join(".DontSpeak.ds-install.lock");
     let ready = dir.path().join("ready");
@@ -124,9 +120,8 @@ fn destination_lock_serializes_separate_installer_processes() {
         "a second installer entered while the lock was held: {}",
         text(&blocked)
     );
-    // NOT merely "exits non-zero": reading the wrapper's HResult also fails, but with the raw
-    // "used by another process" message and no wait at all. This string is what proves the
-    // waiter waited and then failed closed on its own deadline.
+    // "still finalizing" proves the waiter waited then failed closed — wrapper HResult
+    // alone also fails, but with raw "used by another process" and no wait.
     assert!(
         text(&blocked).contains("still finalizing"),
         "blocked installer did not report a concurrent installer: {}",

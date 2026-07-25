@@ -1,14 +1,9 @@
 //! English number → words for TTS.
 //!
-//! WHY: neither G2P expands digits — ONNX/misaki drops them at vocab (silent);
-//! The BART G2P frontend is alphabetic; lexicons never contain numeric tokens such as `"12"`.
-//!
-//! Runs via [`crate::normalize_kokoro_text`] before split/phonemize. English-only.
-//!
-//! Cardinals, thousands-grouped (a comma groups only with exactly three digits after
-//! it), decimals, ordinals, leading minus; multi-dot keeps separators; alphanumerics
-//! get word boundaries; leading-zero / overlong runs digit-by-digit; non-number tokens
-//! pass through.
+//! Neither G2P expands digits (ONNX/misaki drops them; BART is alphabetic). Via
+//! [`crate::normalize_kokoro_text`] before split/phonemize. English-only: cardinals,
+//! thousands-grouped commas, decimals, ordinals, leading minus; multi-dot keeps
+//! separators; leading-zero/overlong → digit-by-digit.
 
 /// `0..=19` spelled out (index = value).
 const ONES: [&str; 20] = [
@@ -34,13 +29,12 @@ const ONES: [&str; 20] = [
     "nineteen",
 ];
 
-/// Tens words indexed by the tens digit (`TENS[2]` = "twenty"); 0/1 unused.
+/// Tens words by tens digit (`TENS[2]` = "twenty"); 0/1 unused.
 const TENS: [&str; 10] = [
     "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
 ];
 
-/// Thousands-group scale names, ascending. Index 0 (units) has no word. A number
-/// with more groups than this (> 10^21) is read digit-by-digit instead.
+/// Thousands-group scales (index 0 empty). Beyond this → digit-by-digit.
 const SCALES: [&str; 7] = [
     "",
     " thousand",
@@ -51,8 +45,7 @@ const SCALES: [&str; 7] = [
     " quintillion",
 ];
 
-/// Spell a 0..=999 group. Empty for 0 (callers skip zero groups). No leading or
-/// trailing spaces.
+/// Spell a 0..=999 group. Empty for 0 (callers skip zero groups).
 fn three_digits(n: u64) -> String {
     debug_assert!(n < 1000);
     let mut out = String::new();
@@ -91,7 +84,7 @@ fn cardinal(n: u64) -> String {
         v /= 1000;
     }
     if groups.len() > SCALES.len() {
-        // Beyond named scales; expand_numbers digit-paths before this.
+        // Beyond named scales; expand_numbers digit-paths first.
         return n.to_string();
     }
     let mut parts: Vec<String> = Vec::new();
@@ -104,8 +97,7 @@ fn cardinal(n: u64) -> String {
     parts.join(" ")
 }
 
-/// Read each digit of `digits` individually ("007" → "zero zero seven"). Used for
-/// leading-zero runs (codes/IDs) and the fractional part of a decimal.
+/// Digit-by-digit ("007" → "zero zero seven") for codes/IDs and fractional parts.
 fn digit_by_digit(digits: &str) -> String {
     digits
         .chars()
@@ -115,7 +107,7 @@ fn digit_by_digit(digits: &str) -> String {
         .join(" ")
 }
 
-/// Inflect the last space-separated word ("twenty-one" → "twenty-first").
+/// Last space-separated word → ordinal ("twenty-one" → "twenty-first").
 fn to_ordinal(cardinal: &str) -> String {
     let (head, last) = match cardinal.rsplit_once(' ') {
         Some((h, l)) => (Some(h), l),
@@ -128,7 +120,7 @@ fn to_ordinal(cardinal: &str) -> String {
     }
 }
 
-/// Single cardinal word (may be hyphenated). Irregulars + `-y` → `-ieth`.
+/// Single cardinal word → ordinal (irregulars; `-y` → `-ieth`).
 fn ordinal_word(word: &str) -> String {
     if let Some((tens, unit)) = word.split_once('-') {
         return format!("{tens}-{}", ordinal_word(unit));
@@ -146,11 +138,8 @@ fn ordinal_word(word: &str) -> String {
     }
 }
 
-/// A `,` at `at` separates thousands only with a 1..=3-digit group before it (exactly three
-/// after the first comma) and EXACTLY three digits after: "1,2,3" is a digit list, not 123.
-/// Side effect of the head rule: "1234,567" and Indian grouping ("12,34,567") stop fusing and
-/// read as separate numbers — the expander is English-only (issue #227), and English text
-/// never groups that way.
+/// Thousands comma only with exactly three digits after (and 1..=3 before first).
+/// "1,2,3" stays a list; "1234,567"/Indian grouping read separate (#227 English-only).
 fn thousands_comma(chars: &[char], at: usize, group_len: usize, grouped: bool) -> bool {
     let head_ok = if grouped {
         group_len == 3
@@ -164,12 +153,7 @@ fn thousands_comma(chars: &[char], at: usize, group_len: usize, grouped: bool) -
         && !chars.get(at + 4).is_some_and(char::is_ascii_digit)
 }
 
-/// Expand every plain number token in `text` to its English words, leaving all
-/// other characters untouched. Idempotent on number-free text.
-///
-/// Scans by `char` (not bytes) so non-ASCII text is preserved verbatim; every
-/// character that participates in number syntax (digits, `,`, `.`, the `st`/`nd`/
-/// `rd`/`th` suffix letters, a sign `-`) is ASCII, so a `char` scan is exact.
+/// Expand plain number tokens to English words. Char scan (number syntax is ASCII).
 pub fn expand_numbers(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len() + text.len() / 4);
@@ -181,7 +165,7 @@ pub fn expand_numbers(text: &str) -> String {
             continue;
         }
 
-        // Preceding '-' is a sign only at start / after space or opening delimiter ("3-4" stays range).
+        // '-' is a sign only at start / after space or open delimiter ("3-4" stays range).
         let mut minus = false;
         if out.ends_with('-') {
             let before = out[..out.len() - 1].chars().next_back();
@@ -200,8 +184,8 @@ pub fn expand_numbers(text: &str) -> String {
         }
 
         let mut int_digits = String::new();
-        let mut group_len = 0usize; // digits since the last accepted comma
-        let mut grouped = false; // a thousands comma was accepted
+        let mut group_len = 0usize; // digits since last accepted comma
+        let mut grouped = false;
         while i < chars.len() {
             if chars[i].is_ascii_digit() {
                 int_digits.push(chars[i]);
@@ -211,7 +195,7 @@ pub fn expand_numbers(text: &str) -> String {
                 && !int_digits.is_empty()
                 && thousands_comma(&chars, i, group_len, grouped)
             {
-                i += 1; // skip thousands comma
+                i += 1;
                 group_len = 0;
                 grouped = true;
             } else {
@@ -228,7 +212,7 @@ pub fn expand_numbers(text: &str) -> String {
             }
         }
 
-        // Ordinal suffix after integer only; next char must not be alphanumeric ("1street").
+        // Ordinal suffix after integer only; next char not alphanumeric ("1street").
         let mut ordinal = false;
         if frac_digits.is_empty() && i + 1 < chars.len() {
             let s0 = chars[i].to_ascii_lowercase();
@@ -249,7 +233,7 @@ pub fn expand_numbers(text: &str) -> String {
         let int_words = if leading_zero || too_long {
             digit_by_digit(&int_digits)
         } else {
-            // 20–21 digits can clear `too_long` yet overflow u64; digit-path, never "zero".
+            // 20–21 digits may pass `too_long` yet overflow u64 → digit-path.
             match int_digits.parse::<u64>() {
                 Ok(n) => cardinal(n),
                 Err(_) => digit_by_digit(&int_digits),
@@ -260,7 +244,7 @@ pub fn expand_numbers(text: &str) -> String {
             out.push_str(&int_words);
             out.push_str(" point ");
             out.push_str(&digit_by_digit(&frac_digits));
-            // Further dots are version-like components ("0.2.2" → "zero point two point two").
+            // Multi-dot versions: "0.2.2" → "zero point two point two".
             while i + 1 < chars.len() && chars[i] == '.' && chars[i + 1].is_ascii_digit() {
                 i += 1;
                 let mut component = String::new();
@@ -326,15 +310,13 @@ mod tests {
 
     #[test]
     fn digit_lists_are_not_fused_into_one_number() {
-        // A comma groups thousands only with exactly three digits after it, so an enumeration
-        // stays an enumeration instead of reading as one large number.
         assert_eq!(expand_numbers("1,2,3"), "one,two,three");
         assert_eq!(expand_numbers("1,23"), "one,twenty-three");
         assert_eq!(
             expand_numbers("12,3456"),
             "twelve,three thousand four hundred fifty-six"
         );
-        // Documented side effect of the head rule (see `thousands_comma`).
+        // Head-rule side effect (see `thousands_comma`).
         assert_eq!(
             expand_numbers("1234,567"),
             "one thousand two hundred thirty-four,five hundred sixty-seven"

@@ -1,6 +1,6 @@
-// libdontspeak_mlx -- C ABI over MLX Audio (all built-in MLX TTS, Parakeet STT, Sortformer
-// diarization). Rust owns the text frontend and model downloads. See dontspeak_mlx.h.
-// 0 = success. Helper calls are serial; locks guard shared models.
+// libdontspeak_mlx -- C ABI over MLX Audio (built-in TTS, Parakeet STT, Sortformer
+// diarization). Rust owns text frontend + downloads. See dontspeak_mlx.h.
+// 0 = success. Serial helper calls; locks guard shared models.
 import AVFoundation
 import Foundation
 @preconcurrency import MLX
@@ -8,7 +8,7 @@ import MLXAudioSTT
 import MLXAudioTTS
 import MLXAudioVAD
 
-// MARK: - async → blocking bridge (called from a Rust worker thread)
+// MARK: - async → blocking bridge (Rust worker thread only; Swift Task deadlocks the pool)
 
 private final class Box<T>: @unchecked Sendable { var value: Result<T, Error>? }
 private final class SendableValue<T>: @unchecked Sendable {
@@ -16,8 +16,7 @@ private final class SendableValue<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
-/// Park calling thread until `op` completes. C entry from Rust worker only —
-/// never from a Swift Task (cooperative-pool deadlock risk).
+/// Park calling thread until `op` completes. C entry from Rust worker only.
 private func runBlocking<T>(_ op: @escaping @Sendable () async throws -> T) -> Result<T, Error> {
     let sem = DispatchSemaphore(value: 0)
     let box = Box<T>()
@@ -33,9 +32,8 @@ enum MlxShimError: Error {
     case noResult, nilDir, badAudio
 }
 
-// MARK: - borrowed-result callbacks
-// Success path: fire cb once on this thread with borrowed buffer; Rust copies out — no free.
-// Still blocking via runBlocking; status is the C return. Types mirror dontspeak_mlx.h.
+// MARK: - borrowed-result callbacks (see dontspeak_mlx.h / dontspeak_shim.h)
+// Success: fire cb once with borrowed buffer; Rust copies out. Status is the C return.
 public typealias MlxPcmCb =
     @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<Float>?, Int, Int32) -> Void
 public typealias MlxStrCb = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> Void
@@ -51,8 +49,8 @@ private enum TtsKind: String {
     var usesManagedHubCache: Bool { self == .chatterbox || self == .omnivoice }
 }
 
-/// Rust TTS-param registry mirror; values say whether the pinned MLX API applies a key.
-/// Registry edits must update this map and the Rust/Swift literal drift tests together.
+/// Rust TTS-param registry mirror; true = pinned MLX API applies the key.
+/// Keep in sync with registry + Rust/Swift literal drift tests.
 let ttsParamMirror: [String: [String: Bool]] = [
     "kokoro": [:],
     "chatterbox": ["exaggeration": true],
@@ -110,7 +108,7 @@ private func decodeTtsParam(
     return true
 }
 
-/// Sorted classification; malformed JSON returns nil without failing synthesis.
+/// Sorted classification; malformed JSON → nil (synthesis still proceeds).
 func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
     guard let data = json.data(using: .utf8),
         let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -130,7 +128,7 @@ func ttsParamsDecode(model: String, json: String) -> TtsParamDecode? {
     return decode
 }
 
-/// FNV-1a with NUL-separated fields, matching the ORT OmniVoice backend.
+/// FNV-1a NUL-separated fields; matches ORT OmniVoice backend.
 func stableOmniVoiceSeed(language: String, instruct: String) -> UInt64 {
     var hash: UInt64 = 0xcbf2_9ce4_8422_2325
     for bytes in [Array(language.utf8), [0], Array(instruct.utf8)] {
@@ -154,10 +152,8 @@ private func cString(_ p: UnsafePointer<CChar>?) -> String? {
     return s.isEmpty ? nil : s
 }
 
-/// MLX Audio's OmniVoice loader currently exposes only its repository API. Point its
-/// cache at the already verified DontSpeak directory; ModelUtils returns that complete
-/// local snapshot before any network operation. Chatterbox shares the root for its S3
-/// tokenizer, keeping every native model asset on the Rust-managed download path.
+/// OmniVoice (and Chatterbox tokenizer) only expose a hub API — point HF_HUB_CACHE at the
+/// verified mlx-audio parent so ModelUtils hits the local snapshot before any network.
 private func configureManagedHubCache(for modelDir: URL) -> Bool {
     let mlxAudioDir = modelDir.deletingLastPathComponent()
     guard mlxAudioDir.lastPathComponent == "mlx-audio" else {
@@ -218,7 +214,7 @@ public func ds_mlx_tts_init(
     }
 }
 
-// Versioned call ABI: skew must fail symbol lookup before arguments are passed.
+// Versioned call ABI: skew fails symbol lookup before arguments are passed.
 @_cdecl("ds_mlx_tts_synthesize2")
 public func ds_mlx_tts_synthesize2(
     _ text: UnsafePointer<CChar>?,
@@ -240,7 +236,7 @@ public func ds_mlx_tts_synthesize2(
         return 2
     }
     var appliedParams = TtsAppliedParams()
-    // Settings are advisory; only unknown or malformed input is logged.
+    // Settings advisory; unknown/malformed only logged (never fail synthesis).
     if let paramsJson = cString(paramsJson) {
         if let decode = ttsParamsDecode(model: kind.rawValue, json: paramsJson) {
             appliedParams = decode.values
@@ -260,8 +256,8 @@ public func ds_mlx_tts_synthesize2(
         let exaggeration = appliedParams.chatterboxExaggeration
     {
         chatterbox.emotionAdvOverride = exaggeration
-        // mlx-audio-swift 0.1.3 only consults the override while preparing reference
-        // conditioning. DontSpeak uses the bundled default conditioning, so update it too.
+        // mlx-audio-swift 0.1.3 reads override only while preparing reference conditioning;
+        // we use bundled default conditioning, so update that too.
         chatterbox.defaultConditioning?.emotionAdv = MLXArray(exaggeration)
     }
     let selectedVoice: String? = switch kind {
@@ -360,7 +356,7 @@ private func transcribe(_ model: ParakeetModel, _ samples: [Float]) -> String {
     model.generate(audio: MLXArray(samples)).text
 }
 
-/// Load Parakeet TDT v3 multilingual, matching the ONNX path. 0 = ok.
+/// Load Parakeet TDT v3 multilingual (mirrors ONNX). 0 = ok.
 @_cdecl("ds_mlx_asr_init")
 public func ds_mlx_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: Int32) -> Int32 {
     _ = computeUnits
@@ -377,7 +373,7 @@ public func ds_mlx_asr_init(_ modelDir: UnsafePointer<CChar>?, _ computeUnits: I
     }
 }
 
-/// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty input → "" (rc 0).
+/// 16 kHz mono f32 → UTF-8 via borrowed cb. Empty → "" (rc 0).
 @_cdecl("ds_mlx_transcribe")
 public func ds_mlx_transcribe(
     _ samples: UnsafePointer<Float>?,
@@ -417,7 +413,7 @@ public func ds_mlx_asr_shutdown() {
     clearMlxCacheAndLog(phase: "asr_shutdown")
 }
 
-/// End buffered streaming state without unloading the shared warm Parakeet model.
+/// Drop stream buffer; shared warm Parakeet stays loaded.
 @_cdecl("ds_mlx_asr_stream_shutdown")
 public func ds_mlx_asr_stream_shutdown() {
     asr.lock.lock()
@@ -428,8 +424,7 @@ public func ds_mlx_asr_stream_shutdown() {
 }
 
 // MARK: - Buffered streaming ASR
-// MLX Audio's Parakeet API consumes a complete array. Buffer chunks, periodically re-decode
-// the utterance for live partials, then run one final decode at finish.
+// Parakeet takes a complete array: buffer chunks, re-decode for partials, final decode at finish.
 
 /// Start/reset streaming utterance (modelDir only on first load). 0 = ok.
 @_cdecl("ds_mlx_asr_stream_start")
@@ -450,7 +445,7 @@ public func ds_mlx_asr_stream_start(_ modelDir: UnsafePointer<CChar>?) -> Int32 
     }
 }
 
-/// Push chunk; at most once per second of new 16 kHz audio, cb receives a refreshed hypothesis.
+/// Push chunk; at most once per second of new 16 kHz audio, cb gets refreshed hypothesis.
 @_cdecl("ds_mlx_asr_stream_push")
 public func ds_mlx_asr_stream_push(
     _ samples: UnsafePointer<Float>?,
@@ -509,7 +504,7 @@ public func ds_mlx_asr_stream_finish(
 }
 
 // MARK: - Diarization (Sortformer + WeSpeaker MLX)
-// Own manager+lock; JSON out for C ABI. Models pre-downloaded by DontSpeak.
+// Own manager+lock; JSON for C ABI. Models pre-downloaded by DontSpeak.
 
 private final class DiarState: @unchecked Sendable {
     let lock = NSLock()
@@ -548,7 +543,7 @@ func exclusiveRanges(
     }
 }
 
-/// Load diarizer and publish both models atomically after successful initialization.
+/// Load diarizer; publish both models only after successful init.
 @_cdecl("ds_mlx_diar_init")
 public func ds_mlx_diar_init(_ modelDir: UnsafePointer<CChar>?, _ activityThreshold: Float) -> Int32 {
     guard let path = cString(modelDir) else { return 3 }
@@ -575,7 +570,7 @@ public func ds_mlx_diar_init(_ modelDir: UnsafePointer<CChar>?, _ activityThresh
     }
 }
 
-/// 16 kHz mono f32 → JSON {segments, speakers}. Same id-space for join. Empty → {"segments":[]}.
+/// 16 kHz mono f32 → JSON {segments, speakers}. Empty → {"segments":[]}.
 @_cdecl("ds_mlx_diarize")
 public func ds_mlx_diarize(
     _ samples: UnsafePointer<Float>?,
@@ -662,7 +657,7 @@ public func ds_mlx_diar_shutdown() {
     clearMlxCacheAndLog(phase: "diar_shutdown")
 }
 
-/// WeSpeaker embedding for enrollment. Needs `ds_mlx_diar_init`. Empty → rc 3.
+/// WeSpeaker embedding for enrollment. Needs diar_init. Empty → rc 3.
 @_cdecl("ds_mlx_diar_embed")
 public func ds_mlx_diar_embed(
     _ samples: UnsafePointer<Float>?,

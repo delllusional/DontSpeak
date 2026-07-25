@@ -1,13 +1,12 @@
 //! Hook writers ([`claude_json_hooks`], TOML, Grok, [`seed_config`]).
-//! Registry target; merges in `ds-config`; IO in `super::io`.
-//! Additive, idempotent, backed-up. Unmergeable → leave untouched.
-//! Print-only seed/capture: #30 / `wire_surfaces_print_only`.
+//! Merges in `ds-config`; IO in `super::io`. Additive, idempotent, backed-up.
+//! Unmergeable → leave untouched. Print-only seed/capture: #30.
 
 use super::io::{self, WriteBody};
 use crate::PreviewDoc;
 use ds_config::{HookCommandStyle, HookSpec, Paths, WiredAgent};
 
-/// Seed missing `config.toml`. Interactive wire only (not engine reconcile).
+/// Seed missing `config.toml` (interactive wire only).
 pub(crate) fn seed_config(paths: &Paths) {
     if !paths.config_toml.exists() {
         if let Err(e) = ds_config::write_settings(paths, &ds_config::VoiceConfig::default()) {
@@ -23,7 +22,7 @@ pub(crate) fn seed_config(paths: &Paths) {
 }
 
 /// Claude-contract JSON hooks. Malformed/unmergeable → leave untouched (exit 1).
-/// `seed`/`capture`: print-only grouping (issue #30).
+/// `seed`/`capture`: print-only grouping (#30).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn claude_json_hooks(
     cfg: &std::path::Path,
@@ -92,7 +91,7 @@ pub(crate) fn claude_json_hooks(
             },
         }
     } else {
-        // Load-bearing: every-boot reconcile zero-write when unchanged.
+        // Zero-write on unchanged (every-boot reconcile).
         if merged == before {
             return 0;
         }
@@ -114,8 +113,7 @@ fn hook_action(remove: bool) -> &'static str {
     }
 }
 
-/// Shared TOML hook body: format-preserving; malformed/unmergeable → exit 1; zero-write when
-/// unchanged; backup before write; print-only seed/capture. Bin resolve only on merge path.
+/// Shared TOML hook body: format-preserving; unmergeable → exit 1; zero-write when unchanged.
 #[allow(clippy::too_many_arguments)]
 fn toml_hooks_body<E: std::fmt::Display>(
     cfg: &std::path::Path,
@@ -177,7 +175,7 @@ fn toml_hooks_body<E: std::fmt::Display>(
     }
 }
 
-/// Claude-contract TOML hooks (e.g. Codex). Same writer contract as JSON path.
+/// Claude-contract TOML hooks (e.g. Codex). Same contract as JSON path.
 pub(crate) fn claude_toml_hooks(
     cfg: &std::path::Path,
     client: WiredAgent,
@@ -223,10 +221,8 @@ pub(crate) fn kimi_toml_hooks(
     )
 }
 
-/// Shared YAML text body (Hermes config.yaml): same contract as [`toml_hooks_body`].
-///
-/// `write_action(remove)` labels the backup write; `load_hint` prints after a
-/// successful non-remove write (MCP).
+/// Shared YAML text body (Hermes): same contract as [`toml_hooks_body`].
+/// `write_action` labels the backup write; `load_hint` after successful non-remove write.
 #[allow(clippy::too_many_arguments)]
 fn yaml_text_body<E: std::fmt::Display>(
     cfg: &std::path::Path,

@@ -330,8 +330,7 @@ pub struct VoiceConfig {
     )]
     pub exclude_clients: Option<Vec<WiredAgent>>,
 
-    /// Agents feature gate: Agents tab + `usage` tool. Opt-in because usage
-    /// probing may touch the macOS keychain.
+    /// Agents tab + `usage` tool. Opt-in (usage may touch the macOS keychain).
     #[serde(default)]
     pub agents: bool,
 }

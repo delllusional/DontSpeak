@@ -112,8 +112,7 @@ impl TtsManagerTestOptions {
 pub struct TtsManager {
     bin: PathBuf,
     helper_log_file: PathBuf,
-    /// Outer lifecycle (start/stop/mark_dead). Before child/stdin/reader; not across
-    /// slot Condvar waits (avoids joining wrong reader on dual-EOF).
+    /// Lifecycle (start/stop/mark_dead). Not held across slot Condvar waits.
     lifecycle: Mutex<()>,
     last_restart: Mutex<Option<std::time::Instant>>,
     /// Live child + gen + deliberate teardown; shared with reader.
@@ -123,9 +122,9 @@ pub struct TtsManager {
     reader: Mutex<Option<JoinHandle<()>>>,
     speak_slot: Arc<(Mutex<SpeakSlot>, Condvar)>,
     cue_slot: Arc<(Mutex<CueSlot>, Condvar)>,
-    /// Separate from speak so speak+listen coexist on one stdout.
+    /// Separate from speak (speak+listen on one stdout).
     listen_slot: Arc<(Mutex<ListenSlot>, Condvar)>,
-    /// One untagged listen; tests fail busy instead of stealing Caps events.
+    /// One untagged listen (tests fail busy vs stealing Caps).
     listen_lease: Mutex<()>,
     cue_lease: Mutex<()>,
     /// Stop cancels through gen N (early stop vs delayed start).
@@ -144,11 +143,9 @@ pub struct TtsManager {
     stats: Arc<crate::stats::TtsStats>,
     stt_stats: Arc<crate::stats::SttStats>,
     lifetime: Arc<crate::stats::LifetimeSeconds>,
-    /// The backend a child ACTUALLY realized for TTS, from its `PROVIDER` line.
-    /// `None` = none realized (no child, or a child started without TTS preload) — never a guess.
+    /// Realized TTS EP from `PROVIDER` — never a guess (`None` until reported).
     tts_realized: Arc<Mutex<Option<String>>>,
-    /// The backend a child ACTUALLY realized for STT, from its `STT_PROVIDER` line.
-    /// `None` = none realized (no child, or a child that loaded no STT) — never a guess.
+    /// Realized STT EP from `STT_PROVIDER` — never a guess.
     stt_realized: Arc<Mutex<Option<String>>>,
     spawn_prefs: Mutex<SpawnPrefs>,
     full_duplex_active: Mutex<bool>,
@@ -324,15 +321,12 @@ impl TtsManager {
         self.tts_model
             .clear_error(self.gate.get().map(|g| g.as_ref()));
     }
-    /// The warm child's REALIZED TTS execution provider, from its `PROVIDER` line.
-    /// `None` until a child reports a realized backend.
+    /// Realized TTS EP (`PROVIDER` line).
     pub fn provider(&self) -> Option<String> {
         self.tts_realized.lock().unwrap().clone()
     }
 
-    /// The warm child's REALIZED STT execution provider ("CPU"/"CUDA"/"MLX"/"System"), from
-    /// its `STT_PROVIDER` line — what the STT sessions ACTUALLY loaded on, the STT counterpart to
-    /// [`provider`](Self::provider). `None` until a child reports a realized backend.
+    /// Realized STT EP (`STT_PROVIDER`); counterpart to [`provider`](Self::provider).
     pub fn stt_realized_provider(&self) -> Option<String> {
         self.stt_realized.lock().unwrap().clone()
     }
@@ -341,10 +335,7 @@ impl TtsManager {
         self.spawn_prefs.lock().unwrap().tts_model
     }
 
-    /// Switch the execution-provider preference ("auto"|"cpu"|"cuda"|"coreml"|"mlx"). Restarts
-    /// the warm child ONLY when the RESOLVED provider differs from the active one
-    /// (so picking "auto" while already on CPU is a no-op). Returns true if it
-    /// actually restarted — the caller then resets the TTS stats.
+    /// Set provider pref; restart only when the resolved EP differs. Returns whether restarted.
     pub fn set_provider(&self, which: &str) -> bool {
         let (model, tts_preload) = {
             let mut prefs = self.spawn_prefs.lock().unwrap();
@@ -399,8 +390,7 @@ impl TtsManager {
         self.stt_stats.reset();
     }
 
-    /// Download completion: restart (or start if presence-gated) to load new model files.
-    /// Provider unchanged; sole caller only for wanted engines. Returns is_running after.
+    /// After download: restart (or start) to load new files. Returns is_running after.
     pub(crate) fn reload_models(&self) -> bool {
         if !self.is_running() {
             self.ensure_started();
@@ -410,8 +400,7 @@ impl TtsManager {
         true
     }
 
-    /// Post-READY crash heal (queue worker). Decision: [`warm_child_heal_action`].
-    /// Observe+act under one lifecycle lock (avoid killing replacement after reload_models).
+    /// Post-READY crash heal ([`warm_child_heal_action`]). Observe+act under one lifecycle lock.
     pub(crate) fn restart_if_crashed(&self) {
         use crate::config_gate::HealAction;
         let _lifecycle = self.lifecycle.lock().unwrap();

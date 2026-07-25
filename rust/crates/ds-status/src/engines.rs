@@ -1,8 +1,5 @@
-//! Status-wire STT/TTS engine tokens — config tokens plus synthetic `"off"`.
-//!
-//! Config enums (`ds-config::{Stt,Tts}Engine`) have no `Off` variant (preference empty
-//! vec means off). Status always emits a concrete token. Wire tokens match config
-//! `as_str()` when not off. Unknown tokens fail deserialize (no fail-open).
+//! Status STT/TTS engine tokens: config `as_str()` plus synthetic `"off"`.
+//! Config has no Off (empty pref); status always emits a concrete token. Unknown → fail closed.
 
 use std::str::FromStr;
 
@@ -15,7 +12,7 @@ fn unknown_engine<'de, D: Deserializer<'de>>(
     serde::de::Error::unknown_variant(token, expected)
 }
 
-/// STT engine identity on `model_status.stt.engine` (includes status-only `"off"`).
+/// `model_status.stt.engine` (includes status-only `"off"`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum StatusSttEngine {
     BuiltIn,
@@ -75,7 +72,7 @@ impl<'de> Deserialize<'de> for StatusSttEngine {
     }
 }
 
-/// TTS engine identity on `model_status.tts.engine` (includes status-only `"off"`).
+/// `model_status.tts.engine` (includes status-only `"off"`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum StatusTtsEngine {
     BuiltIn,

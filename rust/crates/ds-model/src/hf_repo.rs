@@ -1,11 +1,9 @@
-//! Self-managed Hugging Face model sets: the shape, the roots, and the transfer.
+//! Self-managed Hugging Face model sets: shape, roots, transfer.
 //!
-//! We fetch every self-managed HF asset with the same HTTP/retry/SHA/atomic-rename/progress
-//! path as ONNX. The native shims load only these local directories. Each set pins an
-//! immutable HF commit and every selected file's path, size, and SHA-256 in this repository.
-//! `.ds-ready` records the revision after all pinned bytes verify (status polling stays
-//! network-free). The manifests live beside their runtime ([`crate::mlx_repo`]); this module
-//! owns only the machinery they share.
+//! Same HTTP/retry/SHA/atomic-rename path as ONNX. Shims load only local dirs. Each set
+//! pins an immutable HF commit and every file's path/size/SHA-256. `.ds-ready` records the
+//! revision after verify (status polling stays network-free). Manifests live beside their
+//! runtime ([`crate::mlx_repo`]); this module owns the shared machinery.
 
 use std::path::{Path, PathBuf};
 
@@ -14,48 +12,44 @@ use crate::hash::verify_sha256_cached;
 use crate::spec::ModelSpec;
 
 pub(crate) const HF_HOST: &str = "https://huggingface.co";
-/// Written into a model dir once every file is present + verified; holds the pinned revision
-/// so bumping the pin invalidates a stale tree and forces a re-fetch.
+/// Written once every file verifies; holds the pin so a bump invalidates a stale tree.
 pub(crate) const READY_MARKER: &str = ".ds-ready";
 
-/// Which on-disk root a repo's `dir_name` hangs under.
+/// On-disk root for a repo's `dir_name`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoRoot {
-    /// `<model>/mlx/<dir_name>` — the MLX Audio sets.
+    /// `<model>/mlx/<dir_name>`.
     Mlx,
-    /// `<model>/coreml/<dir_name>` — Core ML sets DontSpeak hands an explicit directory to.
+    /// `<model>/coreml/<dir_name>` — explicit-directory Core ML sets.
     CoreMl,
-    /// `<fluid>/<dir_name>` — FluidAudio's OWN cache. Its G2P singleton hardcodes
-    /// `TtsCacheDirectory.ensure()/Models/kokoro`: no env var, no settable property, and the
-    /// Swift side derives the home directory from `getpwuid`, so no `HOME` override can
-    /// redirect it. DontSpeak pre-fills that exact directory instead.
+    /// `<fluid>/<dir_name>` — FluidAudio's own cache. G2P hardcodes
+    /// `TtsCacheDirectory.ensure()/Models/kokoro` via `getpwuid` (no `HOME` redirect);
+    /// DontSpeak pre-fills that path instead.
     FluidCache,
 }
 
-/// Every on-disk root an asset can live under, as VALUES rather than ambient lookups.
+/// Asset roots as values, not ambient lookups.
 ///
-/// One resolution point ([`ModelRoots::ambient`]) at the process boundary; everything below
-/// it takes a `&ModelRoots`. That is what lets a removal reclaim a third-party cache while a
-/// test builds every root inside one tempdir.
+/// Resolve once at the process boundary ([`ModelRoots::ambient`]); everything below takes
+/// `&ModelRoots` — tests put both roots in one tempdir; removal can reclaim third-party cache.
 #[derive(Debug, Clone)]
 pub struct ModelRoots {
-    /// DontSpeak's model cache ([`ds_config::model_dir`]).
+    /// DontSpeak model cache ([`ds_config::model_dir`]).
     pub model: PathBuf,
-    /// FluidAudio's TTS cache ([`ds_config::fluidaudio_models_dir`]).
+    /// FluidAudio TTS cache ([`ds_config::fluidaudio_models_dir`]).
     pub fluid: PathBuf,
 }
 
 impl ModelRoots {
-    /// The ONE ambient resolution. Process boundary only. `None` exactly when
-    /// [`ds_config::model_dir`] is `None` — the fluid root is platform-neutral path math.
+    /// Ambient resolution (process boundary only). `None` when [`ds_config::model_dir`] is
+    /// `None`; fluid is platform-neutral path math.
     pub fn ambient() -> Option<Self> {
         let roots = Self {
             model: ds_config::model_dir()?,
             fluid: ds_config::fluidaudio_models_dir()?,
         };
-        // Nesting would make the recursive orphan sweep of one root walk the other; the
-        // containment arm in `download::orphan_sweep_root` tests `fluid` first so a nested
-        // pair still confines, but the layout itself is a configuration mistake.
+        // Nested roots would make one orphan sweep walk the other (layout is a config bug;
+        // `orphan_sweep_root` still checks fluid first so a nested pair confines).
         debug_assert!(
             !roots.fluid.starts_with(&roots.model) && !roots.model.starts_with(&roots.fluid),
             "model root {} and fluid root {} must be disjoint",
@@ -65,8 +59,7 @@ impl ModelRoots {
         Some(roots)
     }
 
-    /// Every root inside `dir`. Test seam, and the only other constructor. Pure path math:
-    /// creates nothing, so a fixture can assert its root was never materialized.
+    /// Both roots under `dir`. Test seam; pure path math (creates nothing).
     pub fn under(dir: &Path) -> Self {
         Self {
             model: dir.join("models"),
@@ -74,7 +67,7 @@ impl ModelRoots {
         }
     }
 
-    /// Total — a repo always has a directory once the roots resolve.
+    /// Directory for `repo` once roots resolve (total).
     pub fn dir_for(&self, repo: &HfRepo) -> PathBuf {
         match repo.root {
             RepoRoot::Mlx => ds_config::mlx_dir_under(&self.model).join(repo.dir_name),
@@ -97,43 +90,37 @@ pub struct HfFile {
     pub sha256: &'static str,
 }
 
-/// One model set, pinned to an immutable HF revision and static file manifest.
+/// Model set pinned to an immutable HF revision + static file manifest.
 pub struct HfRepo {
     pub name: &'static str,
     pub repo: &'static str,
     pub revision: &'static str,
     pub files: &'static [HfFile],
-    /// Directory name under the root `root` names. [`ModelRoots::dir_for`] is the ONE
-    /// resolution of the pair, so the downloader, the presence probe and the removal
-    /// cannot land on different directories.
+    /// Directory under `root`. [`ModelRoots::dir_for`] is the sole resolution — downloader,
+    /// presence, and removal cannot disagree.
     pub dir_name: &'static str,
     pub root: RepoRoot,
-    /// Library-catalog metadata (the Apple-Silicon model sets shown in the Libraries tab).
-    /// The license lives WITH the files here — same can't-drift principle as
-    /// [`crate::urls::Project`] — so `crate::libraries` can render these alongside the
-    /// downloaded ONNX assets without a second, drift-prone source. `display_name`/`usage`
-    /// empty ⇒ the set is an internal sub-component of another entry (e.g. the Kokoro G2P
-    /// sub-models share the Kokoro repo) and is folded into it, not listed on its own.
+    /// Libraries-tab catalog. License lives with the files (same can't-drift as
+    /// [`crate::urls::Project`]). Empty `display_name`/`usage` ⇒ internal sub-component
+    /// folded into another entry (e.g. Kokoro G2P).
     pub display_name: &'static str,
     pub usage: &'static str,
     pub license: &'static str,
     pub license_url: &'static str,
 }
 
-/// LOCAL presence of a whole set (no network): every repo's completion marker present at the
-/// pinned revision — see [`is_hf_repo_present`].
+/// Local set presence (no network): every repo ready — see [`is_hf_repo_present`].
 pub fn is_hf_set_present(roots: &ModelRoots, set: &[&HfRepo]) -> bool {
     set.iter().all(|r| is_hf_repo_present(roots, r))
 }
 
-/// Completion marker in `dir` carries `repo`'s pinned revision. Existence-only half of
-/// [`is_hf_repo_present`], for the inventory probe.
+/// Marker in `dir` matches pinned revision. Existence-only half of [`is_hf_repo_present`].
 pub(crate) fn ready_marker_matches(dir: &Path, repo: &HfRepo) -> bool {
     std::fs::read_to_string(dir.join(READY_MARKER))
         .is_ok_and(|marker| marker.trim() == repo.revision)
 }
 
-/// LOCAL presence (no network): marker revision matches and every source-pinned file verifies.
+/// Local presence (no network): marker matches + every pinned file verifies.
 pub fn is_hf_repo_present(roots: &ModelRoots, repo: &HfRepo) -> bool {
     let target = roots.dir_for(repo);
     ready_marker_matches(&target, repo)
@@ -165,12 +152,10 @@ fn download_one_at(
     ensure_at(dest, &spec, DEFAULT_RETRIES, progress)
 }
 
-/// Download a SET of repos as one unit, reporting ONE overall byte-weighted bar:
-/// `progress(done_bytes, total_bytes)` where BOTH are summed across every file of every repo —
-/// so the UI shows a single monotonic "Downloading `<pct>`%" over the WHOLE set (a true global
-/// percent, not a per-file percent that resets each file). Writes each repo's completion marker
-/// once its own files verify — per repo, so a failed member keeps completed repos' markers.
-/// Missing files fetch concurrently (bounded pool).
+/// Download a set as one unit with one byte-weighted bar (`progress(done, total)` summed
+/// across every file of every repo — monotonic over the whole set). Writes each repo's
+/// marker once its own files verify (failed sibling keeps completed markers). Concurrent
+/// fetch for missing files (bounded pool).
 pub fn ensure_hf_repos(
     roots: &ModelRoots,
     repos: &[&HfRepo],
@@ -210,11 +195,9 @@ pub(crate) fn ensure_hf_repos_at(
         return Ok(());
     }
 
-    // One directory flight per planned repo dir for the whole run — the granularity a
-    // `models remove` deletes at, so the two exclude each other instead of interleaving
-    // per file. The pre-check above still runs outside the flight: a removal landing in
-    // that window makes a concurrent cross-process `ds-helper --prefetch` skip a repo it
-    // believed present, which the engine's next `compute_needs` probe re-fetches.
+    // One dir flight per planned repo (same grain as `models remove`). Pre-check is outside
+    // the flight: a removal in that window can skip a still-needed repo; next
+    // `compute_needs` re-fetches.
     let dirs: Vec<PathBuf> = plan.iter().map(|(_, target)| target.clone()).collect();
     crate::download::with_destination_flights_in(Some(roots), &dirs, || {
         ensure_hf_repos_locked(host, &plan, total_bytes, progress)
@@ -267,18 +250,14 @@ fn ensure_hf_repos_locked(
         jobs,
     );
 
-    // Per-repo marker atomicity: write each repo's marker as soon as ALL of its own files verify,
-    // independent of sibling repos in the same set. A failed sibling no longer discards a completed
-    // repo's marker, so the next retry skips the finished repo. A repo with any invalid file gets
-    // no marker and self-repairs on the next run.
+    // Per-repo markers: write as soon as that repo's files verify (siblings independent).
     for (repo, target) in plan {
         if let Some(missing) = repo
             .files
             .iter()
             .find(|file| !already_have(&target.join(Path::new(file.path)), file))
         {
-            // After a *successful* pool run every file must be present; a gap is a real bug, not
-            // the partial-failure case (which already carries the pool's own error).
+            // Successful pool ⇒ every file present; a gap is a bug (partial failure already errs).
             if pool_result.is_ok() {
                 return Err(std::io::Error::other(format!(
                     "missing verified file after download: {}",
@@ -307,8 +286,7 @@ pub(crate) fn fixture_files(files: Vec<HfFile>) -> &'static [HfFile] {
     Box::leak(files.into_boxed_slice())
 }
 
-/// A manifest-shaped repo whose `dir_name` is its own name, so two fixtures in one set land
-/// in distinct directories under the same roots.
+/// Fixture repo with `dir_name == name` (distinct dirs under one root).
 #[cfg(test)]
 pub(crate) fn fixture_repo(
     name: &'static str,
@@ -335,9 +313,7 @@ pub(crate) fn fixture_repo(
 mod tests {
     use super::*;
 
-    /// Pure path math (no FS): one resolution per repo, under the root it declares. There is
-    /// only one spelling of that resolution now, so what is left to pin is the LAYOUT each
-    /// [`RepoRoot`] promises.
+    /// Layout each [`RepoRoot`] promises (pure path math).
     #[test]
     fn every_repo_resolves_under_its_declared_root() {
         let dir = Path::new("/roots");
@@ -361,8 +337,7 @@ mod tests {
             roots.model.join("coreml").join("coreml")
         );
 
-        // A third-party cache is NOT under the model root: that is the whole point of the
-        // second root, and what makes a removal there something to bound (#212).
+        // Fluid cache is outside the model root — removal there must stay bounded (#212).
         let fluid = fixture_repo(
             "kokoro",
             "test-org/fluid",
@@ -375,9 +350,7 @@ mod tests {
         assert!(!fluid_dir.starts_with(&roots.model));
     }
 
-    /// `under` yields both roots on any host, and `ambient` resolves exactly when the model
-    /// dir does — the fluid root is platform-neutral path math, not a macOS-gated lookup, so
-    /// `dir_for` never has to be fallible.
+    /// `under` always yields both roots; `ambient` tracks `model_dir` (fluid is pure path math).
     #[test]
     fn model_roots_resolve_on_every_platform() {
         let tmp = tempfile::tempdir().unwrap();

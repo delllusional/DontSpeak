@@ -1,16 +1,14 @@
-//! `models` tool backend: on-disk inventory + removal, over `ds-ipc`.
+//! `models` tool: inventory + removal over `ds-ipc`.
 //!
-//! Lives in the engine because the engine owns the process-local download flights and the
-//! authoritative in-flight download state — a cross-process file lock alone would not
-//! serialize a removal against a download running in this same process. It is also the only
-//! place `DownloadState` is visible.
+//! Engine-local: only here sees `DownloadState` / in-process flights (file locks can't
+//! serialize remove vs same-process download).
 
 use ds_config::{Paths, VoiceConfig};
 use ds_model::{DownloadTarget, ModelRoots};
 
 use crate::downloads::{DownloadProg, TargetState};
 
-/// Targets currently transferring — the authoritative "is this downloading right now".
+/// In-flight targets (authoritative "downloading right now").
 fn active_targets(downloads: &DownloadProg) -> Vec<DownloadTarget> {
     downloads
         .lock()
@@ -22,9 +20,7 @@ fn active_targets(downloads: &DownloadProg) -> Vec<DownloadTarget> {
         .collect()
 }
 
-/// Names WHAT still holds a referenced shared asset. One arm per
-/// [`ds_config::SHARED_ASSET_TOKENS`] entry, so no id inherits another's cause;
-/// `every_shared_token_names_its_own_cause` fails the build when a token arrives without one.
+/// Cause text per [`ds_config::SHARED_ASSET_TOKENS`] (one arm each; test pins completeness).
 fn shared_refusal(id: &str) -> String {
     match id {
         ds_config::ONNXRUNTIME_ASSET_TOKEN => format!(
@@ -40,8 +36,7 @@ fn shared_refusal(id: &str) -> String {
     }
 }
 
-/// Cause-free fallback for a shared id [`shared_refusal`] does not name — refuse without
-/// asserting a reason that may not apply.
+/// Fallback when [`shared_refusal`] has no named cause.
 fn unnamed_shared_refusal(id: &str) -> String {
     format!("models: `{id}` is shared and still referenced — remove or deselect what needs it")
 }
@@ -50,8 +45,7 @@ fn unavailable_refusal(id: &str) -> String {
     format!("models: `{id}` is not available on this platform")
 }
 
-/// Refuse a removal the engine would immediately undo, or that would break an installed
-/// model. `None` ⇒ the removal may proceed. First match wins.
+/// Refuse unsafe/undoable removal. `None` = may proceed. First match wins.
 fn refusal(
     roots: &ModelRoots,
     cfg: &VoiceConfig,
@@ -59,8 +53,7 @@ fn refusal(
     active: &[DownloadTarget],
 ) -> Option<String> {
     let Some(targets) = ds_model::asset_targets(id) else {
-        // The tool schema already rejects this, so reaching here means the CLI and the engine
-        // disagree about the asset list.
+        // Schema already rejects — CLI/engine asset-list skew.
         return Some(format!(
             "models: unknown model `{id}` — the running engine may be older than this CLI"
         ));
@@ -69,13 +62,11 @@ fn refusal(
         .iter()
         .any(|target| target.is_supported_on_this_host())
     {
-        // The remove enum is one platform-independent list while `scan_at` drops a row this
-        // host cannot hold; without this the answer is a confusing 0-byte "success".
+        // Platform-independent remove enum vs host-dropped scan rows → avoid 0-byte "success".
         return Some(unavailable_refusal(id));
     }
     if ds_model::asset_in_use(cfg, id) {
-        // Distinct texts: on Windows and Linux the STT ladder resolves to built_in by
-        // default, so pointing that user at tts_model would be actively wrong.
+        // Distinct STT/TTS texts (Win/Linux STT default is built_in).
         return Some(if id == ds_config::STT_MODEL_TOKEN {
             format!(
                 "models: `{id}` is the active STT model — switch with set_config stt_engine first"
@@ -90,9 +81,7 @@ fn refusal(
         return Some(shared_refusal(id));
     }
     if ds_model::is_shared_asset(id) && !active.is_empty() {
-        // `DownloadTarget::Onnxruntime` is never an engine download target — every ORT fetch
-        // is a step inside another target's setup — so the per-target check below cannot see
-        // the Chatterbox download that is about to install the dylib.
+        // ORT is never its own engine target — per-target check can't see the parent fetch.
         return Some(format!(
             "models: `{id}` is shared and a download is in flight — try again when it finishes"
         ));
@@ -105,8 +94,7 @@ fn refusal(
     None
 }
 
-/// List the on-disk inventory, optionally removing one model or shared-asset id first. A
-/// failed removal answers with an error and no payload — never a success carrying a stale row.
+/// Inventory, optionally remove first. Failed remove → error, never stale success payload.
 pub(crate) fn respond(
     paths: &Paths,
     downloads: &DownloadProg,
@@ -149,8 +137,7 @@ mod tests {
             .join(" ")
     }
 
-    /// Guards a fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`: the flight would
-    /// then take its sweep gate in the REAL model dir (#204).
+    /// Fixture must not sit under `DONTSPEAK_MODEL_DIR` (#204 sweep into real model dir).
     fn assert_fixture_is_isolated(root: &Path, path: &Path) {
         assert!(
             ds_model::sweep_root_of(path).is_some_and(|resolved| resolved.starts_with(root)),
@@ -176,7 +163,7 @@ mod tests {
         dylib
     }
 
-    /// `Paths::rooted_at` keeps the fixture off the developer's real config.toml.
+    /// Isolated config root (not the developer's real config.toml).
     fn fixture(config: &str) -> (tempfile::TempDir, Paths) {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
@@ -210,8 +197,7 @@ mod tests {
         }
     }
 
-    /// The docs quote these user-facing refusals; keep the examples tied to the engine
-    /// branches that produce them.
+    /// docs/MCP-TOOLS.md quotes these refusals.
     #[test]
     fn mcp_tools_doc_matches_models_refusals() {
         let doc = normalize(MCP_TOOLS_DOC);
@@ -360,8 +346,7 @@ mod tests {
         assert!(!dylib.exists());
     }
 
-    /// Every shared token must name what holds it; the fallback names nothing, so a token
-    /// still answering with it is one this table has not been taught.
+    /// Shared tokens must not fall through to the unnamed refusal.
     #[test]
     fn every_shared_token_names_its_own_cause() {
         for id in ds_config::SHARED_ASSET_TOKENS {
@@ -369,9 +354,7 @@ mod tests {
         }
     }
 
-    /// The CUDA runtime is referenced by SELECTION plus a driver to use it, so this fixture
-    /// must resolve a built-in engine — with a model whose own row is not the one being
-    /// removed — and split on whether this host actually has the driver.
+    /// CUDA remove: selection + driver; fixture keeps a different model selected.
     #[test]
     fn the_cuda_runtime_follows_the_resolved_provider() {
         let cfg = |provider: &str| {
@@ -401,8 +384,7 @@ mod tests {
                 "models: `cuda` is the resolved compute provider — set_config provider without `cuda` first"
             );
         } else {
-            // No driver: the engine runs the CPU EP and never prefetches the runtime, so the
-            // ladder resolving to `cuda` must not strand ~1.4 GB on this host.
+            // No driver → CPU EP; do not strand the runtime.
             assert_eq!(payload(response)["removed"]["id"], "cuda");
         }
 
@@ -414,8 +396,7 @@ mod tests {
         assert_eq!(after["removed"]["id"], "cuda");
     }
 
-    /// `DownloadTarget::Onnxruntime` is never an engine download target — the dylib installs
-    /// as a step inside another target's setup — so only the shared clause can catch this.
+    /// Shared ids refused while any download is in flight (ORT has no own target).
     #[test]
     fn a_shared_id_is_refused_while_any_download_is_in_flight() {
         let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\nprovider = [\"cpu\"]\n");
@@ -432,9 +413,7 @@ mod tests {
         );
     }
 
-    /// An id this engine does not list is version skew, not a shared asset: a CLI updated
-    /// ahead of the app-hosted engine advertises the new token in its schema, and the stale
-    /// engine must point at itself rather than at a shared-asset rule that does not apply.
+    /// Unlisted id = CLI/engine skew (blame engine), not shared-asset rules.
     #[test]
     fn an_unlisted_id_names_the_engine_as_the_stale_side() {
         let (_config, paths) = fixture("tts_engine = []\nstt_engine = []\n");

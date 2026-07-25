@@ -1,9 +1,8 @@
-//! FluidAudio Core ML / ANE Kokoro voice packs from the shared ONNX `voices-v1.0.bin`.
+//! FluidAudio ANE Kokoro voice packs from the shared ONNX `voices-v1.0.bin`.
 //!
-//! HF ships only `ANE/af_heart.bin`, and FluidAudio's `ensureVoicePack` throws (no fallback)
-//! for any other id, while Kokoro's default voices are `af_sarah` / `bf_emma`. The graph accepts
-//! any Kokoro voice (`[510, 256]` fp32), so materialize the requested pack from the shared npz
-//! into the ANE cache the chain loads from. Layout = the shipped pack: 510*256 LE f32.
+//! HF ships only `ANE/af_heart.bin` and `ensureVoicePack` throws for other ids, while
+//! defaults are `af_sarah`/`bf_emma`. Materialize `[510, 256]` LE f32 packs into the ANE
+//! cache the chain loads from.
 
 use std::path::PathBuf;
 
@@ -13,17 +12,13 @@ use ds_model::hf_repo::ModelRoots;
 const VOICE_PACK_FLOATS: usize = 510 * 256;
 const VOICE_PACK_BYTES: usize = VOICE_PACK_FLOATS * 4;
 
-/// Where FluidAudio's English ANE chain loads packs: `<model>/coreml/kokoro-82m-coreml/ANE`.
-/// DontSpeak inits the shim with its OWN root, not FluidAudio's `~/.cache/fluidaudio`, so a
-/// pack materialized for that chain MUST land here. Via shared
-/// [`ds_model::coreml_repo::kokoro_ane_dir`] so the materialize target cannot drift from the
-/// shim's read path.
+/// ANE cache under DontSpeak's model root (not FluidAudio's `~/.cache/fluidaudio`).
+/// Shared [`ds_model::coreml_repo::kokoro_ane_dir`] keeps materialize path aligned with the shim.
 fn ane_dir(roots: &ModelRoots) -> PathBuf {
     ds_model::coreml_repo::kokoro_ane_dir(roots)
 }
 
-/// Filename FluidAudio's `ensureVoicePack` looks up (ASCII alnum + `_`). Kokoro ids are all
-/// ASCII; `None` if empty after filtering.
+/// FluidAudio `ensureVoicePack` filename (ASCII alnum + `_`); `None` if empty after filter.
 fn sanitize(voice: &str) -> Option<String> {
     let s: String = voice
         .chars()
@@ -32,13 +27,13 @@ fn sanitize(voice: &str) -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// Path `voice`'s ANE pack would live at. `None` if the model dir is unresolvable.
+/// Path for `voice`'s ANE pack, or `None` if model dir unresolvable.
 pub fn voice_pack_path(voice: &str) -> Option<PathBuf> {
     let roots = ModelRoots::ambient()?;
     Some(ane_dir(&roots).join(format!("{}.bin", sanitize(voice)?)))
 }
 
-/// ANE pack already on disk?
+/// Whether the ANE pack is already on disk.
 pub fn is_materialized(voice: &str) -> bool {
     voice_pack_path(voice).is_some_and(|p| p.is_file())
 }
@@ -75,8 +70,7 @@ pub fn materialize(voice: &str) -> Result<PathBuf, String> {
     }
     debug_assert_eq!(bytes.len(), VOICE_PACK_BYTES);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    // Atomic write+rename: concurrent synth never sees a half-written pack, and two writers
-    // cannot clobber temps. Content is deterministic -- last rename wins harmlessly.
+    // Atomic write+rename so concurrent synth never sees a half-written pack.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = dir.join(format!(".{id}.bin.{}.{n}.tmp", std::process::id()));
@@ -88,7 +82,7 @@ pub fn materialize(voice: &str) -> Result<PathBuf, String> {
     Ok(dest)
 }
 
-/// Voices npz on disk? Decide extract-now vs kick download.
+/// Whether the voices npz is on disk (extract now vs kick download).
 pub fn voices_npz_present() -> bool {
     ModelRoots::ambient()
         .is_some_and(|roots| roots.model.join(ds_model::KOKORO_VOICES_FILE).is_file())
@@ -107,7 +101,7 @@ mod tests {
         assert_eq!(sanitize("///"), None);
     }
 
-    /// Pure path math (no ambient, no FS): a pack lands in the ANE cache under the given roots.
+    /// Pure path math: pack under the ANE cache for given roots.
     #[test]
     fn voice_pack_lands_in_the_ane_cache_under_roots() {
         let roots = ModelRoots::under(Path::new("/roots"));

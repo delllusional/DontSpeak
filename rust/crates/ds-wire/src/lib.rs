@@ -1,5 +1,5 @@
 //! Client-wiring orchestrator — CLI [`run`] and engine boot/config [`reconcile`].
-//! Same path over `CLIENT_REGISTRY` (no drift). Additive, idempotent, backed-up.
+//! Same path over `CLIENT_REGISTRY`. Additive, idempotent, backed-up.
 //!
 //! `--print-only` (#30): co-file surfaces share one disk read via `PreviewDoc`.
 
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ds_config::{ClientKind, ClientSpec, Paths, Surface, WireMechanism, WiredAgent};
 
-/// Merged surface doc for print-only threading (JSON, format-preserving TOML, or YAML text).
+/// Merged surface doc for print-only threading (JSON / TOML / YAML text).
 #[derive(Debug)]
 pub(crate) enum PreviewDoc {
     Json(serde_json::Value),
@@ -22,7 +22,7 @@ pub(crate) enum PreviewDoc {
 /// MCP registry key / `serverInfo.name`. Must match `dontspeak::mcp::SERVER_NAME`.
 pub const SERVER_NAME: &str = "DontSpeak";
 
-/// CLI entry. Exit 0 ok/skip, 1 hard error. Wire-able tokens only.
+/// CLI entry. Exit 0 ok/skip, 1 hard error.
 pub fn run(args: &[String]) -> i32 {
     let mut client: Option<WiredAgent> = None;
     let mut remove = false;
@@ -31,7 +31,6 @@ pub fn run(args: &[String]) -> i32 {
     let mut do_reconcile = false;
     let mut list = false;
     let mut help = false;
-    // Registry-driven usage tokens.
     let tokens = || {
         ds_config::CLIENT_REGISTRY
             .iter()
@@ -101,7 +100,7 @@ pub fn run(args: &[String]) -> i32 {
         return 1;
     };
 
-    // Before `--all` so `--reconcile` is not also an unconditional wire.
+    // Before `--all` so reconcile is not also an unconditional wire.
     if do_reconcile {
         return reconcile(&paths);
     }
@@ -122,7 +121,7 @@ pub fn run(args: &[String]) -> i32 {
     )
 }
 
-/// Manual selections update the desired state before converging client files.
+/// Update desired state, then converge client files.
 fn wire_selected(clients: &[WiredAgent], paths: &Paths, remove: bool, print_only: bool) -> i32 {
     if !print_only && let Err(error) = ds_config::set_clients_excluded(paths, clients, remove) {
         eprintln!("wire: {error}");
@@ -135,7 +134,7 @@ fn wire_selected(clients: &[WiredAgent], paths: &Paths, remove: bool, print_only
         .unwrap_or(0)
 }
 
-/// Converge every client to `exclude_clients` (absent/empty ⇒ wire all). No seed/prune.
+/// Converge every client to `exclude_clients` (absent/empty ⇒ wire all).
 /// Engine boot + `wire --reconcile`. Worst exit code wins.
 pub fn reconcile(paths: &Paths) -> i32 {
     let excluded = ds_config::VoiceConfig::load(paths).excluded_clients();
@@ -153,13 +152,13 @@ pub fn reconcile(paths: &Paths) -> i32 {
         .unwrap_or(0)
 }
 
-/// All surfaces run even if one fails (worst code wins) so `--remove` cannot leave dangling MCP.
+/// All surfaces run even if one fails (worst code wins) so `--remove` leaves no dangling MCP.
 fn wire_client(client: WiredAgent, paths: &Paths, remove: bool, print_only: bool) -> i32 {
     let spec = ds_config::client_spec(client);
 
     if !print_only {
         if remove {
-            // No config files ⇒ nothing to strip; don't scatter on remove.
+            // No config files ⇒ nothing to strip.
             if !spec
                 .surfaces
                 .iter()
@@ -177,7 +176,7 @@ fn wire_client(client: WiredAgent, paths: &Paths, remove: bool, print_only: bool
     }
 
     let code = if print_only {
-        // Issue #30 — real writes always pass seed/capture = None.
+        // #30 — real writes always pass seed/capture = None.
         wire_surfaces_print_only(spec, paths, remove)
             .into_iter()
             .map(|(_file, code, _doc)| code)
@@ -196,7 +195,7 @@ fn wire_client(client: WiredAgent, paths: &Paths, remove: bool, print_only: bool
     code
 }
 
-/// `seed`/`capture` are print-only only; always `None` on real write. Grok ignores both.
+/// `seed`/`capture` print-only only; `None` on real write. Grok ignores both.
 #[allow(clippy::too_many_arguments)] // 5 mechanisms + seed/capture
 fn dispatch_surface(
     s: &'static Surface,
@@ -208,7 +207,7 @@ fn dispatch_surface(
     capture: Option<&mut Option<PreviewDoc>>,
 ) -> i32 {
     match s.mechanism {
-        // Writers take `spec.target` as `--client` — none hardcodes its client.
+        // Writers take `spec.target` as `--client`.
         WireMechanism::ClaudeJsonHooks => hooks::claude_json_hooks(
             (s.config_file)(paths),
             s.hook_streaming,
@@ -286,8 +285,8 @@ fn dispatch_surface(
     }
 }
 
-/// Print-only: group by config file, thread merged `PreviewDoc`s (issue #30).
-/// Grok never participates (`doc` is `None`; it prints itself).
+/// Print-only: group by config file, thread merged `PreviewDoc`s (#30).
+/// Grok prints itself (`doc` is `None`).
 pub(crate) fn wire_surfaces_print_only(
     spec: &'static ClientSpec,
     paths: &Paths,
@@ -334,7 +333,7 @@ pub(crate) fn wire_surfaces_print_only(
         .collect()
 }
 
-/// Print captured preview as the writer would (`// {path}\n{body}`, issue #33).
+/// Print captured preview as the writer would (`// {path}\n{body}`, #33).
 fn print_captured_doc(mechanism: WireMechanism, cfg: &Path, doc: &PreviewDoc) -> i32 {
     match (mechanism, doc) {
         (WireMechanism::ClaudeJsonHooks | WireMechanism::JsonMcp, PreviewDoc::Json(v)) => {
@@ -425,9 +424,7 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    /// Satisfy a client's presence gate: drop a stub executable where
-    /// `ClientSpec::present` looks (`~/.local/bin`, one of its unconditional fallback
-    /// dirs) — not a dot-dir, which is no longer the presence signal.
+    /// Stub executable where `ClientSpec::present` looks (`~/.local/bin`).
     fn make_present(paths: &Paths, client: WiredAgent) {
         let command = client.as_str();
         let bin_dir = paths.home.join(".local/bin");

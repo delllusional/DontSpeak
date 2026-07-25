@@ -1,7 +1,6 @@
-//! Shared macOS speech C-ABI shim loader. One dylib per runtime family (`sys`, `mlx`,
-//! `fluid`), each with its own path variable and its own `Frameworks` member, so a host can
-//! carry any subset. One place for the env vars + dlopen so `ds-stt` and `ds-tts` can't drift
-//! (neither depends on the other). Callers retain every loaded `Library` for its use period.
+//! Shared macOS speech C-ABI shim loader. One dylib per family (`sys` / `mlx` / `fluid`),
+//! each with its own env var and Frameworks member. Single env+dlopen site so `ds-stt` and
+//! `ds-tts` cannot drift. Callers retain each loaded `Library` for its use period.
 
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
@@ -9,9 +8,8 @@ use std::path::{Path, PathBuf};
 
 use libloading::Library;
 
-/// Which shim dylib a call targets. `Mlx` and `Fluid` are SEPARATE dylibs: one presence
-/// answer cannot stand for both, or a Fluid-present/MLX-absent host silently falls through
-/// to ONNX and the status row reads a plausible-looking "ORT CPU" (#241).
+/// Shim dylib family. `Mlx` and `Fluid` are separate: one presence must not stand for both
+/// or Fluid-present/MLX-absent falls to ONNX with a plausible "ORT CPU" status (#241).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shim {
     Sys,
@@ -38,7 +36,7 @@ impl Shim {
         }
     }
 
-    /// The family's `ds_*_set_log_cb` export (dontspeak_shim.h).
+    /// `ds_*_set_log_cb` export (dontspeak_shim.h).
     fn log_symbol(self) -> &'static [u8] {
         match self {
             Shim::Sys => b"ds_sys_set_log_cb\0",
@@ -47,7 +45,7 @@ impl Shim {
         }
     }
 
-    /// `ds-log` source token, which is what the Logs tab filters on.
+    /// `ds-log` source token (Logs tab filter).
     fn log_source(self) -> &'static str {
         match self {
             Shim::Sys => "sys",
@@ -57,8 +55,7 @@ impl Shim {
     }
 }
 
-/// Diagnostic sink registered with each dylib after `dlopen`. One thunk per family so the
-/// source token is a Rust-side fact rather than something the shim reports.
+/// Post-`dlopen` diagnostic sink. One thunk per family so the source token is Rust-side.
 type LogCb = unsafe extern "C" fn(i32, *const c_char);
 
 unsafe extern "C" fn log_sys(level: i32, msg: *const c_char) {
@@ -71,24 +68,20 @@ unsafe extern "C" fn log_fluid(level: i32, msg: *const c_char) {
     forward(Shim::Fluid, level, msg)
 }
 
-/// Copy one shim line into the unified log. Cannot panic (null-checked pointer,
-/// `to_string_lossy` is infallible, `ds-log`'s writer is fail-quiet), which matters because
-/// an escaping panic across `extern "C"` aborts -- same contract as `pcm_sink` / `str_sink`.
+/// Copy one shim line into the unified log. Must not panic across `extern "C"` (abort) —
+/// same contract as `pcm_sink` / `str_sink`.
 fn forward(shim: Shim, level: i32, msg: *const c_char) {
     if msg.is_null() {
         return;
     }
-    // SAFETY: NUL-terminated UTF-8 owned by the shim for this call only (dontspeak_shim.h);
-    // copied before return, like `str_sink`.
+    // SAFETY: NUL C string owned by the shim for this call only (dontspeak_shim.h); copy out.
     let text = unsafe { CStr::from_ptr(msg) }.to_string_lossy();
-    // No installed logger (`log`'s default max level is Off) => `log::log!` would drop this
-    // silently. The ds-stt/ds-tts examples dlopen a shim without calling `ds_log::init`, so
-    // keep their diagnostics on stderr exactly as they are today.
+    // No logger (default Off) would drop this; examples dlopen without `ds_log::init`.
     if log::max_level() == log::LevelFilter::Off {
         eprintln!("[{}] {text}", shim.log_source());
         return;
     }
-    // Baseline filter is Info, so DEBUG lines drop unless DONTSPEAK_DEBUG raises it.
+    // Baseline Info; DEBUG needs DONTSPEAK_DEBUG.
     let level = match level {
         0 => log::Level::Debug,
         2 => log::Level::Warn,
@@ -98,8 +91,7 @@ fn forward(shim: Shim, level: i32, msg: *const c_char) {
     log::log!(target: shim.log_source(), level, "{text}");
 }
 
-// Borrowed-result callbacks: shim fires once, sync, on this thread before return.
-// We copy out; no free. Stack `&mut Option<…>` ctx — no channel/Send.
+// Borrowed-result callbacks: sync, same-thread, once before return. Copy out; no free.
 
 /// dontspeak_shim.h borrowed-result callbacks; buffer valid only during the call.
 pub type PcmCb = unsafe extern "C" fn(*mut c_void, *const f32, usize, i32);
@@ -129,7 +121,7 @@ unsafe extern "C" fn str_sink(ctx: *mut c_void, ptr: *const c_char) {
     });
 }
 
-/// Run a PCM-returning shim call; copy out during the sync callback. `Ok` on status 0.
+/// PCM-returning shim call; copy out on sync callback. `Ok` on status 0.
 pub fn collect_pcm(call: impl FnOnce(*mut c_void, PcmCb) -> i32) -> Result<Vec<f32>, i32> {
     let mut out: Option<Vec<f32>> = None;
     let rc = call(&mut out as *mut _ as *mut c_void, pcm_sink);
@@ -159,54 +151,42 @@ fn path_arg(dir: Option<PathBuf>) -> CString {
     CString::new("").unwrap()
 }
 
-/// Local directory for any built-in MLX TTS model.
 pub fn tts_model_dir_arg(model: ds_config::TtsModel) -> CString {
     path_arg(crate::mlx_repo::tts_mlx_dir(model))
 }
 
-/// The Core ML root handed to FluidAudio's ANE Kokoro chain. FluidAudio appends the variant's
-/// full `folderName` (`kokoro-82m-coreml/ANE`), so this is the root ABOVE the set dir -- see
-/// [`crate::coreml_repo::kokoro_hub_root`], which shares one resolution with the download
-/// target and with `ds-tts`'s voice-pack materializer.
+/// Core ML root for Fluid ANE Kokoro — see [`crate::coreml_repo::kokoro_hub_root`].
 pub fn fluid_kokoro_dir_arg() -> CString {
     let dir = crate::hf_repo::ModelRoots::ambient()
         .map(|roots| crate::coreml_repo::kokoro_hub_root(&roots));
     path_arg(dir)
 }
 
-/// Local MLX Parakeet directory, shared by batch and buffered streaming calls.
 pub fn parakeet_model_dir_arg() -> CString {
     path_arg(crate::mlx_repo::parakeet_mlx_dir())
 }
 
-/// Directory handed to FluidAudio's `AsrModels.load(from:version:.v2)` for the batch Parakeet
-/// set. The v0.15.5 loader strips the last path component and re-appends the v2 repo folder
-/// (`parakeet-tdt-0.6b-v2`), so handing it the set directory itself round-trips to the same
-/// files -- one resolution shared with the download target via `parakeet_batch_dir`.
+/// Batch Parakeet dir for Fluid `AsrModels.load` — see [`crate::coreml_repo::parakeet_batch_dir`].
 pub fn fluid_parakeet_dir_arg() -> CString {
     let dir = crate::hf_repo::ModelRoots::ambient()
         .map(|roots| crate::coreml_repo::parakeet_batch_dir(&roots));
     path_arg(dir)
 }
 
-/// The `160ms/` streaming EOU directory `StreamingEouAsrManager.loadModels(from:)` reads the
-/// `.mlmodelc` set + `vocab.json` from directly (no parent-stripping, unlike the batch loader).
+/// Streaming EOU dir — see [`crate::coreml_repo::parakeet_eou_dir`].
 pub fn fluid_parakeet_eou_dir_arg() -> CString {
     let dir = crate::hf_repo::ModelRoots::ambient()
         .map(|roots| crate::coreml_repo::parakeet_eou_dir(&roots));
     path_arg(dir)
 }
 
-/// The FluidAudio Core ML diarization set directory the shim loads
-/// `pyannote_segmentation.mlmodelc` + `wespeaker_v2.mlmodelc` from directly (one resolution
-/// shared with the download target via `diarization_coreml_dir`).
+/// Diarization set dir — see [`crate::coreml_repo::diarization_coreml_dir`].
 pub fn fluid_diarization_dir_arg() -> CString {
     let dir = crate::hf_repo::ModelRoots::ambient()
         .map(|roots| crate::coreml_repo::diarization_coreml_dir(&roots));
     path_arg(dir)
 }
 
-/// Parent directory containing the Sortformer and WeSpeaker model subdirectories.
 pub fn mlx_model_root_arg() -> CString {
     path_arg(ds_config::mlx_dir())
 }
@@ -252,16 +232,14 @@ fn validated_bundled_shim(shim: Shim, path: &Path) -> Result<PathBuf, String> {
     Ok(dylib)
 }
 
-/// Cheap presence probe for the gates: the family's variable is set AND the path exists. No
-/// dlopen, no `codesign` -- [`open`] is what validates the bundle member.
+/// Env var set and path exists. No dlopen/`codesign` — [`open`] validates the bundle member.
 pub fn available(shim: Shim) -> bool {
     std::env::var_os(shim.env_var())
         .map(|p| Path::new(&p).exists())
         .unwrap_or(false)
 }
 
-/// `dlopen` the app-bundled, signature-verified dylib for one shim family, then register the
-/// diagnostic sink. The caller fails quiet or falls back on rejection.
+/// `dlopen` the app-bundled, signature-verified dylib and register the log sink.
 pub fn open(shim: Shim) -> Result<Library, String> {
     let path = std::env::var(shim.env_var()).map_err(|_| format!("{} not set", shim.env_var()))?;
     let path = validated_bundled_shim(shim, Path::new(&path))?;
@@ -273,8 +251,7 @@ pub fn open(shim: Shim) -> Result<Library, String> {
     Ok(lib)
 }
 
-/// Best-effort: a missing setter leaves that dylib logging to stderr rather than failing the
-/// load. Idempotent -- `open` runs per consumer and writes the same 'static pointer each time.
+/// Best-effort log sink; missing setter leaves stderr. Idempotent across consumers.
 fn register_log_sink(shim: Shim, lib: &Library) {
     let thunk: LogCb = match shim {
         Shim::Sys => log_sys,
@@ -294,9 +271,7 @@ fn register_log_sink(shim: Shim, lib: &Library) {
 mod tests {
     use super::*;
 
-    /// The three families must stay addressable independently: a duplicated variable, file
-    /// name, or setter symbol would silently make two of them share one answer -- the exact
-    /// coupling the split removes (#241). Pure, no filesystem.
+    /// Families stay independent: duplicated env/file/symbol would reintroduce #241.
     #[test]
     fn every_shim_family_has_its_own_variable_file_and_log_symbol() {
         let vars: Vec<_> = Shim::ALL.iter().map(|s| s.env_var()).collect();

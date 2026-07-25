@@ -1,4 +1,4 @@
-//! MCP registration (`JsonMcp` / `TomlMcp`): stdio `DontSpeak` entry; target from registry.
+//! MCP registration (`JsonMcp` / `TomlMcp`): stdio `DontSpeak` entry.
 //! Shared merge/strip + backup/atomic write. Print-only seed/capture: #30.
 
 use std::path::Path;
@@ -7,14 +7,14 @@ use super::io::{self, WriteBody};
 use crate::PreviewDoc;
 use ds_config::{Paths, Surface};
 
-/// Per-client MCP write target. Presence is gated once by the shared `wire_client` pipeline.
+/// Per-client MCP write target. Presence gated by `wire_client`.
 pub struct Target<'a> {
     pub tool: &'a str,
     pub config: &'a Path,
     pub load_hint: &'a str,
 }
 
-/// Build [`Target`] from registry entry + surface.
+/// Build [`Target`] from registry surface.
 pub fn target_for<'a>(surface: &'static Surface, paths: &'a Paths) -> Target<'a> {
     Target {
         tool: "wire",
@@ -25,8 +25,8 @@ pub fn target_for<'a>(surface: &'static Surface, paths: &'a Paths) -> Target<'a>
     }
 }
 
-/// Register/strip `mcpServers.DontSpeak` (or print-only). Malformed file left untouched.
-/// Additive + idempotent. `seed`/`capture`: print-only grouping (JSON).
+/// Register/strip `mcpServers.DontSpeak` (or print-only). Malformed left untouched.
+/// Additive + idempotent. `seed`/`capture`: print-only JSON grouping.
 pub fn apply(
     target: &Target,
     remove: bool,
@@ -86,7 +86,7 @@ pub fn apply(
         };
     }
 
-    // Load-bearing: every-boot reconcile must be zero-write when unchanged.
+    // Zero-write on unchanged (every-boot reconcile).
     if merged == before {
         return 0;
     }
@@ -103,7 +103,7 @@ pub fn apply(
     code
 }
 
-/// TOML MCP configs (format-preserving). Same contract as [`apply`] (`PreviewDoc::Toml`).
+/// TOML MCP (format-preserving). Same contract as [`apply`] (`PreviewDoc::Toml`).
 pub fn apply_toml(
     target: &Target,
     remove: bool,
@@ -181,7 +181,7 @@ pub fn apply_toml(
     code
 }
 
-// Tests inject tempdir `Paths` so bin resolution never hits real $HOME.
+// Tempdir Paths so bin resolve never hits real $HOME.
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -65,11 +65,10 @@ pub struct Paths {
     pub hermes_config_yaml: PathBuf,
     /// Hermes first-use consent for shell hooks (`(event, command)` approvals).
     pub hermes_shell_hooks_allowlist: PathBuf,
-    /// `$PATH` captured once at [`Self::resolve`]. Tests may replace this with a synthetic path.
+    /// `$PATH` at [`Self::resolve`]. Tests may substitute a synthetic path.
     pub path_env: Option<OsString>,
-    /// Whether the shared client-binary resolver may consult other ambient install sources.
-    /// Kept separate from [`Self::path_env`] so a synthetic test path does not enable host
-    /// overrides, login-shell PATH, APPDATA, or machine-global directories.
+    /// Allow ambient install sources in client-binary resolve. Separate from [`Self::path_env`]
+    /// so a synthetic test PATH does not enable host overrides / login PATH / APPDATA.
     pub(crate) live_client_environment: bool,
 }
 
@@ -116,18 +115,12 @@ impl Paths {
             .filter(|value| !value.is_empty())
             .map(|_| claude_dir.join(".claude.json"))
             .unwrap_or_else(|| home.join(".claude.json"));
-        // Two roots, each idiomatic per OS (see [`data_dir`] / [`model_dir`] / `state_root`):
-        //   config (roaming, user settings): config.toml, speakers.json
-        //   state  (local, machine RUNTIME): stats.toml, pidfiles, the IPC socket, logs
-        // On Windows/Linux these resolve to distinct OS dirs (roaming vs local / config vs
-        // state); on macOS both are Application Support. The engine create_dir_all's both on
-        // startup, and every writer create_dir_all's its own parent too.
+        // Config (roaming settings) vs state (local runtime: stats, pids, socket, logs).
+        // Win/Linux: distinct OS dirs; macOS: both Application Support.
         let config_dir = data_dir()?;
         let state_dir = state_root(&base);
         let cache_dir = cache_root(&base);
         Some(Self {
-            // Runtime/state files live under the LOCAL state root (machine-specific, never
-            // roamed); settings live under the roaming config root.
             log_file: log_path(&base, &state_dir),
             settings_json: claude_dir.join("settings.json"),
             keybindings_json: claude_dir.join("keybindings.json"),
@@ -163,8 +156,7 @@ impl Paths {
         })
     }
 
-    /// Env-free Paths under `home` (inert engine when resolve fails). No `set_var`.
-    /// Layout immaterial — not a real session.
+    /// Env-free Paths under `home` (tests / inert engine). No `set_var`.
     pub fn rooted_at(home: &Path) -> Self {
         let home = home.to_path_buf();
         let claude_dir = home.join(".claude");
@@ -211,8 +203,7 @@ impl Paths {
     }
 }
 
-/// Resolve a client-specific home without mutating process environment in tests.
-/// Relative overrides follow the client's launch cwd; `~` remains the user home.
+/// Client home: relative overrides use launch cwd; `~` = user home. No env mutation.
 fn client_config_dir(
     home: &Path,
     cwd: &Path,
@@ -270,9 +261,8 @@ fn cache_root(base: &BaseDirs) -> PathBuf {
     base.cache_dir().join(APP_DIR)
 }
 
-/// Homebrew onnxruntime dylib on Intel mac (None elsewhere) — the loader's last resort behind
-/// the app-bundled and downloaded copies. Floor 1.23 = the workspace `ort` api level; SepFormer,
-/// which wanted 1.27, is Apple-Silicon-only (its diarizer rung is MLX).
+/// Homebrew ORT dylib on Intel mac only (last resort after app-bundled / downloaded). Floor
+/// 1.23 = workspace `ort` API level; SepFormer (wanted 1.27) is Apple-Silicon-only.
 pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
@@ -304,9 +294,7 @@ pub fn brew_onnxruntime_dylib() -> Option<PathBuf> {
     }
 }
 
-/// Parse a dotted dylib version ("1.27.0", "1.27") into a comparable triple; a missing patch reads
-/// as 0, anything non-numeric (including the bare "1" major-only symlink, which carries no minor to
-/// gate on) is `None`.
+/// Dotted dylib version → comparable triple; missing patch = 0; bare major ("1") → `None`.
 #[cfg(any(all(target_os = "macos", target_arch = "x86_64"), test))]
 fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
     let mut parts = v.split('.');
@@ -319,41 +307,35 @@ fn parse_dylib_version(v: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-/// Sub-directory of the model root holding every MLX repository.
 pub const MLX_DIR_NAME: &str = "mlx";
 
-/// Root-relative form of [`mlx_dir`], for callers that own their model root (inventory
-/// scans, tests) instead of resolving the ambient one.
+/// Root-relative [`mlx_dir`] for owned model roots (inventory, tests).
 pub fn mlx_dir_under(root: &Path) -> PathBuf {
     root.join(MLX_DIR_NAME)
 }
 
-/// MLX model cache under [`model_dir`]/mlx — explicit so downloads stay together.
+/// MLX cache under [`model_dir`]/mlx.
 pub fn mlx_dir() -> Option<PathBuf> {
     Some(mlx_dir_under(&model_dir()?))
 }
 
-/// Sub-directory of the model root holding every Core ML repository DontSpeak hands an
-/// explicit directory to.
 pub const COREML_DIR_NAME: &str = "coreml";
 
-/// Root-relative form of [`coreml_dir`], for callers that own their model root.
+/// Root-relative [`coreml_dir`] for owned model roots.
 pub fn coreml_dir_under(root: &Path) -> PathBuf {
     root.join(COREML_DIR_NAME)
 }
 
-/// Core ML model cache under [`model_dir`]/coreml.
+/// Core ML cache under [`model_dir`]/coreml.
 pub fn coreml_dir() -> Option<PathBuf> {
     Some(coreml_dir_under(&model_dir()?))
 }
 
-/// FluidAudio's OWN TTS cache: `~/.cache/fluidaudio/Models`. Platform-neutral path math, not
-/// a macOS lookup — the directory only ever holds files on Apple Silicon, but it must resolve
-/// everywhere so `ds_model::ModelRoots::dir_for` stays total.
+/// FluidAudio's TTS cache: `~/.cache/fluidaudio/Models`. Platform-neutral path math so
+/// `ModelRoots::dir_for` stays total (files only appear on Apple Silicon).
 ///
-/// Override: absolute `DONTSPEAK_FLUID_MODELS_DIR`, the test seam a child process needs
-/// because `Command::env` cannot redirect `getpwuid` (issue #212). Read EXACTLY ONCE, by
-/// `ds_model::ModelRoots::ambient`; everything below that takes the resolved value.
+/// Override: absolute `DONTSPEAK_FLUID_MODELS_DIR` (child-process seam — `getpwuid` ignores
+/// `HOME`, #212). Read once via `ModelRoots::ambient`.
 pub fn fluidaudio_models_dir() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("DONTSPEAK_FLUID_MODELS_DIR")
         && !d.is_empty()
@@ -483,9 +465,6 @@ mod tests {
         );
     }
 
-    /// The brew-probe version gate: full versions parse and compare against the 1.23 floor (the
-    /// `ort` api level); the bare major-only symlink ("1") and junk are rejected (no minor to
-    /// gate on).
     #[test]
     fn brew_dylib_version_gate() {
         assert_eq!(parse_dylib_version("1.27.0"), Some((1, 27, 0)));

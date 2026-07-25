@@ -100,11 +100,10 @@ public enum UsageUpdateKind: Sendable {
     case authorization
 }
 
-/// Agents-tab paint rules; the WinUI/GTK ports mirror them.
+/// Agents-tab paint rules; WinUI/GTK ports mirror them.
 public enum UsagePaint {
-    /// An explicit authorization result is authoritative, including an empty result
-    /// after keychain access succeeds but the credential itself is rejected. Background
-    /// refreshes stay conservative so a transient empty result cannot blank good data.
+    /// Authorization results are authoritative (including empty after keychain reject).
+    /// Background refresh stays conservative so a transient empty cannot blank good data.
     public static func replaces(
         painted: UsageCard?,
         with updated: UsageCard,

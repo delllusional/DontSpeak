@@ -162,15 +162,14 @@ Watcher can drop mid-run (`wsarecv` / intermittent `HTTP 503`); restart watch or
 gh release view "v$ver" --repo delllusional/DontSpeak --json assets,body --jq '{assets:[.assets[].name], body_preview:(.body[:200])}'
 ```
 
-Expect **9 assets**: `checksums.txt`, `install.sh`, `install.ps1`, linux
-`{x86_64,aarch64}.tar.gz`, macos `{aarch64,x86_64}.app.zip`, windows
-`{x86_64,aarch64}.zip`. Missing Linux = best-effort job fail (re-cut or ship without).
-Missing installer = release failure. Body = the tag annotation **plus** the CI-filled
-Binaries size column (they intentionally diverge in exactly that column; not empty
-auto-notes). For a real release, check no `…` size cells remain; if the soft-fail
-patch step failed, recover with the scripted patch — never a hand-edit. `-dev` drafts
-intentionally retain the `…` size placeholders; do not run the manual scripted size
-patch for a draft.
+Expect **9 assets** for a numbered release: `checksums.txt`, `install.sh`,
+`install.ps1`, linux `{x86_64,aarch64}.tar.gz`, macos `{aarch64,x86_64}.app.zip`,
+windows `{x86_64,aarch64}.zip`; a `-dev` draft has the same set. Missing Linux =
+best-effort job fail (re-cut or ship without). Missing installer = release failure.
+Body = the tag annotation **plus** the CI-filled Binaries size column (they
+intentionally diverge in exactly that column; not empty auto-notes). For every
+release, including a `-dev` draft, check no `…` size cells remain; if the soft-fail
+patch step failed, recover with the scripted patch — never a hand-edit.
 
 ```bash
 tmp="$(mktemp -d)"
@@ -260,6 +259,6 @@ Web UI may show `untagged-<hash>` briefly — display-only; `tag_name` is correc
 - `workflow_dispatch` builds without publish.
 - Don't `git tag -f` without deleting the remote tag first.
 - Don't skip step 7 after a real publish.
-- Real releases: always `git tag -a -F …`. Never commit release notes into the tree
-  for CI to read — the annotation is the immutable transport; post-publish CI edits
-  only the body's Binaries size cells.
+- Releases and `-dev` drafts: always `git tag -a -F …`. Never commit release notes
+  into the tree for CI to read — the annotation is the immutable transport;
+  post-publish CI edits only the body's Binaries size cells.

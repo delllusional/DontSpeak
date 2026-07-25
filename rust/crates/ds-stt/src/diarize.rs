@@ -1,18 +1,9 @@
-//! Speaker diarization — "who spoke when", optionally labelled by enrolled NAME.
+//! Speaker diarization — who spoke when, optionally labelled by enrolled name.
 //!
-//! Mirrors the [`crate::Stt`] split: ONE platform-agnostic [`Diarizer`](crate::diarize::Diarizer)
-//! trait with an MLX backend now (`MlxDiarizer`,
-//! macOS only) and room for a cross-platform ONNX backend later (Sortformer + WeSpeaker over
-//! `ort`). Diarization runs on the FULL utterance buffer at end-of-capture, one-shot (not
-//! streamed).
-//!
-//! Enrollment: [`Diarizer::embed`](crate::diarize::Diarizer::embed) extracts a WeSpeaker
-//! voiceprint from a sample; the engine persists it in
-//! [`ds_config::speakers::SpeakerStore`]. At diarize time the shim returns each cluster's
-//! embedding ([`DiarizationOutput::speakers`](crate::diarize::DiarizationOutput::speakers)) and
-//! the engine cosine-matches them against the store via
-//! [`match_speaker`](crate::diarize::match_speaker) to relabel
-//! segments with names. The matching is pure (here) so it's unit-tested.
+//! Platform-agnostic [`Diarizer`] with macOS MLX/Fluid backends; ONNX room later.
+//! One-shot on the full utterance buffer (not streamed). Enrollment:
+//! [`Diarizer::embed`] → [`SpeakerStore`]; diarize returns cluster embeddings and the
+//! engine relabels via pure [`match_speaker`].
 
 use std::collections::HashMap;
 
@@ -21,31 +12,27 @@ use serde::{Deserialize, Serialize};
 use ds_config::DiarizerProvider;
 use ds_config::speakers::SpeakerStore;
 
-/// One contiguous span attributed to a single speaker. Times are seconds from the start
-/// of the diarized buffer. `speaker` is the within-utterance cluster id assigned by the
-/// backend — the same string used as the key in
-/// [`DiarizationOutput::speakers`], which is how the engine joins a segment to its
-/// embedding to relabel it. `name` is the enrolled person the engine matched it to, if any.
+/// Contiguous speaker span. Times in seconds from buffer start. `speaker` is the
+/// within-utterance cluster id (key in [`DiarizationOutput::speakers`]); `name` is the
+/// enrolled match when set.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpeakerSegment {
     pub speaker: String,
     pub start: f64,
     pub end: f64,
-    /// Enrolled name (set by the engine after voiceprint matching); absent until then.
+    /// Enrolled name after voiceprint match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
 
-/// Full diarizer result: the segments plus each cluster's WeSpeaker embedding (keyed by
-/// the same `speaker` id), so the caller can match clusters to enrolled voiceprints.
+/// Segments plus per-cluster WeSpeaker embeddings (keyed by `speaker` id).
 #[derive(Debug, Clone, Default)]
 pub struct DiarizationOutput {
     pub segments: Vec<SpeakerSegment>,
     pub speakers: HashMap<String, Vec<f32>>,
 }
 
-/// The shim emits `{"segments":[…], "speakers":{"<id>":[…floats…]}}`. `speakers` is
-/// absent on older shims / when embeddings aren't available, hence `#[serde(default)]`.
+/// Shim JSON: `{"segments":[…], "speakers":{…}}`. `speakers` optional on older shims.
 #[derive(Deserialize)]
 struct DiarizationJson {
     segments: Vec<SpeakerSegment>,
@@ -53,8 +40,7 @@ struct DiarizationJson {
     speakers: HashMap<String, Vec<f32>>,
 }
 
-/// Parse the shim's diarization JSON into the full output (segments + per-speaker
-/// embeddings). Shared by every backend returning the same JSON contract.
+/// Shared parse for every backend's diarization JSON contract.
 pub fn parse_output(json: &str) -> Result<DiarizationOutput, String> {
     let d = serde_json::from_str::<DiarizationJson>(json)
         .map_err(|e| format!("diarization JSON parse: {e}"))?;
@@ -70,8 +56,7 @@ pub fn parse_output(json: &str) -> Result<DiarizationOutput, String> {
     })
 }
 
-/// Cosine similarity of two equal-length embedding vectors (0.0 for mismatched/empty
-/// or zero-magnitude inputs). Range −1..=1; identical direction → 1.0.
+/// Cosine similarity (−1..=1); 0.0 for length mismatch, empty, or zero magnitude.
 pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
@@ -88,8 +73,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     dot / (na.sqrt() * nb.sqrt())
 }
 
-/// Match an embedding to the closest enrolled speaker whose cosine similarity is at or
-/// above `threshold`; `None` if no enrolled voiceprint is close enough.
+/// Closest enrolled speaker at or above `threshold`, else `None`.
 pub fn match_speaker(embedding: &[f32], store: &SpeakerStore, threshold: f32) -> Option<String> {
     let mut best: Option<(&str, f32)> = None;
     for sp in &store.speakers {
@@ -102,8 +86,7 @@ pub fn match_speaker(embedding: &[f32], store: &SpeakerStore, threshold: f32) ->
         .map(|(name, _)| name.to_string())
 }
 
-/// A speaker-diarization backend. Object-safe so a factory can hand back
-/// `Box<dyn Diarizer>` once a second (ONNX) backend exists.
+/// Speaker-diarization backend. Object-safe for `Box<dyn Diarizer>`.
 pub trait Diarizer {
     fn preload(&mut self) -> Result<(), String>;
 
@@ -118,12 +101,8 @@ pub trait Diarizer {
     }
 }
 
-/// Map a resolved diarizer rung → its backend gate. Both rungs (MLX Sortformer and FluidAudio
-/// Core ML) run only where their chains can — Apple-Silicon macOS — so the platform half is
-/// [`DiarizerProvider::is_diarizer_usable`](ds_config::DiarizerProvider::is_diarizer_usable); a
-/// local `cfg!` here would drift from what config resolves and hand callers a backend that only
-/// fails later at dylib load. The message covers both causes (a rung off its platform, or a
-/// future unwired rung) deliberately, so it stays true as rungs are added.
+/// Gate via [`DiarizerProvider::is_diarizer_usable`] (not a local `cfg!` — that drifted
+/// from config and failed late at dlopen, #211). Message covers off-platform and unwired rungs.
 pub fn ensure_backend(provider: DiarizerProvider) -> Result<(), String> {
     if provider.is_diarizer_usable() {
         Ok(())
@@ -140,7 +119,7 @@ pub use fluid_impl::FluidDiarizer;
 #[cfg(target_os = "macos")]
 pub use mlx_impl::MlxDiarizer;
 
-/// MLX Sortformer + WeSpeaker via `libdontspeak_mlx` (macOS). Rust owns downloads.
+/// MLX Sortformer + WeSpeaker via `libdontspeak_mlx`. Rust owns downloads.
 #[cfg(target_os = "macos")]
 mod mlx_impl {
     use std::ffi::{c_char, c_void};
@@ -150,7 +129,7 @@ mod mlx_impl {
     use super::{DiarizationOutput, Diarizer, parse_output};
     use ds_model::shim::{PcmCb, StrCb};
 
-    // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
+    // Result via collect_{str,pcm}; init/shutdown plain int.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
     type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
     type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
@@ -159,7 +138,7 @@ mod mlx_impl {
     pub struct MlxDiarizer {
         lib: Option<Library>,
         loaded: bool,
-        /// Sortformer activity cutoff for `ds_mlx_diar_init` (0.1–0.9; 0.0 → shim 0.5).
+        /// Sortformer activity cutoff for init (0.1–0.9; 0.0 → shim 0.5).
         activity_threshold: f32,
     }
 
@@ -172,7 +151,7 @@ mod mlx_impl {
             }
         }
 
-        /// `0.0` keeps shim default; positive values clamp to 0.1–0.9.
+        /// `0.0` → shim default; positive clamps to 0.1–0.9.
         pub fn with_threshold(threshold: f32) -> Self {
             MlxDiarizer {
                 lib: None,
@@ -200,7 +179,7 @@ mod mlx_impl {
             }
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: symbol matches `DiarInitFn`; `dir` lives across the blocking call.
+            // SAFETY: `DiarInitFn`; `dir` lives across the call.
             let rc = unsafe {
                 let init: Symbol<DiarInitFn> = lib
                     .get(b"ds_mlx_diar_init\0")
@@ -221,10 +200,9 @@ mod mlx_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: the shim exports this name with the `DiarizeFn` C ABI.
+            // SAFETY: `DiarizeFn`; `pcm` + collect_str outlive the call.
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_mlx_diarize\0") }
                 .map_err(|e| format!("ds_mlx_diarize symbol: {e}"))?;
-            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
             let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -238,10 +216,9 @@ mod mlx_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: the shim exports this name with the `EmbedFn` C ABI.
+            // SAFETY: `EmbedFn`; `pcm` + collect_pcm outlive the call.
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_mlx_diar_embed\0") }
                 .map_err(|e| format!("ds_mlx_diar_embed symbol: {e}"))?;
-            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
             let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -282,10 +259,8 @@ mod mlx_impl {
     }
 }
 
-/// FluidAudio pyannote + WeSpeaker (Core ML / ANE) via `libdontspeak_fluid` (macOS). Mirrors
-/// [`MlxDiarizer`] exactly — same `Diarizer` trait, same borrowed-callback bridge — but resolves
-/// the `ds_fluid_diar_*` symbols and loads the Core ML diarization set. `DiarizerManager` is not
-/// an actor, so the shim takes a full-call lock; nothing here need reason about that.
+/// FluidAudio pyannote + WeSpeaker (Core ML / ANE) via `libdontspeak_fluid`.
+/// Same [`Diarizer`] + collect bridge as MLX; `ds_fluid_diar_*` symbols / Core ML set.
 #[cfg(target_os = "macos")]
 mod fluid_impl {
     use std::ffi::{c_char, c_void};
@@ -295,7 +270,7 @@ mod fluid_impl {
     use super::{DiarizationOutput, Diarizer, parse_output};
     use ds_model::shim::{PcmCb, StrCb};
 
-    // Result via borrowed callback (`collect_{str,pcm}`); init/shutdown plain int.
+    // Result via collect_{str,pcm}; init/shutdown plain int.
     type DiarInitFn = unsafe extern "C" fn(*const c_char, f32) -> i32;
     type DiarizeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
     type EmbedFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, PcmCb) -> i32;
@@ -304,7 +279,7 @@ mod fluid_impl {
     pub struct FluidDiarizer {
         lib: Option<Library>,
         loaded: bool,
-        /// Clustering cutoff for `ds_fluid_diar_init` (0.1–0.9; 0.0 → shim default 0.7).
+        /// Clustering cutoff for init (0.1–0.9; 0.0 → shim 0.7).
         clustering_threshold: f32,
     }
 
@@ -317,7 +292,7 @@ mod fluid_impl {
             }
         }
 
-        /// `0.0` keeps the shim default; positive values clamp to 0.1–0.9.
+        /// `0.0` → shim default; positive clamps to 0.1–0.9.
         pub fn with_threshold(threshold: f32) -> Self {
             FluidDiarizer {
                 lib: None,
@@ -345,7 +320,7 @@ mod fluid_impl {
             }
             self.ensure_lib()?;
             let lib = self.lib.as_ref().expect("lib opened above");
-            // SAFETY: symbol matches `DiarInitFn`; `dir` lives across the blocking call.
+            // SAFETY: `DiarInitFn`; `dir` lives across the call.
             let rc = unsafe {
                 let init: Symbol<DiarInitFn> = lib
                     .get(b"ds_fluid_diar_init\0")
@@ -366,10 +341,9 @@ mod fluid_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: the shim exports this name with the `DiarizeFn` C ABI.
+            // SAFETY: `DiarizeFn`; `pcm` + collect_str outlive the call.
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_fluid_diarize\0") }
                 .map_err(|e| format!("ds_fluid_diarize symbol: {e}"))?;
-            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
             let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
                 dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -383,10 +357,9 @@ mod fluid_impl {
             }
             self.preload()?;
             let lib = self.lib.as_ref().expect("lib loaded above");
-            // SAFETY: the shim exports this name with the `EmbedFn` C ABI.
+            // SAFETY: `EmbedFn`; `pcm` + collect_pcm outlive the call.
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_fluid_diar_embed\0") }
                 .map_err(|e| format!("ds_fluid_diar_embed symbol: {e}"))?;
-            // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_pcm`'s pair.
             let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
                 ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
             })
@@ -446,7 +419,6 @@ mod tests {
 
     #[test]
     fn parses_without_speakers_map() {
-        // Older shim / no embeddings: speakers defaults to empty.
         let out = parse_output(r#"{"segments":[]}"#).unwrap();
         assert!(out.segments.is_empty());
         assert!(out.speakers.is_empty());
@@ -467,11 +439,7 @@ mod tests {
 
     #[test]
     fn ensure_backend_gates_every_provider_per_platform() {
-        // Every rung's gate must answer exactly what config calls usable — asserted against
-        // `is_diarizer_usable` rather than a second `cfg!`, which is the drift #211 caught
-        // (x86_64 macOS got Ok). The Err message is the exact user-facing string the warm
-        // helper's diarize/enroll ops emit — keep it byte-stable, and it no longer claims
-        // "only MLX is wired" now that FluidAudio is a second rung.
+        // Must match `is_diarizer_usable` (not a local cfg! — #211). Err string is user-facing.
         for provider in DiarizerProvider::ALL.iter().copied() {
             let res = ensure_backend(provider);
             assert_eq!(res.is_ok(), provider.is_diarizer_usable(), "{provider:?}");
@@ -492,14 +460,11 @@ mod tests {
         let mut store = SpeakerStore::default();
         store.upsert("Alex", vec![1.0, 0.0, 0.0]);
         store.upsert("Sam", vec![0.0, 1.0, 0.0]);
-        // Almost exactly Alex's direction.
         assert_eq!(
             match_speaker(&[0.99, 0.05, 0.0], &store, 0.65).as_deref(),
             Some("Alex")
         );
-        // Orthogonal to everyone → no match.
         assert_eq!(match_speaker(&[0.0, 0.0, 1.0], &store, 0.65), None);
-        // Empty store → no match.
         assert_eq!(
             match_speaker(&[1.0, 0.0, 0.0], &SpeakerStore::default(), 0.5),
             None

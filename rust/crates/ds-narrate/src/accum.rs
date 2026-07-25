@@ -1,17 +1,17 @@
-//! Per-message accumulation: which top-level blockquote lines become speakable now.
+//! Per-message accumulation: which top-level blockquote lines become speakable.
 //! Pure of IO; [`crate::deliver_batch`] owns state file + lock.
 //!
-//! Out-of-order batches (parallel hooks): reconstruct by content-block `index`, emit
-//! each completed line once in document order (high-water mark). Cumulative
-//! `displayed_text` covers Qwen / Codex final snapshots.
+//! Out-of-order batches: reconstruct by content-block `index`, emit each completed
+//! line once in document order (high-water mark). Cumulative `displayed_text` covers
+//! Qwen/Codex final snapshots.
 
 use std::collections::BTreeMap;
 
-/// Max bytes of detection corpus retained at selection / on the wire. Equality with the
-/// engine's per-item speak cap is asserted at compile time in `dontspeakd::ttsq`.
+/// Max detection-corpus bytes at selection / on the wire.
+/// Equality with the engine speak cap is asserted in `dontspeakd::ttsq`.
 pub const DETECTION_TEXT_MAX_BYTES: usize = 10 * 1024;
 
-/// Prefix-truncate to `max` bytes on a char boundary (same semantics as the speak limit).
+/// Prefix-truncate to [`DETECTION_TEXT_MAX_BYTES`] on a char boundary.
 pub fn cap_detection_text(s: String) -> String {
     if s.len() <= DETECTION_TEXT_MAX_BYTES {
         return s;
@@ -23,31 +23,29 @@ pub fn cap_detection_text(s: String) -> String {
     s[..end].to_string()
 }
 
-/// One newly speakable line plus the reconstructed message-so-far for language detection.
+/// Newly speakable line + message-so-far for language detection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedUtterance {
     pub text: String,
-    /// Turn text so far, capped at [`DETECTION_TEXT_MAX_BYTES`]. The engine classifies
-    /// `text` on its own and reaches for this only when that is too short to decide.
+    /// Turn text so far (capped). Engine classifies `text` first; uses this only when thin.
     pub detection_text: String,
 }
 
 /// Feed batches → newly speakable blockquote lines. One per session under a lock.
 #[derive(Default, Clone, Debug, PartialEq)]
 pub struct Accum {
-    /// Chunks by content-block `index` — reconstructs regardless of arrival order.
+    /// Chunks by content-block `index` (arrival-order independent).
     pub parts: BTreeMap<u64, String>,
-    /// Sticky: any `final=true` makes the message final (even if that batch arrived early).
+    /// Sticky: any `final=true` finalizes (even if that batch arrived early).
     pub seen_final: bool,
-    /// High-water mark of lines already forwarded; re-fed batches advance nothing.
+    /// High-water mark of lines already forwarded.
     pub emitted: usize,
-    /// "Shorts" latch: blockquote-less final reply voiced whole, once.
+    /// Shorts latch: blockquote-less final reply voiced whole, once.
     pub short_done: bool,
 }
 
 impl Accum {
-    /// Newly speakable lines this batch (usually empty mid-line). Cumulative
-    /// `displayed_text` wins over delta reconstruction when present.
+    /// Newly speakable lines this batch. Cumulative `displayed_text` wins over deltas.
     pub fn feed(
         &mut self,
         index: u64,
@@ -61,8 +59,7 @@ impl Accum {
 
         let cumulative = match displayed_text {
             Some(dt) if !dt.trim().is_empty() => {
-                // Codex ends deltas with one authoritative final snapshot. Earlier
-                // cumulative would leave `parts` stale if another delta followed.
+                // Codex ends with one final snapshot; non-final cumulative after deltas is a bug.
                 debug_assert!(
                     self.parts.is_empty() || is_final,
                     "a non-final cumulative payload must not follow delta payloads"
@@ -75,18 +72,15 @@ impl Accum {
             }
         };
 
-        // Speakable prefix = leading complete lines (only the last can still be open).
-        // Advance the high-water mark even when `messages_on` is false so shorts can
-        // tell "no blockquote" from "blockquotes, but muted".
+        // Leading complete lines only. Advance high-water even when muted so shorts
+        // can tell "no blockquote" from "blockquotes muted".
         let lines = ds_config::all_blockquotes_state(&cumulative, self.seen_final);
         let total = lines.len();
         let mut speakable = lines.iter().take_while(|(_, complete)| *complete).count();
-        // Racing hook processes serialize on the lock but not in order, so a
-        // later-indexed delta can land first. Entries past a gap in `parts` are
-        // position-unstable — the gap filling in shifts them under the index
-        // high-water mark (double-speak + skip) — so before the final batch only
-        // the gap-free prefix may speak. On final the full list stays trusted: a
-        // permanent hole (non-text block) must not silence lines forever.
+        // Hooks serialize on the lock but not in order. Entries past a gap in `parts`
+        // are position-unstable (gap fill → double-speak/skip), so pre-final only the
+        // gap-free prefix may speak. On final, trust the full list: a permanent hole
+        // (non-text block) must not silence later lines forever.
         if !self.seen_final && !self.parts.keys().copied().eq(0..self.parts.len() as u64) {
             let dense: String = self
                 .parts
@@ -102,7 +96,7 @@ impl Accum {
             speakable = speakable.min(stable);
         }
         let mut spoken = Vec::new();
-        // Cap once per feed so pending state and IPC never carry multi-MB corpora.
+        // Cap once per feed so pending/IPC never carry multi-MB corpora.
         let detection_corpus = cap_detection_text(cumulative.clone());
         if messages_on {
             for (text, _) in lines.into_iter().take(speakable).skip(self.emitted) {
@@ -114,7 +108,7 @@ impl Accum {
         }
         self.emitted = speakable.max(self.emitted);
 
-        // Final + no blockquote at all → voice whole once (latched).
+        // Final + no blockquote → voice whole once (latched).
         if short_on && self.seen_final && total == 0 && !self.short_done {
             self.short_done = true;
             if !cumulative.trim().is_empty() {
@@ -125,7 +119,7 @@ impl Accum {
             }
         }
 
-        // Free buffer when done; high-water mark stays so late duplicates stay silent.
+        // Free buffer when done; high-water stays so late duplicates stay silent.
         if self.seen_final && self.emitted >= total {
             self.parts.clear();
         }
@@ -158,13 +152,11 @@ mod tests {
             out[0].detection_text,
             "Preamble prose.\n\n> The spoken line.\n\nBody."
         );
-        // Past high-water mark → no-op.
         assert!(a.feed(3, " more body.", None, true, true, false).is_empty());
     }
 
     #[test]
     fn speaks_every_blockquote_in_order_each_once() {
-        // Multi-emit: every blockquote, document order, each once as it closes.
         let mut a = Accum::default();
         let first = a.feed(
             0,
@@ -242,8 +234,7 @@ mod tests {
         assert_eq!(texts(&second), ["Short digest two."]);
         assert!(
             second[0].detection_text.starts_with(&first_det)
-                || second[0].detection_text.len() >= first_det.len(),
-            "second quote's detection corpus is fuller so-far"
+                || second[0].detection_text.len() >= first_det.len()
         );
         assert!(second[0].detection_text.contains("Short digest two."));
         assert!(second[0].detection_text.contains("Closing English prose"));
@@ -251,7 +242,7 @@ mod tests {
 
     #[test]
     fn whole_reply_as_one_final_batch_emits_all_blockquotes() {
-        // Non-streaming (`Stop`): one final batch must match the streamed multi-emit.
+        // Non-streaming Stop: one final batch matches streamed multi-emit.
         let reply = "> First point.\n\nDetail.\n\n> Second point.\n\nMore.\n\n> Closing ask?";
         let mut a = Accum::default();
         let out = a.feed(0, reply, None, true, true, false);
@@ -265,7 +256,6 @@ mod tests {
 
     #[test]
     fn whole_blockquoteless_reply_voiced_whole_under_short() {
-        // Short on + no blockquote → whole once; short off → silent.
         let reply = "Done — all three tests pass.";
         let mut a = Accum::default();
         let out = a.feed(
@@ -283,7 +273,6 @@ mod tests {
     #[test]
     fn out_of_order_batches_assemble_correctly() {
         let mut a = Accum::default();
-        // Indices 2, 0, 1 — reversed arrival.
         assert!(
             a.feed(2, "\n\nBody after.", None, true, true, false)
                 .is_empty()
@@ -301,18 +290,13 @@ mod tests {
             false,
         );
         assert_eq!(texts(&out), ["Spoken even out of order."]);
-        // Early final batch frees `parts` when no quotes yet, so later assembly only
-        // has chunks that arrived after that free — detection still tracks so-far.
         assert!(out[0].detection_text.contains("Spoken even out of order."));
         assert!(!out[0].detection_text.is_empty());
     }
 
     #[test]
     fn out_of_order_multiline_batch_waits_for_the_gap() {
-        // Racing hook processes: the index-1 batch lands first with newline-complete
-        // lines. Speaking them early would double-speak "C." and never speak "A."
-        // once index 0 fills in — the gap-free prefix rule holds them until order
-        // settles.
+        // Gap-free prefix: early complete lines past a hole would double-speak/skip.
         let mut a = Accum::default();
         assert!(
             a.feed(1, "> B.\n> C.\n", None, false, true, false)
@@ -325,8 +309,7 @@ mod tests {
 
     #[test]
     fn a_permanent_index_hole_still_speaks_on_final() {
-        // Non-text content blocks leave holes that never fill; final must not hold
-        // their lines hostage to the gap rule.
+        // Permanent hole (non-text block) must not silence later lines on final.
         let mut a = Accum::default();
         let first = a.feed(0, "> Before tool.\n", None, false, true, false);
         assert_eq!(texts(&first), ["Before tool."]);
@@ -354,13 +337,12 @@ mod tests {
         let out = a.feed(1, "that's the `default`.", None, true, true, true);
         assert_eq!(texts(&out), ["Yes, that's the `default`."]);
         assert_eq!(out[0].detection_text, "Yes, that's the `default`.");
-        // Latched against late duplicates.
         assert!(a.feed(2, " dup", None, true, true, true).is_empty());
     }
 
     #[test]
     fn short_mode_reads_code_paths_and_long_text_whole() {
-        // Selection preserves content; the single TTS frontend owns prose cleanup.
+        // Selection preserves content; TTS frontend owns prose cleanup.
         let code = Accum::default().feed(0, "Run ```cargo build```", None, true, true, true);
         assert_eq!(texts(&code), ["Run ```cargo build```"]);
         let path = Accum::default().feed(0, "See rust/crates/lib.rs now", None, true, true, true);

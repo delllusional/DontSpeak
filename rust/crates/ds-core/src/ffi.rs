@@ -133,8 +133,7 @@ pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_ch
 const USAGE_DECK_EMPTY: &str = r#"{"cards":[]}"#;
 const USAGE_CARD_EMPTY: &str = r#"{"agent":"unknown","rows":[]}"#;
 
-/// Config `agents` gate for the Agents tab / usage surfaces. Paths unresolvable → false
-/// (fail closed).
+/// Config `agents` gate. Paths unresolvable → false (fail closed).
 fn agents_enabled() -> bool {
     let Some(paths) = ds_config::Paths::resolve() else {
         return false;
@@ -142,8 +141,7 @@ fn agents_enabled() -> bool {
     ds_config::VoiceConfig::load(&paths).agents
 }
 
-/// Usage skeleton (`ds_agent_usage::skeleton`). No network. Empty deck while the config
-/// `agents` gate is off. Owned `char*`. HANDLE-FREE.
+/// Usage skeleton (no network). Empty deck when `agents` off. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_skeleton_json() -> *mut c_char {
     guard_str(USAGE_DECK_EMPTY, || {
@@ -158,9 +156,7 @@ fn agent_usage_skeleton_json_gated(agents: bool) -> *mut c_char {
     to_cstring(ds_agent_usage::skeleton().to_json())
 }
 
-/// Blocking card refresh (`WiredAgent` token). Off UI thread. `refresh` skips soft cache.
-/// Empty card while the config `agents` gate is off (keychain guard: no provider probe).
-/// Owned `char*`. HANDLE-FREE.
+/// Blocking card refresh (off UI). Empty when `agents` off (no keychain probe). HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_json(agent: *const c_char, refresh: u8) -> *mut c_char {
     guard_str(USAGE_CARD_EMPTY, || {
@@ -176,17 +172,14 @@ fn agent_usage_card_json_gated(
     let Some(source) = ds_agent_usage::parse_agent(token) else {
         return to_cstring(USAGE_CARD_EMPTY);
     };
-    // Non-client exits before the gate: `agents` resolves Paths + reads config, and a
-    // non-client call must touch nothing (contract pinned by the tests below).
+    // Non-client before gate (must not resolve Paths / read config).
     if !agents() {
         return to_cstring(USAGE_CARD_EMPTY);
     }
     to_cstring(ds_agent_usage::refresh_card(source, refresh).to_json())
 }
 
-/// User-click authorize + force refresh (off UI; may ACL-prompt on macOS). Empty card
-/// while the config `agents` gate is off (keychain guard: no auth prompt). Owned `char*`.
-/// HANDLE-FREE.
+/// Authorize + force refresh (off UI; may ACL-prompt). Empty when `agents` off. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agent_usage_card_authorize_json(agent: *const c_char) -> *mut c_char {
     guard_str(USAGE_CARD_EMPTY, || {
@@ -208,9 +201,7 @@ fn agent_usage_card_authorize_json_gated(
     to_cstring(ds_agent_usage::authorize_card(source).to_json())
 }
 
-/// Tools-window catalog: JSON array `{name, description, params:[…]}` — ordered params,
-/// same `ds-tools` catalog as MCP (no drift). Each param gets localized `detail` via
-/// [`crate::status_fmt::tool_param_detail`]. Owned `char*`. HANDLE-FREE.
+/// Tools catalog (`ds-tools` + localized param `detail`). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tools_json() -> *mut c_char {
     guard_str("[]", || tools_json_gated(agents_enabled()))
@@ -234,8 +225,7 @@ fn tools_json_gated(agents: bool) -> *mut c_char {
     to_cstring(catalog.to_string())
 }
 
-/// Libraries/credits catalog from the same download registry every platform fetches
-/// (models + runtime). Owned `char*`. HANDLE-FREE.
+/// Libraries/credits from the download registry. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_libraries_json() -> *mut c_char {
     guard_str("[]", || {
@@ -243,9 +233,7 @@ pub extern "C" fn ds_libraries_json() -> *mut c_char {
     })
 }
 
-/// Combined activity-log tail for Logs tab: `{source, level, text}` merging unified log
-/// with sibling aux logs. `max_bytes` per file; shared-read while engine appends.
-/// `"[]"` if none. Owned `char*`. HANDLE-FREE.
+/// Activity-log tail (`{source, level, text}`); `"[]"` if none. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_logs_json(max_bytes: u32) -> *mut c_char {
     guard_str("[]", || match ds_config::Paths::resolve() {
@@ -254,10 +242,8 @@ pub extern "C" fn ds_logs_json(max_bytes: u32) -> *mut c_char {
     })
 }
 
-/// Like [`ds_logs_json`] but BLOCKS until any `*.log` in the logs dir changes (not
-/// rotated `*.log.N`) or `timeout_ms` elapses, then returns the full current tail (no
-/// since-token). Client-side fs watch, not engine IPC. Dedicated background thread only.
-/// Owned `char*`; `"[]"` if Paths fail. HANDLE-FREE.
+/// [`ds_logs_json`] after waiting for a live `*.log` change or timeout (client-side watch).
+/// Background thread only. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_logs_wait(max_bytes: u32, timeout_ms: u32) -> *mut c_char {
     guard_str("[]", || {
@@ -272,8 +258,7 @@ pub extern "C" fn ds_logs_wait(max_bytes: u32, timeout_ms: u32) -> *mut c_char {
     })
 }
 
-/// Erase entire on-disk activity log (unified + rotated + aux). Irreversible — UI must
-/// confirm. No-op if empty. HANDLE-FREE.
+/// Erase on-disk activity logs (UI must confirm). HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_logs_clear() {
     guard_val((), || {
@@ -289,23 +274,19 @@ pub extern "C" fn ds_homepage_url() -> *mut c_char {
     guard_str("", || to_cstring(crate::HOMEPAGE_URL))
 }
 
-/// Brand colors JSON (`seed_purple`, `mic_orange`, `warning`) — single cross-platform
-/// source. Owned `char*`. HANDLE-FREE.
+/// Brand colors JSON (`seed_purple`, `mic_orange`, `warning`). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_brand_colors_json() -> *mut c_char {
     guard_str("{}", || to_cstring(crate::BRAND_COLORS_JSON))
 }
 
-/// Logs-tab colors JSON (`levels`, `source_palette`) — sibling of `ds_brand_colors_json`.
-/// Owned `char*`. HANDLE-FREE.
+/// Logs-tab colors JSON (`levels`, `source_palette`). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_log_colors_json() -> *mut c_char {
     guard_str("{}", || to_cstring(crate::LOG_COLORS_JSON))
 }
 
-/// One random Usage speaking-card wash: `{"r","g","b","a"}` (opaque RGB + wash alpha).
-/// New color each call; hosts freeze while `speaker` is unchanged. Owned `char*`.
-/// HANDLE-FREE.
+/// Random Usage wash `{"r","g","b","a"}`; hosts freeze while `speaker` unchanged. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_random_pastel_wash_json() -> *mut c_char {
     guard_str(
@@ -320,17 +301,13 @@ pub extern "C" fn ds_version() -> *mut c_char {
     guard_str("", || to_cstring(crate::VERSION))
 }
 
-/// Startup update check vs GitHub API (blocking HTTP — only network FFI; call off UI
-/// thread). Compares latest tag to [`crate::VERSION`]. Returns
-/// `{"update_available", "current_version", "latest_version", "html_url"}`. Any failure
-/// → `"{}"`; host must treat missing `update_available` as false (never show pill).
-/// Owned `char*`.
+/// Blocking GitHub update check (off UI). Failure → `"{}"` (no pill). Owned `char*`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_update_check_json() -> *mut c_char {
     ds_update_check_json_at("https://api.github.com")
 }
 
-/// Test seam for [`ds_update_check_json`]: mockable `api_base`, real marshaling + VERSION.
+/// Test seam for [`ds_update_check_json`] (mockable `api_base`).
 fn ds_update_check_json_at(api_base: &str) -> *mut c_char {
     guard_str("{}", || {
         let json = ds_model::update_check::check_for_update_at(api_base, crate::VERSION)
@@ -340,10 +317,9 @@ fn ds_update_check_json_at(api_base: &str) -> *mut c_char {
     })
 }
 
-// Shared ds-i18n catalog — every host UI; English fallback; locale defaults to OS.
+// Shared ds-i18n catalog; English fallback; locale defaults to OS.
 
-/// Set active UI locale (BCP-47 / bare tag). NULL no-op; unknown → English at lookup.
-/// HANDLE-FREE.
+/// Active UI locale (BCP-47). NULL no-op; unknown → English at lookup. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_set_locale(locale: *const c_char) {
     guard_val((), || {
@@ -372,12 +348,9 @@ pub extern "C" fn ds_t_args(key: *const c_char, args_json: *const c_char) -> *mu
     })
 }
 
-// Shared status-panel formatters (was duplicated per host). Culture-sensitive number
-// formatting (if any beyond these complete strings) stays in each UI.
+// Shared status-panel formatters (culture-sensitive extras stay per-host).
 
-/// Hover word for engine lifecycle state. Tokens: running|idle|warming|downloading|
-/// failed|blocked|missing. `progress` = overall byte-weighted 0..1 (downloading only);
-/// `why` = failure reason (failed only). Owned `char*`. HANDLE-FREE.
+/// Hover word for lifecycle token (+ progress/why). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_state_word(
     state: *const c_char,
@@ -393,14 +366,13 @@ pub extern "C" fn ds_engine_state_word(
     })
 }
 
-/// Lifetime / remaining duration; leading and trailing zero units dropped.
-/// Owned `char*`. HANDLE-FREE.
+/// Duration; leading/trailing zero units dropped. Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_duration_live(secs: f64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::duration_live(secs)))
 }
 
-/// See [`crate::status_fmt::usage_resets_in`]. Owned `char*`.
+/// [`crate::status_fmt::usage_resets_in`]. Owned `char*`.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_usage_resets_in(resets_at_unix: i64) -> *mut c_char {
     guard_str("", || {
@@ -408,8 +380,7 @@ pub extern "C" fn ds_usage_resets_in(resets_at_unix: i64) -> *mut c_char {
     })
 }
 
-/// Runtime label for provider token (mlx|coreml|cuda|cpu; unknown verbatim). Owned
-/// `char*`. HANDLE-FREE.
+/// Provider token → runtime label (unknown verbatim). Owned `char*`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_runtime_label(provider: *const c_char) -> *mut c_char {
     guard_str("", || {
@@ -451,8 +422,7 @@ pub extern "C" fn ds_human_size(bytes: u64) -> *mut c_char {
     guard_str("", || to_cstring(crate::status_fmt::human_size(bytes)))
 }
 
-/// Tray kind via [`ds_status::tray_icon_kind`]. `tray_indicator_json`: JSON array of
-/// [`ds_status::StatusTrayKind`] tokens (NULL/malformed → `[]`). Owned `char*`. HANDLE-FREE.
+/// [`ds_status::tray_icon_kind`]; `tray_indicator_json` NULL/malformed → `[]`. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_tray_icon_kind(
     stt_active: u8,
@@ -468,16 +438,13 @@ pub extern "C" fn ds_tray_icon_kind(
     })
 }
 
-/// `ds_tools::DIARIZATION_ENABLED` — single flip for every host. 1 shown / 0 hidden.
-/// HANDLE-FREE.
+/// [`ds_tools::DIARIZATION_ENABLED`] for hosts. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_diarization_ui_enabled() -> u8 {
     guard_val(0, || ds_tools::DIARIZATION_ENABLED as u8)
 }
 
-/// Config `agents` gate: 1 = show the Agents tab. Initial / engine-down probe only —
-/// live updates arrive via the model_status push (`agents` root field). Paths
-/// unresolvable → 0 (fail closed). HANDLE-FREE.
+/// Agents tab gate (initial/engine-down; live via model_status). Fail closed. HANDLE-FREE.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_agents_ui_enabled() -> u8 {
     guard_val(0, || agents_enabled() as u8)
@@ -546,10 +513,7 @@ mod tests {
         assert!(!libraries.as_array().unwrap().is_empty());
     }
 
-    /// DRIFT GUARD: `ds-core` is the only crate that sees both the hand-written `models`
-    /// output schema (`ds-tools`) and the payload the engine builds (`ds-model`) — neither
-    /// alone can catch the split. Built for a NON-EXISTENT root: `scan_at` creates nothing,
-    /// so this stays a pure comparison with no cache anywhere near it.
+    /// Drift guard: `models` schema (`ds-tools`) vs engine payload (`ds-model`); non-existent root.
     #[test]
     fn models_payload_matches_its_advertised_output_schema() {
         use serde_json::Value;
@@ -604,7 +568,7 @@ mod tests {
         }
 
         let schema = ds_tools::output_schema("models").expect("models advertises an output schema");
-        // A root that does not exist and is never created — the payload is pure data.
+        // Non-existent root — pure comparison, no cache.
         let root = std::path::Path::new("__ds_core_models_schema_guard__/no-such-model-root");
         assert!(!root.exists());
         let payload = ds_model::inventory_json(
@@ -653,7 +617,7 @@ mod tests {
         assert_eq!(json, USAGE_CARD_EMPTY);
     }
 
-    // Non-client exits before Paths::resolve (no dirs, no prompt).
+    // Non-client before Paths::resolve.
     #[test]
     fn agent_usage_card_authorize_json_unknown_agent_is_empty_without_auth() {
         let json = take_string(agent_usage_card_authorize_json_gated(
@@ -663,8 +627,7 @@ mod tests {
         assert_eq!(json, USAGE_CARD_EMPTY);
     }
 
-    /// Agents gate OFF: usage exports return their EMPTY consts before any provider
-    /// work (keychain guard) — a KNOWN client token proves the gate short-circuits.
+    /// Agents off: usage returns empty before provider work (keychain guard).
     #[test]
     fn agent_usage_exports_return_empty_while_agents_gate_is_off() {
         assert_eq!(
@@ -683,8 +646,7 @@ mod tests {
         );
     }
 
-    /// Non-client exits BEFORE the gate: the gate resolves Paths + reads config, and a
-    /// non-client call must touch neither.
+    /// Non-client before gate (no Paths / config).
     #[test]
     fn agent_usage_gate_is_never_evaluated_for_a_non_client() {
         let gate = || -> bool { panic!("gate must not be evaluated for a non-client") };
@@ -743,8 +705,7 @@ mod tests {
         );
     }
 
-    /// FFI path through real marshaling + VERSION against a mock (not a retest of
-    /// `check_for_update_at` itself).
+    /// FFI marshaling + VERSION against a mock.
     #[test]
     fn ds_update_check_json_at_reads_a_mocked_release_through_the_real_ffi_path() {
         let server = httpmock::MockServer::start();
@@ -771,7 +732,7 @@ mod tests {
         assert_eq!(v["latest_version"], "9.9.9");
     }
 
-    /// Failing endpoint must degrade to `"{}"`, never propagate an error.
+    /// Failing endpoint → `"{}"`.
     #[test]
     fn ds_update_check_json_at_degrades_to_empty_object_on_a_failing_endpoint() {
         let server = httpmock::MockServer::start();
@@ -793,8 +754,7 @@ mod tests {
         assert_eq!(json, "{}");
     }
 
-    /// FFI enrichment: every param has `detail`; enum params get "one of: …".
-    /// Inner fn with `agents: true` — the export reads the developer's real config.
+    /// Every param has `detail`; enums get "one of: …".
     #[test]
     fn ds_tools_json_enriches_every_param_with_detail() {
         let json = take_string(tools_json_gated(true));

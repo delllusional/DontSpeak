@@ -1,7 +1,6 @@
 //! Agent text → prose for the speech frontend.
-//!
-//! Markdown is structure, not pronunciation: keep labels/code; drop formatting,
-//! HTML tags, link destinations, and commit-like hashes. Bare URLs → the word "link".
+//! Keep labels/code; drop formatting, HTML, link destinations, commit-like hashes.
+//! Bare URLs → "link".
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -9,8 +8,7 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpokenText(String);
 
-/// GFM extensions (tables, strike, tasklists, footnotes) — bare CommonMark leaves
-/// them as literal text that reaches the number expander ("Claim caret one").
+/// GFM extensions — bare CommonMark would leave them as literal expander fodder.
 fn markdown_options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_STRIKETHROUGH
@@ -27,15 +25,12 @@ impl SpokenText {
             match event {
                 Event::Text(text) | Event::Code(text) => rendered.push_str(&text),
                 Event::SoftBreak | Event::HardBreak | Event::Rule => rendered.push(' '),
-                // Block boundary = word boundary both ends. Nested `Start(List)` has no
-                // intervening `End` — End-only spacing glued "outerinner".
+                // Space both ends: nested `Start(List)` has no intervening `End`.
                 Event::Start(tag) if is_block_start(&tag) => rendered.push(' '),
                 Event::End(tag) if is_block_end(&tag) => rendered.push(' '),
-                // One Html event may hold a whole block; strip tags, keep residual text.
                 Event::Html(html) | Event::InlineHtml(html) => {
                     rendered.push_str(&strip_html_tags(&html));
                 }
-                // Footnotes / checkboxes: structure only.
                 _ => {}
             }
         }
@@ -88,7 +83,7 @@ fn is_block_end(tag: &TagEnd) -> bool {
     )
 }
 
-/// Drop tags/comments; keep residual text. Unterminated `<` swallows the rest (agent markup only).
+/// Drop tags/comments; keep residual text. Unterminated `<` swallows the rest.
 fn strip_html_tags(html: &str) -> String {
     let mut text = String::with_capacity(html.len());
     let mut rest = html;
@@ -126,11 +121,10 @@ fn omit_urls_and_collapse_whitespace(rendered: &str) -> String {
     spoken
 }
 
-/// Bare URLs become "link" with wrappers intact. Omitted hashes attach trailing
-/// prosody punctuation to preceding prose. Both preserve `batch` `.!?` boundaries.
+/// URLs → "link" (wrappers kept). Omitted hashes attach trailing prosody punctuation.
 fn spoken_token(token: &str) -> SpokenToken {
     const OPENERS: &[char] = &['(', '[', '{', '<', '"', '\'', '‘', '“', '„', '«', '‹'];
-    // '“' is English OPENER and German CLOSER — at token end only the closing role applies.
+    // '“' is EN opener and DE closer — at token end only the closer applies.
     const CLOSERS: &[char] = &[
         ')', ']', '}', '>', '"', '\'', '’', '”', '“', '»', '›', '.', ',', ';', ':', '!', '?', '…',
         '。', '，', '；', '：', '！', '？',
@@ -138,7 +132,7 @@ fn spoken_token(token: &str) -> SpokenToken {
     const SPOKEN_PUNCTUATION: &[char] = &[
         '.', ',', ';', ':', '!', '?', '…', '。', '，', '；', '：', '！', '？',
     ];
-    // Speech heuristic: split at first unicode sentence boundary (may appear mid-URL).
+    // Split at first unicode sentence boundary (may appear mid-URL).
     const UNICODE_BOUNDARIES: &[char] =
         &['’', '”', '»', '›', '…', '。', '，', '；', '：', '！', '？'];
 
@@ -177,8 +171,7 @@ enum SpokenToken {
     Separated(String),
 }
 
-/// Hex token 7–40 chars carrying both a digit and an `a–f` letter — real hashes have
-/// digits, and all-letter hex strings are English words ("defaced", "acceded").
+/// Hex 7–40 chars with both a digit and an a–f letter (all-letter hex is English words).
 fn is_hash_like(token: &str) -> bool {
     let core = token.trim_matches(|c: char| !c.is_ascii_alphanumeric());
     let len = core.len();
@@ -234,8 +227,7 @@ mod tests {
         );
     }
 
-    /// Regression: 7+ letter words built only from `a-f` are valid hex, so the length and
-    /// letter rules alone silently swallowed them. A hash always carries a digit.
+    /// All-letter a–f words are not hashes; hashes always carry a digit.
     #[test]
     fn hex_letter_words_are_spoken_not_dropped() {
         assert_eq!(
@@ -243,7 +235,6 @@ mod tests {
                 .as_str(),
             "The banner was defaced, then effaced; they acceded."
         );
-        // A full SHA-1 still drops.
         assert_eq!(
             SpokenText::from_markdown("See eedfc5710bd3c0a5c4a1f2e6d7b8093c4e5f6a71 for context.")
                 .as_str(),
@@ -264,9 +255,7 @@ mod tests {
         assert_eq!(spoken.as_str(), "cargo test -p ds-tts");
     }
 
-    /// Regression: `Start(List)` follows the parent item's text with no `End` between, so
-    /// separating only on `End` produced "outerinner one" — one unpronounceable OOV word.
-    /// Nested bullets are pervasive in agent replies.
+    /// Nested `Start(List)` has no intervening `End` — End-only spacing glued "outerinner".
     #[test]
     fn nested_list_items_do_not_glue_into_one_word() {
         let spoken = SpokenText::from_markdown("- outer\n  - inner one\n- outer two");

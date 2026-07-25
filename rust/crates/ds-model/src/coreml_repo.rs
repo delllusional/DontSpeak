@@ -1,80 +1,61 @@
 //! Pinned FluidAudio (Core ML / ANE) model manifests.
 //!
-//! Manifests only: the shape, the roots, the transfer and the presence probe live in
-//! [`crate::hf_repo`], which every self-managed Hugging Face set shares. Each set here pins
-//! an immutable HF commit and every selected file's path, size, and SHA-256; a `.mlmodelc`
-//! is a directory of ordinary files, so its members are plain manifest entries.
+//! Shape, roots, transfer, and presence live in [`crate::hf_repo`]. Each set pins an
+//! immutable HF commit and every selected file's path/size/SHA-256. A `.mlmodelc` is a
+//! directory of ordinary files — members are plain manifest entries.
 
 use std::path::PathBuf;
 
 use crate::hf_repo::{HfFile, HfRepo, ModelRoots, RepoRoot};
 
-/// On-disk folder name of the Apple-native Kokoro Core ML chain.
 pub const KOKORO_COREML_DIR_NAME: &str = "kokoro-82m-coreml";
-/// The Kokoro variant subfolder we fetch — MIRRORS the `.english` variant the shim requests
-/// (`KokoroAneManager(variant: .english)`), whose FluidAudio `folderName` is
-/// `<KOKORO_COREML_DIR_NAME>/ANE`. Mandarin (`ANE-zh`) and Japanese (`ANE-ja`) are unrouted.
+/// Subfolder we fetch — mirrors `KokoroAneManager(variant: .english)` (`folderName` =
+/// `<KOKORO_COREML_DIR_NAME>/ANE`). Mandarin/Japanese variants unrouted.
 pub const KOKORO_ANE_VARIANT: &str = "ANE";
-/// Folder name inside FluidAudio's OWN cache. Its `G2PModel` singleton hardcodes
-/// `TtsCacheDirectory.ensure()/Models/kokoro`, so this name is theirs, not ours.
+/// FluidAudio's own cache folder (`G2PModel` hardcodes
+/// `TtsCacheDirectory.ensure()/Models/kokoro`) — their name, not ours.
 pub const KOKORO_G2P_COREML_DIR_NAME: &str = "kokoro";
 pub const PARAKEET_COREML_DIR_NAME: &str = "parakeet-tdt-0.6b-v2";
-/// On-disk folder name of the streaming STT set (Parakeet EOU 120M).
 pub const PARAKEET_EOU_DIR_NAME: &str = "parakeet-eou-streaming";
-/// The EOU variant subfolder we fetch — MIRRORS the chunk size the shim requests
-/// (`StreamingEouAsrManager(chunkSize: .ms160)`), so the two cannot drift. 160 ms is
-/// FluidAudio's lowest-latency EOU variant (~6 partials/sec).
+/// EOU subfolder — mirrors `StreamingEouAsrManager(chunkSize: .ms160)` so loader and
+/// manifest cannot drift. Lowest-latency EOU variant (~6 partials/sec).
 pub const PARAKEET_EOU_VARIANT: &str = "160ms";
 pub const DIARIZATION_COREML_DIR_NAME: &str = "speaker-diarization-coreml";
-/// The two `.mlmodelc` bundles the diarizer loads from [`diarization_coreml_dir`]. Mirrored
-/// as literals on the Swift side, so a rename here must move with them.
+/// Diarizer `.mlmodelc` basenames under [`diarization_coreml_dir`]. Swift hard-codes the
+/// same strings — rename both sides together.
 pub const DIARIZATION_SEGMENTATION_MODEL: &str = "pyannote_segmentation.mlmodelc";
 pub const DIARIZATION_EMBEDDING_MODEL: &str = "wespeaker_v2.mlmodelc";
 
-/// The repo + pinned revision BOTH Kokoro Core ML sets share — the runtime ANE chain
-/// ([`KOKORO_COREML`]) and the G2P/lexicon sub-models ([`KOKORO_G2P_COREML`]) are different
-/// sub-paths of one tree. ONE source of truth so a pin bump cannot strand one of them on a
-/// stale tree; `kokoro_coreml_sets_share_one_repo_and_revision` pins that.
+/// Shared repo + pin for both Kokoro Core ML sets (ANE chain + G2P). One pin so a bump
+/// cannot strand one set; `kokoro_coreml_sets_share_one_repo_and_revision` guards it.
 const KOKORO_HF_REPO: &str = "FluidInference/kokoro-82m-coreml";
 const KOKORO_HF_REVISION: &str = "c94edcb4b671856795458645cd389c0a9184e8bb";
 
-/// `<model>/coreml/kokoro-82m-coreml/ANE` — the exact directory the ANE Kokoro chain loads
-/// voice packs from (`<voice>.bin`; only `af_heart.bin` ships). A pack materialized for that
-/// chain MUST land here: DontSpeak initializes it with its OWN root, not FluidAudio's cache.
+/// ANE voice-pack dir (`<voice>.bin`). Packs land under DontSpeak's root, not FluidAudio's.
 pub fn kokoro_ane_dir(roots: &ModelRoots) -> PathBuf {
     roots.dir_for(&KOKORO_COREML).join(KOKORO_ANE_VARIANT)
 }
 
-/// The directory handed to FluidAudio's `KokoroAneManager(directory:)` — the Core ML root, NOT
-/// the Kokoro set dir. `KokoroAneResourceDownloader.ensureModels` appends the variant's whole
-/// `folderName` (`kokoro-82m-coreml/ANE` for `.english`), so the argument is one level ABOVE
-/// the set dir; handing it the set dir resolves to `…/kokoro-82m-coreml/kokoro-82m-coreml/ANE`,
-/// which misses and — under `ModelHub.offlineMode` — fails as
-/// `networkDisabled(download(kokoro-82m-coreml/ANE))` instead of loading. `kokoro_hub_layout`
-/// pins this against [`kokoro_ane_dir`], where the downloader actually writes.
+/// Argument to `KokoroAneManager(directory:)`: Core ML root ABOVE the set dir.
+/// FluidAudio appends `kokoro-82m-coreml/ANE`; handing the set dir double-nests and fails
+/// closed under `ModelHub.offlineMode`. See `kokoro_hub_layout` vs [`kokoro_ane_dir`].
 pub fn kokoro_hub_root(roots: &ModelRoots) -> PathBuf {
     ds_config::coreml_dir_under(&roots.model)
 }
 
-/// The directory handed to FluidAudio's `AsrModels.load(from:version:.v2)` for the batch set.
-/// The v0.15.5 loader does `from.deletingLastPathComponent().appendingPathComponent(<repo
-/// folder>)`, and for `.v2` that folder is literally `parakeet-tdt-0.6b-v2` — so handing it the
-/// set directory itself round-trips to the same files under `<model>/coreml/`. That is why the
-/// batch set stays a normal `CoreMl` repo rather than needing a bare-`model_dir` root.
+/// Argument to `AsrModels.load(from:version:.v2)`. Loader strips last component and re-
+/// appends `parakeet-tdt-0.6b-v2`, so the set dir itself round-trips under `coreml/`.
 pub fn parakeet_batch_dir(roots: &ModelRoots) -> PathBuf {
     roots.dir_for(&PARAKEET_COREML)
 }
 
-/// The exact directory `StreamingEouAsrManager.loadModels(from:)` reads the streaming
-/// `.mlmodelc` set + `vocab.json` from. The manifest carries the repo's `160ms/` prefix, so
-/// the loadable directory is that subfolder of the download target.
+/// Streaming EOU load dir (`160ms/` prefix in the manifest — no parent-stripping).
 pub fn parakeet_eou_dir(roots: &ModelRoots) -> PathBuf {
     roots
         .dir_for(&PARAKEET_EOU_COREML)
         .join(PARAKEET_EOU_VARIANT)
 }
 
-/// The directory the two diarization `.mlmodelc` load from.
 pub fn diarization_coreml_dir(roots: &ModelRoots) -> PathBuf {
     roots.dir_for(&DIARIZATION_COREML)
 }
@@ -606,7 +587,7 @@ static DIARIZATION_COREML_FILES: &[HfFile] = &[
 
 // counts=[42, 12, 22, 16, 10] total_files=102 total_bytes=801_616_892
 
-/// Apple-native Kokoro TTS runtime chain (the `ANE/` subtree).
+/// Kokoro TTS ANE runtime chain (`ANE/` subtree).
 pub static KOKORO_COREML: HfRepo = HfRepo {
     name: "kokoro_coreml",
     repo: KOKORO_HF_REPO,
@@ -620,12 +601,9 @@ pub static KOKORO_COREML: HfRepo = HfRepo {
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
-/// Kokoro's G2P + lexicon sub-models, in the SAME repo at the SAME revision as the runtime
-/// chain. They live under FluidAudio's own cache because `KokoroAneManager.initialize()`
-/// ensures them through a singleton that hardcodes that path — DontSpeak pre-fills the exact
-/// directory it reads. A pre-fill for `initialize()`, never a second G2P in the synthesis
-/// path: phonemes still come from Rust. Removing the `kokoro` asset reclaims this directory
-/// too, which FluidAudio would re-create for itself if run independently.
+/// G2P + lexicon, same repo/revision as the ANE chain. Lives in FluidAudio's cache
+/// (`KokoroAneManager.initialize` hardcodes that path) — pre-fill only; synthesis phonemes
+/// still come from Rust. Reclaimed with the `kokoro` asset.
 pub static KOKORO_G2P_COREML: HfRepo = HfRepo {
     name: "kokoro_g2p_coreml",
     repo: KOKORO_HF_REPO,
@@ -633,22 +611,15 @@ pub static KOKORO_G2P_COREML: HfRepo = HfRepo {
     files: KOKORO_G2P_COREML_FILES,
     dir_name: KOKORO_G2P_COREML_DIR_NAME,
     root: RepoRoot::FluidCache,
-    // Empty display_name/usage ⇒ folded into the Kokoro Core ML catalog entry; the license
-    // record stays real, because these bytes are downloaded like any other.
+    // Empty display/usage ⇒ folded into Kokoro Core ML catalog; license stays real.
     display_name: "",
     usage: "",
     license: "Apache-2.0",
     license_url: "https://www.apache.org/licenses/LICENSE-2.0",
 };
 
-/// Apple-native Parakeet TDT 0.6b **v2** STT — English only, unlike the MLX rung's
-/// multilingual v3.
-///
-/// Stays a normal `CoreMl` repo at `parakeet-tdt-0.6b-v2`: FluidAudio 0.15.5's
-/// `AsrModels.load(from:version:.v2)` resolves the model directory as
-/// `from.deletingLastPathComponent()` + the v2 repo folder (`parakeet-tdt-0.6b-v2`), so the
-/// shim hands it this set directory ([`parakeet_batch_dir`]) and the load round-trips to the
-/// same files under `<model>/coreml/`. No bare-`model_dir` root is required.
+/// Parakeet TDT 0.6b v2 STT (English only; MLX uses multilingual v3). Normal `CoreMl` repo
+/// — loader parent-strip round-trips via [`parakeet_batch_dir`].
 pub static PARAKEET_COREML: HfRepo = HfRepo {
     name: "parakeet_coreml",
     repo: "FluidInference/parakeet-tdt-0.6b-v2-coreml",
@@ -662,8 +633,7 @@ pub static PARAKEET_COREML: HfRepo = HfRepo {
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
-/// Parakeet EOU 120M streaming STT (the live dictation overlay), `160ms/` variant only. The
-/// model card declares NVIDIA's open model license, same terms as the MLX Sortformer set.
+/// Parakeet EOU 120M streaming STT (`160ms/` only). NVIDIA open model license (as Sortformer).
 pub static PARAKEET_EOU_COREML: HfRepo = HfRepo {
     name: "parakeet_eou_coreml",
     repo: "FluidInference/parakeet-realtime-eou-120m-coreml",
@@ -677,7 +647,7 @@ pub static PARAKEET_EOU_COREML: HfRepo = HfRepo {
     license_url: "https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/",
 };
 
-/// Apple-native speaker diarization: pyannote segmentation plus the WeSpeaker v2 embedding.
+/// Speaker diarization: pyannote segmentation + WeSpeaker v2 embedding.
 pub static DIARIZATION_COREML: HfRepo = HfRepo {
     name: "diarization_coreml",
     repo: "FluidInference/speaker-diarization-coreml",
@@ -691,19 +661,16 @@ pub static DIARIZATION_COREML: HfRepo = HfRepo {
     license_url: "https://creativecommons.org/licenses/by/4.0/",
 };
 
-/// The repos one `DownloadTarget::KokoroFluid` fetch produces — the runtime ANE chain plus
-/// its G2P/lexicon sub-models. ONE source of truth shared by the download manager, the
-/// presence gate and the inventory row, so they can never disagree about what the set is.
+/// `DownloadTarget::KokoroFluid` set — one list for download, presence, and inventory.
 pub static KOKORO_COREML_SET: [&HfRepo; 2] = [&KOKORO_COREML, &KOKORO_G2P_COREML];
 
-/// The repos one `DownloadTarget::ParakeetFluid` fetch produces — the streaming EOU set (the
-/// live overlay) plus the batch set the offline path transcribes with.
+/// `DownloadTarget::ParakeetFluid` set: streaming EOU + batch offline.
 pub static PARAKEET_COREML_SET: [&HfRepo; 2] = [&PARAKEET_EOU_COREML, &PARAKEET_COREML];
 
-/// The repos one `DownloadTarget::DiarizationFluid` fetch produces.
+/// `DownloadTarget::DiarizationFluid` set.
 pub static DIARIZATION_COREML_SET: [&HfRepo; 1] = [&DIARIZATION_COREML];
 
-/// Every Core ML repo we self-manage, in the order a clean install fetches them.
+/// Every self-managed Core ML repo, clean-install order.
 pub fn all_coreml_repos() -> [&'static HfRepo; 5] {
     [
         &KOKORO_COREML,
@@ -761,8 +728,7 @@ mod tests {
         }
     }
 
-    /// Both Kokoro sets are sub-paths of ONE tree: a pin bump that moved only one of them
-    /// would mix model files across two commits.
+    /// One tree, one pin — bumping only one set would mix commits.
     #[test]
     fn kokoro_coreml_sets_share_one_repo_and_revision() {
         for repo in KOKORO_COREML_SET {
@@ -773,12 +739,8 @@ mod tests {
         assert_ne!(KOKORO_COREML.root, KOKORO_G2P_COREML.root);
     }
 
-    /// Cross-language drift guard: the two diarization `.mlmodelc` basenames the shim loads
-    /// MUST be exactly the constants this manifest pins, or the Rust presence probe and the
-    /// Swift loader (`ds_fluid_diar_init`) would look at different files. The Swift side hard-
-    /// codes them as string literals; this asserts they still appear verbatim in `Fluid.swift`.
-    /// Four levels up from `ds-model/src/` is the repo root — the same base `mlx_repo.rs`'s
-    /// Swift guard uses (`include_str!` resolves against this source file, not the CWD).
+    /// Drift: Rust constants must appear verbatim in Fluid.swift (`ds_fluid_diar_init`).
+    /// `include_str!` is relative to this file (repo root = four levels up).
     #[test]
     fn diarization_model_names_match_prefixes() {
         const FLUID_SWIFT: &str = include_str!(
@@ -794,8 +756,7 @@ mod tests {
         );
     }
 
-    /// `.mlmodelc` members are nested manifest paths, so a hand-edited `..` would escape the
-    /// download target — the transfer rejects that at run time; this rejects it at review time.
+    /// Nested `.mlmodelc` paths must stay Normal components (no `..` escape).
     #[test]
     fn coreml_directory_bundle_paths_are_normal_components() {
         for repo in all_coreml_repos() {
@@ -812,8 +773,7 @@ mod tests {
         }
     }
 
-    /// Pure path math (no FS): the layout each set promises, including the one set that lands
-    /// OUTSIDE DontSpeak's own cache because FluidAudio's G2P singleton hardcodes it.
+    /// Layout pin: G2P lands in FluidAudio's cache, not under the model root.
     #[test]
     fn fluid_kokoro_g2p_lives_outside_the_model_root() {
         let roots = ModelRoots::under(Path::new("/roots"));
@@ -845,11 +805,7 @@ mod tests {
         );
     }
 
-    /// FluidAudio resolves its Kokoro models as `directory + <variant folderName>`, and for
-    /// `.english` that folder is the two-component `kokoro-82m-coreml/ANE` — so the argument is
-    /// the Core ML ROOT, not the set dir. Passing the set dir resolved one level too deep and,
-    /// under `ModelHub.offlineMode`, surfaced as `networkDisabled(download(...))` rather than a
-    /// load. This pins the argument against where the downloader actually writes.
+    /// Hub root is ABOVE the set dir so FluidAudio's append lands on [`kokoro_ane_dir`].
     #[test]
     fn kokoro_hub_layout() {
         let roots = ModelRoots::under(Path::new("/roots"));
@@ -867,10 +823,7 @@ mod tests {
         );
     }
 
-    /// Cross-language drift guard: the variant this manifest fetches (`ANE/` prefixes, pinned by
-    /// [`KOKORO_ANE_VARIANT`]) MUST be the variant `ds_fluid_tts_init` asks FluidAudio for, or
-    /// the loader would resolve a folder we never downloaded. The Swift side names it as an enum
-    /// case, so assert that case still appears verbatim.
+    /// Drift: [`KOKORO_ANE_VARIANT`] must match Fluid.swift `variant: .english`.
     #[test]
     fn kokoro_variant_matches_the_swift_loader() {
         const FLUID_SWIFT: &str = include_str!(

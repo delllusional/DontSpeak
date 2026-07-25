@@ -1,19 +1,14 @@
-//! On-disk inventory of the model cache: what each built-in model costs, and removal.
+//! On-disk model-cache inventory: costs and removal.
 //!
-//! Every entry is derived from the existing registries ([`crate::tts_assets`],
-//! [`crate::mlx_repo`], [`crate::coreml_repo`], [`crate::spec`], [`crate::ort`]) — there is no second taxonomy to
-//! keep in sync. The whole API is parameterized on [`ModelRoots`]; nothing here resolves an
-//! ambient root, not even inside `remove_at`'s flights, so a test can never scan or delete
-//! the developer's real caches.
+//! Rows derive from existing registries ([`crate::tts_assets`], [`crate::mlx_repo`],
+//! [`crate::coreml_repo`], [`crate::spec`], [`crate::ort`]) — no second taxonomy. API takes
+//! [`ModelRoots`] only (no ambient roots, even in `remove_at` flights) so tests never touch
+//! real caches.
 //!
-//! `installed` matches each engine's cheap presence gate: required files and pinned completion
-//! markers are present. The engine additionally verifies model checksums when it loads, so a
-//! corrupt-but-present set reports installed here and fails at load. Sizes are logical bytes
-//! (`symlink_metadata().len()`), never block usage, and symlinks are not followed — the same
-//! walk shape as the orphan sweep.
+//! `installed` = cheap presence (files + markers). Load-time checksums still gate the engine.
+//! Sizes are logical (`symlink_metadata().len()`), no follow — same walk as the orphan sweep.
 //!
-//! Diarization (`diarization_mlx`, `diarization_fluid`, `sepformer_model`) is deliberately
-//! unlisted while the feature is hidden (#77); enabling it must add its row here.
+//! Diarization rows stay unlisted while the feature is hidden (#77).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -44,15 +39,14 @@ impl AssetKind {
         }
     }
 
-    /// Frontend/runtime rows are the assets more than one model set loads; TTS/STT rows are
-    /// one model's own files. A shared row is removable once nothing references it — see
-    /// [`shared_asset_referenced`] (#220).
+    /// Frontend/runtime shared across models; removable only when unreferenced
+    /// ([`shared_asset_referenced`], #220).
     pub fn is_shared(self) -> bool {
         matches!(self, AssetKind::Frontend | AssetKind::Runtime)
     }
 }
 
-/// One on-disk flavor of an asset, keyed by its existing [`DownloadTarget`] wire token.
+/// On-disk flavor, keyed by [`DownloadTarget`] wire token.
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub target: DownloadTarget,
@@ -60,7 +54,7 @@ pub struct Variant {
     pub bytes: u64,
 }
 
-/// One inventory row: a model id and every variant of it this host can hold.
+/// Inventory row: asset id + host-supported variants.
 #[derive(Debug, Clone)]
 pub struct Asset {
     pub id: &'static str,
@@ -70,7 +64,6 @@ pub struct Asset {
 }
 
 impl Asset {
-    /// Any variant present on disk.
     pub fn installed(&self) -> bool {
         self.variants.iter().any(|variant| variant.installed)
     }
@@ -89,8 +82,7 @@ struct Row {
     targets: &'static [DownloadTarget],
 }
 
-/// Row order is the wire order: TTS models in `TTS_MODELS` order, then STT, then the
-/// shared frontend and runtimes.
+/// Wire order: TTS models, STT, then shared frontend/runtimes.
 static ROWS: &[Row] = &[
     Row {
         id: "kokoro",
@@ -157,17 +149,14 @@ fn row(id: &str) -> Option<&'static Row> {
     ROWS.iter().find(|row| row.id == id)
 }
 
-/// The download targets behind `id`, or `None` when this build does not list the id at all.
-/// Whether `id` may be removed right now is dynamic — see [`shared_asset_referenced`] and
-/// `dontspeakd::models::refusal`, which owns the user-facing refusal text.
+/// Targets for `id`, or `None` if unlisted. Removal gates are dynamic — see
+/// [`shared_asset_referenced`] and engine-side `dontspeakd::models::refusal`.
 pub fn asset_targets(id: &str) -> Option<&'static [DownloadTarget]> {
     row(id).map(|row| row.targets)
 }
 
-/// A flat set's own ONNX weights: THAT model's files minus the shared text-frontend files, so
-/// the G2P graphs stay with `kokoro_frontend` and are never deleted with the model. Derived
-/// from the model passed in, never from Kokoro — a second `dir_name: None` set must resolve to
-/// its own weights, not to Kokoro's.
+/// Flat ONNX weights for `model` minus shared frontend files (G2P stays on `kokoro_frontend`).
+/// Derived from the argument, never hardcoded to Kokoro.
 fn flat_weight_files(model: TtsModel) -> Vec<&'static str> {
     let frontend: HashSet<String> = crate::spec::kokoro_frontend_files()
         .into_iter()
@@ -193,14 +182,11 @@ const KOKORO_G2P_FILES: [&str; 2] = [
     crate::spec::KOKORO_G2P_DECODER_FILE,
 ];
 
-/// Each repo's directory under the root it declares. Total — [`ModelRoots::dir_for`] always
-/// answers — which is what lets one target own a set that spans two roots.
 fn hf_dirs(roots: &ModelRoots, repos: &[&'static HfRepo]) -> Vec<PathBuf> {
     repos.iter().map(|repo| roots.dir_for(repo)).collect()
 }
 
-/// Everything one target owns under `roots`. Files and directories both appear; a directory
-/// entry is removed whole.
+/// Paths one target owns under `roots` (files and whole dirs).
 pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<PathBuf> {
     let root = roots.model.as_path();
     let onnx_tts = |model: TtsModel| -> Vec<PathBuf> {
@@ -229,8 +215,7 @@ pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<Path
             .map(|name| root.join(name))
             .collect(),
         DownloadTarget::ParakeetMlx => hf_dirs(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
-        // Two roots: the Core ML chain under our own cache, and the G2P sub-models under
-        // FluidAudio's. A removal reclaims both.
+        // Spans model + FluidAudio roots — removal reclaims both.
         DownloadTarget::KokoroFluid => hf_dirs(roots, &crate::coreml_repo::KOKORO_COREML_SET),
         DownloadTarget::ParakeetFluid => hf_dirs(roots, &crate::coreml_repo::PARAKEET_COREML_SET),
         DownloadTarget::KokoroFrontend => {
@@ -243,7 +228,7 @@ pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<Path
         }
         DownloadTarget::Onnxruntime => crate::ort::onnxruntime_paths_under(root),
         DownloadTarget::Cuda => vec![crate::ort::cuda_runtime_dir_under(root)],
-        // Unlisted: diarization is hidden (#77), and `Models` is an installer group.
+        // Diarization hidden (#77); `Models` is an installer group.
         DownloadTarget::DiarizationMlx
         | DownloadTarget::DiarizationFluid
         | DownloadTarget::SepformerModel
@@ -251,7 +236,7 @@ pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<Path
     }
 }
 
-/// Recursive logical size. Missing ⇒ 0; symlinks counted as themselves, never followed.
+/// Recursive logical size. Missing ⇒ 0; symlinks never followed.
 pub fn dir_size_at(path: &Path) -> u64 {
     let Ok(metadata) = std::fs::symlink_metadata(path) else {
         return 0;
@@ -270,9 +255,7 @@ pub fn dir_size_at(path: &Path) -> u64 {
         .fold(0u64, |sum, e| sum.saturating_add(dir_size_at(&e.path())))
 }
 
-/// Existence-based presence for a whole repo set, matching the engine's cheap gate: every
-/// repo's marker at the pinned revision plus every pinned file present. The checksum-aware
-/// answer is [`crate::hf_repo::is_hf_set_present`]'s.
+/// Cheap set presence (marker + files). Checksums: [`crate::hf_repo::is_hf_set_present`].
 fn hf_set_installed(roots: &ModelRoots, repos: &[&'static HfRepo]) -> bool {
     repos.iter().all(|repo| {
         let dir = roots.dir_for(repo);
@@ -306,9 +289,7 @@ fn variant_installed(roots: &ModelRoots, target: DownloadTarget) -> bool {
             .iter()
             .all(|name| root.join(name).is_file()),
         DownloadTarget::ParakeetMlx => hf_set_installed(roots, &crate::mlx_repo::PARAKEET_MLX_SET),
-        // Files on disk only. The Fluid Kokoro engine additionally needs the shared voice
-        // pack, but that is a USABILITY gate: folding it in here would make an installed set
-        // read as absent and let a reclaim delete the frontend it loads (#220).
+        // Files only — voice pack is a usability gate, not inventory (#220).
         DownloadTarget::KokoroFluid => {
             hf_set_installed(roots, &crate::coreml_repo::KOKORO_COREML_SET)
         }
@@ -338,7 +319,7 @@ fn variant_bytes(roots: &ModelRoots, target: DownloadTarget) -> u64 {
         .fold(0u64, |sum, path| sum.saturating_add(dir_size_at(path)))
 }
 
-/// Read-only walk of `roots`. Creates nothing — not even the roots themselves.
+/// Read-only walk of `roots` (creates nothing).
 pub fn scan_at(roots: &ModelRoots) -> Vec<Asset> {
     ROWS.iter()
         .filter_map(|row| {
@@ -366,9 +347,8 @@ pub fn scan_at(roots: &ModelRoots) -> Vec<Asset> {
         .collect()
 }
 
-/// Is this id the model the engine would immediately re-fetch? Coarse per model (both
-/// variants): the live variant depends on the app-hosted MLX shim, which this process
-/// cannot see, so refusing the whole model is the predictable rule.
+/// Would the engine re-fetch this id? Coarse per model (both variants) — live flavor
+/// depends on the app-hosted shim this process cannot see.
 pub fn asset_in_use(cfg: &VoiceConfig, id: &str) -> bool {
     match row(id) {
         Some(row) if row.kind == AssetKind::Stt => {
@@ -381,9 +361,8 @@ pub fn asset_in_use(cfg: &VoiceConfig, id: &str) -> bool {
     }
 }
 
-/// Every target whose installed files load through the shared ORT dylib: the five ONNX sets
-/// plus both native Kokoro flavors, whose English G2P is an ORT graph on every backend. Not
-/// `Cuda` — the CUDA runtime ships its own onnxruntime under `cuda/`.
+/// Targets that load the shared ORT dylib (ONNX sets + native Kokoro G2P). Not `Cuda`
+/// (ships its own ORT under `cuda/`).
 const ORT_CONSUMER_TARGETS: [DownloadTarget; 7] = [
     DownloadTarget::KokoroModel,
     DownloadTarget::ChatterboxModel,
@@ -402,22 +381,16 @@ fn any_installed(roots: &ModelRoots, targets: &[DownloadTarget]) -> bool {
         .any(|target| variant_installed(roots, target))
 }
 
-/// macOS speaker-lock pulls the SepFormer separator, whose install ends in the same
-/// `ensure_onnxruntime` step as every ONNX model set ([`crate::setup`]). Mirrors
-/// `dontspeakd::downloads::compute_needs`' `sepformer_model` arm minus its presence probe —
-/// presence is the on-disk clause's job.
+/// Speaker-lock would pull SepFormer (and thus ORT). Mirrors `compute_needs` selection,
+/// not presence.
 fn sepformer_selected(cfg: &VoiceConfig) -> bool {
     DownloadTarget::SepformerModel.is_supported_on_this_host()
         && cfg.speaker_lock
         && cfg.is_diarization_on()
 }
 
-/// Does this configuration ask for the CUDA EP? The ONE spelling of "a built-in engine
-/// resolves to the CUDA provider", read by the engine's boot prefetch (`apply_tts_provider`),
-/// its warm-child reload (`download_needs_child_reload`) and [`shared_asset_referenced`], so
-/// a reclaimed runtime is never one the next pass re-fetches. Pure config — the live driver
-/// probe stays with the callers that gate on it. Typed `Provider` throughout — never a
-/// `"cuda"` string.
+/// Built-in engine resolves to CUDA? Shared spelling for boot prefetch, warm-child reload,
+/// and [`shared_asset_referenced`]. Pure config; callers own the driver probe.
 pub fn cuda_runtime_wanted(cfg: &VoiceConfig) -> bool {
     (cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
         && cfg.resolved_tts_provider() == ds_config::Provider::OrtCuda)
@@ -425,16 +398,12 @@ pub fn cuda_runtime_wanted(cfg: &VoiceConfig) -> bool {
             && cfg.resolved_stt_provider() == ds_config::Provider::OrtCuda)
 }
 
-/// Is `id` one of the shared rows (ORT dylib, CUDA runtime, Kokoro frontend)?
 pub fn is_shared_asset(id: &str) -> bool {
     row(id).is_some_and(|row| row.kind.is_shared())
 }
 
-/// Does anything on this host still need shared asset `id`? Two independent reasons:
-/// something INSTALLED loads it (never break an installed model), or the current SELECTION
-/// would make the engine fetch it again (never remove what the next reload undoes).
-/// `false` for a model row and for an id this build does not list; a shared row this table
-/// does not describe is referenced, so a reclaim can never outrun the arms below.
+/// Shared asset still needed: something installed loads it, or selection would re-fetch.
+/// Model rows and unknown ids → `false`. Undescribed shared row → referenced (fail closed).
 pub fn shared_asset_referenced(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> bool {
     let root = roots.model.as_path();
     let Some(row) = row(id) else { return false };
@@ -455,38 +424,27 @@ pub fn shared_asset_referenced(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) 
         }
         [DownloadTarget::Onnxruntime] => {
             any_installed(roots, &ORT_CONSUMER_TARGETS)
-                // Diarization has no inventory row while the feature is hidden (#77), so
-                // probe its file directly rather than through a row that does not exist.
+                // No diarization row while hidden (#77) — probe the file directly.
                 || root.join(crate::spec::SEPFORMER_FILE).is_file()
                 || cfg.resolved_tts() == Some(ds_config::TtsEngine::BuiltIn)
                 || cfg.resolved_stt() == Some(ds_config::SttEngine::BuiltIn)
                 || sepformer_selected(cfg)
         }
-        // A driverless host loads the CPU EP instead ([`crate::ort::ensure_ort_dylib_gpu`])
-        // and its boot prefetch requires this same conjunct
-        // (`dontspeakd::downloads::should_prefetch_cuda`), so the ~1.4 GB runtime is
-        // reclaimable there whatever the provider ladder resolves to.
+        // Driverless host uses CPU EP and never prefetches CUDA — reclaimable there.
         [DownloadTarget::Cuda] => cuda_runtime_wanted(cfg) && crate::ort::cuda_driver_available(),
-        // Fail closed: a shared row with no arm of its own reads as referenced rather than
-        // as free to delete. `every_shared_row_has_its_own_reference_arm` catches the drift.
+        // Fail closed; `every_shared_row_has_its_own_reference_arm` catches missing arms.
         _ => true,
     }
 }
 
-/// Delete every path `id` owns under `roots`, returning the reclaimed bytes.
+/// Delete every path `id` owns under `roots`; return reclaimed bytes.
 ///
-/// Enforces exactly two gates, so a caller that skips `dontspeakd::models::refusal` still
-/// cannot break an install: `id` must be listed by this build, and a shared asset must be
-/// unreferenced ([`shared_asset_referenced`]) — defence in depth across the IPC edge. The
-/// active-model, host-support and in-flight-download gates stay engine-side with their own
-/// messages, the same split as [`asset_in_use`].
+/// Two local gates (listed id; shared ⇒ unreferenced) so IPC callers that skip engine
+/// refusal cannot break an install. Active-model / host / in-flight stay engine-side.
 ///
-/// Idempotent in outcome, not side-effect-free: each path is deleted inside its own
-/// destination flight, and entering a flight materializes the destination's parent, the
-/// sweep root, `.orphan-sweep.gate`, and a `.{name}.lock` sidecar — the same footprint a
-/// download attempt leaves. Partial failure is surfaced, never repaired: on an `io::Error`
-/// the asset stays half-deleted and re-running this is the recovery (removal operates on
-/// paths present, not on `installed`).
+/// Idempotent outcome, not side-effect-free: each path's flight materializes parent, sweep
+/// root, gate, and lock sidecars (same footprint as a download). Partial failure surfaces;
+/// re-run recovers (operates on paths present, not `installed`).
 pub fn remove_at(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> std::io::Result<u64> {
     let invalid = |message: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, message);
     let targets =
@@ -502,9 +460,7 @@ pub fn remove_at(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> std::io::Re
     paths.dedup();
     let mut reclaimed: u64 = 0;
     for path in &paths {
-        // That flight footprint is fine inside our OWN cache and wrong outside it: a host
-        // that never enabled a third-party backend would have `models remove` MATERIALIZE
-        // that backend's cache just to lock an absent path.
+        // Skip absent paths outside our cache — do not materialize third-party roots.
         if !path.exists() && !path.starts_with(&roots.model) {
             continue;
         }
@@ -519,7 +475,7 @@ pub fn remove_at(roots: &ModelRoots, cfg: &VoiceConfig, id: &str) -> std::io::Re
     Ok(reclaimed)
 }
 
-/// Measure then delete, inside the flight, so the reported bytes are the bytes that left.
+/// Measure then delete inside the flight (reported = reclaimed).
 fn remove_locked(path: &Path) -> std::io::Result<u64> {
     let metadata = match std::fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -574,12 +530,10 @@ fn capabilities_json(model: TtsModel) -> Value {
     })
 }
 
-/// The `models` tool payload. `removed` is present only after a successful removal.
+/// `models` tool payload. `removed` only after a successful removal.
 ///
-/// `removable` answers "can this be removed right now": the selected model cannot, a shared
-/// asset something installed or selected still references cannot, and neither can one whose
-/// download is in flight. `reason` names only the durable cause (`active` / `shared`) —
-/// live download state belongs to `status`.
+/// `removable`: not active, not shared-referenced, not downloading. `reason` is the durable
+/// cause only (`active` / `shared`); live download state is `status`.
 pub fn inventory_json(
     roots: &ModelRoots,
     cfg: &VoiceConfig,
@@ -592,9 +546,7 @@ pub fn inventory_json(
             let shared = asset.kind.is_shared();
             let active = asset_in_use(cfg, asset.id);
             let referenced = shared && shared_asset_referenced(roots, cfg, asset.id);
-            // A shared row is off-limits while ANY fetch runs. Coarse on purpose: the precise
-            // answer is "which `start_download` arms end in `ensure_onnxruntime_with_progress`",
-            // a third table that would have to track those arms. Over-blocking costs one retry.
+            // Shared rows block while any fetch runs (coarse; over-block costs one retry).
             let downloading = if shared {
                 !active_downloads.is_empty()
             } else {
@@ -643,14 +595,11 @@ mod tests {
     use super::*;
     use crate::download::sweep_root_of;
 
-    /// Every root inside one tempdir. A fixture seeds `roots.model` only, so any file that
-    /// shows up under `roots.fluid` is something the code under test created.
     fn roots_under(dir: &Path) -> ModelRoots {
         ModelRoots::under(dir)
     }
 
-    /// Guards a fixture against a `DONTSPEAK_MODEL_DIR` that covers `TMPDIR`: the flight
-    /// would then take its sweep gate in the REAL model dir (#204).
+    /// Fail if ambient `DONTSPEAK_MODEL_DIR` would steal the flight gate (#204).
     fn assert_fixture_is_isolated(root: &Path, path: &Path) {
         assert!(
             sweep_root_of(path).is_some_and(|resolved| resolved.starts_with(root)),
@@ -723,7 +672,6 @@ mod tests {
             ]
         );
 
-        // The G2P graphs and the espeak runtime belong to the shared frontend row only.
         let frontend = owned_paths_under(&roots, DownloadTarget::KokoroFrontend);
         assert!(frontend.contains(&root.join(crate::spec::KOKORO_G2P_ENCODER_FILE)));
         assert!(frontend.contains(&root.join(crate::spec::KOKORO_G2P_DECODER_FILE)));
@@ -739,10 +687,7 @@ mod tests {
         assert!(owned_paths_under(&roots, DownloadTarget::DiarizationMlx).is_empty());
         assert!(owned_paths_under(&roots, DownloadTarget::DiarizationFluid).is_empty());
 
-        // The Fluid variant is exactly its two repo directories — one of them outside the
-        // model root. `voices-v1.0.bin` is the ONNX variant's file even though the Fluid
-        // engine reads it too, so `variant_bytes(KokoroFluid)` under-reports by its size
-        // rather than double-counting it across the row's variants.
+        // Fluid: two repos (one outside model root). Voice pack stays on the ONNX variant.
         let fluid = owned_paths_under(&roots, DownloadTarget::KokoroFluid);
         assert_eq!(
             fluid,
@@ -764,10 +709,7 @@ mod tests {
         }
     }
 
-    /// A second flat (`dir_name: None`) set must own ITS files. Kokoro is the only flat set
-    /// today, so this calls the helper for a subdirectory model to pin that the derivation
-    /// follows the argument — a Kokoro-hardcoded helper would make the new model's removal
-    /// delete `kokoro-v1.0-fp32.onnx` and `voices-v1.0.bin`.
+    /// `flat_weight_files` follows its argument (not hardcoded to Kokoro).
     #[test]
     fn flat_weights_are_derived_from_the_model_passed_in() {
         let qwen: Vec<&'static str> = crate::tts_assets::tts_ort_asset_set(TtsModel::Qwen)
@@ -804,7 +746,7 @@ mod tests {
         assert_eq!(dir_size_at(root.path()), 4096);
     }
 
-    /// Seeds one directory asset, one flat asset, and one MLX asset — the three shapes.
+    /// Directory + flat + MLX fixtures.
     fn seed(roots: &ModelRoots) {
         let root = roots.model.as_path();
         let chatterbox = crate::tts_assets::tts_model_dir_under(root, TtsModel::Chatterbox);
@@ -824,9 +766,7 @@ mod tests {
         );
     }
 
-    /// Kokoro's ONNX set is all four `KOKORO_FILES` — the two G2P graphs included, because
-    /// `variant_installed` mirrors `tts_model_files_present`. Seeding only the flat weights
-    /// leaves `KokoroModel` NOT installed.
+    /// Full Kokoro ONNX set (incl. G2P — presence matches `tts_model_files_present`).
     fn seed_kokoro_onnx(root: &Path) {
         let dir = crate::tts_assets::tts_model_dir_under(root, TtsModel::Kokoro);
         for file in crate::tts_assets::tts_ort_asset_set(TtsModel::Kokoro).files_for(false) {
@@ -834,9 +774,7 @@ mod tests {
         }
     }
 
-    /// Both repos of the Fluid Kokoro set, marker included — one under the model root, one
-    /// under the third-party cache. The shared `voices-v1.0.bin` is deliberately NOT written:
-    /// the variant is installed on files alone.
+    /// Fluid Kokoro set with markers; no shared voice pack (files alone install).
     fn seed_kokoro_fluid(roots: &ModelRoots) {
         for repo in crate::coreml_repo::KOKORO_COREML_SET {
             let dir = roots.dir_for(repo);
@@ -847,8 +785,7 @@ mod tests {
         }
     }
 
-    /// Everything deselected: no engine resolves, so only on-disk state can reference a
-    /// shared asset. `speaker_lock` and `diarizer` default to off.
+    /// No engine resolves; only on-disk state can reference shared assets.
     fn nothing_selected() -> VoiceConfig {
         VoiceConfig {
             tts_engine: Some(Vec::new()),
@@ -887,7 +824,6 @@ mod tests {
         assert!(parakeet_onnx.installed);
         assert_eq!(parakeet_onnx.bytes, 8 * PARAKEET_ONNX_FILES.len() as u64);
 
-        // Rows/variants are host-gated; MLX only exists on Apple Silicon.
         let kokoro = asset(&assets, "kokoro");
         match variant(kokoro, DownloadTarget::KokoroMlx) {
             Some(mlx) => {
@@ -895,7 +831,6 @@ mod tests {
                     mlx.installed,
                     "a seeded set at the pinned revision is ready"
                 );
-                // A stale marker invalidates the whole set without touching the files.
                 let dir = roots.dir_for(&crate::mlx_repo::KOKORO_MLX);
                 std::fs::write(dir.join(".ds-ready"), "0000000").unwrap();
                 let stale = scan_at(&roots);
@@ -969,9 +904,7 @@ mod tests {
         );
     }
 
-    /// The `kokoro` row is one id with three variants: the Fluid one alone makes the row
-    /// installed, and `models remove kokoro` reclaims BOTH of its directories — including the
-    /// one in FluidAudio's own cache, which no other row owns.
+    /// Fluid-only Kokoro installs the row; remove reclaims both roots (incl. FluidAudio cache).
     #[test]
     fn a_kokoro_row_holding_only_the_fluid_variant_is_installed_and_fully_reclaimed() {
         if !DownloadTarget::KokoroFluid.is_supported_on_this_host() {
@@ -1009,9 +942,7 @@ mod tests {
         assert!(!g2p.exists(), "the third-party cache is reclaimed too");
     }
 
-    /// #220's contract for the third variant: Kokoro's English G2P is an ORT BART graph on
-    /// every backend, so an installed Fluid Kokoro holds both shared rows even with nothing
-    /// selected — otherwise a reclaim would delete assets it loads.
+    /// Fluid Kokoro holds ORT + frontend even with nothing selected (#220).
     #[test]
     fn kokoro_fluid_keeps_the_onnx_runtime_referenced() {
         assert_eq!(ORT_CONSUMER_TARGETS.len(), 7);
@@ -1084,7 +1015,6 @@ mod tests {
                 "{}",
                 row.id
             );
-            // Licenses the single-target slice patterns in `shared_asset_referenced`.
             if row.kind.is_shared() {
                 assert_eq!(row.targets.len(), 1, "{}", row.id);
                 assert_eq!(row.id, row.targets[0].as_str(), "{}", row.id);
@@ -1092,10 +1022,7 @@ mod tests {
         }
     }
 
-    /// Drift guard for [`shared_asset_referenced`]'s arms. With nothing installed and nothing
-    /// selected the only clause that can answer `true` is the fail-closed default, so a shared
-    /// row added without an arm of its own fails here instead of becoming silently
-    /// reclaimable while the engine still loads it.
+    /// Empty disk + nothing selected: only the fail-closed default can answer `true`.
     #[test]
     fn every_shared_row_has_its_own_reference_arm() {
         let empty = tempfile::tempdir().unwrap();
@@ -1143,9 +1070,7 @@ mod tests {
         );
     }
 
-    /// #4.5: removing a never-downloaded model is a 0-byte success whose only footprint is
-    /// what entering a flight creates. Pins that a lock change cannot start materializing
-    /// model directories.
+    /// Absent model: 0 bytes reclaimed; only flight lock scaffolding appears.
     #[test]
     fn removing_an_absent_model_reclaims_nothing_and_creates_only_lock_scaffolding() {
         let root = tempfile::tempdir().unwrap();
@@ -1166,10 +1091,8 @@ mod tests {
         expected.sort();
         assert_eq!(entries(&roots.model), expected);
         let mlx = ds_config::mlx_dir_under(&roots.model);
-        // CHATTERBOX_MLX_DIR_NAME nests, so its flight also creates the `mlx-audio` parent.
         assert_eq!(entries(&mlx), vec!["mlx-audio".to_string()]);
-        // Every gate collapses onto the model root's own `.orphan-sweep.gate`: the removal
-        // holds the roots, so a nested destination no longer falls back to its own parent.
+        // Rooted removal: nested destinations share the model-root gate (no per-parent gate).
         assert_eq!(
             entries(&mlx.join("mlx-audio")),
             vec![
@@ -1230,7 +1153,6 @@ mod tests {
             "kokoro_frontend"
         ));
 
-        // Diarization has no row (#77): only a direct file probe sees its ORT consumer.
         let sepformer = tempfile::tempdir().unwrap();
         let sepformer_roots = roots_under(sepformer.path());
         write(
@@ -1248,7 +1170,6 @@ mod tests {
             "kokoro_frontend"
         ));
 
-        // MLX Kokoro runs English G2P through the BART ONNX graph, so it needs the dylib.
         if DownloadTarget::KokoroMlx.is_supported_on_this_host() {
             let mlx = tempfile::tempdir().unwrap();
             let mlx_roots = roots_under(mlx.path());
@@ -1300,7 +1221,6 @@ mod tests {
             assert!(!shared_asset_referenced(&roots, &off, id), "{id}");
         }
 
-        // Speaker-lock's SepFormer install ends in the same ensure-ORT step (#220 F7).
         let diarizing = VoiceConfig {
             speaker_lock: true,
             diarizer: vec![ds_config::DiarizerProvider::Mlx],
@@ -1317,9 +1237,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let roots = roots_under(root.path());
         let has_row = DownloadTarget::Cuda.is_supported_on_this_host();
-        // Selection alone does not hold the runtime: with no NVIDIA driver the engine runs the
-        // CPU EP and `should_prefetch_cuda` never fetches it, so a driverless x86_64 host
-        // reclaims the ~1.4 GB even while the ladder still resolves to `cuda`.
+        // Driverless host uses CPU EP and never prefetches — reclaimable despite ladder.
         let held = has_row && crate::ort::cuda_driver_available();
         let built_in_tts = |provider| VoiceConfig {
             tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
@@ -1335,8 +1253,6 @@ mod tests {
         assert_eq!(cuda_runtime_wanted(&cuda), has_row);
         assert_eq!(shared_asset_referenced(&roots, &cuda, "cuda"), held);
 
-        // A CUDA STT alone keeps the runtime, even with TTS off (`5cf0c0b` made
-        // `Provider::OrtCuda` usability arch-aware, so this tracks the row exactly).
         let stt_cuda = VoiceConfig {
             tts_engine: Some(Vec::new()),
             stt_engine: Some(vec![ds_config::SttEngine::BuiltIn]),
@@ -1389,8 +1305,7 @@ mod tests {
         assert!(dylib.is_file(), "a refusal deletes nothing");
     }
 
-    /// The invariant this preserves: you can never remove something the engine
-    /// (`dontspeakd::downloads::compute_needs`) would immediately re-fetch.
+    /// Never remove what `compute_needs` would immediately re-fetch.
     #[test]
     fn in_use_follows_the_resolved_engine_ladders() {
         let built_in = VoiceConfig {
@@ -1428,12 +1343,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let roots = roots_under(root.path());
         seed(&roots);
-        // `seed` installs Kokoro MLX only, which exists on Apple Silicon alone; the full ONNX
-        // set makes `kokoro_frontend` referenced ON DISK on every host.
+        // ONNX Kokoro so frontend is referenced on every host (seed's MLX is Apple-only).
         seed_kokoro_onnx(&roots.model);
-        // STT off explicitly: the default ladder resolves to `system` on macOS but falls
-        // through to `built_in` on Linux/Windows, which would make `parakeet` the active
-        // STT and flip the `removable` row below by host.
+        // Explicit STT off — default ladder is host-dependent and would flip `parakeet`.
         let cfg = VoiceConfig {
             tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
             tts_model: TtsModel::Chatterbox,
@@ -1473,10 +1385,7 @@ mod tests {
         assert_eq!(parakeet["removable"], true);
         assert_eq!(parakeet["capabilities"], Value::Null);
 
-        // `kokoro_frontend` and `onnxruntime` are referenced on disk here; `cuda` is referenced
-        // by selection — the unset `provider` ladder resolves built-in TTS to `OrtCuda` — but
-        // only where a driver would let the engine load it. The in-flight Qwen download blocks
-        // every shared row regardless, so only `reason` splits by host.
+        // In-flight Qwen blocks every shared row; `reason` still splits by host/driver.
         for id in ds_config::SHARED_ASSET_TOKENS {
             let Some(shared) = assets.iter().find(|asset| asset["id"] == *id) else {
                 assert_eq!(
@@ -1499,7 +1408,6 @@ mod tests {
             );
             assert_eq!(shared["active"], false, "{id}");
         }
-        // Deterministic order: TTS models, then STT, then the shared rows this host can hold.
         let ids: Vec<&str> = assets
             .iter()
             .map(|asset| asset["id"].as_str().unwrap())
@@ -1516,7 +1424,6 @@ mod tests {
             .collect();
         assert_eq!(ids, expected);
 
-        // Nothing installed and nothing selected: every shared row this host lists is free.
         let empty = tempfile::tempdir().unwrap();
         let free = inventory_json(&roots_under(empty.path()), &nothing_selected(), &[], None);
         for shared in
@@ -1559,8 +1466,7 @@ mod tests {
         assert_eq!(row["bytes"], 0);
     }
 
-    /// #208 class: a cross-process installer holding the asset's directory flight must block
-    /// the removal until it releases.
+    /// Cross-process directory flight blocks removal until release.
     #[test]
     fn removal_waits_for_a_cross_process_directory_installer() {
         const CHILD_TARGET: &str = "DS_MODEL_INVENTORY_CHILD_TARGET";
@@ -1582,8 +1488,7 @@ mod tests {
             .env(CHILD_TARGET, &target)
             .env(CHILD_READY, &ready)
             .env(CHILD_RELEASE, &release)
-            // The child must resolve the SAME sweep root as the parent (#204).
-            .env_remove("DONTSPEAK_MODEL_DIR")
+            .env_remove("DONTSPEAK_MODEL_DIR") // same sweep root as parent (#204)
             .spawn()
             .unwrap();
 
@@ -1619,8 +1524,7 @@ mod tests {
         assert!(!target.exists());
     }
 
-    /// Child half of `removal_waits_for_a_cross_process_directory_installer`; inert unless
-    /// the parent sets its environment.
+    /// Child half of the cross-process flight test; inert without parent env.
     #[test]
     fn inventory_directory_lock_child() {
         let Some(target) = std::env::var_os("DS_MODEL_INVENTORY_CHILD_TARGET") else {
@@ -1644,9 +1548,7 @@ mod tests {
         .unwrap();
     }
 
-    /// An install in flight for one of the asset's own files must finish before the removal
-    /// deletes it — driven through the file-level httpmock seam, so no thread-local target
-    /// seam and no ambient destination are involved.
+    /// In-flight file install finishes before removal deletes it (httpmock seam).
     #[test]
     fn removal_does_not_interleave_with_an_in_flight_install() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -1674,8 +1576,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let install_root = roots.model.clone();
         let installer = std::thread::spawn(move || {
-            // `download_to_network` reports progress at least twice for a small body; only
-            // the first call is the rendezvous, inside the flight and before the rename.
+            // First progress tick is the in-flight rendezvous (before rename).
             let announced = AtomicBool::new(false);
             let progress = |_done: u64, _total: u64| {
                 if !announced.swap(true, Ordering::SeqCst) {
@@ -1712,7 +1613,6 @@ mod tests {
             .expect("the removal completes once the install finishes");
         remover.join().unwrap();
 
-        // The install's atomic rename lands BEFORE the delete, so the finalized file is gone.
         assert!(!onnx.exists(), "the removal deletes the finalized download");
         assert!(!voices.exists());
         assert!(reclaimed >= b"already installed voices".len() as u64);
@@ -1726,10 +1626,7 @@ mod tests {
         mock.assert_calls(1);
     }
 
-    /// R11 / #212: a host that never enabled a third-party backend must not have `models
-    /// remove` MATERIALIZE that backend's cache. `remove_at` enters a flight per path, and a
-    /// flight creates the destination's parent, the sweep root and two lock sidecars — so a
-    /// path outside our own root that does not already exist is skipped, not locked.
+    /// Do not materialize an unused FluidAudio cache on remove (#212).
     #[test]
     fn removing_kokoro_creates_nothing_in_a_fluid_cache_that_does_not_exist() {
         let root = tempfile::tempdir().unwrap();

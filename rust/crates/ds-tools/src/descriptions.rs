@@ -1,6 +1,4 @@
-//! Canonical MCP / Tools-tab tokens: wire names + bare description prose.
-//! Single source for `tools/list`, `catalog_ui` (app Tools tab), and docs drift guards.
-//! WHAT not HOW; bare minimum for token cost.
+//! MCP / Tools-tab wire names + bare description prose (token-cost minimal).
 
 // ── tool wire names (Tools tab titles; MCP tool names) ──────────────────────
 

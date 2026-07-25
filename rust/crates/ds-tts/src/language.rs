@@ -1,9 +1,7 @@
 //! Shared language detection for every TTS backend.
 //!
-//! Two entry points. [`detect_language`] classifies one text and is what backends use
-//! when the text is all they have. [`chunk_language`] decides what a *spoken chunk* is
-//! spoken in: the engine calls it once per queued utterance, so a reply that switches
-//! language mid-way is voiced per utterance rather than under one turn-wide verdict.
+//! [`detect_language`] classifies one text; [`chunk_language`] scopes a spoken chunk so
+//! mid-reply language switches voice per utterance, not one turn-wide verdict.
 
 use std::sync::OnceLock;
 
@@ -11,13 +9,8 @@ use whatlang::{Detector, Info, Lang};
 
 pub const DEFAULT_LANGUAGE: &str = "en";
 
-/// Canonical `whatlang::Lang` ↔ two-letter ISO 639-1 code table — the single source for
-/// [`language_code`], [`lang_for_code`], and [`full_range`], so the code a detector can
-/// return and the code the mapper accepts cannot drift. Two-letter 639-1 is what every
-/// model frontend consumes (whatlang's own `code()` is three-letter 639-3, which no model
-/// accepts). Malay (`ms`) and Swahili (`sw`) are in Chatterbox's set but have no whatlang
-/// variant, so they are absent here: their text detects as a related allowed language or
-/// falls back to English — the accepted cost of whatlang over the much larger lingua models.
+/// Single source for [`language_code`] / [`lang_for_code`] / [`full_range`] (639-1;
+//! whatlang's own codes are 639-3). `ms`/`sw` lack whatlang variants — absent here.
 const LANG_CODES: &[(Lang, &str)] = &[
     (Lang::Ara, "ar"),
     (Lang::Cmn, "zh"),
@@ -42,16 +35,13 @@ const LANG_CODES: &[(Lang, &str)] = &[
     (Lang::Tur, "tr"),
 ];
 
-/// Built once per model and shared by reference across threads — the engine detects on its
-/// TTS worker while other callers may detect concurrently. `detect_lang` takes `&self` and
-/// holds no interior mutability, so the shared `&Detector` needs no lock; this asserts the
-/// `Sync` that the `static` relies on stays true.
+/// `Detector` is `Sync` — shared statics need no lock.
 const _: fn() = || {
     fn assert_sync<T: Sync>() {}
     assert_sync::<Detector>();
 };
 
-/// `whatlang::Lang` → the two-letter ISO 639-1 code every model frontend consumes.
+/// `whatlang::Lang` → ISO 639-1 for model frontends.
 fn language_code(language: Lang) -> &'static str {
     LANG_CODES
         .iter()
@@ -60,8 +50,7 @@ fn language_code(language: Lang) -> &'static str {
         .unwrap_or(DEFAULT_LANGUAGE)
 }
 
-/// Two-letter ISO 639-1 code → its `whatlang::Lang`. `None` for codes with no whatlang
-/// variant (e.g. `ms`/`sw`), which therefore cannot enter a detector allowlist.
+/// ISO 639-1 → `whatlang::Lang`; `None` when no whatlang variant (e.g. `ms`/`sw`).
 fn lang_for_code(code: &str) -> Option<Lang> {
     LANG_CODES
         .iter()
@@ -69,18 +58,15 @@ fn lang_for_code(code: &str) -> Option<Lang> {
         .map(|(lang, _)| *lang)
 }
 
-/// Every `whatlang::Lang` in the table — the detector range for models that accept any
-/// language or select one internally.
+/// Full table range for models that accept any language or select internally.
 fn full_range() -> Vec<Lang> {
     LANG_CODES.iter().map(|(lang, _)| *lang).collect()
 }
 
-/// The detector allowlist for a model: the whatlang variants of the languages it declares.
+/// whatlang allowlist from the model's declared languages.
 fn model_allowlist(model: ds_config::TtsModel) -> Vec<Lang> {
     let languages = model.descriptor().languages;
-    // Empty or the `auto` sentinel (OmniVoice) → detect across the full mapped range:
-    // the model either accepts any language or selects one internally. General rule,
-    // not an OmniVoice special-case.
+    // Empty / `auto` → full range (model accepts any or picks internally).
     if languages.is_empty() || languages.contains(&"auto") {
         return full_range();
     }
@@ -90,8 +76,7 @@ fn model_allowlist(model: ds_config::TtsModel) -> Vec<Lang> {
         .collect()
 }
 
-/// Per-model detector, cached. Indexing by `model as usize` mirrors `descriptor()`
-/// (`TTS_MODELS[self as usize]`), so the model's declared languages scope its allowlist.
+/// Cached per-model detector (`model as usize` matches `descriptor()` indexing).
 fn detector_for(model: ds_config::TtsModel) -> &'static Detector {
     static DETECTORS: [OnceLock<Detector>; ds_config::TtsModel::ALL.len()] =
         [const { OnceLock::new() }; ds_config::TtsModel::ALL.len()];
@@ -103,12 +88,12 @@ fn detector_for_any_language() -> &'static Detector {
     DETECTOR.get_or_init(|| Detector::with_allowlist(full_range()))
 }
 
-/// One whatlang verdict scoped to `model`: the ISO code plus how much evidence backs it.
+/// whatlang verdict: ISO code + confidence evidence.
 struct Classified {
     code: &'static str,
-    /// `0.0` when nothing matched — the `en` below is a default, not a reading.
+    /// `0.0` when nothing matched (`en` is a default, not a reading).
     confidence: f64,
-    /// whatlang's own bar. Strict by design: it wants paragraph-length prose.
+    /// whatlang's own bar (paragraph-length prose).
     reliable: bool,
 }
 
@@ -119,10 +104,7 @@ fn classify_with(text: &str, detector: &Detector, target: &str) -> Classified {
         .as_ref()
         .map(|info| language_code(info.lang()))
         .unwrap_or(DEFAULT_LANGUAGE);
-    // Which language an utterance got is the first thing to check when speech comes out in
-    // the wrong voice, and the fallback to `en` is otherwise indistinguishable from a
-    // confident English detection. Logs the classified prose length rather than the prose,
-    // which is user speech content.
+    // Length only — prose is user content. Distinguishes en-default from confident en.
     log::debug!(
         target: "tts",
         "whatlang detected {code} for {}{} at confidence {:.2} over {} chars",
@@ -146,36 +128,24 @@ fn classify_any_language(text: &str) -> Classified {
     classify_with(text, detector_for_any_language(), "system")
 }
 
-/// Detect the language of `text` scoped to `model`'s supported set; ambiguous / unspeakable
-/// → `en`. Because the allowlist is derived from `descriptor().languages` and
-/// `language_code` is its exact inverse, every non-fallback result is a language the model
-/// can speak. The `en` fallback is valid because every built-in model supports `en`.
+/// Language of `text` scoped to `model`; ambiguous / unspeakable → `en`
+/// (every built-in supports `en`; non-fallback codes are always speakable).
 pub fn detect_language(text: &str, model: ds_config::TtsModel) -> String {
     classify(text, model).code.to_string()
 }
 
-/// Evidence a chunk needs to be voiced in the language it reads as. whatlang's own
-/// `is_reliable` wants roughly a paragraph, which a one-line digest never has, but below
-/// that bar its confidence still separates the two failure directions at digest length:
-/// English lines that mis-top-1 as a Romance language sit under 0.25, while short prose
-/// that really is Italian, Spanish, French, or Portuguese lands at 0.3 and above
-/// (`digest_confidence_separates_english_from_the_rest` holds the measured table). Below
-/// this, weak evidence loses to the turn's language or to English — the safer error,
-/// since these replies are overwhelmingly English and a foreign voice on English text is
-/// the failure users hear first.
+/// Digest-length confidence floor. `is_reliable` wants paragraphs; below that, measured
+/// table in `digest_confidence_separates_english_from_the_rest`: weak Romance mis-top-1s
+/// on English sit under 0.25; real short non-English lands ≥0.3. Below this, prefer turn
+/// language or English (foreign voice on English is the worst failure mode).
 const MIN_CHUNK_CONFIDENCE: f64 = 0.3;
 
-/// Language for one spoken chunk. Each chunk is classified on its own text, so a reply
-/// that switches language is voiced per utterance. `corpus` is the surrounding turn text
-/// when the caller has it (narration sends the message-so-far); it is consulted only when
-/// the chunk's own evidence is too thin to stand, letting a bare digest inherit the
-/// language of the reply it came from instead of taking a coin flip.
+/// Per-chunk language. Own text first; `corpus` (message-so-far) only when evidence is thin.
 pub fn chunk_language(chunk: &str, corpus: Option<&str>, model: ds_config::TtsModel) -> String {
     choose_chunk_language(chunk, corpus, |text| classify(text, model))
 }
 
-/// System speech has no built-in-model language allowlist, so classify across every mapped
-/// language while retaining the same short-chunk confidence policy.
+/// System speech: full mapped range, same short-chunk confidence policy.
 pub fn chunk_language_any(chunk: &str, corpus: Option<&str>) -> String {
     choose_chunk_language(chunk, corpus, classify_any_language)
 }
@@ -195,10 +165,7 @@ fn choose_chunk_language(
     }
 }
 
-/// Non-refusing clamp for an already-scoped code — used by the engine before it speaks an
-/// item and by the warm helper, which trusts the code it gets over IPC and must never drop.
-/// Guards a model-switch race: a code detected (or pinned) under one model that the live
-/// model can't speak resolves to that model's default.
+/// Clamp an already-scoped code to `model` (model-switch race; IPC path must never drop).
 pub fn supported_language(language: &str, model: ds_config::TtsModel) -> String {
     let descriptor = model.descriptor();
     if descriptor.accepts_detected_language(language) {
@@ -245,8 +212,7 @@ mod tests {
 
     #[test]
     fn detects_kokoro_espeak_languages() {
-        // The espeak-backed Kokoro languages, so a detection regression that routed one
-        // of these to English (silently wrong voice) fails here.
+        // espeak-backed Kokoro langs — silent en-fallback would wrong-voice them.
         let m = TtsModel::Kokoro;
         assert_eq!(
             detect_language("Ciao, oggi è una bella giornata di sole.", m),
@@ -271,9 +237,7 @@ mod tests {
 
     #[test]
     fn detection_is_scoped_to_the_selected_model() {
-        // Russian input. Kokoro has no Russian, so scoping falls it back to a supported code
-        // (never a drop, never "ru"). Qwen/Chatterbox support Russian, so they keep it, and
-        // OmniVoice's full range keeps it too.
+        // Kokoro lacks Russian → supported code; models that support it keep `ru`.
         let russian = "Этот ответ написан на русском языке.";
         let kokoro = detect_language(russian, TtsModel::Kokoro);
         assert_ne!(kokoro, "ru");
@@ -292,8 +256,6 @@ mod tests {
 
     #[test]
     fn supported_language_clamps_unsupported_to_the_model_default() {
-        // Warm-helper clamp: a code the model can't speak becomes its default; a supported
-        // code passes through; OmniVoice accepts anything.
         assert_eq!(supported_language("ru", TtsModel::Kokoro), "en");
         assert_eq!(supported_language("ru", TtsModel::Qwen), "ru");
         assert_eq!(supported_language("ru", TtsModel::OmniVoice), "ru");
@@ -323,7 +285,6 @@ mod tests {
     fn codes_without_a_whatlang_variant_are_absent() {
         assert_eq!(lang_for_code("ms"), None);
         assert_eq!(lang_for_code("sw"), None);
-        // The allowlist skips them without panic and still builds a usable detector.
         let allow = model_allowlist(TtsModel::Chatterbox);
         assert!(!allow.is_empty());
         let _ = Detector::with_allowlist(allow);
@@ -331,15 +292,13 @@ mod tests {
 
     #[test]
     fn english_is_always_in_the_allowlist() {
-        // Fallback safety: `detect_language`'s no-evidence `en` must be a valid result for
-        // every model's detector.
+        // no-evidence `en` fallback must be valid for every model.
         for model in TtsModel::ALL.iter().copied() {
             assert!(model_allowlist(model).contains(&Lang::Eng));
         }
     }
 
-    /// Reply that opens in Italian and closes in English, as narration delivers it: one
-    /// utterance per blockquote line, each with the message-so-far as its corpus.
+    /// Narration-style fixtures: one utterance per blockquote, message-so-far as corpus.
     const ITALIAN_QUOTE: &str = concat!(
         "Oggi è una giornata tranquilla e luminosa, e mi fa davvero piacere poter ",
         "scambiare due parole con te in italiano, una lingua che ha un ritmo caldo e ",
@@ -353,22 +312,19 @@ mod tests {
 
     #[test]
     fn a_chunk_with_prose_of_its_own_outranks_the_turn_corpus() {
-        // The bug this policy exists for: the English quote arrives with a corpus whose
-        // first (and longer) half is Italian, and must still be spoken in English.
+        // English quote must stay en even when corpus is majority Italian.
         let corpus = format!("> {ITALIAN_QUOTE}\n\n> {ENGLISH_QUOTE}");
         for model in [TtsModel::Kokoro, TtsModel::Chatterbox] {
             assert_eq!(chunk_language(ITALIAN_QUOTE, Some(&corpus), model), "it");
             assert_eq!(chunk_language(ENGLISH_QUOTE, Some(&corpus), model), "en");
-            // A mixed corpus resolves to a single language (here English) — whichever it
-            // is, one of the two quotes would be voiced wrong under a turn-wide verdict.
+            // Turn-wide would wrong-voice one of the two.
             assert_eq!(detect_language(&corpus, model), "en");
         }
     }
 
     #[test]
     fn a_digest_too_short_to_classify_inherits_the_turn() {
-        // Regression: short digests alone ("Bon courage.") false-positive as FR/PT. With an
-        // English turn behind them they stay English; with an Italian one they follow it.
+        // Short digests false-positive alone; inherit turn language when present.
         let english_turn = concat!(
             "This assistant reply is written entirely in clear English prose so language ",
             "detection has a solid corpus for the whole turn.\n\n> Bon courage.\n\n",
@@ -385,17 +341,13 @@ mod tests {
                 chunk_language("Grazie mille.", Some(&italian_turn), model),
                 "it"
             );
-            // No corpus and nothing solid of its own → English, never a coin flip.
             assert_eq!(chunk_language("Grazie mille.", None, model), "en");
         }
     }
 
     #[test]
     fn digest_confidence_separates_english_from_the_rest() {
-        // Measured basis for `MIN_CHUNK_CONFIDENCE`: one-line digests, no corpus. English
-        // lines never leave English (some top-1 as `fr` under 0.2); non-English lines with
-        // enough trigram evidence get their language, and the rest fall back to English —
-        // wrong voice for that line, but never a foreign voice on English text.
+        // Measured basis for `MIN_CHUNK_CONFIDENCE` (one-line digests, no corpus).
         const DIGESTS: &[(&str, &str)] = &[
             ("en", "Hello, it is nice to meet you."),
             ("en", "Let me check the logs."),
@@ -428,8 +380,7 @@ mod tests {
 
     #[test]
     fn allowlist_matches_the_descriptor_languages() {
-        // Structural guarantee: the auto/empty case detects across the full range (OmniVoice
-        // is `["auto"]`), every other model only over codes it actually declares.
+        // auto/empty → full range; else only declared codes.
         for model in TtsModel::ALL.iter().copied() {
             let descriptor = model.descriptor();
             let allow = model_allowlist(model);

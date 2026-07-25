@@ -5,9 +5,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// Deployed `dontspeak` for hook/MCP registration.
-///
-/// Unix: prefer `~/.local/bin` (wired configs survive rebuilds). Windows: sibling of this
-/// exe only (portable zip; ignore stale `~/.local/bin`). macOS `.app` → [`bundle_cli_path`].
+/// Unix: prefer `~/.local/bin`. Windows: sibling of this exe. macOS `.app` → [`bundle_cli_path`].
 /// `paths: None` skips the unix stable path.
 pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> {
     let file = format!("dontspeak{}", std::env::consts::EXE_SUFFIX);
@@ -27,7 +25,7 @@ pub(crate) fn resolve_dontspeak_bin_at(paths: Option<&Paths>) -> Option<String> 
     Some(exe.parent()?.join(&file).to_string_lossy().into_owned())
 }
 
-/// macOS bundle: `Contents/MacOS/<bin>` → `Contents/Helpers/dontspeak`. Pure; `None` elsewhere.
+/// macOS: `Contents/MacOS/<bin>` → `Contents/Helpers/dontspeak`. Pure; `None` elsewhere.
 fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
     let macos_dir = exe.parent()?;
     if macos_dir.file_name()? != "MacOS" {
@@ -40,7 +38,7 @@ fn bundle_cli_path(exe: &Path) -> Option<PathBuf> {
     Some(contents.join("Helpers").join("dontspeak"))
 }
 
-/// Missing/empty → `Null` (shapers treat as `{}`). Malformed → report + `Err` (leave file).
+/// Missing/empty → `Null`. Malformed → report + `Err` (leave file).
 pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
     match read_text_or_empty(tool, cfg)? {
         s if s.trim().is_empty() => Ok(Value::Null),
@@ -53,7 +51,7 @@ pub(crate) fn read_json_or_bail(tool: &str, cfg: &Path) -> Result<Value, ()> {
     }
 }
 
-/// Missing file → empty. Every other read failure leaves the user file untouched.
+/// Missing file → empty. Other read failures leave the file untouched.
 pub(crate) fn read_text_or_empty(tool: &str, cfg: &Path) -> Result<String, ()> {
     match std::fs::read_to_string(cfg) {
         Ok(text) => Ok(text),
@@ -70,7 +68,7 @@ pub(crate) enum WriteBody<'a> {
     Str(&'a str),
 }
 
-/// Backup (warn on failure, still write) → atomic write → report. Exit 0/1.
+/// Backup (warn, still write) → atomic write → report. Exit 0/1.
 pub(crate) fn backup_then_write(
     tool: &str,
     cfg: &Path,

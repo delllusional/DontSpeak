@@ -21,7 +21,7 @@ use ds_status::{
     StatusTtsModel, SttStatus, TtsSnapshot, TtsStatus,
 };
 
-/// Status seq + condvar for `WaitModelStatus`. Bump after every status flip.
+/// Seq + condvar for `WaitModelStatus` (bump on every status flip).
 pub(crate) struct StatusGate {
     seq: Mutex<u64>,
     cv: Condvar,
@@ -53,7 +53,7 @@ impl StatusGate {
         *self.seq.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Seq first, then read: mid-read transitions stay unacked (next wait returns).
+    /// Seq first, then read (mid-read transitions stay unacked).
     pub(crate) fn snapshot<T>(&self, read: impl FnOnce() -> T) -> (T, u64) {
         let seq = self.seq();
         (read(), seq)
@@ -74,7 +74,7 @@ impl StatusGate {
     }
 }
 
-/// Shared Arcs for IPC + status (built once in `engine_run`).
+/// Shared Arcs for IPC + status (`engine_run`).
 #[derive(Clone)]
 pub(crate) struct EngineShared {
     pub tts: Arc<TtsManager>,
@@ -85,12 +85,10 @@ pub(crate) struct EngineShared {
     pub tts_stats: Arc<stats::TtsStats>,
     pub stt_stats: Arc<stats::SttStats>,
     pub lifetime: Arc<stats::LifetimeSeconds>,
-    /// WaitModelStatus gate (bumped on every status flip).
     pub gate: Arc<StatusGate>,
 }
 
-/// Model presence report. `read_tts` runs under gate.snapshot so mid-report
-/// transitions stay unacked.
+/// Model presence report. `read_tts` under `gate.snapshot` (mid-report transitions unacked).
 pub(crate) fn model_status_json(
     shared: &EngineShared,
     paths: &Paths,
@@ -109,20 +107,13 @@ pub(crate) fn model_status_json(
         gate: _,
     } = shared;
     let cfg = VoiceConfig::load(paths);
-    // Resolved ladders (skip unusable rungs) — all active checks use these.
     let resolved_tts = cfg.resolved_tts();
     let resolved_stt = cfg.resolved_stt();
-    // CHEAP presence: file existence only — NO sha256. model_status is polled to
-    // drive the UI's status dots, so it must be fast; full sha verification over
-    // large TTS and Parakeet ONNX files would delay the dots by
-    // many seconds. Correctness-critical sha checks stay in the load path
-    // (load_synth / ParakeetModel::load), not here.
-    // The TTS row reflects the active backend (mirrors the Parakeet row below).
+    // File existence only — no sha256 (polled UI dots; sha stays on load path).
     let shims = NativeShims::probe().unwrap_or_default();
     let tts_uses_native = native_tts_active(&cfg);
     let tts_present = tts_model_files_present(&cfg);
     let parakeet_onnx_files = parakeet_onnx_files_present();
-    // Same shim-aware ONNX downgrade as TTS.
     let stt_uses_onnx = stt_uses_onnx_runtime(cfg.resolved_stt_provider(), shims);
     let parakeet_present = if stt_uses_onnx {
         parakeet_onnx_files
@@ -131,9 +122,8 @@ pub(crate) fn model_status_json(
     };
     let parakeet_enabled = resolved_stt == Some(ds_config::SttEngine::BuiltIn);
     let parakeet_running = parakeet_enabled && parakeet_present;
-    // System STT: OS-owned model; same present/warming/running split as Parakeet.
     let system_enabled = resolved_stt == Some(ds_config::SttEngine::System);
-    // Probe only when selected (row hidden otherwise).
+    // Probe only when selected.
     let system_state = if system_enabled {
         ds_stt::system_state()
     } else {
@@ -142,7 +132,7 @@ pub(crate) fn model_status_json(
     let system_present = system_enabled && system_state != ds_stt::SystemState::Unavailable;
     let system_running = system_state == ds_stt::SystemState::Ready;
 
-    // claude_code: read CC config only when selected. present = voice on + synthesizable key.
+    // claude_code: present = voice on + synthesizable key.
     let claude_code_enabled = resolved_stt == Some(ds_config::SttEngine::ClaudeCode);
     let (claude_code_present, claude_code_running, claude_code_error, claude_code_key) =
         if claude_code_enabled {
@@ -165,10 +155,7 @@ pub(crate) fn model_status_json(
             (false, false, None, None)
         };
 
-    // Dictation-preview snapshot for the confirm panel (see `dictation_preview`): the
-    // finalized transcript while awaiting confirmation, else the live partial — but never
-    // the finalized text while a Caps press is in flight (a long-press cancel mustn't flash
-    // the bubble before it dismisses).
+    // Confirm panel: finalized while awaiting, else partial; never finalized under Caps hold.
     let (dict_text, dict_awaiting, dict_has_target, dict_refused) = paste
         .lock()
         .map(|p| {
@@ -177,20 +164,18 @@ pub(crate) fn model_status_json(
                 text,
                 awaiting,
                 p.can_paste,
-                // Same refusal clock as tick digest.
                 crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
             )
         })
         .unwrap_or((String::new(), false, true, false));
 
-    // Per-target download snapshot (parallel; each row owns its fraction).
     let (dl, download_transfer_start) = {
         let downloads = downloads.lock().unwrap_or_else(|e| e.into_inner());
         (downloads.targets.clone(), downloads.transfer_start.clone())
     };
     let download_statuses = active_download_statuses(&dl, &download_transfer_start, Instant::now());
     let downloading = |eng: DownloadTarget| matches!(dl.get(&eng), Some(TargetState::Active(_)));
-    // Active-only (Done % is row_download_frac).
+    // Active-only (Done % via row_download_frac).
     let frac_for = |eng: DownloadTarget| match dl.get(&eng) {
         Some(TargetState::Active(p)) => p.frac(),
         _ => 0.0,
@@ -213,14 +198,12 @@ pub(crate) fn model_status_json(
 
     let diar_present = ds_model::ModelRoots::ambient()
         .is_some_and(|roots| diarization_present(&roots, cfg.resolved_diarizer()));
-    // SepFormer required for lock green (exists check only — sha at download).
+    // Exists only — sha at download.
     let sepformer_present = ds_model::model_path(ds_model::SEPFORMER_FILE)
         .map(|p| p.is_file())
         .unwrap_or(false);
 
-    // Download manager owns "downloading". GREEN = loaded (resident+warm).
-    // Cuda is ONNX compute dep: force downloading until row's engine loads; never
-    // after (avoids loaded Kokoro flashing back to ~25% ring). See row_downloading.
+    // GREEN = loaded. Cuda keeps ONNX rows downloading until load (no flash-back ring).
     let tts_loaded = tts.is_tts_loaded();
     let stt_loaded = tts.is_stt_loaded();
     let cuda_downloading = downloading(DownloadTarget::Cuda);
@@ -245,7 +228,6 @@ pub(crate) fn model_status_json(
         &[DownloadTarget::ParakeetModel, DownloadTarget::ParakeetMlx],
     );
 
-    // One load each — avoid tear across recording/prompt_glow/state.
     let dict_recording = stt_active.load(Ordering::Relaxed);
     let dict_local = dictation_local_stt(parakeet_running, system_running);
 
@@ -274,7 +256,6 @@ pub(crate) fn model_status_json(
     };
 
     let stt_status = match resolved_stt {
-        // Parakeet STT — one engine, runtime chosen by `stt.provider`.
         Some(ds_config::SttEngine::BuiltIn) => Some(engine_status(
             RowState {
                 present: parakeet_present,
@@ -316,7 +297,7 @@ pub(crate) fn model_status_json(
         None => None,
     };
 
-    // Speaker lock needs both diarization and SepFormer before it can report running.
+    // Running needs diarization + SepFormer.
     let diarization_status = engine_status(
         RowState {
             present: diar_present,
@@ -332,7 +313,6 @@ pub(crate) fn model_status_json(
         },
         frac_for(DownloadTarget::DiarizationMlx).max(frac_for(DownloadTarget::SepformerModel)),
     );
-    // The diarizer rungs are separate dylibs too, so read the resolved provider's own.
     let diar_shim = match cfg.resolved_diarizer() {
         ds_config::DiarizerProvider::Mlx => shims.mlx,
         ds_config::DiarizerProvider::Fluid => shims.fluid,
@@ -395,7 +375,7 @@ pub(crate) fn model_status_json(
             can_paste: dict_has_target,
         },
         stats: Stats {
-            // Depth comes from the queue under `gate.snapshot`, not the stats accumulator.
+            // Queue depth under gate.snapshot, not the stats accumulator.
             tts: TtsSnapshot {
                 queued: tts_sample.queued,
                 ..tts_stats.snapshot()
@@ -443,14 +423,12 @@ fn active_download_statuses(
     statuses
 }
 
-/// Child realized-EP → config Provider (shared STT/TTS; drift guard in tests).
+/// Child realized-EP → config Provider (shared STT/TTS).
 fn realized_provider_token(child_provider: &str) -> ds_config::Provider {
     ds_config::RealizedProvider::parse(child_provider).to_provider()
 }
 
-/// Realized STT EP token (built_in only); child reports honest backend. `None` when the
-/// engine isn't built-in OR when no backend has been realized yet (download/warming/
-/// no-preload) — a reported-but-unknown token still fails closed to `"cpu"`.
+/// Built_in only; `None` until realized. Unknown realized token fails closed to `"cpu"`.
 fn stt_provider_token(
     resolved_stt: Option<ds_config::SttEngine>,
     child_provider: Option<&str>,
@@ -463,9 +441,7 @@ fn stt_provider_token(
     }
 }
 
-/// Realized TTS provider token (built_in only; child reports honest backend). `None` when
-/// the engine isn't built-in OR when no backend has been realized yet (download/warming/
-/// no-preload) — a reported-but-unknown token still fails closed to `"cpu"`.
+/// Built_in only; `None` until realized. Unknown realized token fails closed to `"cpu"`.
 fn tts_provider_token(
     resolved_tts: Option<ds_config::TtsEngine>,
     child_provider: Option<&str>,
@@ -478,13 +454,8 @@ fn tts_provider_token(
     }
 }
 
-/// Realized diarizer token — `None` until a diarization backend can actually run.
-/// The diarizer loads inside `ds-helper` on demand and reports nothing back, so the
-/// engine measures what that load path needs: the config ladder, shim + the rung's asset set
-/// (`backend_present`, mirroring [`parakeet_available`]), and `ensure_backend`, the sole
-/// provider→backend mapping — without which `resolved_diarizer`'s fallback would claim a
-/// backend off Apple-Silicon macOS. Speaker lock and SepFormer gate the row's `running`,
-/// not the backend: `diarize`/`enroll` serve without either.
+/// `None` until ladder + shim/assets + `ensure_backend` can run. Lock/SepFormer gate
+/// `running`, not this token (`diarize`/`enroll` work without either).
 fn diarization_provider_token(
     diarizer: ds_config::DiarizerProvider,
     enabled: bool,
@@ -496,9 +467,7 @@ fn diarization_provider_token(
 
 fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
     if native_tts_active(cfg) {
-        // Fluid resolves to its own Core ML variant; MLX (and any other native provider) to
-        // the MLX one. `fluid_for_tts` is Some only for Kokoro, which is the only model a
-        // resolved Fluid provider can name.
+        // Fluid → Core ML (Kokoro only); other native → MLX.
         let native_target = DownloadTarget::fluid_for_tts(cfg.tts_model)
             .filter(|_| cfg.resolved_tts_provider() == ds_config::Provider::Fluid)
             .unwrap_or_else(|| DownloadTarget::mlx_for_tts(cfg.tts_model));
@@ -512,9 +481,7 @@ fn tts_download_targets(cfg: &VoiceConfig) -> Vec<DownloadTarget> {
     }
 }
 
-/// The diarization model set a resolved rung loads — MLX Sortformer + WeSpeaker, or FluidAudio's
-/// Core ML pyannote + WeSpeaker. The ONE place the provider chooses a set, so the presence probe
-/// and the status token can't disagree about which rung's files gate the row.
+/// Provider → diarization set (single place so presence + status token agree).
 fn diarization_set_for(
     provider: ds_config::DiarizerProvider,
 ) -> &'static [&'static ds_model::HfRepo] {
@@ -524,10 +491,7 @@ fn diarization_set_for(
     }
 }
 
-/// Diarization set present for `provider` — same completion markers as the downloader, over the
-/// set matching the RESOLVED rung. R8/#200: a `diarizer=["fluid"]` config with only the MLX set
-/// on disk must read absent, so the (hidden) row never claims `provider:"fluid"` while unable to
-/// load. Takes `roots` as a value so no test resolves `$HOME` (#212).
+/// Resolved rung's set only (#200 wrong-rung files → absent). `roots` value: no `$HOME` (#212).
 fn diarization_present(
     roots: &ds_model::ModelRoots,
     provider: ds_config::DiarizerProvider,
@@ -535,8 +499,7 @@ fn diarization_present(
     ds_model::hf_repo::is_hf_set_present(roots, diarization_set_for(provider))
 }
 
-/// Row "downloading": own fetch, or Cuda while `!engine_loaded` on ONNX path.
-/// Cuda must not flip an already-loaded row. Pure (unit-tested).
+/// Own fetch, or Cuda while `!engine_loaded` on ONNX (never after load). Pure.
 fn row_downloading(
     own_downloading: bool,
     cuda_downloading: bool,
@@ -573,7 +536,7 @@ fn row_download_frac(
         .unwrap_or(0.0)
 }
 
-/// Flags for [`engine_obj`] (named fields avoid running/enabled transpose).
+/// Named fields for [`engine_status`] (avoid running/enabled transpose).
 struct RowState {
     present: bool,
     downloading: bool,
@@ -582,8 +545,7 @@ struct RowState {
     enabled: bool,
 }
 
-/// Build one engine row with a lifecycle `state` (the app maps it 1:1 to a status dot):
-/// downloading > failed > missing > running > warming > idle.
+/// One engine row; priority downloading > failed > missing > running > warming > idle.
 fn engine_status(row: RowState, progress: f64) -> EngineStatus {
     let state = engine_state(
         row.present,

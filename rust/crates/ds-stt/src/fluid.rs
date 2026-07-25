@@ -1,8 +1,6 @@
-//! FluidAudio Parakeet TDT v2 STT on Core ML / the Neural Engine (macOS, Apple Silicon).
-//! Same `libdontspeak_fluid` dylib as the FluidAudio TTS backend, opened through
-//! [`ds_model::shim`]; only the resolved `ds_fluid_asr_*` symbols differ.
-//! Lazy-load shape matches [`crate::mlx::MlxTranscriber`] / [`crate::mlx::MlxStreamer`] so the
-//! helper drives it through the same [`crate::local::LocalTranscriber`] and streaming loop.
+//! FluidAudio Parakeet TDT v2 STT on Core ML / ANE (macOS aarch64).
+//! Same `libdontspeak_fluid` dylib as Fluid TTS via [`ds_model::shim`]; ASR symbols only.
+//! Lazy-load shape matches MLX so the helper drives it through [`crate::local::LocalTranscriber`].
 
 use std::ffi::{c_char, c_void};
 
@@ -11,15 +9,12 @@ use libloading::{Library, Symbol};
 use crate::streaming::{StreamingStt, timed};
 use ds_model::shim::StrCb;
 
-// Text-returning calls BLOCK and return their status; the transcript comes back through a
-// borrowed callback (copied out by `ds_model::shim::collect_str`), so there is no out-param
-// and no free. init/shutdown/start carry no buffer, so they keep the plain int32 ABI.
+// Text via borrowed callback (`collect_str`); init/shutdown/start plain int32.
 type AsrInitFn = unsafe extern "C" fn(*const c_char, i32) -> i32;
 type TranscribeFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type AsrShutdownFn = unsafe extern "C" fn();
 
-// Streaming ASR C ABI. `start` begins a new utterance, `push` buffers 16 kHz audio and
-// periodically returns a refreshed live hypothesis, and `finish` returns the final transcript.
+// Streaming: start / push (live hypothesis) / finish.
 type StreamStartFn = unsafe extern "C" fn(*const c_char) -> i32;
 type StreamPushFn = unsafe extern "C" fn(*const f32, usize, i32, *mut c_void, StrCb) -> i32;
 type StreamFinishFn = unsafe extern "C" fn(*mut c_void, StrCb) -> i32;
@@ -51,8 +46,7 @@ impl FluidTranscriber {
         }
         self.ensure_lib()?;
         let lib = self.lib.as_ref().expect("lib opened above");
-        // SAFETY: symbol from app-signed shim matches `AsrInitFn` (dontspeak_mlx.h);
-        // `dir` lives across the blocking call. `compute_units` is ABI-reserved (0).
+        // SAFETY: app-signed shim `AsrInitFn`; `dir` lives across the call. compute_units=0 reserved.
         let rc = unsafe {
             let init: Symbol<AsrInitFn> = lib
                 .get(b"ds_fluid_asr_init\0")
@@ -89,11 +83,9 @@ impl FluidTranscriber {
         }
         self.preload()?;
         let lib = self.lib.as_ref().expect("lib loaded above");
-        // SAFETY: the shim exports this name with the `TranscribeFn` C ABI.
+        // SAFETY: `TranscribeFn` ABI; `pcm` + `collect_str` pair outlive the call.
         let tr: Symbol<TranscribeFn> = unsafe { lib.get(b"ds_fluid_transcribe\0") }
             .map_err(|e| format!("ds_fluid_transcribe symbol: {e}"))?;
-        // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s
-        // borrowed-result pair (dontspeak_mlx.h).
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -113,8 +105,8 @@ impl Drop for FluidTranscriber {
     }
 }
 
-/// Streaming FluidAudio STT ([`StreamingStt`]); same session loop as ONNX/MLX. Eager load so a
-/// missing shim/model fails before STT is advertised ready.
+/// Streaming FluidAudio STT ([`StreamingStt`]); same session loop as ONNX/MLX.
+/// Eager load so a missing shim/model fails before STT is advertised ready.
 pub struct FluidStreamer {
     lib: Library,
     model_dir: std::ffi::CString,
@@ -123,8 +115,7 @@ pub struct FluidStreamer {
 }
 
 impl FluidStreamer {
-    /// Open the shim and load the streaming EOU model. `Err` lets the caller use the offline
-    /// fallback.
+    /// Open shim + load streaming EOU model. `Err` → offline fallback.
     pub fn new() -> Result<Self, String> {
         let lib = ds_model::shim::open(ds_model::shim::Shim::Fluid)?;
         let mut streamer = Self {
@@ -137,10 +128,9 @@ impl FluidStreamer {
     }
 
     fn push(&self, sym: &[u8], pcm: &[f32]) -> Result<String, String> {
-        // SAFETY: NUL-terminated symbol matching `StreamPushFn`; Symbol borrows `self.lib`.
+        // SAFETY: `StreamPushFn`; Symbol borrows `self.lib`; `pcm` + collect_str outlive call.
         let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
             .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
-        // SAFETY: `pcm` outlives the blocking call; `ctx`/`cb` are `collect_str`'s pair.
         ds_model::shim::collect_str(|ctx, cb| unsafe {
             f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
         })
@@ -150,9 +140,8 @@ impl FluidStreamer {
 
 impl Drop for FluidStreamer {
     fn drop(&mut self) {
-        // Streamer owns utterance state only; keep the process-global warm model for
-        // FluidTranscriber.
-        // SAFETY: stream shutdown is idempotent; Symbol cannot outlive `self.lib`.
+        // Utterance state only; leave process-global warm model for FluidTranscriber.
+        // SAFETY: idempotent stream shutdown; Symbol cannot outlive `self.lib`.
         unsafe {
             if let Ok(shutdown) = self
                 .lib
@@ -166,7 +155,7 @@ impl Drop for FluidStreamer {
 
 impl StreamingStt for FluidStreamer {
     fn reset(&mut self) -> Result<(), String> {
-        // SAFETY: symbol matches `StreamStartFn`; `model_dir` lives across the call.
+        // SAFETY: `StreamStartFn`; `model_dir` lives across the call.
         let rc = unsafe {
             let f: Symbol<StreamStartFn> = self
                 .lib
@@ -189,11 +178,10 @@ impl StreamingStt for FluidStreamer {
     }
 
     fn finalize(&mut self) -> Result<String, String> {
-        // SAFETY: the shim exports this name with the `StreamFinishFn` C ABI.
+        // SAFETY: `StreamFinishFn` + collect_str pair.
         let f: Symbol<StreamFinishFn> = unsafe { self.lib.get(b"ds_fluid_asr_stream_finish\0") }
             .map_err(|e| format!("ds_fluid_asr_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
-            // SAFETY: `collect_str` pair; call takes no other pointers.
             ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
                 .map_err(|rc| format!("ds_fluid_asr_stream_finish failed (rc={rc})"))
         });

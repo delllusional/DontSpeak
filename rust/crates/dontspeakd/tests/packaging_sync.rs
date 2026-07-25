@@ -1,21 +1,14 @@
 //! Pins the install/uninstall surface in sync across its copies.
 //!
 //! NAMING CONSTRAINT — do NOT put `install`/`setup`/`update` in this file's name.
-//! Windows' "Installer Detection Technology" force-elevates any unsigned executable whose
-//! filename contains one of those words, so `cargo test`'s (unelevated) integration-test
-//! binary can't even be launched — it dies with `os error 740 (requires elevation)` BEFORE
-//! running a single assertion, failing `cargo test --workspace` on every Windows dev box.
-//! This file was `installer_sync.rs` and hit exactly that; hence `packaging_sync.rs`.
-//! (`cli_dispatch.rs` runs fine, proving `patch`/`dispatch` is NOT a trigger — only those
-//! three words are.) The Linux per-commit CI is unaffected; this is a Windows-local trap.
+//! Windows Installer Detection force-elevates any unsigned exe whose filename contains
+//! those words, so `cargo test` dies with os error 740 before any assertion (Windows-local;
+//! Linux per-commit CI is fine). Only those three words trigger it.
 //!
-//! Uninstall logic lives only in `scripts/install/bundle/uninstall.sh` (macOS/Linux) and
-//! `scripts/install/bundle/uninstall.ps1` (Windows). Platform packages copy those canonical files as
-//! payloads; installers require and place/register the payload instead of embedding a
-//! second script body. These tests pin that three-platform route and the install-side
-//! invariant that macOS has ONE per-user install layout
-//! (`~/Applications/DontSpeak.app`, shared by the release and dev flows) — never the
-//! system `/Applications` folder, which needs an admin account.
+//! Uninstall logic lives only in `scripts/install/bundle/uninstall.{sh,ps1}`. Packages
+//! copy those as payloads; installers require the payload rather than embedding a second
+//! body. Also pins macOS's single per-user layout (`~/Applications/DontSpeak.app`) —
+//! never system `/Applications`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -24,7 +17,7 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
 }
 
-/// Reads a repo file with line endings normalized to LF.
+/// Repo file with line endings normalized to LF.
 fn repo_file(rel: &str) -> String {
     let path = repo_root().join(rel);
     fs::read_to_string(&path)
@@ -35,11 +28,8 @@ fn repo_file(rel: &str) -> String {
 #[test]
 fn repo_uninstall_entry_points_exec_the_canonical_script() {
     let body = repo_file("apps/linux/uninstall.sh");
-    // Require BOTH substrings on the SAME line, with `exec` as that line's first token —
-    // i.e. `exec` must actually prefix the canonical-script invocation. Checking the two
-    // substrings independently (old behavior) would still pass if the script ran
-    // scripts/install/bundle/uninstall.sh as a plain subprocess (changing exit-code/signal semantics)
-    // and `exec`'d something unrelated elsewhere as a fallback.
+    // Same line must start with `exec` and invoke the canonical script — independent
+    // substring checks would pass a plain subprocess plus an unrelated `exec` elsewhere.
     let execs_canonical_script = body.lines().any(|line| {
         let trimmed = line.trim_start();
         trimmed.starts_with("exec ")
@@ -297,8 +287,8 @@ fn uninstaller_honors_the_app_dir_override() {
 
 #[test]
 fn dev_installs_place_the_standalone_uninstaller() {
-    // macOS/Linux share install-engine.sh; Windows runs the exact public installer against
-    // its local archive instead of recreating registration as skill documentation.
+    // macOS/Linux: install-engine.sh places the uninstaller. Windows: public installer
+    // against a local archive (skill routes through install.ps1, no Expand-Archive fork).
     assert!(
         repo_file("scripts/install/local/install-engine.sh")
             .contains("scripts/install/bundle/uninstall.sh\" \"$INSTALL_DIR/dontspeak-uninstall\""),
@@ -322,7 +312,7 @@ fn dev_installs_place_the_standalone_uninstaller() {
 
 #[test]
 fn macos_installs_share_the_single_per_user_layout() {
-    // Both flows lay down ~/Applications/DontSpeak.app — the ONE install location.
+    // Both flows lay down ~/Applications/DontSpeak.app — the one install location.
     let web = repo_file("scripts/install/web/install.sh");
     assert!(
         web.contains(r#"APP="$HOME/Applications/DontSpeak.app""#),
@@ -335,14 +325,8 @@ fn macos_installs_share_the_single_per_user_layout() {
         "apps/macos/bundle.sh must default to ~/Applications/DontSpeak.app — the same \
          layout as the release install"
     );
-    // No script may touch the system folder: a `/Applications/DontSpeak.app` reference
-    // NOT prefixed by `$HOME`, `$H`, or `~` (the per-user home spellings actually used
-    // across these files, including in doc comments) would resurrect the admin-only
-    // layout this repo deliberately has exactly one mechanism instead of.
-    // Quote characters are stripped before matching so this catches the forbidden path
-    // whether it's written double-quoted (`"/Applications/DontSpeak.app"`), single-quoted
-    // (`'/Applications/DontSpeak.app'`), or bare/unquoted — not just the one double-quoted
-    // spelling the old substring check happened to look for.
+    // Any `/Applications/DontSpeak.app` must be prefixed by $HOME/$H/~ (per-user).
+    // Strip quotes so double-/single-/unquoted spellings all match.
     fn strip_quotes(s: &str) -> String {
         s.chars().filter(|c| *c != '"' && *c != '\'').collect()
     }
@@ -367,9 +351,8 @@ fn macos_installs_share_the_single_per_user_layout() {
     }
 }
 
-/// The POSIX destination lock ships duplicated: `install.sh` arrives through `curl | sh` and
-/// `tarball-install.sh` inside the tarball, so neither can source a shared file. Pin the two
-/// copies equal — a fix applied to one only would leave the other platform racing.
+/// POSIX destination lock is duplicated (curl|sh install.sh and tarball-install.sh cannot
+/// source a shared file). Pin both copies equal.
 #[test]
 fn posix_installers_share_one_destination_lock_block() {
     fn block(rel: &str) -> String {
@@ -412,8 +395,8 @@ fn posix_installers_share_one_destination_lock_block() {
     }
 }
 
-/// Every platform must take its destination lock BEFORE the first destructive step, and give
-/// it back. An acquire that drifts below the stop/replace steps serializes nothing.
+/// Every platform acquires the destination lock before the first destructive step and
+/// releases it on exit. Acquire after stop/replace serializes nothing.
 #[test]
 fn installers_lock_before_replacing_the_destination() {
     fn precedes(body: &str, first: &str, second: &str, what: &str) {
@@ -465,8 +448,8 @@ fn installers_lock_before_replacing_the_destination() {
         "Linux: the bundled installer must release the destination lock on exit"
     );
 
-    // The call site, not the function definition — `Enter-DestinationLock` alone also matches
-    // the definition above it, so that pin would survive deleting the call.
+    // Call site, not the function definition (`Enter-DestinationLock` alone also matches
+    // the def above it and would survive deleting the call).
     let windows = repo_file("scripts/install/web/install.ps1");
     precedes(
         &windows,
@@ -485,8 +468,7 @@ fn installers_lock_before_replacing_the_destination() {
         "Windows: the finally block must dispose the destination lock handle"
     );
 
-    // POSIX release DELETES the dir (the Windows file must survive — waiters hold handles to
-    // it). A release that only unlocks would leave every later install force-breaking.
+    // POSIX release deletes the dir (Windows file must survive — waiters hold handles).
     assert!(
         macos.contains("rm -rf \"$DS_LOCK_DIR\" || :"),
         "the POSIX lock block must delete its dir on release"
@@ -561,8 +543,7 @@ fn development_installers_lock_before_writing_canonical_destinations() {
     }
 }
 
-/// A killed installer leaves its lock behind, and Windows never deletes its lock file at all —
-/// so full removal is the uninstaller's job.
+/// Killed installer leaves its lock; Windows never deletes its lock file — uninstaller removes both.
 #[test]
 fn uninstallers_remove_the_destination_lock_artifacts() {
     let posix = repo_file("scripts/install/bundle/uninstall.sh");

@@ -1,9 +1,7 @@
 //! Shared client-executable resolution.
 //!
-//! Presence checks, launch wrappers, usage providers, and the Codex stream supervisor must
-//! agree on whether a client is installed and which absolute executable to run. Keep the
-//! directory order and client-specific install roots here so those callers cannot drift
-//! independently.
+//! Presence, launch, usage, and Codex stream supervision share one search order and
+//! client-specific roots so callers cannot drift.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -17,27 +15,23 @@ use ds_client::WiredAgent;
 use crate::paths::Paths;
 use crate::voice::VoiceConfig;
 
-/// Explicit inputs for deterministic resolver tests.
+/// Explicit resolver inputs (deterministic tests).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClientBinarySearch<'a> {
-    /// Configured executable name or path. Empty means the client's canonical command.
+    /// Executable name or path; empty = canonical command.
     configured: &'a str,
-    /// Client-specific environment override such as `CODEX_CLI_PATH`.
+    /// Client override env (e.g. `CODEX_CLI_PATH`).
     override_path: Option<&'a Path>,
-    /// Login-shell path captured for GUI-launched processes.
+    /// Login-shell PATH for GUI-launched hosts.
     login_path: Option<&'a OsStr>,
-    /// Ordinary process path.
     path: Option<&'a OsStr>,
-    /// Windows roaming application-data root.
     app_data: Option<&'a Path>,
-    /// Whether machine-global fallback directories may be inspected.
     include_system_dirs: bool,
-    /// On Windows, skip command shims while searching directories for an embeddable binary.
+    /// Windows: skip command shims; prefer native `.exe`.
     native_windows_executable: bool,
 }
 
-/// Resolve a registry client using its normal configuration and the live environment captured
-/// by [`Paths::resolve`]. [`Paths::rooted_at`] remains isolated from the host environment.
+/// Resolve with live config + [`Paths::resolve`] env. [`Paths::rooted_at`] stays isolated.
 pub fn resolve_client_binary(client: WiredAgent, paths: &Paths) -> Option<PathBuf> {
     let configured = if client == WiredAgent::Codex {
         VoiceConfig::load(paths).codex_bin
@@ -47,7 +41,6 @@ pub fn resolve_client_binary(client: WiredAgent, paths: &Paths) -> Option<PathBu
     resolve_configured_client_binary(client, paths, &configured)
 }
 
-/// Resolve a registry client with a caller-provided executable name or path.
 pub fn resolve_configured_client_binary(
     client: WiredAgent,
     paths: &Paths,
@@ -56,9 +49,7 @@ pub fn resolve_configured_client_binary(
     resolve_configured_client_binary_with_policy(client, paths, configured, false)
 }
 
-/// Resolve an executable suitable for direct process supervision. On Windows this skips npm
-/// command shims during directory search and selects a native `.exe`; explicit override or
-/// configured paths remain authoritative.
+/// Native binary for process supervision (Windows: skip npm shims; overrides still win).
 pub fn resolve_native_client_binary(
     client: WiredAgent,
     paths: &Paths,
@@ -114,7 +105,7 @@ fn client_binary_override(client: WiredAgent) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// Pure resolver core shared by production entry points and table-driven tests.
+/// Pure resolver core (production + table tests).
 pub(crate) fn resolve_client_binary_in(
     client: WiredAgent,
     paths: &Paths,
@@ -190,11 +181,8 @@ pub(crate) fn resolve_client_binary_in(
         .find_map(|dir| executable_in_dir(&dir, name, search.native_windows_executable))
 }
 
-/// Codex ships its native Windows executable as one npm optional dependency per arch, under
-/// a vendor dir named for the target triple. The ONE spelling of that path below `%APPDATA%`:
-/// resolution and the tests that plant a fixture both read it here, so a test cannot pass
-/// against a package name production never looks in. Takes `arch` (`std::env::consts::ARCH`
-/// at the call sites) so both arms stay reachable from any host.
+/// Codex native Windows path under `%APPDATA%` (one npm optional dep per arch). Shared by
+/// resolution and fixtures. `arch` is injectable so both arms stay reachable from any host.
 pub fn codex_native_windows_dir(arch: &str) -> PathBuf {
     let (package, target) = if arch == "aarch64" {
         ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
@@ -236,7 +224,7 @@ fn executable_in_dir(dir: &Path, name: &str, _native_only: bool) -> Option<PathB
     existing_absolute_file(&candidate)
 }
 
-/// Login-shell PATH once, as a fallback for GUI-launched processes.
+/// Cached login-shell PATH (GUI-launched hosts).
 #[cfg(not(windows))]
 fn login_shell_path() -> Option<&'static OsStr> {
     static LOGIN_PATH: OnceLock<Option<std::ffi::OsString>> = OnceLock::new();
@@ -314,8 +302,7 @@ mod tests {
         }
     }
 
-    /// Both arms as literals — the Windows legs only ever exercise their own host's arch,
-    /// so the other package name would otherwise go unchecked until someone shipped on it.
+    /// Both arch→vendor triples (host CI only runs its own arch).
     #[test]
     fn codex_native_windows_dir_pairs_each_arch_with_its_vendor_triple() {
         assert_eq!(

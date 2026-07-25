@@ -23,7 +23,7 @@ where
         .transpose()
 }
 
-/// Partial update for the nested `tts_voices` config object.
+/// Partial `tts_voices` update.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TtsVoiceUpdates {
@@ -61,7 +61,7 @@ impl TtsVoiceUpdates {
     }
 }
 
-/// Provided maps replace stored overrides; `{}` resets defaults. Entries validate strictly.
+/// Replace stored param overrides; `{}` resets. Strict validation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TtsParamUpdates {
@@ -110,8 +110,7 @@ fn change_for_param_map(key: &str, params: &TtsParamMap) -> String {
     format!("{key}=[{}]", entries.join(", "))
 }
 
-/// Single source for set_config (schema/parse/apply can't drift). Guards:
-/// parse (`deny_unknown_fields` + strict enums); apply (no `..`); schema name parity test.
+/// set_config single source (schema/parse/apply; exhaustive apply; name parity test).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SetConfigArgs {
@@ -144,10 +143,9 @@ pub struct SetConfigArgs {
 }
 
 impl SetConfigArgs {
-    /// Merge fields onto `cfg`; `key=value` tokens. Clamps gain; rejects empty voices.
+    /// Merge onto `cfg`; `key=value` change tokens. Clamps gain; rejects empty voices.
     pub fn apply(self, cfg: &mut VoiceConfig) -> Result<Vec<String>, String> {
-        // Enumerate Kokoro disk ids only when this call changes the Kokoro voice pool —
-        // non-Kokoro applies and rejected-before-validation shapes stay disk-free.
+        // Disk-enumerate Kokoro ids only when this call changes that pool.
         let needs_ids = self
             .tts_voices
             .as_ref()
@@ -159,12 +157,9 @@ impl SetConfigArgs {
         self.apply_with(cfg, kokoro_ids.as_deref())
     }
 
-    /// [`apply`](Self::apply) with the Kokoro voice-id source injected (hermetic tests).
-    /// `Some(ids)` = enumerated disk voices: pool ids must be members AND speak a language
-    /// this build routes. `None` = fresh install (no voices bin / MLX voices dir yet): skip
-    /// membership so lazily-downloaded pack voices aren't rejected against the static
-    /// fallback, but still require a routed language.
-    /// Exhaustive destructure (no `..`) — new fields fail at compile.
+    /// [`apply`](Self::apply) with injected Kokoro ids (tests).
+    /// `Some` = membership + routed language; `None` = skip membership (fresh install).
+    /// Exhaustive destructure (no `..`).
     pub fn apply_with(
         self,
         cfg: &mut VoiceConfig,
@@ -197,7 +192,7 @@ impl SetConfigArgs {
         } = self;
 
         let mut changes = Vec::new();
-        // The full-duplex gate uses the post-call engine and applies only to built-in TTS.
+        // Full-duplex gate: post-call engine; built-in TTS only.
         let final_engine = match &tts_engine {
             Some(pref) => pref.first().copied(),
             None => cfg.resolved_tts(),
@@ -742,7 +737,7 @@ mod tests {
         assert!(mixed.apply_with(&mut cfg, Some(&known)).is_ok());
         assert_eq!(cfg.tts_voices.kokoro, ["af_sarah", "if_sara", "ef_dora"]);
 
-        // Enumerated but unroutable: Japanese lost its frontend, so the voice cannot speak.
+        // Enumerated but unroutable (no JA frontend).
         let unroutable: SetConfigArgs =
             serde_json::from_value(serde_json::json!({ "tts_voices": { "kokoro": ["jf_alpha"] } }))
                 .unwrap();

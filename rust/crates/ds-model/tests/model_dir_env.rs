@@ -1,14 +1,9 @@
-//! Every ds-model test that points `DONTSPEAK_MODEL_DIR` at a tempdir, isolated in its own
-//! test binary.
+//! ds-model tests that set `DONTSPEAK_MODEL_DIR`, isolated in their own binary.
 //!
-//! `set_var` is `unsafe` under edition 2024 because a concurrent `getenv` can read a freed
-//! environ entry. A mutex closes that window only when the READERS take it too, and the lib
-//! test binary is full of readers that cannot: `download`/`mlx_repo` tests reach
-//! `ds_config::model_dir()` through `ensure_at`, and libtest runs them alongside everything
-//! else. Process isolation is what makes these writes sound — this binary holds no other
-//! tests, so `ENV_LOCK` really does cover every reader that can observe them.
-//! `crate_sources_keep_env_mutation_to_the_single_ort_writer` keeps the lib binary
-//! writer-free.
+//! Edition 2024: `set_var` is unsafe if a concurrent `getenv` races. A mutex only helps when
+//! readers take it too; the lib test binary has many ambient `model_dir()` readers. Process
+//! isolation makes these writes sound — this binary has no other tests, so `ENV_LOCK` covers
+//! every observer. Drift guard: lib `src/` stays writer-free except `ort::set_ort_dylib_path`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -24,9 +19,7 @@ const MODEL_DIR_VAR: &str = "DONTSPEAK_MODEL_DIR";
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Points `DONTSPEAK_MODEL_DIR` at a fresh EMPTY tempdir for as long as it lives, holding
-/// `ENV_LOCK` across the whole window. Probing against the ambient cache would hash hundreds
-/// of MB of real model bytes and read as present on a developer machine.
+/// Empty tempdir as `DONTSPEAK_MODEL_DIR` while holding `ENV_LOCK` (avoids ambient cache).
 struct EmptyModelDir {
     tmp: tempfile::TempDir,
     previous: Option<OsString>,
@@ -54,12 +47,9 @@ impl EmptyModelDir {
 }
 
 impl Drop for EmptyModelDir {
-    /// Restores the ambient value even when a probe panics — a leaked override would point
-    /// later tests at a deleted directory, which `model_dir()` silently ignores in favour of
-    /// the real cache.
+    /// Restore ambient even on panic (leaked override would point later tests at a deleted dir).
     fn drop(&mut self) {
-        // SAFETY: `Drop::drop` runs before the struct's fields, so `_lock` still serializes
-        // this restore against the other tests.
+        // SAFETY: Drop order keeps `_lock` until after this restore.
         unsafe {
             match self.previous.take() {
                 Some(value) => std::env::set_var(MODEL_DIR_VAR, value),
@@ -69,7 +59,6 @@ impl Drop for EmptyModelDir {
     }
 }
 
-/// Empty model dir: a subdirectory model lists every file under its prefetch key.
 #[test]
 fn tts_model_prefetch_lists_every_file_for_an_empty_model_dir() {
     let _model_dir = EmptyModelDir::enter();
@@ -106,8 +95,7 @@ fn omnivoice_prefetch_manifest_stages_no_cuda_asset() {
     }
 }
 
-/// The three network-free factory probes must all read absent on a fresh dir — a probe that
-/// panicked or read present there would strand the engine on the wrong backend.
+/// Fresh dir: factory probes must read absent (wrong answer strands the engine).
 #[test]
 fn presence_probes_read_absent_on_an_empty_model_dir() {
     let _model_dir = EmptyModelDir::enter();
@@ -133,12 +121,7 @@ fn model_subdirectories_do_not_collide() {
     assert!(!tts_model_files_present(TtsModel::OmniVoice, true));
 }
 
-/// The argument `ds_fluid_tts_init` hands `KokoroAneManager(directory:)`, pinned at the ambient
-/// boundary the shim actually calls. FluidAudio appends the `.english` variant's whole
-/// `folderName` (`kokoro-82m-coreml/ANE`), so this must stay the Core ML ROOT: the set dir
-/// resolved one level too deep and failed closed as `networkDisabled(download(...))` under
-/// `ModelHub.offlineMode`. macOS-gated with `shim` itself; `kokoro_hub_layout` covers the
-/// same contract on the Linux-only per-commit gate.
+/// Ambient `fluid_kokoro_dir_arg` is the Core ML root (see `kokoro_hub_layout`).
 #[cfg(target_os = "macos")]
 #[test]
 fn fluid_kokoro_dir_arg_is_the_coreml_root() {
@@ -156,10 +139,7 @@ fn fluid_kokoro_dir_arg_is_the_coreml_root() {
     );
 }
 
-/// The SAFETY claims above rest on this binary being the crate's only env writer outside
-/// `ort::set_ort_dylib_path` (`Once`-guarded, single deterministic path). A `set_var` added
-/// back to a `#[cfg(test)]` module in `src/` would race the download tests' `model_dir()`
-/// reads with nothing to serialize them — that regression is issue #204.
+/// Lib `src/` mutates env only in `ort` — other writers belong in this binary (#204).
 #[test]
 fn crate_sources_keep_env_mutation_to_the_single_ort_writer() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -175,7 +155,6 @@ fn crate_sources_keep_env_mutation_to_the_single_ort_writer() {
     );
 }
 
-/// File names (deduped by the caller) under `dir` that call `env::set_var`/`env::remove_var`.
 fn collect_env_writers(dir: &Path, writers: &mut Vec<String>) {
     let entries = std::fs::read_dir(dir)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));

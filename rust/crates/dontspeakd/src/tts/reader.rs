@@ -1,7 +1,5 @@
-//! The persistent stdout reader for [`super::TtsManager`] — owns the warm child's
-//! stdout and demuxes each line into the speak/listen/diarize/enroll slots, so a
-//! `speak` and a `listen` can be served concurrently. Split from the manager into its
-//! own module (matching `codex_stream/`) so the slot types stay private to `tts/`.
+//! Persistent stdout reader for [`super::TtsManager`]: demux into speak/listen/diarize/
+//! enroll slots (full-duplex). Slot types stay private to `tts/`.
 
 use std::io::BufRead;
 use std::sync::{Arc, Condvar, Mutex};
@@ -13,44 +11,32 @@ use crate::child_slot::ChildSlot;
 use crate::model_slot::{ModelSlot, ModelState};
 use crate::status::StatusGate;
 
-/// Render a `try_wait`'d exit status for a log line ("exit status: 0" / "signal: 9
-/// (SIGKILL)" via `ExitStatus`'s own `Display`, or a fixed fallback when the status
-/// couldn't be obtained). Shared ONLY for this one formatting detail — each caller
-/// (`mark_dead_locked`'s reap, the reader thread's live unexpected-EOF detection)
-/// keeps its own distinct surrounding message, so which one fired stays traceable
-/// in the log — that distinction is itself diagnostic (crash reaped lazily on the
-/// next speak vs. caught live the instant the pipe closed).
+/// Format `try_wait` status for a log line (`ExitStatus` Display, or fixed fallback).
+/// Shared for formatting only — callers keep distinct surrounding messages.
 pub(super) fn describe_exit(status: Option<std::process::ExitStatus>) -> String {
     status
         .map(|s| s.to_string())
         .unwrap_or_else(|| "exit status unavailable".to_string())
 }
 
-/// What a `speak` waits for: the persistent reader thread sets `done` on the
-/// child's `DONE` (or `ERR`/EOF, with `err`). `fatal` distinguishes a child that
-/// DIED (EOF/read error ⇒ reap + restart) from a soft `ERR` line (child alive).
+/// Speak wait: `done` on `DONE`/`ERR`/EOF; `fatal` = child died (reap) vs soft `ERR`.
 #[derive(Default)]
 pub(super) struct SpeakSlot {
     pub(super) done: bool,
     pub(super) err: Option<String>,
     pub(super) fatal: bool,
-    /// The helper's ABSOLUTE played-batch high-water mark for THIS request
-    /// (`PROGRESS` lines — see `ds_helper_proto::PROGRESS_PREFIX`). 0 = no mark seen
-    /// (older helper, duplex path, or nothing played) ⇒ resume falls back to the top.
-    /// Monotone within a request; reset with the whole slot by `play()`.
+    /// Absolute played-batch high-water (`PROGRESS`). 0 = none → resume from top. Monotone.
     pub(super) progress: usize,
 }
 
-/// What an ordered earcon waits for: the reader sets `done` on `CUEDONE`; `dead` wakes the
-/// queue if the helper exits mid-cue.
+/// Earcon wait: `done` on `CUEDONE`; `dead` if helper exits mid-cue.
 #[derive(Default)]
 pub(super) struct CueSlot {
     pub(super) done: bool,
     pub(super) dead: bool,
 }
 
-/// One demuxed line of a `listen` session (the reader routes the child's
-/// LISTENING/PARTIAL/FINAL/STTERR/LDONE lines here).
+/// One demuxed listen line.
 #[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) enum ListenEvt {
     Partial(String),
@@ -59,18 +45,14 @@ pub(super) enum ListenEvt {
     Done,
 }
 
-/// What a `listen` drains: the reader pushes [`ListenEvt`]s; `dead` marks the
-/// child gone so a waiting listen unblocks.
+/// Listen drain; `dead` unblocks waiters when the child is gone.
 #[derive(Default)]
 pub(super) struct ListenSlot {
     pub(super) events: std::collections::VecDeque<ListenEvt>,
     pub(super) dead: bool,
 }
 
-/// What a one-shot `diarize` waits for: the reader fills `result` from the child's
-/// `DIAR <json>` (Ok) or `DIARERR <msg>` (Err), then sets `done` on `DDONE`. `dead`
-/// marks the child gone mid-diarize so the waiter unblocks. Simpler than a listen —
-/// diarize is record-then-return, not streamed.
+/// One-shot diarize: `result` from `DIAR`/`DIARERR`, `done` on `DDONE`.
 #[derive(Default)]
 pub(super) struct DiarizeSlot {
     pub(super) result: Option<Result<String, String>>,
@@ -78,9 +60,7 @@ pub(super) struct DiarizeSlot {
     pub(super) dead: bool,
 }
 
-/// What a one-shot `enroll` waits for: the reader fills `result` from the child's
-/// `EMB <json-floats>` (Ok) or `ENROLLERR <msg>` (Err), then sets `done` on `EDONE`.
-/// Same shape as [`DiarizeSlot`].
+/// One-shot enroll: same shape as [`DiarizeSlot`] (`EMB`/`ENROLLERR`/`EDONE`).
 #[derive(Default)]
 pub(super) struct EnrollSlot {
     pub(super) result: Option<Result<String, String>>,
@@ -88,8 +68,7 @@ pub(super) struct EnrollSlot {
     pub(super) dead: bool,
 }
 
-/// The five demux slots [`reader_loop`] routes the child's lines into. Bundled because every
-/// caller always supplies the whole set together rather than passing a fixed-order run of arcs.
+/// Demux slots for [`reader_loop`] (always passed as a set).
 pub(super) struct ReaderSlots {
     pub(super) speak: Arc<(Mutex<SpeakSlot>, Condvar)>,
     pub(super) cue: Arc<(Mutex<CueSlot>, Condvar)>,
@@ -98,37 +77,27 @@ pub(super) struct ReaderSlots {
     pub(super) enroll: Arc<(Mutex<EnrollSlot>, Condvar)>,
 }
 
-/// The three stats/lifetime sinks [`reader_loop`] feeds from the
-/// child's `STATS`/`STTSTATS` lines. Bundled alongside [`ReaderSlots`] for the
-/// same reason — always passed together, never partially.
+/// Stats sinks for [`reader_loop`] (`STATS`/`STTSTATS`).
 pub(super) struct ReaderStats {
     pub(super) tts: Arc<crate::stats::TtsStats>,
     pub(super) stt: Arc<crate::stats::SttStats>,
     pub(super) lifetime: Arc<crate::stats::LifetimeSeconds>,
 }
 
-/// The model-residency state [`reader_loop`] flips on
-/// `TTSLOADED`/`STTLOADED`/unexpected EOF, plus the shared [`ChildSlot`] it asks
-/// whether an EOF was deliberate and peeks (never kills) for the real exit
-/// status. Bundled so the reader doesn't thread a fixed-order run of positional
-/// args that share a type — an easy mis-ordering footgun.
+/// Model residency + child for [`reader_loop`] (bundled to avoid same-typed arg reorder).
 pub(super) struct ReaderModelState {
     pub(super) tts_model: Arc<ModelSlot>,
     pub(super) stt_model: Arc<ModelSlot>,
     pub(super) stt_realized: Arc<Mutex<Option<String>>>,
-    /// Only CLEARED here (on unexpected EOF) — the helper never emits `PROVIDER` post-READY,
-    /// so the reader has no set path; the pre-READY parse in `start()` owns the set.
+    /// Cleared here on unexpected EOF only; set is pre-READY in `start()`.
     pub(super) tts_realized: Arc<Mutex<Option<String>>>,
     pub(super) gate: Option<Arc<StatusGate>>,
     pub(super) child: Arc<ChildSlot>,
 }
 
-/// The persistent stdout reader: owns the warm child's stdout and demuxes each
-/// line into the operation slots, so independent operations can be served concurrently.
-/// Returns on EOF / read error (child gone), signalling every slot so all waiters unblock.
+/// Demux child stdout into operation slots until EOF/read error (then signal all waiters).
 pub(super) fn reader_loop(
-    // `impl BufRead` (not `BufReader<ChildStdout>`) so the EOF handling is unit-testable
-    // with a canned byte slice — production passes the child's buffered stdout.
+    // `impl BufRead` for canned-EOF unit tests; production passes buffered child stdout.
     mut stdout: impl BufRead,
     slots: ReaderSlots,
     stats: ReaderStats,
@@ -211,38 +180,16 @@ pub(super) fn reader_loop(
                 let (em, ecv) = &*enroll_slot;
                 em.lock().unwrap().dead = true;
                 ecv.notify_all();
-                // An EOF nobody marked expected = the child DIED post-READY (AV
-                // false-positive on freshly written dylibs, OOM, GPU driver). Such
-                // deaths used to be invisible — no log line, and the stale "loaded"
-                // flags stayed green until some later write failed. Unload both models
-                // NOW (the status dots go amber immediately) and say so; the worker's
-                // `restart_if_crashed` revives the child on the next speak. Deliberate
-                // teardowns (`stop_child`/`mark_dead`) own their flags and logging.
+                // Unexpected EOF post-READY: unload now (dots amber); `restart_if_crashed` on next speak.
+                // Deliberate teardowns own their flags/logging.
                 if !child.eof_was_expected() {
-                    // `ModelSlot::transition` to `Idle` clears any per-model "failed to
-                    // load" state too (mirrors every other teardown path —
-                    // `start_locked`'s fresh-install, `clear_loaded_flags`,
-                    // `unload_engine`): a crashed child's stale error must not keep
-                    // showing after the process is gone, or it lingers until the next
-                    // successful `start_locked`. Each call is independently change-gated,
-                    // so this replaces the old unconditional gate bump below it too — a
-                    // real transition on either model already wakes a blocked waiter.
-                    //
-                    // The dead child's realized STT/TTS backends are no longer measurements —
-                    // and the two transitions below BUMP, so a waiter woken by them must not
-                    // still read "CUDA" for a process that no longer exists. Same ordering trap
-                    // as the set direction.
+                    // Idle clears stale load errors (same as other teardowns). Clear realized
+                    // backends first — transitions bump, so waiters must not read a dead EP.
                     store_realized(&stt_realized, None, gate.as_deref());
                     store_realized(&tts_realized, None, gate.as_deref());
                     tts_model.transition(ModelState::Idle, gate.as_deref());
                     stt_model.transition(ModelState::Idle, gate.as_deref());
-                    // Debug aid: try_wait() the real exit status/signal at the MOMENT
-                    // of detection — peek only (never kill/take), so the later
-                    // mark_dead/restart_if_crashed still owns the actual reap. Without
-                    // this the cause (SIGKILL/SIGSEGV/OOM/clean exit) was only ever
-                    // learned lazily, whenever the next speak/listen happened to
-                    // trigger restart_if_crashed — which may be minutes later, or
-                    // never before the app itself restarts.
+                    // Peek exit at detection (never reap) — mark_dead still owns the reap.
                     let status = child.peek_exit_status();
                     log::warn!(
                         target: "engine",
@@ -265,24 +212,16 @@ pub(super) fn reader_loop(
                     m.lock().unwrap().done = true;
                     cv.notify_all();
                 } else if let Some(rest) = l.strip_prefix(proto::STATS_PREFIX) {
-                    // Persist the per-utterance playback timing to the activity log (it
-                    // otherwise only fed the in-app stats view, so a clipped/short reply left
-                    // no trace — the gap that made the tail-clip bug hard to diagnose). DEBUG
-                    // level: off by default, one concise line per speak when DONTSPEAK_DEBUG
-                    // is on, size-rotated like the rest.
+                    // Activity-log trace (DEBUG / DONTSPEAK_DEBUG).
                     log::debug!(target: "engine", "TTS speak {rest}");
                     if let Some(secs) = stats.record_stats_line(rest) {
                         lifetime.add_tts(secs);
-                        // End-of-utterance: refresh stats UI even if speaking flag doesn't edge.
                         if let Some(g) = gate.as_ref() {
                             g.bump();
                         }
                     }
                 } else if let Some(rest) = l.strip_prefix(proto::PROGRESS_PREFIX) {
-                    // Batch-granular resume mark: intermediate, never terminal (no
-                    // done/condvar). Malformed values are ignored — protocol chatter
-                    // must never fail a speak — and the max() keeps the mark monotone
-                    // even if lines somehow arrive out of order.
+                    // Intermediate resume mark only; ignore malformed; max keeps monotone.
                     if let Ok(v) = rest.trim().parse::<usize>() {
                         let mut s = speak_slot.0.lock().unwrap();
                         s.progress = s.progress.max(v);
@@ -303,10 +242,6 @@ pub(super) fn reader_loop(
                 } else if let Some(rest) = l.strip_prefix(proto::FINAL_PREFIX) {
                     push_listen(ListenEvt::Final(rest.to_string()));
                 } else if let Some(rest) = l.strip_prefix(proto::STTSTATS_PREFIX) {
-                    // Per-listen transcription timing → the activity log, the speech-IN
-                    // mirror of the `TTS speak` line above (so a slow dictation leaves a
-                    // trace, not just an in-app stats bump). DEBUG: off by default, one
-                    // concise line per listen when DONTSPEAK_DEBUG is on.
                     log::debug!(target: "engine", "STT listen {rest}");
                     if let Some(secs) = stt_stats.record_stt_line(rest) {
                         lifetime.add_stt(secs);
@@ -316,35 +251,22 @@ pub(super) fn reader_loop(
                     }
                 } else if let Some(rest) = l.strip_prefix(proto::STTERR_PREFIX) {
                     push_listen(ListenEvt::Err(rest.to_string()));
-                // STT lifecycle — the SAME `ModelSlot::transition` `start()`'s wait loop
-                // uses, so the pre-/post-READY paths can't drift (STT preloads in parallel →
-                // its terminal lands on either side of READY).
+                // Same `ModelSlot::transition` as `start()` wait (pre-/post-READY can't drift).
                 } else if l == proto::TTSLOADED {
-                    // The Kokoro analogue of STTLOADED: the helper confirms the model is
-                    // resident after a `load tts`, so the dot greens only now — not on the
-                    // optimistic request. (The COMMON path for a mid-session TTS (re)select.)
-                    // One write does what used to be two kept in lockstep (mark loaded +
-                    // clear any stale load error) — see `ModelSlot::transition`.
+                    // Dot greens only on helper confirm — not on optimistic request.
                     tts_model.transition(ModelState::Loaded, gate.as_deref());
                 } else if l == proto::STTLOADED {
                     stt_model.transition(ModelState::Loaded, gate.as_deref());
                 } else if let Some(msg) = l.strip_prefix(proto::STTLOADERR_PREFIX) {
-                    // A mid-session `load stt`/preload failure (e.g. a transient AV-scan
-                    // file-not-found on an already-downloaded model) — surfaced per-model so
-                    // `model_status`'s `parakeet` row can show it without touching `kokoro`.
-                    // Change-gated: the exact same failure can repeat identically several
-                    // times in a row and must not spam `StatusGate` each time.
+                    // Per-model; change-gated (identical repeats must not spam StatusGate).
                     stt_model
                         .transition(ModelState::Failed(msg.trim().to_string()), gate.as_deref());
                 } else if let Some(msg) = l.strip_prefix(proto::TTSLOADERR_PREFIX) {
                     tts_model
                         .transition(ModelState::Failed(msg.trim().to_string()), gate.as_deref());
                 } else if let Some(p) = l.strip_prefix(proto::STT_PROVIDER_PREFIX) {
-                    // The REALIZED STT EP (mirrors the pre-READY parse in start()). Post-READY is
-                    // the COMMON path — the parallel preload usually reports after READY — so
-                    // this is what keeps the STT status row honest on a GPU box. The write is
-                    // change-gated and BUMPS: `STTLOADED` alone would otherwise publish a row
-                    // read between the child's paired lines, with no later bump to correct it.
+                    // Realized STT EP (common post-READY path). Bumps so STTLOADED alone can't
+                    // publish a row between the child's paired lines.
                     store_realized(&stt_realized, realized_backend_token(p), gate.as_deref());
                 // ── diarize events ───────────────────────────────────────────
                 } else if let Some(rest) = l.strip_prefix(proto::DIAR_PREFIX) {
@@ -387,20 +309,14 @@ mod reader_eof_tests {
     use std::io::BufReader;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// A fresh [`ModelSlot`] already transitioned to `Loaded` — the post-READY state in
-    /// which a crash used to leave the old raw flags stale. No gate: these tests assert
-    /// on `is_loaded()`/`error()` outcomes, not bump counts.
+    /// `Loaded` slot without a gate (assert outcomes, not bump counts).
     fn loaded_slot() -> Arc<ModelSlot> {
         let slot = Arc::new(ModelSlot::new());
         slot.transition(ModelState::Loaded, None);
         slot
     }
 
-    /// A canned [`ChildSlot`]: EMPTY (no real process behind it) with the
-    /// deliberate-stop marker optionally pre-set — reproduces the exact
-    /// `{child: None, expected_eof}` pairs the raw fields used to take, so the
-    /// crash case (empty slot, `expected_eof = false`) stays representable
-    /// WITHOUT spawning a real process in every reader test.
+    /// Empty [`ChildSlot`] with optional deliberate-stop (no real process).
     fn canned_slot(expected_eof: bool) -> Arc<ChildSlot> {
         let slot = Arc::new(ChildSlot::new());
         if expected_eof {
@@ -409,9 +325,7 @@ mod reader_eof_tests {
         slot
     }
 
-    /// Drive `reader_loop` over a canned child stdout (ending in EOF, like a real death)
-    /// and return `(tts_loaded, stt_loaded, speak_fatal)` afterwards. Both models start
-    /// `Loaded` — see [`loaded_slot`].
+    /// Drive `reader_loop` on canned stdout → `(tts_loaded, stt_loaded, speak_fatal)`.
     fn run_reader(stdout: &[u8], expected_eof: bool) -> (bool, bool, bool) {
         let dir = tempfile::tempdir().unwrap();
         let speak_slot = Arc::new((Mutex::new(SpeakSlot::default()), Condvar::new()));

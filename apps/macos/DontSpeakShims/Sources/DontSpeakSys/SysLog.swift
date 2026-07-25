@@ -1,17 +1,14 @@
-// Diagnostic sink for libdontspeak_sys: Rust registers one C callback so shim diagnostics
-// land in DontSpeak's own log instead of the helper's stderr. See dontspeak_shim.h.
+// Diagnostic sink for libdontspeak_sys: Rust registers one C callback so shim
+// diagnostics land in DontSpeak's log. See dontspeak_shim.h.
 //
-// Every module-visible name here carries the `Sys`/`sys` prefix. The three shim modules are
-// statically linked into one XCTest bundle, and Swift cannot disambiguate identically named
-// module-visible declarations across `@testable import`s, so `sys` / `mlx` / `fluid` keep
-// disjoint top-level names (`SysLogSink` vs `MlxLogSink` vs `FluidLogSink`, and so on).
+// Sys/sys-prefixed names stay disjoint from mlx/fluid (one XCTest bundle,
+// @testable imports cannot disambiguate shared top-level names).
 
 import Foundation
 
 public typealias SysLogCb = @convention(c) (Int32, UnsafePointer<CChar>?) -> Void
 
-/// Mirror of dontspeak_shim.h's DS_SHIM_LOG_* -- four fixed integers, hand-kept in sync with
-/// that header and ds-model's `forward`. No build check covers this; the header is canonical.
+/// Mirror of dontspeak_shim.h DS_SHIM_LOG_*; header is canonical (also mirrored in ds-model `forward`).
 enum SysLogLevel {
     static let debug: Int32 = 0
     static let info: Int32 = 1
@@ -30,18 +27,15 @@ final class SysLogSink: @unchecked Sendable {
         self.cb = cb
     }
 
-    /// Stderr-fallback count. Lets LogSinkTests prove the sink took over without redirecting
-    /// the shared XCTest process's fd 2.
+    /// Stderr-fallback count for LogSinkTests (avoids redirecting XCTest fd 2).
     func fallbackCount() -> Int {
         lock.lock()
         defer { lock.unlock() }
         return fallbacks
     }
 
-    /// Host log when a sink is registered; stderr otherwise (smoke binary, XCTest, and the
-    /// window before `open()` registers one). The pointer is copied out and the lock released
-    /// BEFORE the call -- the sink must never run under this lock, so a sink may legitimately
-    /// fire just after being deregistered (benign: the Rust thunk is 'static in the Rust image).
+    /// Registered sink, else stderr. Copies cb out and unlocks before invoke so the
+    /// sink never runs under this lock (may fire just after deregister; Rust thunk is 'static).
     func emit(_ level: Int32, _ s: String) {
         lock.lock()
         let cb = self.cb
