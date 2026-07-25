@@ -474,22 +474,9 @@ fn resolve_codex_bin_finds_the_native_npm_payload_on_windows() {
     let home = tempfile::tempdir().unwrap();
     let paths = Paths::rooted_at(home.path());
     let roaming = paths.home.join("AppData/Roaming");
-    let package = if cfg!(target_arch = "aarch64") {
-        "@openai/codex-win32-arm64"
-    } else {
-        "@openai/codex-win32-x64"
-    };
-    let target = if cfg!(target_arch = "aarch64") {
-        "aarch64-pc-windows-msvc"
-    } else {
-        "x86_64-pc-windows-msvc"
-    };
     let bin = roaming
-        .join("npm/node_modules/@openai/codex/node_modules")
-        .join(package)
-        .join("vendor")
-        .join(target)
-        .join("bin/codex.exe");
+        .join(ds_config::codex_native_windows_dir(std::env::consts::ARCH))
+        .join("codex.exe");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::write(&bin, b"test").unwrap();
 

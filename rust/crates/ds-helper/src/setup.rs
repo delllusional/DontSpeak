@@ -18,9 +18,9 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
         ds_model::run_setup_kokoro_with_progress(&p).map(|_| ())?;
         ds_model::run_setup_parakeet_with_progress(&p).map(|_| ())
     };
-    // Same platform gate as every CUDA dispatcher (`DownloadTarget::is_supported_on_this_host`);
-    // was windows-only and silently no-op'd Linux `--prefetch cuda`. Off-platform: quiet Ok(())
-    // (installer semantics), unlike the engine's per-target error.
+    // `#[cfg]` rather than the shared host gate below: `ensure_cuda_runtime_with_progress`
+    // does not COMPILE off x86_64 Windows/Linux. The no-arg `"all"` arm reaches this without
+    // a `DownloadTarget`, so the off-platform no-op closure has to exist.
     #[cfg(all(
         any(target_os = "windows", target_os = "linux"),
         target_arch = "x86_64"
@@ -34,6 +34,11 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
     let cuda = || -> std::io::Result<()> { Ok(()) };
     use ds_model::DownloadTarget;
     let r = match DownloadTarget::parse(what) {
+        // ONE host gate for every named target, ahead of the fetch arms — the per-arm
+        // `cfg!` copies this replaces were where the Apple-Silicon and macOS-any-arch
+        // spellings drifted apart. Off-platform is a quiet `Ok(())` (installer semantics),
+        // unlike the engine's per-target error.
+        Some(target) if !target.is_supported_on_this_host() => Ok(()),
         Some(DownloadTarget::Onnxruntime) => {
             ds_model::ensure_onnxruntime_with_progress(&p).map(|_| ())
         }
@@ -65,60 +70,25 @@ pub(crate) fn run_prefetch(what: &str) -> i32 {
             | DownloadTarget::ChatterboxMlx
             | DownloadTarget::QwenMlx
             | DownloadTarget::OmniVoiceMlx),
-        ) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(ds_model::mlx_repo::tts_mlx_set(
-                    target.tts_model().expect("MLX TTS target has a model"),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-        Some(DownloadTarget::ParakeetMlx) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET)
-            } else {
-                Ok(())
-            }
-        }
-        Some(DownloadTarget::DiarizationMlx) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET)
-            } else {
-                Ok(())
-            }
-        }
+        ) => hf_repos(ds_model::mlx_repo::tts_mlx_set(
+            target.tts_model().expect("MLX TTS target has a model"),
+        )),
+        Some(DownloadTarget::ParakeetMlx) => hf_repos(&ds_model::mlx_repo::PARAKEET_MLX_SET),
+        Some(DownloadTarget::DiarizationMlx) => hf_repos(&ds_model::mlx_repo::DIARIZATION_MLX_SET),
+        // The shared voices npz (owned by KokoroModel) the ANE chain materializes packs
+        // from, plus the two-root Core ML set.
         Some(DownloadTarget::KokoroFluid) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                // The shared voices npz (owned by KokoroModel) the ANE chain materializes
-                // packs from, plus the two-root Core ML set.
-                ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &p)
-                    .and_then(|_| hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET))
-            } else {
-                Ok(())
-            }
+            ds_model::ensure_with_progress(&ds_model::kokoro_voices_spec(), &p)
+                .and_then(|_| hf_repos(&ds_model::coreml_repo::KOKORO_COREML_SET))
         }
         Some(DownloadTarget::ParakeetFluid) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(&ds_model::coreml_repo::PARAKEET_COREML_SET)
-            } else {
-                Ok(())
-            }
+            hf_repos(&ds_model::coreml_repo::PARAKEET_COREML_SET)
         }
         Some(DownloadTarget::DiarizationFluid) => {
-            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-                hf_repos(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
-            } else {
-                Ok(())
-            }
+            hf_repos(&ds_model::coreml_repo::DIARIZATION_COREML_SET)
         }
-        // Off-macOS quiet skip (installer semantics; mirrors `is_supported_on_this_host`).
         Some(DownloadTarget::SepformerModel) => {
-            if cfg!(target_os = "macos") {
-                ds_model::run_setup_sepformer_with_progress(&p).map(|_| ())
-            } else {
-                Ok(())
-            }
+            ds_model::run_setup_sepformer_with_progress(&p).map(|_| ())
         }
         Some(DownloadTarget::Models) => models(),
         Some(DownloadTarget::Cuda) => cuda(),

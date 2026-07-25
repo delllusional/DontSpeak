@@ -180,19 +180,7 @@ pub(crate) fn resolve_client_binary_in(
             .unwrap_or_else(|| paths.home.join("AppData/Roaming"));
         dirs.push(roaming.join("npm"));
         if client == WiredAgent::Codex {
-            let (package, target) = if cfg!(target_arch = "aarch64") {
-                ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
-            } else {
-                ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
-            };
-            dirs.push(
-                roaming
-                    .join("npm/node_modules/@openai/codex/node_modules")
-                    .join(package)
-                    .join("vendor")
-                    .join(target)
-                    .join("bin"),
-            );
+            dirs.push(roaming.join(codex_native_windows_dir(std::env::consts::ARCH)));
         }
     }
     #[cfg(not(windows))]
@@ -200,6 +188,24 @@ pub(crate) fn resolve_client_binary_in(
 
     dirs.into_iter()
         .find_map(|dir| executable_in_dir(&dir, name, search.native_windows_executable))
+}
+
+/// Codex ships its native Windows executable as one npm optional dependency per arch, under
+/// a vendor dir named for the target triple. The ONE spelling of that path below `%APPDATA%`:
+/// resolution and the tests that plant a fixture both read it here, so a test cannot pass
+/// against a package name production never looks in. Takes `arch` (`std::env::consts::ARCH`
+/// at the call sites) so both arms stay reachable from any host.
+pub fn codex_native_windows_dir(arch: &str) -> PathBuf {
+    let (package, target) = if arch == "aarch64" {
+        ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
+    } else {
+        ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
+    };
+    Path::new("npm/node_modules/@openai/codex/node_modules")
+        .join(package)
+        .join("vendor")
+        .join(target)
+        .join("bin")
 }
 
 fn existing_absolute_file(candidate: &Path) -> Option<PathBuf> {
@@ -306,6 +312,22 @@ mod tests {
         } else {
             command.to_string()
         }
+    }
+
+    /// Both arms as literals — the Windows legs only ever exercise their own host's arch,
+    /// so the other package name would otherwise go unchecked until someone shipped on it.
+    #[test]
+    fn codex_native_windows_dir_pairs_each_arch_with_its_vendor_triple() {
+        assert_eq!(
+            codex_native_windows_dir("aarch64"),
+            Path::new("npm/node_modules/@openai/codex/node_modules")
+                .join("@openai/codex-win32-arm64/vendor/aarch64-pc-windows-msvc/bin")
+        );
+        assert_eq!(
+            codex_native_windows_dir("x86_64"),
+            Path::new("npm/node_modules/@openai/codex/node_modules")
+                .join("@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin")
+        );
     }
 
     fn isolated_search<'a>(client: WiredAgent) -> ClientBinarySearch<'a> {
@@ -446,17 +468,9 @@ mod tests {
         let roaming = root.path().join("AppData/Roaming");
         std::fs::create_dir_all(&shim_dir).unwrap();
         std::fs::write(shim_dir.join("codex.cmd"), b"shim").unwrap();
-        let (package, target) = if cfg!(target_arch = "aarch64") {
-            ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
-        } else {
-            ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
-        };
         let native = roaming
-            .join("npm/node_modules/@openai/codex/node_modules")
-            .join(package)
-            .join("vendor")
-            .join(target)
-            .join("bin/codex.exe");
+            .join(codex_native_windows_dir(std::env::consts::ARCH))
+            .join("codex.exe");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         std::fs::write(&native, b"native").unwrap();
         let process_path = std::env::join_paths([&shim_dir]).unwrap();

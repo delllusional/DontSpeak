@@ -365,18 +365,11 @@ mod tests {
         std::fs::write(&shim, b"fixture").unwrap();
         paths.path_env = Some(std::env::join_paths([&shim_dir]).unwrap());
 
-        let (package, target) = if cfg!(target_arch = "aarch64") {
-            ("@openai/codex-win32-arm64", "aarch64-pc-windows-msvc")
-        } else {
-            ("@openai/codex-win32-x64", "x86_64-pc-windows-msvc")
-        };
         let native = paths
             .home
-            .join("AppData/Roaming/npm/node_modules/@openai/codex/node_modules")
-            .join(package)
-            .join("vendor")
-            .join(target)
-            .join("bin/codex.exe");
+            .join("AppData/Roaming")
+            .join(ds_config::codex_native_windows_dir(std::env::consts::ARCH))
+            .join("codex.exe");
         std::fs::create_dir_all(native.parent().unwrap()).unwrap();
         std::fs::write(&native, b"fixture").unwrap();
 

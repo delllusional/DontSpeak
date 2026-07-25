@@ -132,7 +132,8 @@ impl DownloadTarget {
     /// Can this target actually be fetched on the RUNNING platform? The ONE spelling of
     /// every target's platform gate — the `#[cfg]`-gated fetch arms in each dispatcher
     /// (the engine's `start_download`, [`crate::spec::prefetch_items`], ds-helper's
-    /// `run_prefetch`) must mirror this matrix:
+    /// `run_prefetch`) must mirror this matrix, which maps each target onto a
+    /// [`ds_config::host`] gate rather than restating the `(os, arch)` terms:
     ///
     /// * the MLX sets (`kokoro_mlx` / `parakeet_mlx` / `diarization_mlx`) and the FluidAudio
     ///   Core ML sets (`kokoro_fluid` / `parakeet_fluid` / `diarization_fluid`) exist only
@@ -151,14 +152,9 @@ impl DownloadTarget {
             | DownloadTarget::DiarizationMlx
             | DownloadTarget::KokoroFluid
             | DownloadTarget::ParakeetFluid
-            | DownloadTarget::DiarizationFluid => {
-                cfg!(all(target_os = "macos", target_arch = "aarch64"))
-            }
-            DownloadTarget::SepformerModel => cfg!(target_os = "macos"),
-            DownloadTarget::Cuda => cfg!(all(
-                any(target_os = "windows", target_os = "linux"),
-                target_arch = "x86_64"
-            )),
+            | DownloadTarget::DiarizationFluid => ds_config::host::is_apple_silicon(),
+            DownloadTarget::SepformerModel => ds_config::host::is_macos(),
+            DownloadTarget::Cuda => ds_config::host::is_cuda_host(),
             DownloadTarget::Onnxruntime
             | DownloadTarget::KokoroModel
             | DownloadTarget::KokoroFrontend

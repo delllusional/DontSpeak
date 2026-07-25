@@ -766,7 +766,7 @@ impl VoiceConfig {
     /// Built-in model + MLX provider (architecture only; runtime gates assets/shim).
     pub fn uses_mlx_model(&self) -> bool {
         self.resolved_tts() == Some(TtsEngine::BuiltIn)
-            && cfg!(target_os = "macos")
+            && crate::host::is_macos()
             && self.resolved_tts_provider() == Provider::Mlx
     }
 

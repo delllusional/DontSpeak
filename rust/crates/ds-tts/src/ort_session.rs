@@ -67,11 +67,11 @@ impl OrtSessions {
         if descriptor.wants_cuda(&self.preference) {
             return ds_config::RealizedProvider::Cuda;
         }
-        // aarch64: on Intel Macs the Core ML EP registers, then fails every run. Gating here
-        // too because `DONTSPEAK_PROVIDER=coreml` and the full-duplex auto-upgrade below both
-        // bypass the config ladder's `coreml_usable_on` check.
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        if descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
+        // `DONTSPEAK_PROVIDER=coreml` and the full-duplex auto-upgrade below both bypass the
+        // config ladder, so the host gate is re-asked here — same predicate, not a second
+        // spelling of it.
+        if ds_config::host::is_apple_silicon()
+            && descriptor.supports_provider(ds_config::Provider::OrtCoreMl)
             && (self
                 .preference
                 .eq_ignore_ascii_case(ds_config::Provider::OrtCoreMl.as_str())
@@ -87,6 +87,9 @@ impl OrtSessions {
 fn provider_builder(
     requested: ds_config::RealizedProvider,
 ) -> Result<(SessionBuilder, ds_config::RealizedProvider), String> {
+    // `#[cfg]` rather than `ds_config::host::is_apple_silicon()`: `CoreMLExecutionProvider`
+    // does not COMPILE elsewhere. Same terms as that gate — `host`'s own test pins the two
+    // spellings equal.
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     if requested == ds_config::RealizedProvider::CoreMl {
         use ort::execution_providers::CoreMLExecutionProvider;

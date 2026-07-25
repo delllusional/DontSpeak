@@ -132,7 +132,7 @@ impl ListenMode {
 }
 
 /// Diarization runtime rung. `diarizer: Vec` is also on/off: empty = off; first
-/// usable rung wins ([`crate::VoiceConfig::resolved_diarizer`]). macOS-only today.
+/// usable rung wins ([`crate::VoiceConfig::resolved_diarizer`]). Apple-Silicon-only today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DiarizerProvider {
     /// MLX Audio on Apple Silicon (macOS only).
@@ -174,11 +174,10 @@ impl DiarizerProvider {
     /// Pure `(os, arch)` form of [`is_diarizer_usable`](DiarizerProvider::is_diarizer_usable) —
     /// the shape `Provider` already has (`stt_usable_on`/`tts_usable_on`), so the cross-platform
     /// matrix can pin `fluid` off Apple Silicon without a second `cfg!` (the drift #211 caught).
-    /// Both rungs are Apple-Silicon macOS: MLX Sortformer and FluidAudio's Core ML chains alike
-    /// run only on the Neural Engine.
+    /// MLX Sortformer and FluidAudio's Core ML chains alike run only on the Neural Engine.
     pub(crate) fn diarizer_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
-            DiarizerProvider::Mlx | DiarizerProvider::Fluid => os == "macos" && arch == "aarch64",
+            DiarizerProvider::Mlx | DiarizerProvider::Fluid => crate::host::apple_silicon(os, arch),
         }
     }
 }
@@ -191,7 +190,7 @@ pub enum Provider {
     OrtCpu,
     /// ORT CUDA (NVIDIA). May download GPU runtime; STT int8 may fall back per-op.
     OrtCuda,
-    /// ORT Core ML execution provider (macOS TTS only).
+    /// ORT Core ML execution provider (Apple-Silicon TTS only).
     OrtCoreMl,
     /// Native MLX Metal/CPU backend. Both engines on Apple Silicon.
     Mlx,
@@ -239,15 +238,11 @@ impl Provider {
         self.stt_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// Pure `(os, arch)` form of STT usability — shares [`mlx_usable_on`] with TTS.
+    /// Pure `(os, arch)` form of STT usability. The two ladders differ on ONE rung — ORT's
+    /// Core ML EP is wired for TTS graphs only — so deriving STT from TTS keeps the four
+    /// shared rungs from drifting apart the way a second copy of the match would.
     pub(crate) fn stt_usable_on(self, os: &str, arch: &str) -> bool {
-        match self {
-            Provider::OrtCpu => true,
-            Provider::Mlx => mlx_usable_on(os, arch),
-            Provider::OrtCuda => cuda_usable_on(os, arch),
-            Provider::OrtCoreMl => false,
-            Provider::Fluid => fluid_usable_on(os, arch),
-        }
+        self != Provider::OrtCoreMl && self.tts_usable_on(os, arch)
     }
 
     /// TTS usable on this platform?
@@ -255,43 +250,19 @@ impl Provider {
         self.tts_usable_on(std::env::consts::OS, std::env::consts::ARCH)
     }
 
-    /// Pure `(os, arch)` form of TTS usability.
+    /// Pure `(os, arch)` form of TTS usability, and the base
+    /// [`stt_usable_on`](Provider::stt_usable_on) narrows. MLX's Metal kernels, FluidAudio's
+    /// ANE chains, and ORT's Core ML EP all die off Apple Silicon — the last of them only at
+    /// `Session::run` (#250).
     pub(crate) fn tts_usable_on(self, os: &str, arch: &str) -> bool {
         match self {
             Provider::OrtCpu => true,
-            Provider::Mlx => mlx_usable_on(os, arch),
-            Provider::OrtCuda => cuda_usable_on(os, arch),
-            Provider::OrtCoreMl => coreml_usable_on(os, arch),
-            Provider::Fluid => fluid_usable_on(os, arch),
+            Provider::Mlx | Provider::Fluid | Provider::OrtCoreMl => {
+                crate::host::apple_silicon(os, arch)
+            }
+            Provider::OrtCuda => crate::host::cuda_host(os, arch),
         }
     }
-}
-
-/// The bundled ONNX Runtime CUDA wheels are x86_64 Windows/Linux only.
-fn cuda_usable_on(os: &str, arch: &str) -> bool {
-    matches!(os, "windows" | "linux") && arch == "x86_64"
-}
-
-/// MLX Audio = Apple Silicon only. Shared STT/TTS predicate.
-fn mlx_usable_on(os: &str, arch: &str) -> bool {
-    os == "macos" && arch == "aarch64"
-}
-
-/// FluidAudio's Core ML chains target the Apple Neural Engine, which exists only on Apple
-/// Silicon; on Intel macOS the same graphs fall to CPU/GPU, which ORT CPU already covers.
-/// Same gate as MLX so the ladder has one Apple-Silicon shape, and so the Intel
-/// compatibility dylib — which compiles `shim.swift` alone and exports no `ds_fluid_*`
-/// symbols — is never selected.
-fn fluid_usable_on(os: &str, arch: &str) -> bool {
-    os == "macos" && arch == "aarch64"
-}
-
-/// Apple Silicon only. Intel Macs register the ORT Core ML EP successfully, then fail on every
-/// `Session::run` with "Error in dynamically resizing for sequence length" — a run-path error
-/// the load-time fallback cannot catch, leaving TTS dead. Keep in sync with the
-/// `requested_provider` cfg in `ds-tts`.
-fn coreml_usable_on(os: &str, arch: &str) -> bool {
-    os == "macos" && arch == "aarch64"
 }
 
 /// Preference token asks for NVIDIA GPU? Shared TTS/STT load paths.

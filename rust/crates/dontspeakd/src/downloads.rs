@@ -585,7 +585,7 @@ fn compute_needs(cfg: &VoiceConfig) -> DownloadNeeds {
             set_present(&ds_model::coreml_repo::DIARIZATION_COREML_SET),
         );
     // Speaker-lock on + model absent: without it lock fails open (unfiltered).
-    let sepformer_model = cfg!(target_os = "macos")
+    let sepformer_model = DownloadTarget::SepformerModel.is_supported_on_this_host()
         && cfg.speaker_lock
         && cfg.is_diarization_on()
         && !ds_model::is_sepformer_present();

@@ -18,6 +18,7 @@ mod claude_code;
 mod client_binary;
 mod grok_rules;
 mod grok_sessions;
+pub mod host;
 mod narration;
 mod paths;
 mod pidfile;
@@ -30,7 +31,8 @@ mod wire;
 pub use brand::{DISPLAY_NAME, VERSION, name_version};
 pub use claude_code::{ClaudeCodeVoice, read_claude_code_voice};
 pub use client_binary::{
-    resolve_client_binary, resolve_configured_client_binary, resolve_native_client_binary,
+    codex_native_windows_dir, resolve_client_binary, resolve_configured_client_binary,
+    resolve_native_client_binary,
 };
 /// Wired-client identity (`ds-client` leaf; re-export avoids cycle with `ds-log`/`ds-ipc`).
 pub use ds_client::WiredAgent;
