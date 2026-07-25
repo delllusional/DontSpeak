@@ -89,6 +89,12 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// `greet_only` = `notify --greet-only` (non-streaming SessionStart — see [`notify_at`]).
 /// `client` from wiring stamps every ds-ipc request so the activity log knows who caused it.
 pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::WiredAgent) {
+    // Desktop shares ~/.codex/config.toml with the CLI, but its visible text surface must
+    // stay untouched by DontSpeak. In particular, do not mark a session active or feed its
+    // final reply into the engine. The CLI has no Desktop origin marker and is unaffected.
+    if crate::hook_prompt::is_codex_desktop(client) {
+        return;
+    }
     let Some(paths) = ds_config::Paths::resolve() else {
         return;
     };

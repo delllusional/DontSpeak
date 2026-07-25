@@ -11,11 +11,29 @@ use serde_json::{Value, json};
 const MUTED_NOTICE: &str = "\n\n## Voice state\nMUTED: speech and narration play silently. \
     Put anything important in text until unmuted.";
 
+/// Desktop's ordinary text surface must never receive the visible blockquote contract.
+/// Its hook child carries this exact origin marker; the CLI does not and retains streaming
+/// digests. Keep the comparison exact so unrelated Codex environments are unaffected.
+const CODEX_DESKTOP_ORIGIN: &str = "Codex Desktop";
+
+pub(crate) fn is_codex_desktop(client: WiredAgent) -> bool {
+    is_codex_desktop_with(client, |name| std::env::var(name).ok())
+}
+
+fn is_codex_desktop_with(client: WiredAgent, get: impl FnOnce(&str) -> Option<String>) -> bool {
+    client == WiredAgent::Codex
+        && get("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+            .is_some_and(|origin| origin.trim() == CODEX_DESKTOP_ORIGIN)
+}
+
 /// When digests are ON, return the narration spec. Claude-shape clients get
 /// `hookSpecificOutput.additionalContext`; Hermes wants flat `{"context":…}`.
 /// `None` when digests off (no instruction tokens). Also folds a best-effort mute notice
 /// from the engine — read-only; down/unreachable engine omits the notice, never blocks.
 pub(crate) fn narration_context(client: WiredAgent) -> Option<Value> {
+    if is_codex_desktop(client) {
+        return None;
+    }
     let paths = ds_config::Paths::resolve()?;
     if !ds_config::VoiceConfig::load(&paths).narrates(ds_config::NarrateKind::Digests) {
         return None;
@@ -84,5 +102,16 @@ mod tests {
         let claude = provide_shape(WiredAgent::ClaudeCode, "SPEC".into());
         assert_eq!(claude["hookSpecificOutput"]["additionalContext"], "SPEC");
         assert!(claude.get("context").is_none());
+    }
+
+    #[test]
+    fn codex_desktop_suppresses_only_the_model_facing_digest_instruction() {
+        assert!(is_codex_desktop_with(WiredAgent::Codex, |name| {
+            (name == "CODEX_INTERNAL_ORIGINATOR_OVERRIDE").then(|| CODEX_DESKTOP_ORIGIN.to_string())
+        }));
+        assert!(!is_codex_desktop_with(WiredAgent::Codex, |_| None));
+        assert!(!is_codex_desktop_with(WiredAgent::ClaudeCode, |_| {
+            Some(CODEX_DESKTOP_ORIGIN.to_string())
+        }));
     }
 }
