@@ -336,7 +336,8 @@ pub(crate) fn prepare_backend_audio(
 
 pub(crate) fn run(text: &str, voice: &str, rate: f32) -> Result<(), String> {
     let model = tts_model();
-    let language = ds_tts::detect_language(text, model);
+    // Separate process without user config: auto-detect across the model's full range.
+    let language = ds_tts::detect_language(text, model, &[]);
     let FrontendOutcome::Finished(batches) = frontend_batches(model, text, voice, &language)?
     else {
         unreachable!("the one-shot frontend cannot cancel")
@@ -383,7 +384,7 @@ pub(crate) fn synth_check(
     text: &str,
     voice: &str,
 ) -> Result<(), String> {
-    let language = ds_tts::detect_language(text, model);
+    let language = ds_tts::detect_language(text, model, &[]);
     let FrontendOutcome::Finished(batches) = frontend_batches(model, text, voice, &language)?
     else {
         return Err("frontend cancelled".to_string());
@@ -662,7 +663,9 @@ mod tests {
             assert_eq!(voice, descriptor.warmup_voice);
             assert!(!voice.is_empty());
             assert_eq!(language, descriptor.default_language);
-            assert!(descriptor.supports_language(language));
+            // OmniVoice detects internally (empty `languages`), so its `en` default is accepted
+            // rather than a member of the routed set.
+            assert!(descriptor.accepts_detected_language(language));
         }
     }
 }

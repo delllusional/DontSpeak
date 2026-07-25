@@ -220,6 +220,12 @@ static TOOLS: &[Tool] = &[
                 false,
                 SET_CONFIG_TTS_MODEL,
             ),
+            p(
+                PREFERRED_LANGUAGES,
+                PType::EnumArray(ds_config::DETECTABLE_LANGUAGES),
+                false,
+                SET_CONFIG_PREFERRED_LANGUAGES,
+            ),
             p(TTS_VOICES, PType::VoicePools, false, SET_CONFIG_TTS_VOICES),
             p(TTS_PARAMS, PType::ParamPools, false, SET_CONFIG_TTS_PARAMS),
             p(
@@ -1168,6 +1174,10 @@ mod tests {
                 json!({"tts_params": {"omnivoice": {"steps": true}}}),
                 false,
             ),
+            ("set_config", json!({"preferred_languages": ["en"]}), true),
+            ("set_config", json!({"preferred_languages": ["en", "fr"]}), true),
+            ("set_config", json!({"preferred_languages": []}), true),
+            ("set_config", json!({"preferred_languages": ["english"]}), false),
             ("set_config", json!({"tts_language": "ru"}), false),
             ("set_config", json!({"language": "ru"}), false),
             ("set_config", json!({"rate": 1.0}), false),
@@ -1345,6 +1355,7 @@ mod tests {
                 &[
                     (TTS_ENGINE, SET_CONFIG_TTS_ENGINE),
                     (TTS_MODEL, SET_CONFIG_TTS_MODEL),
+                    (PREFERRED_LANGUAGES, SET_CONFIG_PREFERRED_LANGUAGES),
                     (TTS_VOICES, SET_CONFIG_TTS_VOICES),
                     (TTS_PARAMS, SET_CONFIG_TTS_PARAMS),
                     (NARRATE, SET_CONFIG_NARRATE),
@@ -1438,6 +1449,12 @@ mod tests {
             SET_CONFIG_TTS_ENGINE,
             "Omit to keep the automatic preference",
             "tts_engine",
+        );
+        assert!(v.preferred_languages.is_empty());
+        mentions(
+            SET_CONFIG_PREFERRED_LANGUAGES,
+            "auto-detect (default)",
+            "preferred_languages",
         );
         assert!(v.tts_voices.system.is_empty());
         mentions(
@@ -1878,6 +1895,13 @@ mod tests {
             schema_item_enum("provider"),
             toks(Provider::ALL, Provider::as_str)
         );
+        assert_eq!(
+            schema_item_enum("preferred_languages"),
+            ds_config::DETECTABLE_LANGUAGES
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(props["agents"]["type"], "boolean");
         // `diarizer` is one of the hidden diarization params (see
         // `HIDDEN_SET_CONFIG_PARAMS`) — pin that it's actually absent from the wire
@@ -1980,6 +2004,7 @@ mod tests {
                 omnivoice: Some([("steps".to_string(), TtsParamValue::Int(32))].into()),
             }),
             tts_model: Some(TtsModel::Kokoro),
+            preferred_languages: Some(vec!["en".into()]),
             tts_engine: Some(vec![TtsEngine::BuiltIn]),
             stt_engine: Some(vec![SttEngine::ClaudeCode]),
             provider: Some(vec![Provider::Mlx, Provider::OrtCuda, Provider::OrtCpu]),

@@ -350,8 +350,12 @@ pub(crate) fn model_status_json(
             engine: status_tts_engine(resolved_tts),
             model: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
                 .then(|| status_tts_model(cfg.tts_model)),
-            language: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
-                .then(|| "auto".to_string()),
+            language: match resolved_tts {
+                // Built-in scope: null while auto-detecting; the joined preferred codes otherwise.
+                Some(ds_config::TtsEngine::BuiltIn) if cfg.preferred_languages.is_empty() => None,
+                Some(ds_config::TtsEngine::BuiltIn) => Some(cfg.preferred_languages.join(",")),
+                _ => None,
+            },
             provider: tts_provider_token(resolved_tts, tts.provider().as_deref()),
             status: tts_status,
             recent_utterances: tts_sample.recent_utterances,

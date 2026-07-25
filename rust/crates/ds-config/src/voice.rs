@@ -10,11 +10,11 @@ use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::enums::{
-    de_clear_on_input, de_diarizer, de_exclude_clients, de_listen_mode, de_narrate, de_provider,
-    de_stt_engine_ladder, de_stt_engine_pref, de_tray, de_tts_engine_ladder, de_tts_engine_pref,
-    default_clear_on_input, default_diarizer, default_narrate, default_provider,
-    default_stt_engine_ladder, default_tray, default_tts_engine_ladder, se_stt_engine_pref,
-    se_tts_engine_pref,
+    de_clear_on_input, de_diarizer, de_exclude_clients, de_listen_mode, de_narrate,
+    de_preferred_languages, de_provider, de_stt_engine_ladder, de_stt_engine_pref, de_tray,
+    de_tts_engine_ladder, de_tts_engine_pref, default_clear_on_input, default_diarizer,
+    default_narrate, default_provider, default_stt_engine_ladder, default_tray,
+    default_tts_engine_ladder, se_stt_engine_pref, se_tts_engine_pref,
 };
 use crate::tts_model::{SYSTEM_TTS_PARAMS, de_tts_model, validate_tts_param};
 use ds_log::{LogLevel, log};
@@ -187,6 +187,13 @@ pub struct VoiceConfig {
     /// Model hosted by the built-in engine.
     #[serde(default, deserialize_with = "de_tts_model")]
     pub tts_model: TtsModel,
+    /// Detection allowlist scope. Empty = auto (full model range). Ordered, deduped ISO 639-1.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "de_preferred_languages"
+    )]
+    pub preferred_languages: Vec<String>,
     /// SessionStart greet (default on).
     #[serde(default = "default_enabled")]
     pub greet: bool,
@@ -451,6 +458,7 @@ impl Default for VoiceConfig {
             tts_voices: TtsVoicePools::default(),
             tts_params: TtsParamPools::default(),
             tts_model: TtsModel::default(),
+            preferred_languages: Vec::new(),
             greet: true,
             narrate: default_narrate(),
             long_press_ms: default_long_press_ms(),
@@ -939,6 +947,7 @@ pub(crate) mod tests {
         assert_eq!(v.tts_voices.qwen, vec!["sohee"]);
         assert_eq!(v.tts_voices.omnivoice, vec!["young_woman"]);
         assert_eq!(v.tts_model, TtsModel::Kokoro);
+        assert!(v.preferred_languages.is_empty());
         assert!(v.greet);
         assert_eq!(v.narrate, vec![NarrateKind::Shorts, NarrateKind::Digests]);
         assert!(v.narrates(NarrateKind::Digests) && v.narrates(NarrateKind::Shorts));
@@ -1255,6 +1264,50 @@ pub(crate) mod tests {
                 "exclude_clients round-trip: {state:?}"
             );
         }
+    }
+
+    #[test]
+    fn preferred_languages_normalize_dedup_and_fail_open() {
+        let pref = |j: &str| {
+            serde_json::from_str::<VoiceConfig>(j)
+                .unwrap()
+                .preferred_languages
+        };
+        // Array: normalize case, dedup, drop unrecognized, preserve order.
+        assert_eq!(pref(r#"{"preferred_languages":["EN","en","xx"]}"#), vec!["en"]);
+        assert_eq!(
+            pref(r#"{"preferred_languages":["ru"," EN ","ru"]}"#),
+            vec!["ru", "en"]
+        );
+        // Non-array / garbage / absent → empty (= auto).
+        assert!(pref(r#"{"preferred_languages":"en"}"#).is_empty());
+        assert!(pref(r#"{"preferred_languages":42}"#).is_empty());
+        assert!(pref(r#"{"preferred_languages":["auto"]}"#).is_empty());
+        assert!(pref(r#"{}"#).is_empty());
+        assert!(VoiceConfig::known_keys().contains("preferred_languages"));
+    }
+
+    #[test]
+    fn preferred_languages_round_trips_through_write_and_load() {
+        // Empty stays absent from the TOML; a non-empty list round-trips. Tempdir only.
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let cfg = VoiceConfig::default();
+        write_settings(&paths, &cfg).unwrap();
+        let text = std::fs::read_to_string(&paths.config_toml).unwrap();
+        assert!(
+            !text.contains("preferred_languages"),
+            "empty preferred_languages stays absent from the written TOML"
+        );
+        assert!(VoiceConfig::load(&paths).preferred_languages.is_empty());
+
+        let cfg = VoiceConfig {
+            preferred_languages: vec!["en".into(), "fr".into()],
+            ..VoiceConfig::default()
+        };
+        write_settings(&paths, &cfg).unwrap();
+        let loaded = VoiceConfig::load(&paths);
+        assert_eq!(loaded.preferred_languages, vec!["en", "fr"]);
     }
 
     #[test]
@@ -1794,6 +1847,7 @@ pub(crate) mod tests {
                 omnivoice: vec!["deep_man".into()],
             },
             tts_model: TtsModel::Kokoro,
+            preferred_languages: vec!["en".into()], // non-default (default is [])
             tts_params: TtsParamPools {
                 system: [("rate".to_string(), TtsParamValue::Float(1.25))].into(),
                 kokoro: [("rate".to_string(), TtsParamValue::Float(0.8))].into(),

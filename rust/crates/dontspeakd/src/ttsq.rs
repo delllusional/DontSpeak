@@ -794,11 +794,11 @@ impl TtsQueue {
 
     /// Language at admit. `corpus` used only when the chunk cannot self-classify.
     fn chunk_language(&self, text: &str, corpus: Option<&str>) -> String {
-        // Config is Copy — drop lock before detection (same as play_speech).
         let cfg = self.config.lock().unwrap();
+        let pref: Vec<&str> = cfg.preferred_languages.iter().map(String::as_str).collect();
         match cfg.resolved_tts() {
-            Some(ds_config::TtsEngine::System) => ds_tts::chunk_language_any(text, corpus),
-            _ => ds_tts::chunk_language(text, corpus, cfg.tts_model),
+            Some(ds_config::TtsEngine::System) => ds_tts::chunk_language_any(text, corpus, &pref),
+            _ => ds_tts::chunk_language(text, corpus, cfg.tts_model, &pref),
         }
     }
 

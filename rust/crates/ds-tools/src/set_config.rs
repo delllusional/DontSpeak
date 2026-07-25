@@ -118,6 +118,9 @@ pub struct SetConfigArgs {
     pub tts_params: Option<TtsParamUpdates>,
     #[serde(deserialize_with = "de_opt_tts_model")]
     pub tts_model: Option<TtsModel>,
+    /// Detection allowlist scope. The MCP boundary already rejects unknown tokens (EnumArray
+    /// schema), so a permissive type is fine; `apply` re-normalizes defensively.
+    pub preferred_languages: Option<Vec<String>>,
     #[serde(deserialize_with = "de_opt_pref_tts_engine")]
     pub tts_engine: Option<Vec<TtsEngine>>,
     #[serde(deserialize_with = "de_opt_pref_stt_engine")]
@@ -169,6 +172,7 @@ impl SetConfigArgs {
             tts_voices,
             tts_params,
             tts_model,
+            preferred_languages,
             tts_engine,
             stt_engine,
             diarizer,
@@ -200,6 +204,20 @@ impl SetConfigArgs {
         if let Some(model) = tts_model {
             cfg.tts_model = model;
             changes.push(format!("tts_model={}", model.as_str()));
+        }
+        if let Some(list) = preferred_languages {
+            // Normalize + gate to recognized codes (defense in depth; the MCP schema already
+            // rejects unknown tokens), dedup preserving order. Empty = auto — do not default-fill.
+            let mut uniq: Vec<String> = Vec::new();
+            for code in list {
+                if let Some(code) = ds_config::parse_language_code(&code)
+                    && !uniq.contains(&code)
+                {
+                    uniq.push(code);
+                }
+            }
+            changes.push(format!("preferred_languages=[{}]", uniq.join(",")));
+            cfg.preferred_languages = uniq;
         }
         if let Some(voice_updates) = tts_voices {
             if voice_updates.is_empty() {
@@ -486,6 +504,30 @@ mod tests {
             vec!["agents=false".to_string()]
         );
         assert!(!cfg.agents);
+    }
+
+    #[test]
+    fn set_config_preferred_languages_applies_normalizes_and_clears() {
+        let mut cfg = VoiceConfig::default();
+        // A list sets the scope; case is normalized, order preserved, dups dropped.
+        let set: SetConfigArgs = serde_json::from_value(
+            serde_json::json!({ "preferred_languages": ["EN", "fr", "en"] }),
+        )
+        .unwrap();
+        assert_eq!(
+            set.apply(&mut cfg).unwrap(),
+            vec!["preferred_languages=[en,fr]".to_string()]
+        );
+        assert_eq!(cfg.preferred_languages, vec!["en", "fr"]);
+
+        // `[]` clears back to auto (empty — never default-filled).
+        let clear: SetConfigArgs =
+            serde_json::from_value(serde_json::json!({ "preferred_languages": [] })).unwrap();
+        assert_eq!(
+            clear.apply(&mut cfg).unwrap(),
+            vec!["preferred_languages=[]".to_string()]
+        );
+        assert!(cfg.preferred_languages.is_empty());
     }
 
     #[test]

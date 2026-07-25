@@ -388,8 +388,8 @@ impl TtsModelDescriptor {
         self.languages.contains(&language)
     }
 
-    /// User-facing coverage count. OmniVoice selects a language internally, so its runtime
-    /// sentinel is `auto` while the pinned model covers the full upstream language catalog.
+    /// User-facing coverage count. OmniVoice selects a language internally, so it reports the
+    /// full upstream language catalog rather than the DontSpeak frontend's routed subset.
     pub fn supported_language_count(&self) -> usize {
         match self.model {
             TtsModel::OmniVoice => 646,
@@ -461,9 +461,9 @@ impl TtsModelDescriptor {
                 "it" => "italian",
                 other => other,
             },
-            // Upstream uses `arb`/`nb`; auto and empty prompt English.
+            // Upstream uses `arb`/`nb`; empty prompt English.
             TtsModel::OmniVoice => match language {
-                "" | "auto" => "en",
+                "" => "en",
                 "ar" => "arb",
                 "no" => "nb",
                 other => other,
@@ -527,7 +527,8 @@ const CHATTERBOX_LANGUAGES: &[&str] = &[
     "pl", "pt", "ru", "sv", "sw", "tr", "zh",
 ];
 const QWEN_LANGUAGES: &[&str] = &["zh", "en", "ja", "ko", "de", "fr", "ru", "pt", "es", "it"];
-const OMNIVOICE_LANGUAGES: &[&str] = &["auto"];
+// OmniVoice selects language internally: empty range → `model_allowlist` yields the full table.
+const OMNIVOICE_LANGUAGES: &[&str] = &[];
 const KOKORO_VOICES: &[&str] = &["af_sarah", "bf_emma"];
 const QWEN_VOICES: &[&str] = &[
     "serena", "vivian", "uncle_fu", "ryan", "aiden", "ono_anna", "sohee", "eric", "dylan",
@@ -671,7 +672,7 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
         model: TtsModel::OmniVoice,
         id: "omnivoice",
         display_name: "OmniVoice",
-        default_language: "auto",
+        default_language: "en",
         languages: OMNIVOICE_LANGUAGES,
         model_languages: OMNIVOICE_LANGUAGES,
         voices: OMNIVOICE_VOICES,
@@ -689,6 +690,21 @@ pub static TTS_MODELS: [TtsModelDescriptor; 4] = [
 
 pub fn tts_model_descriptor(id: &str) -> Option<&'static TtsModelDescriptor> {
     TtsModel::parse(id).map(TtsModel::descriptor)
+}
+
+/// ISO 639-1 codes the detector can recognize: the sorted union of every model's
+/// `model_languages`. Hand-written for const schema use; pinned by
+/// `detectable_languages_are_the_sorted_union_of_model_coverage`. Equals the `en.yml`
+/// `language.*` keys, so `preferred_languages` needs no new locale entry.
+pub const DETECTABLE_LANGUAGES: &[&str] = &[
+    "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja", "ko", "ms", "nl", "no",
+    "pl", "pt", "ru", "sv", "sw", "tr", "zh",
+];
+
+/// Normalize + gate a language code to [`DETECTABLE_LANGUAGES`]. `None` for unrecognized.
+pub fn parse_language_code(s: &str) -> Option<String> {
+    let code = s.trim().to_ascii_lowercase();
+    DETECTABLE_LANGUAGES.contains(&code.as_str()).then_some(code)
 }
 
 #[cfg(test)]
@@ -870,7 +886,6 @@ mod tests {
     fn language_contract_is_model_specific() {
         assert!(TtsModel::Chatterbox.descriptor().supports_language("ru"));
         assert!(!TtsModel::Chatterbox.descriptor().supports_language("cs"));
-        assert!(TtsModel::OmniVoice.descriptor().supports_language("auto"));
         assert!(!TtsModel::OmniVoice.descriptor().supports_language("cs"));
         assert!(
             TtsModel::OmniVoice
@@ -892,7 +907,10 @@ mod tests {
             "ja"
         );
         let omnivoice = TtsModel::OmniVoice.descriptor();
-        assert_eq!(omnivoice.runtime_language("auto"), "en");
+        assert!(omnivoice.languages.is_empty());
+        assert!(omnivoice.model_languages.is_empty());
+        assert!(omnivoice.accepts_detected_language("cs"));
+        assert!(omnivoice.accepts_detected_language("en"));
         assert_eq!(omnivoice.runtime_language(""), "en");
         assert_eq!(omnivoice.runtime_language("ar"), "arb");
         assert_eq!(omnivoice.runtime_language("no"), "nb");
@@ -947,8 +965,25 @@ mod tests {
     }
 
     #[test]
+    fn detectable_languages_are_the_sorted_union_of_model_coverage() {
+        let mut union: Vec<&str> = TTS_MODELS
+            .iter()
+            .flat_map(|descriptor| descriptor.model_languages.iter().copied())
+            .collect();
+        union.sort_unstable();
+        union.dedup();
+        assert_eq!(DETECTABLE_LANGUAGES, union.as_slice());
+        assert_eq!(parse_language_code(" EN "), Some("en".to_string()));
+        assert_eq!(parse_language_code("zh"), Some("zh".to_string()));
+        assert_eq!(parse_language_code("xx"), None);
+        assert_eq!(parse_language_code("auto"), None);
+        assert_eq!(parse_language_code(""), None);
+    }
+
+    #[test]
     fn default_language_is_a_supported_code() {
-        // Warm-helper falls back to `default_language` — must be supported (OmniVoice: `auto`).
+        // Warm-helper falls back to `default_language` — must be supported. OmniVoice detects
+        // internally; its default is unused by the clamp.
         for model in TtsModel::ALL.iter().copied() {
             if model == TtsModel::OmniVoice {
                 continue;

@@ -214,6 +214,7 @@ Update and reload settings.
 |---|---|---|
 | `tts_engine` | enum: `built_in`, `system`, `off` | Speech engine. Omit to keep the automatic preference. |
 | `tts_model` | enum: `kokoro`, `chatterbox`, `qwen`, `omnivoice` | Built-in model. |
+| `preferred_languages` | array of `ar`, `da`, `de`, `el`, `en`, `es`, `fi`, `fr`, `he`, `hi`, `it`, `ja`, `ko`, `ms`, `nl`, `no`, `pl`, `pt`, `ru`, `sv`, `sw`, `tr`, `zh` | Language detection scope (ISO 639-1). [] = auto-detect (default). |
 | `tts_voices` | object | Voice pools by target. `system: []` uses the OS default. |
 | `tts_params` | object | Param objects by target. rate default 1.0 (system/kokoro only). `{}` resets. |
 
