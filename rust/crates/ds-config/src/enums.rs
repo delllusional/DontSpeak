@@ -261,7 +261,7 @@ impl Provider {
             Provider::OrtCpu => true,
             Provider::Mlx => mlx_usable_on(os, arch),
             Provider::OrtCuda => cuda_usable_on(os, arch),
-            Provider::OrtCoreMl => os == "macos",
+            Provider::OrtCoreMl => coreml_usable_on(os, arch),
             Provider::Fluid => fluid_usable_on(os, arch),
         }
     }
@@ -283,6 +283,14 @@ fn mlx_usable_on(os: &str, arch: &str) -> bool {
 /// compatibility dylib — which compiles `shim.swift` alone and exports no `ds_fluid_*`
 /// symbols — is never selected.
 fn fluid_usable_on(os: &str, arch: &str) -> bool {
+    os == "macos" && arch == "aarch64"
+}
+
+/// Apple Silicon only. Intel Macs register the ORT Core ML EP successfully, then fail on every
+/// `Session::run` with "Error in dynamically resizing for sequence length" — a run-path error
+/// the load-time fallback cannot catch, leaving TTS dead. Keep in sync with the
+/// `requested_provider` cfg in `ds-tts`.
+fn coreml_usable_on(os: &str, arch: &str) -> bool {
     os == "macos" && arch == "aarch64"
 }
 
@@ -1004,9 +1012,10 @@ mod tests {
             (OrtCuda, "windows", "aarch64", false, false),
             (OrtCuda, "linux", "aarch64", false, false),
             (OrtCuda, "macos", "aarch64", false, false),
-            // Core ML is an explicit macOS TTS-only ONNX Runtime provider.
+            // Core ML is an Apple-Silicon TTS-only ONNX Runtime provider. On Intel Macs the EP
+            // registers and then fails every run, so x86_64 must skip it (issue #250).
             (OrtCoreMl, "macos", "aarch64", false, true),
-            (OrtCoreMl, "macos", "x86_64", false, true),
+            (OrtCoreMl, "macos", "x86_64", false, false),
             (OrtCoreMl, "windows", "x86_64", false, false),
             // FluidAudio — Apple Silicon only, like MLX, identically for STT and TTS.
             (Fluid, "macos", "aarch64", true, true),
