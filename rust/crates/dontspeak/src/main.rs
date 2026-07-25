@@ -31,8 +31,8 @@ enum Subcommand<'a> {
     Launch(WiredAgent, &'a [String]),
     Version,
     Help,
-    /// MCP `status` path; no engine call.
-    Status,
+    /// Runtime status guidance or plugin-facing JSON.
+    Status(&'a [String]),
     /// No argv\[1\]: stdio MCP / Grok bare hook.
     Server,
     Unknown(String),
@@ -53,7 +53,7 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         Some("wire") => Subcommand::Wire(&argv[2..]),
         Some("-V" | "--version" | "version") => Subcommand::Version,
         Some("-h" | "--help" | "help") => Subcommand::Help,
-        Some("status") => Subcommand::Status,
+        Some("status") => Subcommand::Status(&argv[2..]),
         Some(name) if ds_config::client_spec_for_launch(name).is_some() => Subcommand::Launch(
             ds_config::client_spec_for_launch(name)
                 .expect("the guarded registry lookup must still resolve")
@@ -78,7 +78,8 @@ const USAGE_SUFFIX: &str = "\
   dontspeak provide         query-hook executor (stdin JSON)
   dontspeak --version       print package version
   dontspeak --help          this help
-  dontspeak status          how to query runtime status (MCP status)
+  dontspeak status [--json [--since N [--timeout-ms N]]]
+                           runtime status guidance or machine-readable snapshot
 
 Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
@@ -192,12 +193,8 @@ fn main() {
             print!("{}", usage_text());
             std::process::exit(0);
         }
-        Subcommand::Status => {
-            println!(
-                "dontspeak {}: runtime status is via MCP tool status (or the host app UI)",
-                env!("CARGO_PKG_VERSION")
-            );
-            std::process::exit(0);
+        Subcommand::Status(args) => {
+            std::process::exit(run_status(args));
         }
         // Unrecognized argv\[1\] must not fall through to MCP (blocks on stdin forever).
         Subcommand::Unknown(sub) => {
@@ -216,6 +213,89 @@ fn main() {
             } else {
                 mcp::serve();
             }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StatusCli {
+    json: bool,
+    since: Option<u64>,
+    timeout_ms: Option<u64>,
+}
+
+fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
+    let mut parsed = StatusCli {
+        json: false,
+        since: None,
+        timeout_ms: None,
+    };
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--json" if !parsed.json => parsed.json = true,
+            "--since" if parsed.since.is_none() => {
+                index += 1;
+                parsed.since = Some(parse_status_number(args.get(index), "--since")?);
+            }
+            "--timeout-ms" if parsed.timeout_ms.is_none() => {
+                index += 1;
+                let timeout_ms = parse_status_number(args.get(index), "--timeout-ms")?;
+                if !(1..=60_000).contains(&timeout_ms) {
+                    return Err("--timeout-ms must be between 1 and 60000".into());
+                }
+                parsed.timeout_ms = Some(timeout_ms);
+            }
+            option => return Err(format!("unknown or repeated status option {option:?}")),
+        }
+        index += 1;
+    }
+    if !parsed.json && (!args.is_empty()) {
+        return Err("status options require `--json`".into());
+    }
+    if parsed.timeout_ms.is_some() && parsed.since.is_none() {
+        return Err("`--timeout-ms` requires `--since`".into());
+    }
+    Ok(parsed)
+}
+
+fn parse_status_number(value: Option<&String>, option: &str) -> Result<u64, String> {
+    value
+        .ok_or_else(|| format!("{option} requires an integer"))?
+        .parse()
+        .map_err(|_| format!("{option} requires a non-negative integer"))
+}
+
+fn run_status(args: &[String]) -> i32 {
+    if args.is_empty() {
+        println!(
+            "dontspeak {}: runtime status is via MCP tool status, the host app UI, \
+             or `dontspeak status --json`",
+            env!("CARGO_PKG_VERSION")
+        );
+        return 0;
+    }
+    let parsed = match parse_status_cli(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("dontspeak status: {error}");
+            return 2;
+        }
+    };
+    match tools::runtime_status_json(parsed.since, parsed.timeout_ms) {
+        Ok(status) => match serde_json::to_string(&status) {
+            Ok(json) => {
+                println!("{json}");
+                0
+            }
+            Err(error) => {
+                eprintln!("dontspeak status: could not encode status: {error}");
+                1
+            }
+        },
+        Err(error) => {
+            eprintln!("dontspeak status: {error}");
+            1
         }
     }
 }
@@ -310,7 +390,7 @@ mod tests {
             Subcommand::Wire(&[]),
             Subcommand::Version,
             Subcommand::Help,
-            Subcommand::Status,
+            Subcommand::Status(&[]),
             Subcommand::Server,
             Subcommand::Unknown("bogus".to_string()),
         ] {
@@ -330,7 +410,7 @@ mod tests {
             ("-h", Subcommand::Help),
             ("--help", Subcommand::Help),
             ("help", Subcommand::Help),
-            ("status", Subcommand::Status),
+            ("status", Subcommand::Status(&[])),
         ] {
             assert_eq!(
                 resolve_subcommand(&argv(&["dontspeak", tok])),
@@ -338,6 +418,37 @@ mod tests {
                 "{tok}"
             );
         }
+    }
+
+    #[test]
+    fn status_json_options_parse_for_snapshot_and_long_poll() {
+        assert_eq!(
+            parse_status_cli(&argv(&["--json"])).unwrap(),
+            StatusCli {
+                json: true,
+                since: None,
+                timeout_ms: None,
+            }
+        );
+        assert_eq!(
+            parse_status_cli(&argv(&["--json", "--since", "41", "--timeout-ms", "5000"])).unwrap(),
+            StatusCli {
+                json: true,
+                since: Some(41),
+                timeout_ms: Some(5000),
+            }
+        );
+    }
+
+    #[test]
+    fn status_json_options_reject_ambiguous_or_invalid_forms() {
+        assert!(parse_status_cli(&argv(&["--since", "1"])).is_err());
+        assert!(parse_status_cli(&argv(&["--json", "--timeout-ms", "1"])).is_err());
+        assert!(parse_status_cli(&argv(&["--json", "--since"])).is_err());
+        assert!(parse_status_cli(&argv(&["--json", "--since", "x"])).is_err());
+        assert!(
+            parse_status_cli(&argv(&["--json", "--since", "1", "--timeout-ms", "60001"])).is_err()
+        );
     }
 
     #[test]

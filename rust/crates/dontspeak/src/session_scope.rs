@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ds_config::WiredAgent;
 
 pub(crate) const DONTSPEAK_SESSION_ID: &str = "DONTSPEAK_SESSION_ID";
+pub(crate) const HERDR_PANE_ID: &str = ds_config::HERDR_PANE_ID_ENV;
 
 const TERMINAL_IDS: &[&str] = &[
     "WT_SESSION",
@@ -45,8 +46,12 @@ pub(crate) fn for_hook_with(payload: &str, get: impl Fn(&str) -> Option<String>)
 }
 
 fn ambient_with(get: impl Fn(&str) -> Option<String>) -> Option<String> {
-    nonempty(get(DONTSPEAK_SESSION_ID))
-        .map(|value| tagged("launch", DONTSPEAK_SESSION_ID, &value))
+    nonempty(get(HERDR_PANE_ID))
+        .map(|value| ds_config::herdr_queue_scope(&value))
+        .or_else(|| {
+            nonempty(get(DONTSPEAK_SESSION_ID))
+                .map(|value| tagged("launch", DONTSPEAK_SESSION_ID, &value))
+        })
         .or_else(|| {
             TERMINAL_IDS
                 .iter()
@@ -97,6 +102,19 @@ mod tests {
     }
 
     #[test]
+    fn herdr_pane_identity_wins_over_launcher_and_terminal_ids() {
+        assert_eq!(
+            resolve(&[
+                ("WT_SESSION", "terminal"),
+                (DONTSPEAK_SESSION_ID, "launcher"),
+                (HERDR_PANE_ID, "workspace:p7"),
+            ])
+            .as_deref(),
+            Some("dontspeak:herdr:HERDR_PANE_ID:workspace:p7")
+        );
+    }
+
+    #[test]
     fn terminal_identity_is_shared_by_clients_without_session_env() {
         assert_eq!(
             resolve(&[("TMUX_PANE", "%7")]).as_deref(),
@@ -120,9 +138,20 @@ mod tests {
     #[test]
     fn empty_values_do_not_create_shared_empty_scopes() {
         assert_eq!(
-            resolve(&[(DONTSPEAK_SESSION_ID, "  "), ("WT_SESSION", "")]),
+            resolve(&[
+                (HERDR_PANE_ID, ""),
+                (DONTSPEAK_SESSION_ID, "  "),
+                ("WT_SESSION", ""),
+            ]),
             None
         );
+    }
+
+    #[test]
+    fn herdr_scope_round_trips_public_pane_ids_with_colons() {
+        let scope = resolve(&[(HERDR_PANE_ID, "workspace:p7")]).unwrap();
+        assert_eq!(ds_config::herdr_pane_id(&scope), Some("workspace:p7"));
+        assert_eq!(ds_config::herdr_pane_id("dontspeak:launch:other"), None);
     }
 
     #[test]

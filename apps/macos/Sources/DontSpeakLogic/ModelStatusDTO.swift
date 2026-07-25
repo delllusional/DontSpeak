@@ -33,6 +33,22 @@ public struct ActivityDTO: Decodable, Sendable, Equatable {
     }
 }
 
+public struct VoiceSessionDTO: Decodable, Sendable, Equatable {
+    public var paneId: String
+    public var source: String?
+    public var active: Bool
+    public var speaking: Bool
+    public var queued: UInt64
+    public var blocked: Bool
+    public var voice: String?
+    public var language: String?
+
+    enum CodingKeys: String, CodingKey {
+        case paneId = "pane_id"
+        case source, active, speaking, queued, blocked, voice, language
+    }
+}
+
 public struct DictationDTO: Decodable, Sendable, Equatable {
     public var state: String
     public var text: String
@@ -99,6 +115,8 @@ public struct SttStatusDTO: Decodable, Sendable, Equatable {
 public struct ModelStatusDTO: Decodable, Sendable, Equatable {
     public var seq: UInt64
     public var activity: ActivityDTO
+    /// Optional so a newer app can still inspect an older running engine.
+    public var voiceSessions: [VoiceSessionDTO]?
     public var tts: TtsStatusDTO
     public var stt: SttStatusDTO
     public var diarization: DiarizationStatusDTO
@@ -111,6 +129,7 @@ public struct ModelStatusDTO: Decodable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey {
         case seq
         case activity, tts, stt
+        case voiceSessions = "voice_sessions"
         case diarization
         case dictation
         case stats

@@ -35,7 +35,7 @@ pub use client_binary::{
     resolve_native_client_binary,
 };
 /// Wired-client identity (`ds-client` leaf; re-export avoids cycle with `ds-log`/`ds-ipc`).
-pub use ds_client::WiredAgent;
+pub use ds_client::{HERDR_PANE_ID_ENV, WiredAgent, herdr_pane_id, herdr_queue_scope};
 pub use enums::{
     CancelSpeechScope, DiarizerProvider, ListenMode, NarrateKind, Provider, RealizedProvider,
     SttEngine, TrayKind, TtsEngine, de_opt_pref_stt_engine, de_opt_pref_tts_engine,

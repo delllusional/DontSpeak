@@ -129,6 +129,24 @@ pub struct Activity {
     pub muted: bool,
 }
 
+/// Live TTS state joinable to a Herdr `agent.list` row by `pane_id`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VoiceSessionStatus {
+    pub pane_id: String,
+    pub source: Option<ds_client::WiredAgent>,
+    /// Selected by the queue's active-terminal routing.
+    pub active: bool,
+    pub speaking: bool,
+    /// Pending speech items; excludes the item already speaking.
+    pub queued: u64,
+    /// Queued behind a different active terminal.
+    pub blocked: bool,
+    /// Last voice resolved for this pane.
+    pub voice: Option<String>,
+    /// Language paired with `voice`, or `null` for a greeting/default assignment.
+    pub language: Option<String>,
+}
+
 /// Confirm-panel content + [`DictationState`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Dictation {
@@ -196,6 +214,9 @@ pub struct ModelStatus {
     /// `WaitModelStatus` sequence.
     pub seq: u64,
     pub activity: Activity,
+    /// Present only for clients launched inside Herdr panes.
+    #[serde(default)]
+    pub voice_sessions: Vec<VoiceSessionStatus>,
     pub tts: TtsStatus,
     pub stt: SttStatus,
     pub diarization: DiarizationStatus,
@@ -235,6 +256,7 @@ mod tests {
                 warning: None,
                 muted: false,
             },
+            voice_sessions: vec![],
             tts: TtsStatus {
                 engine: StatusTtsEngine::System,
                 model: None,
@@ -278,10 +300,11 @@ mod tests {
         let v = serde_json::to_value(sample()).unwrap();
 
         let root = v.as_object().unwrap();
-        assert_eq!(root.len(), 10, "no duplicated root-level engine fields");
+        assert_eq!(root.len(), 11, "no duplicated root-level engine fields");
         for key in [
             "seq",
             "activity",
+            "voice_sessions",
             "tts",
             "stt",
             "diarization",
@@ -294,6 +317,7 @@ mod tests {
             assert!(root.contains_key(key), "missing root field {key}");
         }
         assert_eq!(v["activity"].as_object().unwrap().len(), 10);
+        assert!(v["voice_sessions"].as_array().unwrap().is_empty());
         assert_eq!(v["stats"]["tts"].as_object().unwrap().len(), 10);
         assert_eq!(v["stats"]["tts"]["queued"], 0);
         assert_eq!(v["tts"].as_object().unwrap().len(), 6);
@@ -339,6 +363,15 @@ mod tests {
         assert_eq!(back.tts.engine, StatusTtsEngine::System);
         assert_eq!(back.dictation.state, DictationState::Hidden);
         assert!(back.stt.provider.is_none());
+    }
+
+    #[test]
+    fn snapshots_without_voice_sessions_decode_as_empty() {
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value.as_object_mut().unwrap().remove("voice_sessions");
+
+        let decoded: ModelStatus = serde_json::from_value(value).unwrap();
+        assert!(decoded.voice_sessions.is_empty());
     }
 
     #[test]
@@ -489,6 +522,30 @@ mod tests {
     }
 
     prop_compose! {
+        fn voice_session_strategy()(
+            pane_id in short_string(),
+            source in prop::option::of(wired_client_strategy()),
+            active in any::<bool>(),
+            speaking in any::<bool>(),
+            queued in any::<u64>(),
+            blocked in any::<bool>(),
+            voice in opt_short_string(),
+            language in opt_short_string(),
+        ) -> VoiceSessionStatus {
+            VoiceSessionStatus {
+                pane_id,
+                source,
+                active,
+                speaking,
+                queued,
+                blocked,
+                voice,
+                language,
+            }
+        }
+    }
+
+    prop_compose! {
         fn dictation_strategy()(
             state in dictation_state_strategy(),
             text in short_string(),
@@ -615,6 +672,7 @@ mod tests {
         fn model_status_strategy()(
             seq in any::<u64>(),
             activity in activity_strategy(),
+            voice_sessions in prop::collection::vec(voice_session_strategy(), 0..4),
             tts in tts_status_strategy(),
             stt in stt_status_strategy(),
             diarization in diarization_status_strategy(),
@@ -627,6 +685,7 @@ mod tests {
             ModelStatus {
                 seq,
                 activity,
+                voice_sessions,
                 tts,
                 stt,
                 diarization,
