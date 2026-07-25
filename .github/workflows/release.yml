@@ -103,10 +103,9 @@ jobs:
         id: plan
         run: |
           set -euo pipefail
-          # Intel is a compatibility slice (ONNX-CPU, no MLX) that only real users of the
-          # published release need — -dev drafts and manual build-check runs stay Apple silicon.
+          # Intel is a compatibility slice (ONNX-CPU, no MLX), but dev drafts ship the
+          # same macOS artifacts as a published release so they can validate both paths.
           case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
-            tag:*-dev*) arches='["arm64"]' ;;
             tag:*)      arches='["arm64","x86_64"]' ;;
             *)          arches='["arm64"]' ;;
           esac
