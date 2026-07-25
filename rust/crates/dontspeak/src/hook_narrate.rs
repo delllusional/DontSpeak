@@ -722,6 +722,18 @@ pub(crate) use ds_narrate::stop_utterances;
 /// Stop: voice final reply once when not already streamed. Returns `Some(session)` for
 /// Grok sticky reply_done; `None` → payload session.
 pub fn speak_reply(paths: &Paths, payload: &str, client: WiredAgent) -> Option<Option<String>> {
+    speak_reply_with_mic(paths, payload, client, ds_platform::is_mic_active())
+}
+
+/// Same as [`speak_reply`], with an injected mic probe. Production always passes the live
+/// platform probe; tests inject `false` so a machine with an open capture session cannot
+/// gate the Stop path and leave a fake-engine accept thread blocked forever.
+fn speak_reply_with_mic(
+    paths: &Paths,
+    payload: &str,
+    client: WiredAgent,
+    mic_active: bool,
+) -> Option<Option<String>> {
     let cfg = VoiceConfig::load(paths);
     let messages_on = cfg.narrates(NarrateKind::Digests);
     let short_on = cfg.narrates(NarrateKind::Shorts);
@@ -766,7 +778,7 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredAgent) -> Option<O
                 paths,
                 session_id,
                 &final_batch,
-                ds_platform::is_mic_active(),
+                mic_active,
                 messages_on,
                 short_on,
                 |utterance| admit_narration(paths, session_tag.clone(), client, utterance),
@@ -775,8 +787,6 @@ pub fn speak_reply(paths: &Paths, payload: &str, client: WiredAgent) -> Option<O
             }
         }
     }
-
-    let mic_active = ds_platform::is_mic_active();
 
     // Grok: direct field else transcript + deferred fp. Streamed mid-turn → skip chat_history.
     let (assistant_text, grok_selection, direct_fp): (
@@ -1732,9 +1742,44 @@ mod tests {
         assert_ne!(first, direct_grok_reply_fingerprint(&hook, &paths, text));
     }
 
+    /// Bounded accept for fake-engine tests. A missing client must fail the suite
+    /// quickly (seconds), never park on a blocking `accept` forever.
+    fn accept_within(
+        listener: &ds_ipc::transport::Listener,
+        budget: std::time::Duration,
+    ) -> std::io::Result<ds_ipc::transport::Stream> {
+        use std::io::ErrorKind;
+        use std::time::{Duration, Instant};
+
+        listener.set_nonblocking(true)?;
+        let deadline = Instant::now() + budget;
+        loop {
+            match listener.accept() {
+                Ok((stream, _addr)) => {
+                    // Restore blocking I/O for the scripted request/response exchange.
+                    let _ = stream.set_nonblocking(false);
+                    return Ok(stream);
+                }
+                Err(err)
+                    if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) =>
+                {
+                    if Instant::now() >= deadline {
+                        return Err(std::io::Error::new(
+                            ErrorKind::TimedOut,
+                            format!("engine accept timed out after {budget:?}"),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
     #[test]
     fn sessionless_grok_stop_commits_the_sentinel_fingerprint_after_enqueue() {
         use std::io::{BufRead, Write};
+        use std::time::Duration;
 
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::rooted_at(dir.path());
@@ -1758,7 +1803,11 @@ mod tests {
 
         let listener = ds_ipc::transport::bind(&paths.engine_sock).unwrap();
         let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
+            let mut stream =
+                accept_within(&listener, Duration::from_secs(5)).expect("bounded accept");
+            // Keep the scripted peer from hanging the client if the test aborts mid-line.
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
             let mut request = String::new();
             std::io::BufReader::new(stream.try_clone().unwrap())
                 .read_line(&mut request)
@@ -1773,7 +1822,9 @@ mod tests {
             .unwrap();
         });
 
-        speak_reply(&paths, &payload, WiredAgent::Grok);
+        // Inject mic=false: a live capture session would empty stop_utterances, skip IPC,
+        // and leave accept parked (the hang observed on macOS with an open mic).
+        speak_reply_with_mic(&paths, &payload, WiredAgent::Grok, false);
         server.join().unwrap();
         assert_eq!(load_last_spoken_fingerprint(&paths, "-"), Some(expected));
         assert!(
