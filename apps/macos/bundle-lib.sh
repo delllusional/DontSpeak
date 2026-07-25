@@ -299,7 +299,11 @@ verify_shim_isolation() {
   local family="$1" dylib="$2" n
   case "$family" in
     sys)
-      n="$(otool -L "$dylib" 2>/dev/null | grep -Ec 'mlx|Cmlx|FluidAudio' || true)"
+      n="$(
+        otool -L "$dylib" 2>/dev/null \
+          | grep -vF "$(basename "$dylib")" \
+          | grep -Ec 'mlx|Cmlx|FluidAudio' || true
+      )"
       [ "${n:-0}" -eq 0 ] || {
         echo "   ERROR: $(basename "$dylib") links an MLX/FluidAudio runtime" >&2
         return 1

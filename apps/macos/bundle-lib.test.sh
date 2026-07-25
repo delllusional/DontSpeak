@@ -222,10 +222,13 @@ done
 verify_shim_exports sys "$sys" >/dev/null 2>"$stderr_file" \
   || fail "verify_shim_exports rejected a complete export table"
 
-: >"$test_dir/otool-output"
+cat >"$test_dir/otool-output" <<EOF
+$test_dir/issue-mlx/libdontspeak_sys.dylib:
+	$test_dir/issue-mlx/libdontspeak_sys.dylib (compatibility version 0.0.0, current version 0.0.0)
+EOF
 verify_shim_isolation sys "$sys" 2>"$stderr_file" \
-  || fail "verify_shim_isolation rejected a dependency-free sys dylib"
-echo "	@rpath/FluidAudio.framework/FluidAudio" >"$test_dir/otool-output"
+  || fail "verify_shim_isolation mistook an MLX-named build path for a dependency"
+echo "	@rpath/FluidAudio.framework/FluidAudio" >>"$test_dir/otool-output"
 if verify_shim_isolation sys "$sys" 2>"$stderr_file"; then
   fail "verify_shim_isolation accepted a sys dylib linking FluidAudio"
 fi
