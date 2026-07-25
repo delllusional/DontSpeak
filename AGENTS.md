@@ -43,16 +43,10 @@ work (reviews, audits, Q&A over the repo) is not exempt.
 
 ## Out-of-scope findings
 
-Small obvious fixes: do inline and note in the report. Otherwise file an issue —
-don't drop it and don't expand scope:
-
-```sh
-gh issue create --repo delllusional/DontSpeak --title "..." --body "..."
-```
-
-Labels in use: `bug`, `enhancement`, `documentation`, `question`
-(`gh label list --repo delllusional/DontSpeak`). Check open issues first; cite the
-issue number in the final report.
+Small obvious fixes: do inline and note in the report. Otherwise use the
+[`create-github-issue`](.agents/skills/create-github-issue/SKILL.md) skill — don't
+drop the finding, expand scope, or substitute labels for Type, Priority, and
+Effort. Check open issues first; cite the issue number in the final report.
 
 ## Commands
 

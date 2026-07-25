@@ -61,9 +61,25 @@ const issues = JSON.parse(
     "--limit",
     "100",
     "--json",
-    "number,title,body,labels,assignees,author,createdAt,updatedAt,url,comments",
+    "number,title,body,issueType,assignees,author,createdAt,updatedAt,url,comments",
   ]),
 );
+for (const issue of issues) {
+  const values = JSON.parse(
+    runGh([
+      "api",
+      "-H",
+      "X-GitHub-Api-Version: 2026-03-10",
+      `repos/${repo}/issues/${issue.number}/issue-field-values`,
+    ]),
+  );
+  issue.issueFields = Object.fromEntries(
+    values.map((field) => [
+      field.issue_field_name,
+      field.single_select_option?.name ?? field.value,
+    ]),
+  );
+}
 const pullRequests = JSON.parse(
   runGh([
     "pr",

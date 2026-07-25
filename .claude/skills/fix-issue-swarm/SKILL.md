@@ -29,9 +29,11 @@ for publishing, CI monitoring, landing, and cleanup.
 
 ## Select a wave
 
-Rank open issues by value, clarity, risk, and independence. Prefer bugs affecting
-builds, correctness, reliability, accessibility, or developer workflow when the
-expected behavior and validation are explicit and the change is localized.
+Rank open issues by value, clarity, risk, and independence. Treat their native
+Type, Priority, and Effort as triage inputs, then verify those estimates against
+the issue evidence. Prefer bugs affecting builds, correctness, reliability,
+accessibility, or developer workflow when the expected behavior and validation
+are explicit and the change is localized.
 
 Reject an issue from autonomous execution when it needs any of:
 

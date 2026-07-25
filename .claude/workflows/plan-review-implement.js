@@ -22,11 +22,10 @@ const ISSUE_FILING_NOTE = `
 If you notice a real problem that isn't part of what you were asked to do here — a
 bug, a missing test, a stale doc, a gap in one of this repo's invariants — don't
 silently drop it and don't silently expand scope to fix it anyway. File it as a
-GitHub issue instead: 'gh issue create --repo delllusional/DontSpeak --title "..."
---body "..."' (label with 'bug'/'enhancement'/'documentation'/'question' if one
-fits). Run 'gh issue list --repo delllusional/DontSpeak' first so you don't file a
-duplicate of something already open. List anything you filed, by number, in the
-filedIssues field.`
+GitHub issue instead with the create-github-issue repository skill. It requires the
+native Type plus Priority and Effort issue fields and prohibits labels. Check open
+issues first so you don't file a duplicate. List anything you filed, by number, in
+the filedIssues field.`
 
 const PLANNER_PERSONA = `You plan changes for DontSpeak (see CLAUDE.md and ARCHITECTURE.md, which you should
 read before planning anything). Your plan is consumed by a reviewer agent next, then

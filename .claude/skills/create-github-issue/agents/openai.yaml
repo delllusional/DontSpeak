@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create GitHub Issue"
+  short_description: "File typed and estimated DontSpeak issues"
+  default_prompt: "Use $create-github-issue to file this DontSpeak issue with Type, Priority, and Effort."
