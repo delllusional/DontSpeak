@@ -417,29 +417,14 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
     Ok(out)
 }
 
-pub(crate) fn runtime_status_json_with_receiver(
+pub(crate) fn runtime_status_json(
     since: Option<u64>,
     timeout_ms: Option<u64>,
-    ui_receiver: Option<&str>,
 ) -> Result<Value, String> {
     if timeout_ms.is_some() && since.is_none() {
         return Err("status: `--timeout-ms` requires `--since`".into());
     }
     let paths = Paths::resolve().ok_or_else(|| "cannot resolve engine socket".to_string())?;
-    if let Some(receiver_id) = ui_receiver {
-        match ds_ipc::request(
-            &paths.engine_sock,
-            &Request::SetDictationUiReceiver {
-                receiver_id: receiver_id.to_string(),
-                ttl_ms: 3_500,
-            },
-        ) {
-            Ok(Response::Done) => {}
-            Ok(Response::Error { message }) => return Err(message),
-            Ok(_) => return Err("dictation UI receiver: unexpected engine response".into()),
-            Err(error) => return Err(format!("engine unavailable: {error}")),
-        }
-    }
     match probe_engine(
         Some(&paths.engine_sock),
         since,
@@ -1186,7 +1171,13 @@ mod status_output {
                 "enabled": false, "provider": null, "speakers": [],
                 "activity_threshold": 0.5
             },
-            "dictation": { "state": "hidden", "text": "", "can_paste": true, "external_ui_active": false },
+            "dictation": {
+                "state": "hidden",
+                "text": "",
+                "can_paste": true,
+                "session_id": null,
+                "external_ui_active": false
+            },
             "stats": {
                 "tts": {
                     "rtf_min": 0.0, "rtf_avg": 0.0, "rtf_max": 0.0,

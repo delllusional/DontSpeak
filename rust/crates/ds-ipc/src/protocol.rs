@@ -59,13 +59,35 @@ pub enum Request {
     SetMuted {
         on: bool,
     },
-    /// An external, terminal-native UI is rendering the live dictation preview.
-    /// The lease expires automatically, so native hosts remain the safe fallback.
-    SetDictationUiReceiver {
+    /// Reserve external presentation for one visible dictation session.
+    AcquireDictationPresenter {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
-        receiver_id: String,
-        /// Bounded lease avoids leaving the native overlay hidden after a plugin crash.
+        presenter_id: String,
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session_id: String,
         ttl_ms: u64,
+    },
+    /// Hide the native fallback only after the external presenter has rendered.
+    ReadyDictationPresenter {
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        lease_id: String,
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session_id: String,
+    },
+    /// Keep a ready or reserved presenter lease alive.
+    RenewDictationPresenter {
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        lease_id: String,
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session_id: String,
+        ttl_ms: u64,
+    },
+    /// Explicit presenter shutdown; expiry remains the crash fallback.
+    ReleaseDictationPresenter {
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        lease_id: String,
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        session_id: String,
     },
     /// SessionStart greeting when `greet`.
     GreetSession {
@@ -205,6 +227,11 @@ pub enum Response {
     CodexStreamReady {
         endpoint: String,
     },
+    /// Opaque, session-scoped external presenter lease.
+    DictationPresenterLease {
+        lease_id: String,
+        ttl_ms: u64,
+    },
     Listening,
     Partial {
         text: String,
@@ -256,6 +283,7 @@ impl Response {
                 | Response::Done
                 | Response::Utterance { .. }
                 | Response::CodexStreamReady { .. }
+                | Response::DictationPresenterLease { .. }
                 | Response::Transcript { .. }
                 | Response::Diarization { .. }
                 | Response::Enrolled { .. }
@@ -284,6 +312,24 @@ mod tests {
             Request::Ping,
             Request::EnsureCodexStream {
                 codex_bin: codex_bin.into(),
+            },
+            Request::AcquireDictationPresenter {
+                presenter_id: "herdr.voice".into(),
+                session_id: "feedface-0000000000000007".into(),
+                ttl_ms: 3_500,
+            },
+            Request::ReadyDictationPresenter {
+                lease_id: "lease-1".into(),
+                session_id: "feedface-0000000000000007".into(),
+            },
+            Request::RenewDictationPresenter {
+                lease_id: "lease-1".into(),
+                session_id: "feedface-0000000000000007".into(),
+                ttl_ms: 3_500,
+            },
+            Request::ReleaseDictationPresenter {
+                lease_id: "lease-1".into(),
+                session_id: "feedface-0000000000000007".into(),
             },
             Request::Diarize { seconds: 10 },
             Request::Enroll {
@@ -401,6 +447,13 @@ mod tests {
         assert!(Response::Done.is_terminal());
         // A non-terminal answer to `Speak` would be drained away and the handle lost.
         assert!(Response::Utterance { id: 1 }.is_terminal());
+        assert!(
+            Response::DictationPresenterLease {
+                lease_id: "lease-1".into(),
+                ttl_ms: 3_500,
+            }
+            .is_terminal()
+        );
         assert!(Response::error("x").is_terminal());
         assert!(
             Response::ModelStatus {

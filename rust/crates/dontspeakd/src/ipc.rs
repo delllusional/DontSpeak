@@ -62,6 +62,12 @@ fn agent_usage_response(refresh: bool) -> ds_ipc::Response {
     agent_usage_response_with(refresh, ds_agent_usage::snapshot)
 }
 
+fn presenter_session_id(shared: &EngineShared, paths: &Paths, ttsq: &TtsQueue) -> Option<String> {
+    model_status_json(shared, paths, || ttsq.tts_status_sample())["dictation"]["session_id"]
+        .as_str()
+        .map(str::to_owned)
+}
+
 fn agent_usage_response_with(
     refresh: bool,
     snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
@@ -280,31 +286,98 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::SetDictationUiReceiver {
-                    receiver_id,
+                ds_ipc::Request::AcquireDictationPresenter {
+                    presenter_id,
+                    session_id,
                     ttl_ms,
                 } => {
-                    let ttl = std::time::Duration::from_millis(ttl_ms.clamp(500, 60_000));
                     let now = std::time::Instant::now();
-                    let mut lease = shared
-                        .dictation_ui_lease
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    // A receiver refreshes its lease on every long-poll. Publishing a
-                    // status change for an already-live lease would immediately wake
-                    // that same long-poll and turn the UI into a busy loop.
-                    let became_active = !lease.is_some_and(|deadline| deadline > now);
-                    *lease = Some(now + ttl);
-                    drop(lease);
-                    if became_active {
+                    let current = presenter_session_id(&shared, &paths, &ttsq);
+                    let result = shared.dictation_presenters.acquire(
+                        session_id.clone(),
+                        current.as_deref(),
+                        ttl_ms,
+                        now,
+                    );
+                    if result.changed {
                         shared.gate.bump();
-                        log_client(
-                            &paths,
-                            None,
-                            &format!("dictation UI receiver={receiver_id}"),
-                        );
                     }
-                    emit(&ds_ipc::Response::Done);
+                    match result.result {
+                        Ok(lease) => {
+                            log_client(
+                                &paths,
+                                None,
+                                &format!(
+                                    "dictation presenter acquired presenter={presenter_id} \
+                                     session={session_id}"
+                                ),
+                            );
+                            emit(&ds_ipc::Response::DictationPresenterLease {
+                                lease_id: lease.id,
+                                ttl_ms: lease.ttl_ms,
+                            });
+                        }
+                        Err(message) => emit(&ds_ipc::Response::error(message)),
+                    }
+                }
+                ds_ipc::Request::ReadyDictationPresenter {
+                    lease_id,
+                    session_id,
+                } => {
+                    let now = std::time::Instant::now();
+                    let current = presenter_session_id(&shared, &paths, &ttsq);
+                    let result = shared.dictation_presenters.ready(
+                        &lease_id,
+                        &session_id,
+                        current.as_deref(),
+                        now,
+                    );
+                    if result.changed {
+                        shared.gate.bump();
+                    }
+                    match result.result {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(message) => emit(&ds_ipc::Response::error(message)),
+                    }
+                }
+                ds_ipc::Request::RenewDictationPresenter {
+                    lease_id,
+                    session_id,
+                    ttl_ms,
+                } => {
+                    let now = std::time::Instant::now();
+                    let current = presenter_session_id(&shared, &paths, &ttsq);
+                    let result = shared.dictation_presenters.renew(
+                        &lease_id,
+                        &session_id,
+                        current.as_deref(),
+                        ttl_ms,
+                        now,
+                    );
+                    if result.changed {
+                        shared.gate.bump();
+                    }
+                    match result.result {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(message) => emit(&ds_ipc::Response::error(message)),
+                    }
+                }
+                ds_ipc::Request::ReleaseDictationPresenter {
+                    lease_id,
+                    session_id,
+                } => {
+                    let result = shared.dictation_presenters.release(
+                        &lease_id,
+                        &session_id,
+                        std::time::Instant::now(),
+                    );
+                    if result.changed {
+                        shared.gate.bump();
+                    }
+                    match result.result {
+                        Ok(()) => emit(&ds_ipc::Response::Done),
+                        Err(message) => emit(&ds_ipc::Response::error(message)),
+                    }
                 }
                 ds_ipc::Request::Stop { session, source } => {
                     // MCP stop is per-window: prune only that session's items and cancel
@@ -368,21 +441,6 @@ pub(crate) fn spawn_ipc_server(
                     emit(&agent_usage_response(refresh));
                 }
                 ds_ipc::Request::WaitModelStatus { since, timeout_ms } => {
-                    let expired = {
-                        let mut lease = shared
-                            .dictation_ui_lease
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
-                        if lease.is_some_and(|expires| expires <= std::time::Instant::now()) {
-                            *lease = None;
-                            true
-                        } else {
-                            false
-                        }
-                    };
-                    if expired {
-                        shared.gate.bump();
-                    }
                     // PUSH transport: block this (dedicated) connection until the
                     // dictation status changes or the cap elapses, then reply with the
                     // fresh snapshot. One-thread-per-connection (see ipc server), so this

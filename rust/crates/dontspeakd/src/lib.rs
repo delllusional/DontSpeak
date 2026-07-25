@@ -27,6 +27,7 @@ mod boot;
 mod codex_stream;
 mod config_gate;
 mod config_watch;
+mod dictation_presenter;
 mod downloads;
 mod engine;
 mod grok_stream;

@@ -122,6 +122,8 @@ base64 = "0.22"
 # Small seedable RNG for the per-agent voice roll (dontspeakd::ttsq). Already transitively
 # in the graph (via tempfile); chosen over `rand` to add zero new crates. MIT OR Apache-2.0.
 fastrand = "2"
+# OS entropy for opaque local presenter lease and session identifiers.
+getrandom = "0.3"
 
 # ── Engine dependencies ──────────────────────────────────────────────────────
 # Model download (ds-model): tiny blocking HTTP, checksum, atomic rename. We use

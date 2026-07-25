@@ -938,6 +938,7 @@ dependencies = [
  "ds-tts",
  "ds-wire",
  "fastrand",
+ "getrandom 0.3.4",
  "log",
  "notify",
  "serde",

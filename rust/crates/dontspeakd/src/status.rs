@@ -10,6 +10,7 @@ use crate::config_gate::{
     NativeShims, caps_loop_enabled, native_tts_active, parakeet_available,
     parakeet_onnx_files_present, stt_uses_onnx_runtime, tts_model_files_present,
 };
+use crate::dictation_presenter::DictationPresenterRegistry;
 use crate::downloads::{DownloadProg, TargetState};
 use crate::engine::{PasteState, dictation_preview};
 use crate::stats;
@@ -86,7 +87,7 @@ pub(crate) struct EngineShared {
     pub stt_stats: Arc<stats::SttStats>,
     pub lifetime: Arc<stats::LifetimeSeconds>,
     pub gate: Arc<StatusGate>,
-    pub dictation_ui_lease: Arc<Mutex<Option<Instant>>>,
+    pub dictation_presenters: Arc<DictationPresenterRegistry>,
 }
 
 /// Model presence report. `read_tts` under `gate.snapshot` (mid-report transitions unacked).
@@ -105,8 +106,8 @@ pub(crate) fn model_status_json(
         tts_stats,
         stt_stats,
         lifetime,
-        gate: _,
-        dictation_ui_lease,
+        gate,
+        dictation_presenters,
     } = shared;
     let cfg = VoiceConfig::load(paths);
     let resolved_tts = cfg.resolved_tts();
@@ -158,7 +159,7 @@ pub(crate) fn model_status_json(
         };
 
     // Confirm panel: finalized while awaiting, else partial; never finalized under Caps hold.
-    let (dict_text, dict_awaiting, dict_has_target, dict_refused) = paste
+    let (dict_text, dict_awaiting, dict_has_target, dict_refused, presentation_session_id) = paste
         .lock()
         .map(|p| {
             let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
@@ -167,9 +168,10 @@ pub(crate) fn model_status_json(
                 awaiting,
                 p.can_paste,
                 crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
+                p.presentation_session_id,
             )
         })
-        .unwrap_or((String::new(), false, true, false));
+        .unwrap_or((String::new(), false, true, false, 0));
 
     let (dl, download_transfer_start) = {
         let downloads = downloads.lock().unwrap_or_else(|e| e.into_inner());
@@ -325,6 +327,18 @@ pub(crate) fn model_status_json(
         diar_present && diar_shim,
     );
 
+    let dictation_state = dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused);
+    let dictation_session_id = dictation_session_id(
+        dictation_presenters,
+        dictation_state,
+        presentation_session_id,
+    );
+    let (external_ui_active, presenter_changed) =
+        dictation_presenters.external_ui_active(dictation_session_id.as_deref(), Instant::now());
+    if presenter_changed {
+        gate.bump();
+    }
+
     let status = ModelStatus {
         seq,
         activity: Activity {
@@ -377,13 +391,11 @@ pub(crate) fn model_status_json(
             activity_threshold: cfg.activity_threshold as f64,
         },
         dictation: Dictation {
-            state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
+            state: dictation_state,
             text: dict_text,
             can_paste: dict_has_target,
-            external_ui_active: dictation_ui_lease
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .is_some_and(|expires| expires > Instant::now()),
+            session_id: dictation_session_id,
+            external_ui_active,
         },
         stats: Stats {
             // Queue depth under gate.snapshot, not the stats accumulator.
@@ -658,13 +670,22 @@ pub(crate) fn dictation_state(
     }
 }
 
+fn dictation_session_id(
+    presenters: &DictationPresenterRegistry,
+    state: DictationState,
+    presentation_session_id: u64,
+) -> Option<String> {
+    (state != DictationState::Hidden).then(|| presenters.session_id(presentation_session_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         EngineShared, StatusGate, active_download_statuses, combined_error, diarization_present,
-        diarization_provider_token, diarization_set_for, dictation_local_stt, dictation_state,
-        engine_state, model_status_json, realized_provider_token, row_download_frac,
-        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
+        diarization_provider_token, diarization_set_for, dictation_local_stt, dictation_session_id,
+        dictation_state, engine_state, model_status_json, realized_provider_token,
+        row_download_frac, row_downloading, status_tts_model, stt_provider_token,
+        tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
     use crate::engine::PasteBuf;
@@ -757,7 +778,9 @@ mod tests {
             stt_stats,
             lifetime,
             gate,
-            dictation_ui_lease: Arc::new(Mutex::new(None)),
+            dictation_presenters: Arc::new(
+                crate::dictation_presenter::DictationPresenterRegistry::default(),
+            ),
         };
 
         let utterance = UtteranceStatus {
@@ -1315,5 +1338,24 @@ mod tests {
             dictation_state(true, false, false, false),
             DictationState::Hidden
         );
+    }
+
+    #[test]
+    fn dictation_session_projection_is_stable_visible_absent_hidden_and_new_per_turn() {
+        let presenters = crate::dictation_presenter::DictationPresenterRegistry::default();
+        let recording = dictation_session_id(&presenters, DictationState::Recording, 7).unwrap();
+        let awaiting =
+            dictation_session_id(&presenters, DictationState::AwaitingConfirm, 7).unwrap();
+        assert_eq!(recording, awaiting);
+        assert_eq!(
+            dictation_session_id(&presenters, DictationState::Hidden, 7),
+            None
+        );
+
+        let refused = dictation_session_id(&presenters, DictationState::Refused, 8).unwrap();
+        let next_recording =
+            dictation_session_id(&presenters, DictationState::Recording, 9).unwrap();
+        assert_ne!(recording, refused);
+        assert_ne!(refused, next_recording);
     }
 }
