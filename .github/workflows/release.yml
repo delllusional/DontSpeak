@@ -534,11 +534,11 @@ jobs:
       # new release's assets don't exist, so the annotated tag (the immutable notes
       # transport) carries "…" placeholders; this rewrites ONLY those cells against the
       # previous release's published sizes. Soft-fail by design: the release is already
-      # live — a stats hiccup must not redden the job. Dev drafts are skipped: their
-      # commit-message bodies have no Lines table, and gh release view/edit by tag is
-      # unreliable for drafts (see the create step's comment).
+      # live — a stats hiccup must not redden the job. This applies to dev drafts too:
+      # they are installable tester builds and use the same release-note contract as a
+      # numbered release. Address drafts by release id because gh's tag lookup is
+      # unreliable for drafts.
       - name: Fill Binaries avg sizes in release notes
-        if: ${{ !contains(github.ref_name, '-dev') }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -555,10 +555,17 @@ jobs:
           if [ -z "$prev" ]; then
             echo "no previous release — leaving size placeholders"; exit 0
           fi
-          gh release view "$TAG" --json body --jq .body > body.md
+          release_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[] | select(.tag_name==env.TAG) | .id')"
+          release_id="${release_id%%$'\n'*}"
+          if [ -z "$release_id" ]; then
+            echo "release for $TAG not found — skipping size patch"; exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/$release_id" --jq .body > body.md
           cp body.md body.orig.md
           python3 scripts/release/release-stats.py --patch-sizes body.md --old "$prev" --assets-dir artifacts
           if cmp -s body.md body.orig.md; then
             echo "body unchanged (no Lines table or identical sizes) — skipping edit"; exit 0
           fi
-          gh release edit "$TAG" --notes-file body.md
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/releases/$release_id" \
+            -f body="$(<body.md)" >/dev/null
