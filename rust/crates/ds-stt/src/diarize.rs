@@ -203,8 +203,10 @@ mod mlx_impl {
             // SAFETY: `DiarizeFn`; `pcm` + collect_str outlive the call.
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_mlx_diarize\0") }
                 .map_err(|e| format!("ds_mlx_diarize symbol: {e}"))?;
-            let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
-                dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            let json = ds_model::shim::collect_str(|ctx, cb| {
+                // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking
+                // call; `collect_str` supplies a synchronous pair the shim does not retain.
+                unsafe { dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
             })
             .map_err(|rc| format!("ds_mlx_diarize failed (rc={rc})"))?;
             parse_output(&json)
@@ -219,8 +221,10 @@ mod mlx_impl {
             // SAFETY: `EmbedFn`; `pcm` + collect_pcm outlive the call.
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_mlx_diar_embed\0") }
                 .map_err(|e| format!("ds_mlx_diar_embed symbol: {e}"))?;
-            let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
-                ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            let emb = ds_model::shim::collect_pcm(|ctx, cb| {
+                // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking
+                // call; `collect_pcm` supplies a synchronous pair the shim does not retain.
+                unsafe { ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
             })
             .map_err(|rc| format!("ds_mlx_diar_embed failed (rc={rc})"))?;
             if emb.is_empty() {
@@ -344,8 +348,10 @@ mod fluid_impl {
             // SAFETY: `DiarizeFn`; `pcm` + collect_str outlive the call.
             let dz: Symbol<DiarizeFn> = unsafe { lib.get(b"ds_fluid_diarize\0") }
                 .map_err(|e| format!("ds_fluid_diarize symbol: {e}"))?;
-            let json = ds_model::shim::collect_str(|ctx, cb| unsafe {
-                dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            let json = ds_model::shim::collect_str(|ctx, cb| {
+                // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking
+                // call; `collect_str` supplies a synchronous pair the shim does not retain.
+                unsafe { dz(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
             })
             .map_err(|rc| format!("ds_fluid_diarize failed (rc={rc})"))?;
             parse_output(&json)
@@ -360,8 +366,10 @@ mod fluid_impl {
             // SAFETY: `EmbedFn`; `pcm` + collect_pcm outlive the call.
             let ex: Symbol<EmbedFn> = unsafe { lib.get(b"ds_fluid_diar_embed\0") }
                 .map_err(|e| format!("ds_fluid_diar_embed symbol: {e}"))?;
-            let emb = ds_model::shim::collect_pcm(|ctx, cb| unsafe {
-                ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+            let emb = ds_model::shim::collect_pcm(|ctx, cb| {
+                // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking
+                // call; `collect_pcm` supplies a synchronous pair the shim does not retain.
+                unsafe { ex(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
             })
             .map_err(|rc| format!("ds_fluid_diar_embed failed (rc={rc})"))?;
             if emb.is_empty() {

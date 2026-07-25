@@ -85,8 +85,10 @@ impl MlxTranscriber {
         // SAFETY: `TranscribeFn`; `pcm` + collect_str outlive the call.
         let tr: Symbol<TranscribeFn> = unsafe { lib.get(b"ds_mlx_transcribe\0") }
             .map_err(|e| format!("ds_mlx_transcribe symbol: {e}"))?;
-        ds_model::shim::collect_str(|ctx, cb| unsafe {
-            tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+        ds_model::shim::collect_str(|ctx, cb| {
+            // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking call;
+            // `collect_str` supplies a synchronous pair the shim does not retain.
+            unsafe { tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
         })
         .map_err(|rc| format!("ds_mlx_transcribe failed (rc={rc})"))
     }
@@ -130,8 +132,10 @@ impl MlxStreamer {
         // SAFETY: `StreamPushFn`; Symbol borrows `self.lib`; `pcm` + collect_str outlive call.
         let f: Symbol<StreamPushFn> = unsafe { self.lib.get(sym) }
             .map_err(|e| format!("{} symbol: {e}", String::from_utf8_lossy(sym)))?;
-        ds_model::shim::collect_str(|ctx, cb| unsafe {
-            f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+        ds_model::shim::collect_str(|ctx, cb| {
+            // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking call;
+            // `collect_str` supplies a synchronous pair the shim does not retain.
+            unsafe { f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
         })
         .map_err(|rc| format!("{} failed (rc={rc})", String::from_utf8_lossy(sym)))
     }
@@ -181,8 +185,12 @@ impl StreamingStt for MlxStreamer {
         let f: Symbol<StreamFinishFn> = unsafe { self.lib.get(b"ds_mlx_asr_stream_finish\0") }
             .map_err(|e| format!("ds_mlx_asr_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
-            ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
-                .map_err(|rc| format!("ds_mlx_asr_stream_finish failed (rc={rc})"))
+            ds_model::shim::collect_str(|ctx, cb| {
+                // SAFETY: `collect_str` keeps its context/callback pair valid through this
+                // blocking call; the shim invokes it synchronously and does not retain it.
+                unsafe { f(ctx, cb) }
+            })
+            .map_err(|rc| format!("ds_mlx_asr_stream_finish failed (rc={rc})"))
         });
         let text = result?;
         self.transcribe_ms += elapsed_ms;

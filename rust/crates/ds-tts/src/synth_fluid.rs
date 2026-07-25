@@ -56,6 +56,8 @@ impl FluidTts {
         let synth: Symbol<SynthFn> = unsafe { self.lib.get(b"ds_fluid_tts_synthesize_phonemes\0") }
             .map_err(|error| format!("ds_fluid_tts_synthesize_phonemes symbol: {error}"))?;
         ds_model::shim::collect_pcm(|ctx, callback| {
+            // SAFETY: both C strings remain valid for this blocking call; `collect_pcm`
+            // supplies the synchronous context/callback pair, which the shim does not retain.
             unsafe { synth(phonemes.as_ptr(), voice.as_ptr(), speed, ctx, callback) }
         })
         .map_err(|rc| format!("ds_fluid_tts_synthesize_phonemes failed (rc={rc})"))

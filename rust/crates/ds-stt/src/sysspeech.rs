@@ -144,8 +144,10 @@ impl SystemTranscriber {
         // SAFETY: `SysTranscribeFn`; `pcm` + collect_str outlive the call.
         let tr: Symbol<SysTranscribeFn> = unsafe { lib.get(b"ds_sys_transcribe\0") }
             .map_err(|e| format!("ds_sys_transcribe symbol: {e}"))?;
-        ds_model::shim::collect_str(|ctx, cb| unsafe {
-            tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+        ds_model::shim::collect_str(|ctx, cb| {
+            // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking call;
+            // `collect_str` supplies a synchronous pair the shim does not retain.
+            unsafe { tr(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
         })
         .map_err(|rc| format!("ds_sys_transcribe failed (rc={rc})"))
     }
@@ -179,8 +181,10 @@ impl SystemStreamer {
         // SAFETY: `SysStreamPushFn`; Symbol borrows `self.lib`.
         let f: Symbol<SysStreamPushFn> = unsafe { self.lib.get(b"ds_sys_stream_push\0") }
             .map_err(|e| format!("ds_sys_stream_push symbol: {e}"))?;
-        ds_model::shim::collect_str(|ctx, cb| unsafe {
-            f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb)
+        ds_model::shim::collect_str(|ctx, cb| {
+            // SAFETY: `pcm` is readable for `pcm.len()` floats through this blocking call;
+            // `collect_str` supplies a synchronous pair the shim does not retain.
+            unsafe { f(pcm.as_ptr(), pcm.len(), 16_000, ctx, cb) }
         })
         .map_err(|rc| format!("ds_sys_stream_push failed (rc={rc})"))
     }
@@ -215,8 +219,12 @@ impl StreamingStt for SystemStreamer {
         let f: Symbol<SysStreamFinishFn> = unsafe { self.lib.get(b"ds_sys_stream_finish\0") }
             .map_err(|e| format!("ds_sys_stream_finish symbol: {e}"))?;
         let (result, elapsed_ms) = timed(|| {
-            ds_model::shim::collect_str(|ctx, cb| unsafe { f(ctx, cb) })
-                .map_err(|rc| format!("ds_sys_stream_finish failed (rc={rc})"))
+            ds_model::shim::collect_str(|ctx, cb| {
+                // SAFETY: `collect_str` keeps its context/callback pair valid through this
+                // blocking call; the shim invokes it synchronously and does not retain it.
+                unsafe { f(ctx, cb) }
+            })
+            .map_err(|rc| format!("ds_sys_stream_finish failed (rc={rc})"))
         });
         let text = result?;
         self.transcribe_ms += elapsed_ms;
