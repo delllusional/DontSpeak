@@ -1,6 +1,6 @@
 // libdontspeak_fluid -- C ABI over FluidAudio Core ML / ANE (Kokoro TTS, Parakeet ASR,
 // pyannote + WeSpeaker diarization). Own dylib so nothing else links FluidAudio. Rust owns
-// text frontend + downloads; shim loads offline (ModelHub.offlineMode). See dontspeak_fluid.h.
+// text frontend + downloads; shim loads offline. See dontspeak_fluid.h.
 // 0 = success. Serial helper calls; locks guard shared managers.
 import AVFoundation
 import FluidAudio
