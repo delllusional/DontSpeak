@@ -157,6 +157,13 @@ fn is_punctuation(character: char) -> bool {
     )
 }
 
+fn is_numeric_separator(previous: Option<char>, character: char, next: Option<char>) -> bool {
+    // eSpeak applies the selected language's grouping and decimal conventions.
+    matches!(character, ',' | '.')
+        && previous.is_some_and(|character| character.is_ascii_digit())
+        && next.is_some_and(|character| character.is_ascii_digit())
+}
+
 fn append_phonemes(output: &mut String, phonemes: &str) {
     if phonemes.is_empty() {
         return;
@@ -213,9 +220,17 @@ fn phonemize_preserving_punctuation(
 ) -> Result<String, String> {
     let mut output = String::new();
     let mut segment = String::new();
-    for character in text.chars() {
+    let mut previous = None;
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if is_numeric_separator(previous, character, characters.peek().copied()) {
+            segment.push(character);
+            previous = Some(character);
+            continue;
+        }
         if !is_punctuation(character) {
             segment.push(character);
+            previous = Some(character);
             continue;
         }
         append_phonemes(&mut output, &engine.phonemize_raw(&segment, language)?);
@@ -233,6 +248,7 @@ fn phonemize_preserving_punctuation(
         if !is_opening_punctuation(character) {
             output.push(' ');
         }
+        previous = Some(character);
     }
     append_phonemes(&mut output, &engine.phonemize_raw(&segment, language)?);
     Ok(output.trim().to_string())
@@ -327,5 +343,17 @@ mod tests {
         assert_eq!(mlx_punctuation('«'), '“');
         assert_eq!(mlx_punctuation('('), '«');
         assert_eq!(normalize_for_kokoro("(en)həlˈo^ʊ(es)"), "həlˈO");
+    }
+
+    #[test]
+    fn numeric_separators_stay_with_the_number_for_espeak() {
+        for separator in [',', '.'] {
+            assert!(is_numeric_separator(Some('1'), separator, Some('2')));
+            assert!(!is_numeric_separator(None, separator, Some('2')));
+            assert!(!is_numeric_separator(Some('1'), separator, None));
+            assert!(!is_numeric_separator(Some('a'), separator, Some('2')));
+            assert!(!is_numeric_separator(Some('1'), separator, Some('b')));
+        }
+        assert!(!is_numeric_separator(Some('1'), ':', Some('2')));
     }
 }
