@@ -216,8 +216,9 @@ public sealed record Dictation
     public bool DictCanPaste = true;
     // Canonical token (ds-status dictation_state.rs).
     public string DictState = "hidden";
+    public bool ExternalUiActive;
 
-    public bool ShowPanel => DictState != "hidden";
+    public bool ShowPanel => !ExternalUiActive && DictState != "hidden";
     public bool PromptGlow => DictState == "recording" && string.IsNullOrWhiteSpace(DictText);
     public bool HasUsableTarget => DictCanPaste && DictState != "refused";
 }
@@ -318,6 +319,7 @@ internal sealed class HealthSnapshot
                 s.Dictation.DictText = d.Text ?? "";
                 s.Dictation.DictCanPaste = d.CanPaste;
                 s.Dictation.DictState = d.State ?? "hidden";
+                s.Dictation.ExternalUiActive = d.ExternalUiActive;
             }
             if (dto.Tts is { } ttsStatus)
             {
@@ -483,6 +485,7 @@ internal sealed record DictationDto
     [JsonPropertyName("state")] public string? State { get; init; }
     [JsonPropertyName("text")] public string? Text { get; init; }
     [JsonPropertyName("can_paste")] public bool CanPaste { get; init; }
+    [JsonPropertyName("external_ui_active")] public bool ExternalUiActive { get; init; }
 }
 
 internal sealed record StatsDto

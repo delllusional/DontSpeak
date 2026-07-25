@@ -280,6 +280,16 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
+                ds_ipc::Request::SetDictationUiReceiver { receiver_id, ttl_ms } => {
+                    let ttl = std::time::Duration::from_millis(ttl_ms.clamp(500, 60_000));
+                    *shared
+                        .dictation_ui_lease
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + ttl);
+                    shared.gate.bump();
+                    log_client(&paths, None, &format!("dictation UI receiver={receiver_id}"));
+                    emit(&ds_ipc::Response::Done);
+                }
                 ds_ipc::Request::Stop { session, source } => {
                     // MCP stop is per-window: prune only that session's items and cancel
                     // playback only if it is that session's, so one terminal never
@@ -342,6 +352,21 @@ pub(crate) fn spawn_ipc_server(
                     emit(&agent_usage_response(refresh));
                 }
                 ds_ipc::Request::WaitModelStatus { since, timeout_ms } => {
+                    let expired = {
+                        let mut lease = shared
+                            .dictation_ui_lease
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner());
+                        if lease.is_some_and(|expires| expires <= std::time::Instant::now()) {
+                            *lease = None;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if expired {
+                        shared.gate.bump();
+                    }
                     // PUSH transport: block this (dedicated) connection until the
                     // dictation status changes or the cap elapses, then reply with the
                     // fresh snapshot. One-thread-per-connection (see ipc server), so this

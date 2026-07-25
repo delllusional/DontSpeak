@@ -153,6 +153,9 @@ pub struct Dictation {
     pub state: DictationState,
     pub text: String,
     pub can_paste: bool,
+    /// A live external UI owns the preview; native hosts must stay hidden.
+    #[serde(default)]
+    pub external_ui_active: bool,
 }
 
 /// Live TTS RTF / TTFA stats (`stats.tts`).
@@ -282,6 +285,7 @@ mod tests {
                 state: DictationState::Hidden,
                 text: String::new(),
                 can_paste: true,
+                external_ui_active: false,
             },
             stats: Stats {
                 tts: TtsSnapshot::default(),
@@ -323,7 +327,8 @@ mod tests {
         assert_eq!(v["tts"].as_object().unwrap().len(), 6);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
-        assert_eq!(v["dictation"].as_object().unwrap().len(), 3);
+        assert_eq!(v["dictation"].as_object().unwrap().len(), 4);
+        assert!(!v["dictation"]["external_ui_active"].as_bool().unwrap());
         assert_eq!(v["stats"].as_object().unwrap().len(), 3);
 
         for path in [["tts", "status"], ["stt", "status"]] {
@@ -550,11 +555,13 @@ mod tests {
             state in dictation_state_strategy(),
             text in short_string(),
             can_paste in any::<bool>(),
+            external_ui_active in any::<bool>(),
         ) -> Dictation {
             Dictation {
                 state,
                 text,
                 can_paste,
+                external_ui_active,
             }
         }
     }

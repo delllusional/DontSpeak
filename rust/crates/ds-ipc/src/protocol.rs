@@ -59,6 +59,14 @@ pub enum Request {
     SetMuted {
         on: bool,
     },
+    /// An external, terminal-native UI is rendering the live dictation preview.
+    /// The lease expires automatically, so native hosts remain the safe fallback.
+    SetDictationUiReceiver {
+        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        receiver_id: String,
+        /// Bounded lease avoids leaving the native overlay hidden after a plugin crash.
+        ttl_ms: u64,
+    },
     /// SessionStart greeting when `greet`.
     GreetSession {
         /// Upstream logical session used for stream discovery/state.

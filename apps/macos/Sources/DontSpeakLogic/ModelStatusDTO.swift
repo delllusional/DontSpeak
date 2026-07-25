@@ -53,11 +53,13 @@ public struct DictationDTO: Decodable, Sendable, Equatable {
     public var state: String
     public var text: String
     public var canPaste: Bool
+    public var externalUiActive: Bool?
 
     enum CodingKeys: String, CodingKey {
         case state
         case text
         case canPaste = "can_paste"
+        case externalUiActive = "external_ui_active"
     }
 }
 
