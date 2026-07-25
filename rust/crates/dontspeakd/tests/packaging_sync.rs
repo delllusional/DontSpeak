@@ -186,6 +186,31 @@ fn downloaded_installers_require_published_checksums() {
 }
 
 #[test]
+fn public_installers_share_the_local_archive_override_name() {
+    const OVERRIDE: &str = "DONTSPEAK_ARCHIVE";
+    let unix = repo_file("scripts/install/web/install.sh");
+    let windows = repo_file("scripts/install/web/install.ps1");
+
+    for (platform, installer) in [
+        ("Windows", windows.as_str()),
+        ("macOS", unix.as_str()),
+        ("Linux", unix.as_str()),
+    ] {
+        assert!(
+            installer.contains(OVERRIDE),
+            "{platform} public installer must expose the shared {OVERRIDE} local-archive override"
+        );
+    }
+    assert!(
+        unix.contains(r#"ARCHIVE="${DONTSPEAK_ARCHIVE:-}""#)
+            && unix.contains(r#"dontspeak-?*-macos-"$AARCH".app.zip"#)
+            && unix.contains(r#"dontspeak-?*-linux-"$ARCH".tar.gz"#),
+        "macOS and Linux public installer paths must both consume DONTSPEAK_ARCHIVE \
+         and retain their platform/architecture filename guards"
+    );
+}
+
+#[test]
 fn windows_uninstaller_reports_partial_cleanup() {
     let uninstaller = repo_file("scripts/install/bundle/uninstall.ps1");
     for required in [

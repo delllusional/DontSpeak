@@ -15,6 +15,8 @@
 #   DONTSPEAK_REPO         owner/repo to fetch releases from (default delllusional/DontSpeak)
 #   DONTSPEAK_DOWNLOAD_BASE  serve the fixed-name checksums.txt from a mirror; versioned
 #                            assets always resolve via the GitHub API regardless
+#   DONTSPEAK_ARCHIVE      install an explicit local app zip/tarball instead of downloading
+#                          latest (development path; the archive must match this machine)
 #   DONTSPEAK_DRY_RUN=1    resolve + print the plan, download nothing
 #   DONTSPEAK_NO_AUTOSTART=1  Linux: skip enabling start-at-login (macOS N/A -- the app
 #                             manages its own login item)
@@ -27,20 +29,30 @@ set -eu
 REPO="${DONTSPEAK_REPO:-delllusional/DontSpeak}"
 API="https://api.github.com/repos/$REPO/releases/latest"
 DRY="${DONTSPEAK_DRY_RUN:-0}"
+ARCHIVE="${DONTSPEAK_ARCHIVE:-}"
 
 say()  { printf '==> %s\n' "$*"; }
 warn() { printf 'WARN: %s\n' "$*" >&2; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+if [ -n "$ARCHIVE" ]; then
+  [ -f "$ARCHIVE" ] || die "local archive not found: $ARCHIVE"
+  archive_dir=$(cd "$(dirname "$ARCHIVE")" && pwd) \
+    || die "cannot resolve local archive: $ARCHIVE"
+  ARCHIVE="$archive_dir/$(basename "$ARCHIVE")"
+fi
+
 # -- HTTP: prefer curl, fall back to wget -------------------------------------
-if command -v curl >/dev/null 2>&1; then
-  http_get()  { curl -fsSL "$1"; }                 # to stdout
-  http_dl()   { curl -fsSL -o "$2" "$1"; }         # url file
-elif command -v wget >/dev/null 2>&1; then
-  http_get()  { wget -qO- "$1"; }
-  http_dl()   { wget -qO "$2" "$1"; }
-else
-  die "need curl or wget on PATH"
+if [ -z "$ARCHIVE" ]; then
+  if command -v curl >/dev/null 2>&1; then
+    http_get()  { curl -fsSL "$1"; }                 # to stdout
+    http_dl()   { curl -fsSL -o "$2" "$1"; }         # url file
+  elif command -v wget >/dev/null 2>&1; then
+    http_get()  { wget -qO- "$1"; }
+    http_dl()   { wget -qO "$2" "$1"; }
+  else
+    die "need curl or wget on PATH"
+  fi
 fi
 
 # Fetch the latest release's asset-URL list ONCE into $ASSET_URLS -- both the zip and
@@ -258,14 +270,31 @@ case "$OS" in
     # Release-asset arch token is uname-style everywhere: macOS arm64 -> aarch64.
     case "$ARCH" in arm64) AARCH=aarch64 ;; *) AARCH="$ARCH" ;; esac
     ZIP_NAME="dontspeak-<ver>-macos-$AARCH.app.zip"
-    fetch_assets
-    url=$(asset_url "dontspeak-[0-9][^/]*-macos-$AARCH\\.app\\.zip")
-    [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
-    sums=$(asset_url "checksums\\.txt")
-    say "macOS $ARCH -> $url"
+    if [ -n "$ARCHIVE" ]; then
+      archive_name=$(basename "$ARCHIVE")
+      case "$archive_name" in
+        dontspeak-?*-macos-"$AARCH".app.zip) : ;;
+        *) die "archive '$archive_name' does not match this machine (expected $ZIP_NAME)" ;;
+      esac
+      zip="$ARCHIVE"
+      source_label="$ARCHIVE"
+    else
+      fetch_assets
+      url=$(asset_url "dontspeak-[0-9][^/]*-macos-$AARCH\\.app\\.zip")
+      [ -n "$url" ] || die "no macOS asset ($ZIP_NAME) on the latest release of $REPO"
+      sums=$(asset_url "checksums\\.txt")
+      zip="$TMP/$(basename "$url")"
+      source_label="$url"
+    fi
+    say "macOS $ARCH -> $source_label"
     [ "$DRY" = "1" ] && { echo "(dry run) would unzip DontSpeak.app into ~/Applications and wire --reconcile"; exit 0; }
 
-    zip="$TMP/$(basename "$url")"; http_dl "$url" "$zip"; verify_sha "$zip" "$sums"
+    if [ -n "$ARCHIVE" ]; then
+      say "using local archive"
+    else
+      http_dl "$url" "$zip"
+      verify_sha "$zip" "$sums"
+    fi
     # The ONE macOS install location, shared with the dev flow (apps/macos/bundle.sh):
     # per-user, so no admin account and no sudo -- everything else about an install
     # (wiring, data, models, login item, TCC) is per-user anyway.
@@ -335,14 +364,32 @@ EOF
 
   Linux)
     case "$ARCH" in x86_64|aarch64) : ;; *) die "unsupported Linux arch: $ARCH" ;; esac
-    fetch_assets
-    url=$(asset_url "dontspeak-[0-9][^/]*-linux-$ARCH\\.tar\\.gz")
-    [ -n "$url" ] || die "no Linux tarball (dontspeak-<ver>-linux-$ARCH.tar.gz) on the latest release of $REPO"
-    sums=$(asset_url "checksums\\.txt")
-    say "Linux $ARCH -> $url"
+    TGZ_NAME="dontspeak-<ver>-linux-$ARCH.tar.gz"
+    if [ -n "$ARCHIVE" ]; then
+      archive_name=$(basename "$ARCHIVE")
+      case "$archive_name" in
+        dontspeak-?*-linux-"$ARCH".tar.gz) : ;;
+        *) die "archive '$archive_name' does not match this machine (expected $TGZ_NAME)" ;;
+      esac
+      tgz="$ARCHIVE"
+      source_label="$ARCHIVE"
+    else
+      fetch_assets
+      url=$(asset_url "dontspeak-[0-9][^/]*-linux-$ARCH\\.tar\\.gz")
+      [ -n "$url" ] || die "no Linux tarball ($TGZ_NAME) on the latest release of $REPO"
+      sums=$(asset_url "checksums\\.txt")
+      tgz="$TMP/$(basename "$url")"
+      source_label="$url"
+    fi
+    say "Linux $ARCH -> $source_label"
     [ "$DRY" = "1" ] && { echo "(dry run) would extract the tarball and run its install.sh (wires --all)"; exit 0; }
 
-    tgz="$TMP/$(basename "$url")"; http_dl "$url" "$tgz"; verify_sha "$tgz" "$sums"
+    if [ -n "$ARCHIVE" ]; then
+      say "using local archive"
+    else
+      http_dl "$url" "$tgz"
+      verify_sha "$tgz" "$sums"
+    fi
     say "extracting"
     tar -xzf "$tgz" -C "$TMP"
     inner=$(find "$TMP" -maxdepth 2 -name install.sh -path '*dontspeak-*' | head -n1)

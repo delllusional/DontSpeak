@@ -255,6 +255,152 @@ chmod +x "$out/Contents/Helpers/dontspeak" "$out/Contents/Resources/uninstall.sh
   };
 }
 
+test(
+  "macOS web installer installs an explicit local archive without release access",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dontspeak-macos-local-archive-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const archive = join(root, "dontspeak-0.3.8-dev-macos-aarch64.app.zip");
+    const { env, fakeBin } = await macosFixture(root, {
+      extraEnv: { DONTSPEAK_ARCHIVE: archive },
+    });
+    await executable(join(fakeBin, "curl"), "#!/bin/sh\nexit 88\n");
+
+    const result = spawnSync("sh", [installer], { cwd: repoRoot, encoding: "utf8", env });
+
+    assert.equal(result.status, 0, `installer failed:\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /using local archive/);
+    assert.doesNotMatch(result.stdout, /verified .*sha256 ok/);
+  },
+);
+
+test(
+  "Linux web installer installs an explicit local archive without release access",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "dontspeak-linux-local-archive-test-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const assetName = "dontspeak-0.3.8-dev-linux-x86_64.tar.gz";
+    const packageRoot = join(root, "package", assetName.replace(".tar.gz", ""));
+    const archive = join(root, assetName);
+    const fakeBin = join(root, "bin");
+    const installDir = join(root, "install");
+    await mkdir(packageRoot, { recursive: true });
+    await mkdir(fakeBin);
+    await executable(
+      join(packageRoot, "install.sh"),
+      `#!/bin/sh
+set -eu
+mkdir -p "$DONTSPEAK_INSTALL_DIR"
+printf '#!/bin/sh\nexit 0\n' > "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
+chmod +x "$DONTSPEAK_INSTALL_DIR/dontspeak-uninstall"
+`,
+    );
+    execFileSync("tar", ["-czf", assetName, "-C", "package", assetName.replace(".tar.gz", "")], {
+      cwd: root,
+    });
+    await executable(
+      join(fakeBin, "uname"),
+      `#!/bin/sh
+case "$1" in
+  -s) printf 'Linux\\n' ;;
+  -m) printf 'x86_64\\n' ;;
+  *) exit 2 ;;
+esac
+`,
+    );
+    await executable(join(fakeBin, "curl"), "#!/bin/sh\nexit 88\n");
+
+    const result = spawnSync("sh", [installer], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        DISPLAY: "",
+        HOME: join(root, "home"),
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        DONTSPEAK_ARCHIVE: archive,
+        DONTSPEAK_INSTALL_DIR: installDir,
+        DONTSPEAK_NO_AUTOSTART: "1",
+        WAYLAND_DISPLAY: "",
+      },
+    });
+
+    assert.equal(result.status, 0, `installer failed:\n${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /using local archive/);
+    assert.doesNotMatch(result.stdout, /verified .*sha256 ok/);
+  },
+);
+
+test(
+  "local archive override rejects missing files and wrong architectures before install",
+  { skip: process.platform === "win32" },
+  async (t) => {
+    const cases = [
+      {
+        name: "missing",
+        os: "Linux",
+        arch: "x86_64",
+        assetName: "does-not-exist.tar.gz",
+        expected: /local archive not found/,
+        create: false,
+      },
+      {
+        name: "macOS wrong arch",
+        os: "Darwin",
+        arch: "arm64",
+        assetName: "dontspeak-0.3.8-dev-macos-x86_64.app.zip",
+        expected: /does not match this machine .*macos-aarch64\.app\.zip/,
+        create: true,
+      },
+      {
+        name: "Linux wrong arch",
+        os: "Linux",
+        arch: "x86_64",
+        assetName: "dontspeak-0.3.8-dev-linux-aarch64.tar.gz",
+        expected: /does not match this machine .*linux-x86_64\.tar\.gz/,
+        create: true,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const root = await mkdtemp(join(tmpdir(), "dontspeak-local-archive-error-test-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const fakeBin = join(root, "bin");
+      const archive = join(root, testCase.assetName);
+      await mkdir(fakeBin);
+      if (testCase.create) await writeFile(archive, "not installed");
+      await executable(
+        join(fakeBin, "uname"),
+        `#!/bin/sh
+case "$1" in
+  -s) printf '${testCase.os}\\n' ;;
+  -m) printf '${testCase.arch}\\n' ;;
+  *) exit 2 ;;
+esac
+`,
+      );
+      await executable(join(fakeBin, "curl"), "#!/bin/sh\nexit 88\n");
+
+      const result = spawnSync("sh", [installer], {
+        cwd: repoRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          HOME: join(root, "home"),
+          PATH: `${fakeBin}:${process.env.PATH}`,
+          DONTSPEAK_ARCHIVE: archive,
+          DONTSPEAK_DRY_RUN: "1",
+        },
+      });
+
+      assert.notEqual(result.status, 0, testCase.name);
+      assert.match(result.stderr, testCase.expected, testCase.name);
+    }
+  },
+);
+
 function runAsync(command, args, options) {
   return new Promise((resolvePromise) => {
     const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
