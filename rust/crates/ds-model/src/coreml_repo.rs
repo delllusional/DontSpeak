@@ -781,8 +781,9 @@ mod tests {
     /// Swift guard uses (`include_str!` resolves against this source file, not the CWD).
     #[test]
     fn diarization_model_names_match_prefixes() {
-        const FLUID_SWIFT: &str =
-            include_str!("../../../../apps/macos/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift");
+        const FLUID_SWIFT: &str = include_str!(
+            "../../../../apps/macos/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift"
+        );
         assert!(
             FLUID_SWIFT.contains(DIARIZATION_SEGMENTATION_MODEL),
             "Fluid.swift must load {DIARIZATION_SEGMENTATION_MODEL}"
@@ -872,8 +873,9 @@ mod tests {
     /// case, so assert that case still appears verbatim.
     #[test]
     fn kokoro_variant_matches_the_swift_loader() {
-        const FLUID_SWIFT: &str =
-            include_str!("../../../../apps/macos/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift");
+        const FLUID_SWIFT: &str = include_str!(
+            "../../../../apps/macos/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift"
+        );
         assert_eq!(KOKORO_ANE_VARIANT, "ANE", "the `.english` variant folder");
         assert!(
             FLUID_SWIFT.contains("variant: .english"),
