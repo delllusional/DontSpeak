@@ -280,14 +280,30 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::SetDictationUiReceiver { receiver_id, ttl_ms } => {
+                ds_ipc::Request::SetDictationUiReceiver {
+                    receiver_id,
+                    ttl_ms,
+                } => {
                     let ttl = std::time::Duration::from_millis(ttl_ms.clamp(500, 60_000));
-                    *shared
+                    let now = std::time::Instant::now();
+                    let mut lease = shared
                         .dictation_ui_lease
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now() + ttl);
-                    shared.gate.bump();
-                    log_client(&paths, None, &format!("dictation UI receiver={receiver_id}"));
+                        .unwrap_or_else(|e| e.into_inner());
+                    // A receiver refreshes its lease on every long-poll. Publishing a
+                    // status change for an already-live lease would immediately wake
+                    // that same long-poll and turn the UI into a busy loop.
+                    let became_active = !lease.is_some_and(|deadline| deadline > now);
+                    *lease = Some(now + ttl);
+                    drop(lease);
+                    if became_active {
+                        shared.gate.bump();
+                        log_client(
+                            &paths,
+                            None,
+                            &format!("dictation UI receiver={receiver_id}"),
+                        );
+                    }
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::Stop { session, source } => {

@@ -261,7 +261,11 @@ mod tests {
     #[test]
     fn normalizes_markdown_before_detection() {
         assert_eq!(
-            detect_language("**Bonjour**, comment allez-vous ?", TtsModel::Chatterbox, &[]),
+            detect_language(
+                "**Bonjour**, comment allez-vous ?",
+                TtsModel::Chatterbox,
+                &[]
+            ),
             "fr"
         );
     }
@@ -287,7 +291,10 @@ mod tests {
     #[test]
     fn defaults_to_english_when_detection_has_no_evidence() {
         for text in ["", "   ", "12345", "🎉"] {
-            assert_eq!(detect_language(text, TtsModel::Kokoro, &[]), DEFAULT_LANGUAGE);
+            assert_eq!(
+                detect_language(text, TtsModel::Kokoro, &[]),
+                DEFAULT_LANGUAGE
+            );
         }
     }
 
@@ -370,8 +377,14 @@ mod tests {
         // English quote must stay en even when corpus is majority Italian.
         let corpus = format!("> {ITALIAN_QUOTE}\n\n> {ENGLISH_QUOTE}");
         for model in [TtsModel::Kokoro, TtsModel::Chatterbox] {
-            assert_eq!(chunk_language(ITALIAN_QUOTE, Some(&corpus), model, &[]), "it");
-            assert_eq!(chunk_language(ENGLISH_QUOTE, Some(&corpus), model, &[]), "en");
+            assert_eq!(
+                chunk_language(ITALIAN_QUOTE, Some(&corpus), model, &[]),
+                "it"
+            );
+            assert_eq!(
+                chunk_language(ENGLISH_QUOTE, Some(&corpus), model, &[]),
+                "en"
+            );
             // Turn-wide would wrong-voice one of the two.
             assert_eq!(detect_language(&corpus, model, &[]), "en");
         }
