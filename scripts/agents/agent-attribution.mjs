@@ -156,17 +156,6 @@ function assistantModelFromTranscript(file) {
   });
 }
 
-function codexContextFromTranscript(file, activeModel) {
-  return readJsonLinesReverse(file, (row) => {
-    if (row.type !== "turn_context" || typeof row.payload !== "object") return undefined;
-    const model = cleanString(row.payload.model);
-    if (activeModel && model && model !== activeModel) return undefined;
-    const effort = normalizedEffort(row.payload.effort);
-    if (!model && !effort) return undefined;
-    return { model, effort };
-  });
-}
-
 function findFileByName(directory, predicate) {
   const pending = [directory];
   while (pending.length > 0) {
@@ -353,17 +342,15 @@ function modelDoesNotReason(home, model) {
   return false;
 }
 
-function resolveCodex(input, env, home) {
+function resolveCodex(input) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
-  // Transcript only when hook input is incomplete.
-  if (hookModel && hookEffort) return { model: hookModel, effort: hookEffort };
-  const sessionId = firstString(input?.sessionId, input?.session_id, env.CODEX_THREAD_ID);
-  const transcript = transcriptPath(input) ?? findSessionTranscript(home, "codex", sessionId);
-  const context = codexContextFromTranscript(transcript, hookModel);
+  // A transcript's last turn_context may be stale or belong to a delegated agent. A Codex
+  // commit therefore needs an explicit, fresh runtime capture with both values; fail closed
+  // rather than putting a plausible-but-wrong identity into immutable Git history.
   return {
-    model: firstString(hookModel, context?.model),
-    effort: normalizedEffort(firstString(hookEffort, context?.effort)),
+    model: hookModel,
+    effort: hookEffort,
   };
 }
 

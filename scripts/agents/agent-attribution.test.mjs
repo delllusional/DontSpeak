@@ -110,6 +110,7 @@ function captureCodex(root, scripts, env, command, options = {}) {
       session_id: options.session ?? "session-1",
       cwd: options.cwd ?? root,
       model,
+      reasoning_effort: effort,
       transcript_path: transcript,
       tool_input: { command },
     }),
@@ -296,14 +297,9 @@ test("argv-array commands parse without re-tokenizing", () => {
   );
 });
 
-test("Codex uses the hook model and matching turn effort", (t) => {
-  const transcript = join(temporaryDirectory(t), "rollout.jsonl");
-  jsonLines(transcript, [
-    { type: "turn_context", payload: { model: "gpt-5.5", effort: "high" } },
-    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "xhigh" } },
-  ]);
+test("Codex uses only explicit runtime capture", () => {
   assert.deepEqual(
-    resolveAttribution("codex", { model: "gpt-5.6-sol", transcript_path: transcript }),
+    resolveAttribution("codex", { model: "gpt-5.6-sol", reasoning_effort: "xhigh" }),
     {
       model: "gpt-5.6-sol",
       effort: "xhigh",
@@ -312,7 +308,7 @@ test("Codex uses the hook model and matching turn effort", (t) => {
   );
 });
 
-test("Codex resolves the active session transcript without hook input", (t) => {
+test("Codex rejects a transcript-only attribution", (t) => {
   const home = temporaryDirectory(t);
   const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
   const transcript = join(
@@ -334,9 +330,9 @@ test("Codex resolves the active session transcript without hook input", (t) => {
       { home, env: { CODEX_THREAD_ID: sessionId } },
     ),
     {
-      model: "gpt-5.6-sol",
-      effort: "xhigh",
-      errors: [],
+      model: undefined,
+      effort: undefined,
+      errors: ["active model slug is unavailable", "active reasoning-effort level is unavailable"],
     },
   );
 });
@@ -519,7 +515,7 @@ test("conflicting runtime markers fail closed", () => {
   );
 });
 
-test("commit-msg live-resolves Codex when PreToolUse capture is missing", (t) => {
+test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const home = temporaryDirectory(t);
   const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
@@ -552,8 +548,8 @@ test("commit-msg live-resolves Codex when PreToolUse capture is missing", (t) =>
     env,
     encoding: "utf8",
   });
-  assert.equal(commit.status, 0, commit.stderr + commit.stdout);
-  assert.equal(headMessage(root, env), "Live resolve\n\nAgent: gpt-5.6-sol xhigh");
+  assert.notEqual(commit.status, 0, commit.stderr + commit.stdout);
+  assert.match(commit.stderr, /active model slug is unavailable/);
 });
 
 test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) => {
