@@ -434,15 +434,12 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
     /// SAME confirm pill shows the live hands-free transcript (start word → submit/cancel).
     fn sync_pill(&self) {
         let capturing = self.turn.capturing();
-        // Push a recording start/stop to a blocked `WaitModelStatus` immediately; only on
-        // a real transition so the per-tick sync never wakes waiters while idle.
-        if self.stt_active.swap(capturing, Ordering::SeqCst) != capturing
-            && let Some(gate) = &self.gate
-        {
-            gate.bump();
-        }
+        let changed = self.stt_active.load(Ordering::SeqCst) != capturing;
         if let Ok(mut p) = self.paste.lock() {
             if capturing {
+                if changed {
+                    p.presentation_session_id = p.presentation_session_id.wrapping_add(1);
+                }
                 p.partial = self.turn.buffer().to_string();
                 if p.target.is_none() {
                     p.target = self.plat.frontmost_app_name();
@@ -456,6 +453,12 @@ impl<P: KeyInjector + FrontmostWindow> Listener<P> {
                 p.final_state = crate::FinalState::Idle;
                 p.target = None;
             }
+        }
+        // Publish only after the buffer and session identity are coherent.
+        if self.stt_active.swap(capturing, Ordering::SeqCst) != capturing
+            && let Some(gate) = &self.gate
+        {
+            gate.bump();
         }
     }
 
@@ -576,11 +579,16 @@ mod tests {
         l.sync_pill();
         assert!(l.stt_active.load(Ordering::SeqCst));
         assert_eq!(gate.seq(), 1, "capturing edge bumps the gate once");
-        assert_eq!(l.paste.lock().unwrap().partial, "add a button");
+        {
+            let paste = l.paste.lock().unwrap();
+            assert_eq!(paste.partial, "add a button");
+            assert_eq!(paste.presentation_session_id, 1);
+        }
 
         // Still capturing — a repeated sync_pill must NOT re-bump the gate.
         l.sync_pill();
         assert_eq!(gate.seq(), 1);
+        assert_eq!(l.paste.lock().unwrap().presentation_session_id, 1);
 
         // Cancel closes the turn — the idle edge clears the pill + bumps again.
         l.turn.on_segment("cancel");
@@ -590,6 +598,11 @@ mod tests {
         assert!(!l.stt_active.load(Ordering::SeqCst));
         assert_eq!(gate.seq(), 2, "idle edge bumps the gate once more");
         assert_eq!(l.paste.lock().unwrap().partial, "");
+
+        // A later hands-free capture is a distinct presenter scope.
+        l.turn.on_segment("hey computer remove the button");
+        l.sync_pill();
+        assert_eq!(l.paste.lock().unwrap().presentation_session_id, 2);
     }
 
     #[test]

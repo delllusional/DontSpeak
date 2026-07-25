@@ -16,6 +16,7 @@ mod hook_narrate;
 mod hook_prompt;
 mod hook_speak;
 mod mcp;
+mod presenter;
 mod session_scope;
 mod tools;
 mod voices;
@@ -33,6 +34,8 @@ enum Subcommand<'a> {
     Help,
     /// Runtime status guidance or plugin-facing JSON.
     Status(&'a [String]),
+    /// External dictation presenter lease lifecycle.
+    Presenter(&'a [String]),
     /// No argv\[1\]: stdio MCP / Grok bare hook.
     Server,
     Unknown(String),
@@ -54,6 +57,7 @@ fn resolve_subcommand(argv: &[String]) -> Subcommand<'_> {
         Some("-V" | "--version" | "version") => Subcommand::Version,
         Some("-h" | "--help" | "help") => Subcommand::Help,
         Some("status") => Subcommand::Status(&argv[2..]),
+        Some("presenter") => Subcommand::Presenter(&argv[2..]),
         Some(name) if ds_config::client_spec_for_launch(name).is_some() => Subcommand::Launch(
             ds_config::client_spec_for_launch(name)
                 .expect("the guarded registry lookup must still resolve")
@@ -80,6 +84,7 @@ const USAGE_SUFFIX: &str = "\
   dontspeak --help          this help
   dontspeak status [--json [--since N [--timeout-ms N]]]
                            runtime status guidance or machine-readable snapshot
+  dontspeak presenter ...  external dictation presenter lease lifecycle
 
 Engine via local socket; speech config is OS data-dir config.toml (not client settings).
 ";
@@ -106,7 +111,16 @@ fn expected_subcommands() -> String {
         .map(|spec| format!("`{}`", spec.target.as_str()))
         .collect::<Vec<_>>();
     names.extend(
-        ["notify", "provide", "wire", "--version", "--help"].map(|name| format!("`{name}`")),
+        [
+            "notify",
+            "provide",
+            "wire",
+            "status",
+            "presenter",
+            "--version",
+            "--help",
+        ]
+        .map(|name| format!("`{name}`")),
     );
     let last = names.pop().expect("fixed subcommands are nonempty");
     format!("{}, or {last}", names.join(", "))
@@ -196,6 +210,9 @@ fn main() {
         Subcommand::Status(args) => {
             std::process::exit(run_status(args));
         }
+        Subcommand::Presenter(args) => {
+            std::process::exit(presenter::run(args));
+        }
         // Unrecognized argv\[1\] must not fall through to MCP (blocks on stdin forever).
         Subcommand::Unknown(sub) => {
             let expected = expected_subcommands();
@@ -222,7 +239,6 @@ struct StatusCli {
     json: bool,
     since: Option<u64>,
     timeout_ms: Option<u64>,
-    ui_receiver: Option<String>,
 }
 
 fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
@@ -230,7 +246,6 @@ fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
         json: false,
         since: None,
         timeout_ms: None,
-        ui_receiver: None,
     };
     let mut index = 0;
     while index < args.len() {
@@ -247,10 +262,6 @@ fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
                     return Err("--timeout-ms must be between 1 and 60000".into());
                 }
                 parsed.timeout_ms = Some(timeout_ms);
-            }
-            "--ui-receiver" if parsed.ui_receiver.is_none() => {
-                index += 1;
-                parsed.ui_receiver = Some(parse_status_receiver(args.get(index))?);
             }
             option => return Err(format!("unknown or repeated status option {option:?}")),
         }
@@ -288,11 +299,7 @@ fn run_status(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match tools::runtime_status_json_with_receiver(
-        parsed.since,
-        parsed.timeout_ms,
-        parsed.ui_receiver.as_deref(),
-    ) {
+    match tools::runtime_status_json(parsed.since, parsed.timeout_ms) {
         Ok(status) => match serde_json::to_string(&status) {
             Ok(json) => {
                 println!("{json}");
@@ -308,21 +315,6 @@ fn run_status(args: &[String]) -> i32 {
             1
         }
     }
-}
-
-fn parse_status_receiver(value: Option<&String>) -> Result<String, String> {
-    let value = value
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "--ui-receiver requires a non-empty identifier".to_string())?;
-    if value.len() > 120
-        || !value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    {
-        return Err("--ui-receiver accepts letters, digits, '-', '_' and '.' only".into());
-    }
-    Ok(value.to_string())
 }
 
 /// Whole stdin, single-shot. Empty on read error — unknown/empty event is a no-op.
@@ -416,6 +408,7 @@ mod tests {
             Subcommand::Version,
             Subcommand::Help,
             Subcommand::Status(&[]),
+            Subcommand::Presenter(&[]),
             Subcommand::Server,
             Subcommand::Unknown("bogus".to_string()),
         ] {
@@ -436,6 +429,7 @@ mod tests {
             ("--help", Subcommand::Help),
             ("help", Subcommand::Help),
             ("status", Subcommand::Status(&[])),
+            ("presenter", Subcommand::Presenter(&[])),
         ] {
             assert_eq!(
                 resolve_subcommand(&argv(&["dontspeak", tok])),
@@ -453,7 +447,6 @@ mod tests {
                 json: true,
                 since: None,
                 timeout_ms: None,
-                ui_receiver: None,
             }
         );
         assert_eq!(
@@ -462,7 +455,6 @@ mod tests {
                 json: true,
                 since: Some(41),
                 timeout_ms: Some(5000),
-                ui_receiver: None,
             }
         );
     }
@@ -473,13 +465,7 @@ mod tests {
         assert!(parse_status_cli(&argv(&["--json", "--timeout-ms", "1"])).is_err());
         assert!(parse_status_cli(&argv(&["--json", "--since"])).is_err());
         assert!(parse_status_cli(&argv(&["--json", "--since", "x"])).is_err());
-        assert_eq!(
-            parse_status_cli(&argv(&["--json", "--ui-receiver", "herdr.voice"]))
-                .unwrap()
-                .ui_receiver
-                .as_deref(),
-            Some("herdr.voice")
-        );
+        assert!(parse_status_cli(&argv(&["--json", "--ui-receiver", "herdr.voice"])).is_err());
         assert!(
             parse_status_cli(&argv(&["--json", "--since", "1", "--timeout-ms", "60001"])).is_err()
         );

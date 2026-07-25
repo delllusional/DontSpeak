@@ -485,6 +485,7 @@ internal sealed record DictationDto
     [JsonPropertyName("state")] public string? State { get; init; }
     [JsonPropertyName("text")] public string? Text { get; init; }
     [JsonPropertyName("can_paste")] public bool CanPaste { get; init; }
+    [JsonPropertyName("session_id")] public string? SessionId { get; init; }
     [JsonPropertyName("external_ui_active")] public bool ExternalUiActive { get; init; }
 }
 

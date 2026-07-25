@@ -51,6 +51,8 @@ pub(crate) struct PasteBuf {
     pub caps_held: bool,
     /// Detached `stop` joiner deposits only if epoch still matches.
     pub epoch: u64,
+    /// Stable external presenter scope for one visible dictation turn.
+    pub presentation_session_id: u64,
     /// Refusal-cue deadline after an unhonored Caps start.
     pub refused_until: Option<Instant>,
 }
@@ -80,6 +82,7 @@ impl Default for PasteBuf {
             can_paste: true, // fail-open before first probe
             caps_held: false,
             epoch: 0,
+            presentation_session_id: 0,
             refused_until: None,
         }
     }
@@ -479,6 +482,9 @@ impl<P: Platform + 'static> Engine<P> {
             // BuiltIn/System refused: refusal cue. Dictation OFF keeps silent pause/resume.
             if !ready && crate::config_gate::refusal_cue_on_refused_start(self.cfg.resolved_stt()) {
                 if let Ok(mut p) = self.paste.lock() {
+                    if !refusal_live(p.refused_until, Instant::now()) {
+                        p.presentation_session_id = p.presentation_session_id.wrapping_add(1);
+                    }
                     p.refused_until =
                         Some(Instant::now() + Duration::from_millis(DICTATION_REFUSAL_MS));
                 }
@@ -1176,6 +1182,7 @@ impl<P: Platform + 'static> Engine<P> {
             p.partial.clear();
             p.final_state = FinalState::Idle;
             p.target = target;
+            p.presentation_session_id = p.presentation_session_id.wrapping_add(1);
             // A real recording is starting: drop any still-live refusal cue (the model
             // may have become ready inside the window) so the panel shows the normal
             // listening state, not the warning wash.
@@ -1464,6 +1471,7 @@ mod tests {
         d.cfg.stt_engine_ladder = Vec::new(); // dictation off
         let q = crate::ttsq::TtsQueue::test_stub();
         d.ttsq = Some(q.clone());
+        assert_eq!(d.paste.lock().unwrap().presentation_session_id, 0);
         MockPlatform::tap(&mut d);
         assert!(q.is_paused(), "first tap pauses the voice");
         assert!(!d.is_recording(), "dictation off → the mic never opens");
@@ -1531,10 +1539,16 @@ mod tests {
             d.paste.lock().unwrap().refused_until.is_some(),
             "the visual refusal cue still fires (unchanged behavior)"
         );
+        assert_eq!(d.paste.lock().unwrap().presentation_session_id, 1);
         // Tap-happy user during the download: every further tap stays a pure refusal —
         // in particular the second tap must not RESUME-toggle its way into weird states.
         MockPlatform::tap(&mut d);
         assert!(!q.is_paused() && !d.is_recording());
+        assert_eq!(
+            d.paste.lock().unwrap().presentation_session_id,
+            1,
+            "repeated taps during one live refusal keep the same presenter scope"
+        );
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
     use ds_platform::{CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError};

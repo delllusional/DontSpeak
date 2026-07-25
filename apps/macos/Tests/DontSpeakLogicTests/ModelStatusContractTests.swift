@@ -47,7 +47,9 @@ final class ModelStatusContractTests: XCTestCase {
           "dictation": {
             "state": "hidden",
             "text": "",
-            "can_paste": true
+            "can_paste": true,
+            "session_id": null,
+            "external_ui_active": false
           },
           "stats": {
             "tts": {
@@ -105,6 +107,8 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertEqual(dto.dictation.state, "hidden")
         XCTAssertEqual(dto.dictation.text, "")
         XCTAssertTrue(dto.dictation.canPaste)
+        XCTAssertNil(dto.dictation.sessionId)
+        XCTAssertEqual(dto.dictation.externalUiActive, false)
 
         XCTAssertEqual(dto.stats.tts.queued, 0)
         XCTAssertEqual(dto.stats.stt.transcriptions, 0)

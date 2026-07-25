@@ -153,6 +153,9 @@ pub struct Dictation {
     pub state: DictationState,
     pub text: String,
     pub can_paste: bool,
+    /// Stable only for the currently visible dictation turn.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// A live external UI owns the preview; native hosts must stay hidden.
     #[serde(default)]
     pub external_ui_active: bool,
@@ -285,6 +288,7 @@ mod tests {
                 state: DictationState::Hidden,
                 text: String::new(),
                 can_paste: true,
+                session_id: None,
                 external_ui_active: false,
             },
             stats: Stats {
@@ -327,7 +331,8 @@ mod tests {
         assert_eq!(v["tts"].as_object().unwrap().len(), 6);
         assert_eq!(v["stt"].as_object().unwrap().len(), 4);
         assert_eq!(v["diarization"].as_object().unwrap().len(), 5);
-        assert_eq!(v["dictation"].as_object().unwrap().len(), 4);
+        assert_eq!(v["dictation"].as_object().unwrap().len(), 5);
+        assert!(v["dictation"]["session_id"].is_null());
         assert!(!v["dictation"]["external_ui_active"].as_bool().unwrap());
         assert_eq!(v["stats"].as_object().unwrap().len(), 3);
 
@@ -555,12 +560,14 @@ mod tests {
             state in dictation_state_strategy(),
             text in short_string(),
             can_paste in any::<bool>(),
+            session_id in opt_short_string(),
             external_ui_active in any::<bool>(),
         ) -> Dictation {
             Dictation {
                 state,
                 text,
                 can_paste,
+                session_id,
                 external_ui_active,
             }
         }
