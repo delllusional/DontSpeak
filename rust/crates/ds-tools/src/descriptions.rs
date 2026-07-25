@@ -26,6 +26,7 @@ pub const TIMEOUT_MS: &str = "timeout_ms";
 pub const REFRESH: &str = "refresh";
 pub const TTS_ENGINE: &str = "tts_engine";
 pub const TTS_MODEL: &str = "tts_model";
+pub const PREFERRED_LANGUAGES: &str = "preferred_languages";
 pub const LANGUAGE: &str = "language";
 pub const REMOVE: &str = "remove";
 pub const ACTION: &str = "action";
@@ -99,6 +100,8 @@ pub const SPEAKERS_SECONDS: &str = "Enrollment seconds. Default 15.";
 
 pub const SET_CONFIG_TTS_ENGINE: &str = "Speech engine. Omit to keep the automatic preference.";
 pub const SET_CONFIG_TTS_MODEL: &str = "Built-in model.";
+pub const SET_CONFIG_PREFERRED_LANGUAGES: &str =
+    "Language detection scope (ISO 639-1). [] = auto-detect (default).";
 pub const SET_CONFIG_TTS_VOICES: &str = "Voice pools by target. `system: []` uses the OS default.";
 pub const SET_CONFIG_TTS_PARAMS: &str =
     "Param objects by target. rate default 1.0 (system/kokoro only). `{}` resets.";

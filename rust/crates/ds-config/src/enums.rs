@@ -457,6 +457,17 @@ where
     Ok(fail_open_vec!(&v, WiredAgent, WiredAgent::parse))
 }
 
+/// Fail-open `preferred_languages`: array → recognized ISO 639-1 codes (normalized, deduped,
+/// order preserved); non-array/garbage → empty (= auto). Pinned by `preferred_languages`
+/// round-trip tests in `voice.rs`.
+pub(crate) fn de_preferred_languages<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = toml::Value::deserialize(d).unwrap_or(toml::Value::Boolean(false));
+    Ok(fail_open_vec!(&v, String, crate::tts_model::parse_language_code).unwrap_or_default())
+}
+
 // Macros: fail-open / serialize-as-token / strict (textually scoped — see module doc).
 
 macro_rules! fail_open_de {

@@ -80,7 +80,7 @@ pub struct TtsStatus {
     pub engine: StatusTtsEngine,
     /// Built-in model; `null` for system/off.
     pub model: Option<StatusTtsModel>,
-    /// Built-in language; `null` for system/off.
+    /// Built-in detection scope; `null` when auto-detecting, system, or off.
     pub language: Option<String>,
     /// `null` for system/off, or built_in until realized.
     pub provider: Option<String>,

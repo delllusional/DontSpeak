@@ -186,10 +186,10 @@ mod tests {
 
     #[test]
     fn number_expansion_is_english_only() {
-        // Non-English (and OmniVoice's "auto") keep digits — the English word form
-        // would be spoken verbatim in the wrong language.
+        // Non-English keeps digits — the English word form would be spoken verbatim in the
+        // wrong language.
         assert_eq!(text_chunks("**57**", "ru"), vec!["57".to_string()]);
-        assert_eq!(text_chunks("57", "auto"), vec!["57".to_string()]);
+        assert_eq!(text_chunks("57", "xx"), vec!["57".to_string()]);
         assert_eq!(text_chunks("**57**", "en"), vec!["fifty-seven".to_string()]);
     }
 

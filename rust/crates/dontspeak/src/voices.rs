@@ -92,7 +92,7 @@ pub(crate) fn voice_groups_from(
 
 /// Subtag groups the System engine renders: an explicit filter yields that single group;
 /// `None` yields every distinct subtag present. The catalog never inherits a built-in
-/// model default here — OmniVoice's "auto" would filter every system voice out.
+/// model's default language here — that would filter every system voice out.
 fn system_group_subtags(voices: &[ds_voices::SpeakerVoice], language: Option<&str>) -> Vec<String> {
     match language {
         Some(want) => vec![want.to_string()],

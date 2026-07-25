@@ -264,17 +264,19 @@ fn call_voices_from(
         (None, ds_config::TtsEngine::BuiltIn) => {
             Some(model.descriptor().default_language.to_string())
         }
-        // System: no default filter (built-in "auto" would drop every OS voice).
+        // System: no default filter (a built-in language default would drop every OS voice).
         (None, ds_config::TtsEngine::System) => None,
     };
-    if engine == ds_config::TtsEngine::BuiltIn {
-        let lang = language.as_deref().unwrap_or_default();
-        if !model.descriptor().supports_language(lang) {
-            return Err(format!(
-                "language `{lang}` is not supported by {}",
-                model.as_str()
-            ));
-        }
+    // `accepts_detected_language` aligns runtime with the schema: auto-detect models (OmniVoice)
+    // accept any code, so their own language-agnostic default is not rejected.
+    if engine == ds_config::TtsEngine::BuiltIn
+        && let Some(lang) = language.as_deref()
+        && !model.descriptor().accepts_detected_language(lang)
+    {
+        return Err(format!(
+            "language `{lang}` is not supported by {}",
+            model.as_str()
+        ));
     }
     let mut groups = match catalogs {
         Some((kokoro_ids, system_voices)) => voice_groups_from(
@@ -1126,7 +1128,7 @@ mod status_output {
                 "language": "it", "warning": null, "muted": false
             },
             "tts": {
-                "engine": "built_in", "model": "kokoro", "language": "auto",
+                "engine": "built_in", "model": "kokoro", "language": "en",
                 "provider": "cpu",
                 "status": { "state": "downloading", "progress": 0.25, "error": null },
                 "recent_utterances": [{
