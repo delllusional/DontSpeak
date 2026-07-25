@@ -1274,7 +1274,10 @@ pub(crate) mod tests {
                 .preferred_languages
         };
         // Array: normalize case, dedup, drop unrecognized, preserve order.
-        assert_eq!(pref(r#"{"preferred_languages":["EN","en","xx"]}"#), vec!["en"]);
+        assert_eq!(
+            pref(r#"{"preferred_languages":["EN","en","xx"]}"#),
+            vec!["en"]
+        );
         assert_eq!(
             pref(r#"{"preferred_languages":["ru"," EN ","ru"]}"#),
             vec!["ru", "en"]

@@ -315,7 +315,11 @@ fn parse_status_receiver(value: Option<&String>) -> Result<String, String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "--ui-receiver requires a non-empty identifier".to_string())?;
-    if value.len() > 120 || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) {
+    if value.len() > 120
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
         return Err("--ui-receiver accepts letters, digits, '-', '_' and '.' only".into());
     }
     Ok(value.to_string())
@@ -470,7 +474,10 @@ mod tests {
         assert!(parse_status_cli(&argv(&["--json", "--since"])).is_err());
         assert!(parse_status_cli(&argv(&["--json", "--since", "x"])).is_err());
         assert_eq!(
-            parse_status_cli(&argv(&["--json", "--ui-receiver", "herdr.voice"])).unwrap().ui_receiver.as_deref(),
+            parse_status_cli(&argv(&["--json", "--ui-receiver", "herdr.voice"]))
+                .unwrap()
+                .ui_receiver
+                .as_deref(),
             Some("herdr.voice")
         );
         assert!(

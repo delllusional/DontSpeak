@@ -704,7 +704,9 @@ pub const DETECTABLE_LANGUAGES: &[&str] = &[
 /// Normalize + gate a language code to [`DETECTABLE_LANGUAGES`]. `None` for unrecognized.
 pub fn parse_language_code(s: &str) -> Option<String> {
     let code = s.trim().to_ascii_lowercase();
-    DETECTABLE_LANGUAGES.contains(&code.as_str()).then_some(code)
+    DETECTABLE_LANGUAGES
+        .contains(&code.as_str())
+        .then_some(code)
 }
 
 #[cfg(test)]

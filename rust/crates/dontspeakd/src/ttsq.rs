@@ -890,10 +890,9 @@ impl TtsQueue {
             .or_else(|| self.herdr_aliases.lock().unwrap().get(real).cloned())
     }
 
-    /// Bind an MCP tool call that lost `HERDR_PANE_ID` to the active pane of the
-    /// same client. Codex launches its MCP child with a scrubbed environment, but
-    /// its hook has already made the pane queue the authoritative active session.
-    /// Never guess across clients or without an active Herdr pane.
+    /// A pane-less MCP child is safe to associate only when exactly one live
+    /// Herdr pane belongs to that client. Never use last-active as a proxy: two
+    /// Codex panes can produce replies out of order.
     fn route_herdr_speech(
         &self,
         session: Option<String>,
@@ -907,21 +906,19 @@ impl TtsQueue {
         {
             return (session, pane);
         }
-        let active = self.active.lock().unwrap().effective();
-        let Some(pane_id) = self.herdr_pane_for_session(&active) else {
+        let sessions = self.herdr_sessions.lock().unwrap();
+        let mut matches = sessions.iter().filter_map(|(pane_id, record)| {
+            (record.source == source)
+                .then(|| record.queue_session.as_ref().map(|queue| (pane_id, queue)))
+                .flatten()
+        });
+        let Some((pane_id, queue_session)) = matches.next() else {
             return (session, None);
         };
-        let record = self.herdr_sessions.lock().unwrap().get(&pane_id).cloned();
-        let Some(record) = record else {
-            return (session, None);
-        };
-        if record.source != source {
+        if matches.next().is_some() {
             return (session, None);
         }
-        let Some(queue_session) = record.queue_session else {
-            return (session, None);
-        };
-        (Some(queue_session), Some(pane_id))
+        (Some(queue_session.clone()), Some(pane_id.clone()))
     }
 
     fn register_herdr_pane(
@@ -993,6 +990,10 @@ impl TtsQueue {
             drop(aliases);
             let removed = self.herdr_sessions.lock().unwrap().remove(&pane_id);
             self.herdr_queue_depths.lock().unwrap().remove(&pane_id);
+            self.agent_voices
+                .lock()
+                .unwrap()
+                .retain(|(owner, _), _| owner.herdr_pane.as_deref() != Some(pane_id.as_str()));
             if removed.is_some() {
                 self.gate.bump();
             }
