@@ -13,7 +13,16 @@ Scripts under `apps/macos/` + `scripts/` — edit those, don't duplicate.
 
 **Prereqs:** Xcode + CLT (Xcode 26 for `AppIcon.icon` / SDK 26) · Rust
 `aarch64-apple-darwin` (+ `x86_64-apple-darwin` for Intel) · **`librsvg`**
-(`brew install librsvg`) for menu-bar glyph + legacy `.icns`. Signing: [SIGNING.md](../../../docs/SIGNING.md).
+(`brew install librsvg`) for menu-bar glyph + legacy `.icns`. Apple-silicon MLX
+builds also require Xcode 26's separately installed Metal Toolchain:
+
+```bash
+xcodebuild -downloadComponent metalToolchain
+```
+
+Without it, local bundles warn and use ONNX-CPU for BuiltIn TTS/STT; distribution
+builds fail unless the missing-shim waiver is explicit. Signing:
+[SIGNING.md](../../../docs/SIGNING.md).
 
 ### App icon (dual path)
 

@@ -29,8 +29,15 @@ mkdir -p "$test_dir/DontSpeakShims/Sources/DontSpeakSys" \
 : >"$test_dir/DontSpeakShims/Sources/DontSpeakFluid/Fluid.swift"
 : >"$test_dir/DontSpeakShims/Sources/DontSpeakMLX/shim.swift"
 
-xcodebuild() { return 99; }
+xcodebuild() {
+  echo called >>"$test_dir/xcodebuild-calls"
+  return 99
+}
 xcrun() {
+  if [ "${1:-}" = "metal" ]; then
+    [ "${METAL_TOOLCHAIN_AVAILABLE:-0}" = "1" ]
+    return
+  fi
   [ "${1:-}" = "swiftc" ] || return 98
   shift
   local out="" system_only=0 intel_target=0
@@ -67,6 +74,13 @@ xcrun() {
 lipo() { echo "x86_64"; }
 nm() { cat "$test_dir/nm-output" 2>/dev/null || true; }
 otool() { cat "$test_dir/otool-output" 2>/dev/null || true; }
+
+# -- optional Xcode Metal Toolchain -------------------------------------------------------
+if mlx_metal_toolchain_available; then
+  fail "missing Metal Toolchain was reported as available"
+fi
+METAL_TOOLCHAIN_AVAILABLE=1 mlx_metal_toolchain_available \
+  || fail "available Metal Toolchain was not detected"
 
 # -- family lists ------------------------------------------------------------------------
 [ "$(ds_shim_families arm64)" = "sys mlx fluid" ] \
@@ -138,10 +152,23 @@ out="$(DONTSPEAK_DIST=1 DONTSPEAK_ALLOW_MISSING_SHIM=1 build_shim fluid arm64 2>
   || fail "DONTSPEAK_ALLOW_MISSING_SHIM did not waive a failed fluid build"
 [ -z "$out" ] || fail "waived fluid build returned a dylib path"
 
+if DONTSPEAK_DIST=1 build_shim mlx arm64 >/dev/null 2>"$stderr_file"; then
+  fail "distribution accepted a missing Metal Toolchain"
+fi
+grep -q "dist build would ship without the mlx shim" "$stderr_file" \
+  || fail "missing Metal Toolchain weakened the distribution shim gate"
+grep -q "xcodebuild -downloadComponent metalToolchain" "$stderr_file" \
+  || fail "distribution Metal Toolchain failure omitted the install command"
+
+rm -f "$test_dir/xcodebuild-calls"
 out="$(DONTSPEAK_DIST=0 build_shim mlx arm64 2>"$stderr_file")" \
   || fail "arm64 development build did not allow MLX degradation"
 [ -z "$out" ] || fail "failed arm64 development build returned an MLX dylib path"
 grep -q "mlx shim unavailable" "$stderr_file" || fail "arm64 development failure did not warn"
+grep -q "xcodebuild -downloadComponent metalToolchain" "$stderr_file" \
+  || fail "missing Metal Toolchain warning omitted the install command"
+[ ! -f "$test_dir/xcodebuild-calls" ] \
+  || fail "MLX build invoked xcodebuild without the Metal Toolchain"
 
 # Dropping a default family in a dist build is the same class of silent subset.
 if DONTSPEAK_DIST=1 DONTSPEAK_SHIMS="sys" build_shims arm64 >/dev/null 2>"$stderr_file"; then

@@ -52,7 +52,12 @@ compile_icon "$ICONOUT"
 echo "==> 3. assemble + sign $APP"
 SIGN="$(resolve_sign_identity)"
 # Shim arch from built app binary (not uname -- Rosetta).
-DONTSPEAK_SHIM_DYLIBS="$(build_shims "$(lipo -archs "$EXE" | awk '{print $1}')")"
+SHIM_ARCH="$(lipo -archs "$EXE" | awk '{print $1}')"
+MLX_METAL_TOOLCHAIN_MISSING=0
+case " $(ds_shim_families "$SHIM_ARCH") " in
+  *" mlx "*) mlx_metal_toolchain_available || MLX_METAL_TOOLCHAIN_MISSING=1 ;;
+esac
+DONTSPEAK_SHIM_DYLIBS="$(build_shims "$SHIM_ARCH")"
 export DONTSPEAK_SHIM_DYLIBS
 # Helper from install-engine dir; menubar svg at repo assets/.
 ds_lock_acquire "$APP"
@@ -69,3 +74,11 @@ echo "   signed app ($(sign_label "$SIGN"))"
 echo
 echo "Done -> $APP"
 echo "Launch it: open \"$APP\"  (registers itself as the login item + starts the engine)"
+if [ "$MLX_METAL_TOOLCHAIN_MISSING" = "1" ] \
+    && ! printf '%s\n' "$DONTSPEAK_SHIM_DYLIBS" | grep -q 'libdontspeak_mlx\.dylib$'; then
+  echo >&2
+  echo "WARNING: Done without the MLX shim; BuiltIn TTS/STT will use ONNX-CPU." >&2
+  echo "         Xcode's optional Metal Toolchain is missing." >&2
+  mlx_metal_toolchain_install_hint
+  echo "         Then rerun apps/macos/bundle.sh." >&2
+fi

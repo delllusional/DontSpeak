@@ -15,7 +15,12 @@ rebuild leaves stale code.
 ```sh
 xcode-select -s /Applications/Xcode.app
 sudo xcodebuild -runFirstLaunch
+xcodebuild -downloadComponent metalToolchain
 ```
+
+Xcode 26 installs the Metal Toolchain separately. It is required to compile the MLX
+shim for Apple-silicon app bundles; without it, a local bundle warns and uses ONNX-CPU
+for BuiltIn TTS/STT, while distribution builds fail.
 
 `./apps/macos/build.sh` (dev) or `./apps/macos/bundle.sh` (app bundle). Module-cache
 error after clone: `rm -rf apps/macos/.build` and retry.

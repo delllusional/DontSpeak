@@ -18,6 +18,16 @@ Use `build-macos` skill. The shim dylibs ride the host-app route ONLY: a rebuilt
 against a stale `.app` finds the per-family `DONTSPEAK_*_DYLIB_PATH` variables unset and
 correctly falls back to ONNX, which looks like the change did nothing.
 
+Apple-silicon MLX app builds require Xcode 26's separately installed Metal Toolchain:
+
+```sh
+xcodebuild -downloadComponent metalToolchain
+```
+
+Without it, local `bundle.sh` builds remain usable but finish with a conspicuous
+ONNX-CPU degradation warning. Distribution builds keep failing unless
+`DONTSPEAK_ALLOW_MISSING_SHIM=1` explicitly waives the missing MLX shim.
+
 ### Windows
 
 | Piece | Built+installed by | Running app uses |

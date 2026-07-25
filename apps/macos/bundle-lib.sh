@@ -94,6 +94,14 @@ ds_shim_families() {
 
 shim_dylib_name() { echo "libdontspeak_$1.dylib"; }
 
+mlx_metal_toolchain_available() {
+  xcrun metal -v </dev/null >/dev/null 2>&1
+}
+
+mlx_metal_toolchain_install_hint() {
+  echo "         Install it with: xcodebuild -downloadComponent metalToolchain" >&2
+}
+
 # Xcode emits dynamic Swift package products as framework executables. Stage each one under
 # the filename the Rust loader and app bundle contract use.
 stage_shim_dylib() {
@@ -212,6 +220,13 @@ build_shim() {
   if shim_prebuilt_usable "$family" "$derived" "$swarch"; then
     echo "   reusing prebuilt $(shim_dylib_name "$family") ($swarch) <- $products" >&2
     stage_shim_dylib "$family" "$bin" "$swarch"
+    return 0
+  fi
+  if [ "$family" = "mlx" ] && ! mlx_metal_toolchain_available; then
+    local missing_rc=0
+    shim_missing mlx "requires Xcode's optional Metal Toolchain" || missing_rc=$?
+    mlx_metal_toolchain_install_hint
+    [ "$missing_rc" -eq 0 ] || return "$missing_rc"
     return 0
   fi
   if ! (cd "$pkg" && xcodebuild -scheme "dontspeak_$family" -destination 'generic/platform=macOS' \
