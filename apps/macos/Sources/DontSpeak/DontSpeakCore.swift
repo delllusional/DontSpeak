@@ -71,6 +71,7 @@ struct Dictation: Sendable, Equatable {
     var hasTarget = true
     /// Canonical token (ds-status dictation_state): hidden|recording|awaiting_confirm|refused.
     var state = "hidden"
+    var externalUiActive = false
 }
 
 struct HealthSnapshot: Sendable, Equatable {
@@ -260,7 +261,7 @@ final class Core {
         }
         maybeRequestMicAccess()
         DictationPanelController.shared.apply(
-            state: s.dictation.state,
+            state: s.dictation.externalUiActive ? "hidden" : s.dictation.state,
             text: s.dictation.text,
             hasTarget: s.dictation.hasTarget
         )
@@ -356,6 +357,7 @@ final class Core {
         s.dictation.state = dto.dictation.state
         s.dictation.text = dto.dictation.text
         s.dictation.hasTarget = dto.dictation.canPaste
+        s.dictation.externalUiActive = dto.dictation.externalUiActive ?? false
         s.agentsEnabled = dto.agents
         return (s, dto.seq)
     }

@@ -222,6 +222,7 @@ struct StatusCli {
     json: bool,
     since: Option<u64>,
     timeout_ms: Option<u64>,
+    ui_receiver: Option<String>,
 }
 
 fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
@@ -229,6 +230,7 @@ fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
         json: false,
         since: None,
         timeout_ms: None,
+        ui_receiver: None,
     };
     let mut index = 0;
     while index < args.len() {
@@ -245,6 +247,10 @@ fn parse_status_cli(args: &[String]) -> Result<StatusCli, String> {
                     return Err("--timeout-ms must be between 1 and 60000".into());
                 }
                 parsed.timeout_ms = Some(timeout_ms);
+            }
+            "--ui-receiver" if parsed.ui_receiver.is_none() => {
+                index += 1;
+                parsed.ui_receiver = Some(parse_status_receiver(args.get(index))?);
             }
             option => return Err(format!("unknown or repeated status option {option:?}")),
         }
@@ -282,7 +288,11 @@ fn run_status(args: &[String]) -> i32 {
             return 2;
         }
     };
-    match tools::runtime_status_json(parsed.since, parsed.timeout_ms) {
+    match tools::runtime_status_json_with_receiver(
+        parsed.since,
+        parsed.timeout_ms,
+        parsed.ui_receiver.as_deref(),
+    ) {
         Ok(status) => match serde_json::to_string(&status) {
             Ok(json) => {
                 println!("{json}");
@@ -298,6 +308,17 @@ fn run_status(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn parse_status_receiver(value: Option<&String>) -> Result<String, String> {
+    let value = value
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "--ui-receiver requires a non-empty identifier".to_string())?;
+    if value.len() > 120 || !value.chars().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.')) {
+        return Err("--ui-receiver accepts letters, digits, '-', '_' and '.' only".into());
+    }
+    Ok(value.to_string())
 }
 
 /// Whole stdin, single-shot. Empty on read error — unknown/empty event is a no-op.
@@ -428,6 +449,7 @@ mod tests {
                 json: true,
                 since: None,
                 timeout_ms: None,
+                ui_receiver: None,
             }
         );
         assert_eq!(
@@ -436,6 +458,7 @@ mod tests {
                 json: true,
                 since: Some(41),
                 timeout_ms: Some(5000),
+                ui_receiver: None,
             }
         );
     }
@@ -446,6 +469,10 @@ mod tests {
         assert!(parse_status_cli(&argv(&["--json", "--timeout-ms", "1"])).is_err());
         assert!(parse_status_cli(&argv(&["--json", "--since"])).is_err());
         assert!(parse_status_cli(&argv(&["--json", "--since", "x"])).is_err());
+        assert_eq!(
+            parse_status_cli(&argv(&["--json", "--ui-receiver", "herdr.voice"])).unwrap().ui_receiver.as_deref(),
+            Some("herdr.voice")
+        );
         assert!(
             parse_status_cli(&argv(&["--json", "--since", "1", "--timeout-ms", "60001"])).is_err()
         );

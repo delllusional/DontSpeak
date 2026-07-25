@@ -176,6 +176,7 @@ pub fn engine_run(
         stt_stats: stt_stats.clone(),
         lifetime: lifetime.clone(),
         gate: status_gate.clone(),
+        dictation_ui_lease: Arc::new(Mutex::new(None)),
     };
 
     // Session registries before IPC (hooks nudge; supervisors filter).

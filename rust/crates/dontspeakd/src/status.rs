@@ -86,6 +86,7 @@ pub(crate) struct EngineShared {
     pub stt_stats: Arc<stats::SttStats>,
     pub lifetime: Arc<stats::LifetimeSeconds>,
     pub gate: Arc<StatusGate>,
+    pub dictation_ui_lease: Arc<Mutex<Option<Instant>>>,
 }
 
 /// Model presence report. `read_tts` under `gate.snapshot` (mid-report transitions unacked).
@@ -105,6 +106,7 @@ pub(crate) fn model_status_json(
         stt_stats,
         lifetime,
         gate: _,
+        dictation_ui_lease,
     } = shared;
     let cfg = VoiceConfig::load(paths);
     let resolved_tts = cfg.resolved_tts();
@@ -378,6 +380,10 @@ pub(crate) fn model_status_json(
             state: dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused),
             text: dict_text,
             can_paste: dict_has_target,
+            external_ui_active: dictation_ui_lease
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some_and(|expires| expires > Instant::now()),
         },
         stats: Stats {
             // Queue depth under gate.snapshot, not the stats accumulator.
@@ -751,6 +757,7 @@ mod tests {
             stt_stats,
             lifetime,
             gate,
+            dictation_ui_lease: Arc::new(Mutex::new(None)),
         };
 
         let utterance = UtteranceStatus {
