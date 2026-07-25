@@ -346,6 +346,7 @@ pub(crate) fn model_status_json(
                 .and_then(|utterance| utterance.warning),
             muted: tts.is_muted(),
         },
+        voice_sessions: tts_sample.voice_sessions,
         tts: TtsStatus {
             engine: status_tts_engine(resolved_tts),
             model: (resolved_tts == Some(ds_config::TtsEngine::BuiltIn))
@@ -764,6 +765,7 @@ mod tests {
             speaker: None,
             queued: 3,
             utterance: Some(utterance.clone()),
+            voice_sessions: vec![],
             recent_utterances: vec![UtteranceStatus {
                 outcome: Some(ds_status::UtteranceOutcome::Spoken),
                 ..utterance

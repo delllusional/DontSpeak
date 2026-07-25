@@ -20,6 +20,29 @@ use crate::tts::TtsManager;
 /// Language-less voice claim (greeting / `pick_for_language` fallback).
 const DEFAULT_VOICE_KEY: &str = "";
 
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct VoiceOwner {
+    source: Option<WiredAgent>,
+    herdr_pane: Option<String>,
+}
+
+impl VoiceOwner {
+    fn new(source: Option<WiredAgent>, herdr_pane: Option<&str>) -> Self {
+        Self {
+            source,
+            herdr_pane: herdr_pane.map(str::to_string),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HerdrSessionRecord {
+    source: Option<WiredAgent>,
+    queue_session: Option<String>,
+    voice: Option<String>,
+    language: Option<String>,
+}
+
 struct HealingGuard(Arc<AtomicBool>);
 impl Drop for HealingGuard {
     fn drop(&mut self) {
@@ -32,6 +55,7 @@ impl Drop for HealingGuard {
 struct PlayingClaim {
     source: Option<WiredAgent>,
     session: Option<String>,
+    herdr_pane: Option<String>,
     /// Speech (not cue) — contributes to status depth.
     speech: bool,
     /// Admit-time id; voice/language filled at play; `outcome` written to the ring. Cues: `None`.
@@ -156,9 +180,9 @@ fn apply_tts_arg_params(
 /// Reuse if still in `pool`; else free; else least-loaded. `pool` non-empty; `roll(n) < n`.
 /// Load counted only among agents holding a voice for the same language.
 fn pick_agent_voice(
-    assignments: &HashMap<(Option<WiredAgent>, String), String>,
+    assignments: &HashMap<(VoiceOwner, String), String>,
     pool: &[String],
-    agent: &(Option<WiredAgent>, String),
+    agent: &(VoiceOwner, String),
     roll: &mut dyn FnMut(usize) -> usize,
 ) -> String {
     if let Some(v) = assignments.get(agent)
@@ -176,7 +200,7 @@ fn pick_agent_voice(
     };
     // Adopt greeting's language-less claim ([`DEFAULT_VOICE_KEY`]) when free for this language.
     if !agent.1.is_empty()
-        && let Some(claimed) = assignments.get(&(agent.0, DEFAULT_VOICE_KEY.to_string()))
+        && let Some(claimed) = assignments.get(&(agent.0.clone(), DEFAULT_VOICE_KEY.to_string()))
         && pool.iter().any(|p| p == claimed)
         && load(claimed) == 0
     {
@@ -252,6 +276,8 @@ struct Item {
     source: Option<WiredAgent>,
     /// `None` = global. Voice keys off `source`.
     session: Option<String>,
+    /// Public Herdr pane id, resolved from the queue scope or logical-session alias.
+    herdr_pane: Option<String>,
     /// `PROGRESS` high-water; barge resume sends as `skip`.
     resume_skip: usize,
     /// `speak` handle / ring key. Cues: `None`. Survives requeue.
@@ -264,6 +290,7 @@ pub(crate) struct TtsStatusSample {
     pub speaker: Option<WiredAgent>,
     pub queued: u64,
     pub utterance: Option<ds_status::UtteranceStatus>,
+    pub voice_sessions: Vec<ds_status::VoiceSessionStatus>,
     /// Terminal records, most recent first.
     pub recent_utterances: Vec<ds_status::UtteranceStatus>,
 }
@@ -422,8 +449,14 @@ pub struct TtsQueue {
     /// Focus gate. Init false; first poll applies config.
     pause_bg: AtomicBool,
     config: Mutex<VoiceConfig>,
-    /// Lazy pool roll per (agent, language); SessionEnd keeps assignment.
-    agent_voices: Mutex<HashMap<(Option<WiredAgent>, String), String>>,
+    /// Lazy pool roll per (client/pane, language); SessionEnd keeps assignment.
+    agent_voices: Mutex<HashMap<(VoiceOwner, String), String>>,
+    /// Logical session -> public Herdr pane, for engine-side Codex/Grok stream narration.
+    herdr_aliases: Mutex<HashMap<String, String>>,
+    /// Known Herdr panes persist idle until SessionEnd.
+    herdr_sessions: Mutex<HashMap<String, HerdrSessionRecord>>,
+    /// Pending speech depth by Herdr pane, rebuilt under queue mutations.
+    herdr_queue_depths: Mutex<HashMap<String, u64>>,
     /// `say -v ?` once per process.
     system_voices: OnceLock<Vec<ds_tts::SpeakerVoice>>,
     /// Test catalog; production uses live disk enumeration.
@@ -472,6 +505,9 @@ impl TtsQueue {
             pause_bg: AtomicBool::new(false),
             config: Mutex::new(config),
             agent_voices: Mutex::new(HashMap::new()),
+            herdr_aliases: Mutex::new(HashMap::new()),
+            herdr_sessions: Mutex::new(HashMap::new()),
+            herdr_queue_depths: Mutex::new(HashMap::new()),
             system_voices: OnceLock::new(),
             #[cfg(test)]
             kokoro_voice_ids: test_kokoro_voice_ids(),
@@ -542,6 +578,9 @@ impl TtsQueue {
             pause_bg: AtomicBool::new(false),
             config: Mutex::new(VoiceConfig::load(&paths)),
             agent_voices: Mutex::new(HashMap::new()),
+            herdr_aliases: Mutex::new(HashMap::new()),
+            herdr_sessions: Mutex::new(HashMap::new()),
+            herdr_queue_depths: Mutex::new(HashMap::new()),
             system_voices: OnceLock::new(),
             kokoro_voice_ids: test_kokoro_voice_ids(),
             active: Mutex::new(ActiveSel::default()),
@@ -576,6 +615,8 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(None);
         }
+        let herdr_pane = self.herdr_pane_for_session(&session);
+        self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
         // Standalone chunk (MCP Speak / greeting) — language from text alone.
         self.enqueue_action(
             QueueAction::Speech {
@@ -585,6 +626,7 @@ impl TtsQueue {
             },
             source,
             session,
+            herdr_pane,
         )
     }
 
@@ -595,7 +637,9 @@ impl TtsQueue {
         source: Option<WiredAgent>,
         session: Option<String>,
     ) -> Result<(), String> {
-        self.enqueue_action(QueueAction::Earcon(event), source, session)
+        let herdr_pane = self.herdr_pane_for_session(&session);
+        self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
+        self.enqueue_action(QueueAction::Earcon(event), source, session, herdr_pane)
             .map(|_| ())
     }
 
@@ -666,6 +710,7 @@ impl TtsQueue {
         action: QueueAction,
         source: Option<WiredAgent>,
         session: Option<String>,
+        herdr_pane: Option<String>,
     ) -> Result<Option<u64>, String> {
         let mut q = self.items.lock().unwrap();
         let is_cue = matches!(&action, QueueAction::Earcon(_));
@@ -733,10 +778,11 @@ impl TtsQueue {
             action,
             source,
             session,
+            herdr_pane,
             resume_skip: 0,
             utterance_id,
         });
-        self.publish_queue_depth(before, speech_depth(&q));
+        self.publish_queue_depth(before, &q);
         self.cv.notify_one();
         Ok(utterance_id)
     }
@@ -766,6 +812,8 @@ impl TtsQueue {
             text,
             tts_args: None,
         };
+        let herdr_pane = self.herdr_pane_for_session(&session);
+        self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
 
         if let Some(id) = narration_id {
             let mut accepted = self.accepted_narrations.lock().unwrap();
@@ -773,10 +821,10 @@ impl TtsQueue {
                 return Ok(());
             }
             // Lock order: accepted_narrations before items (existing).
-            self.enqueue_action(action, source, session.clone())?;
+            self.enqueue_action(action, source, session.clone(), herdr_pane)?;
             accepted.insert(id, session);
         } else {
-            self.enqueue_action(action, source, session)?;
+            self.enqueue_action(action, source, session, herdr_pane)?;
         }
         Ok(())
     }
@@ -815,11 +863,12 @@ impl TtsQueue {
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> Item {
         let before = speech_depth(q);
         let item = q.remove(pos).expect("select_pos returns a valid index");
-        self.publish_queue_depth(before, speech_depth(q));
+        self.publish_queue_depth(before, q);
         self.in_flight.store(true, Ordering::SeqCst);
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
             session: item.session.clone(),
+            herdr_pane: item.herdr_pane.clone(),
             speech: item.action.speech_text().is_some(),
             utterance: Self::claimed_utterance(&item),
         });
@@ -829,6 +878,109 @@ impl TtsQueue {
     /// Update recency fallback. Caller holds `items` (lock order: items → active).
     fn note_recent(&self, session: &Option<String>) {
         self.active.lock().unwrap().recent = session.clone();
+    }
+
+    fn herdr_pane_for_session(&self, session: &Option<String>) -> Option<String> {
+        let session = session.as_deref()?;
+        let real = session
+            .strip_prefix(GROK_STOP_STICKY_PREFIX)
+            .unwrap_or(session);
+        ds_config::herdr_pane_id(real)
+            .map(str::to_string)
+            .or_else(|| self.herdr_aliases.lock().unwrap().get(real).cloned())
+    }
+
+    fn register_herdr_pane(
+        &self,
+        pane_id: Option<&str>,
+        source: Option<WiredAgent>,
+        queue_session: Option<&str>,
+    ) {
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+        let mut sessions = self.herdr_sessions.lock().unwrap();
+        let prior = sessions.get(pane_id);
+        let next = HerdrSessionRecord {
+            source: source.or_else(|| prior.and_then(|record| record.source)),
+            queue_session: queue_session
+                .filter(|session| ds_config::herdr_pane_id(session).is_some())
+                .map(str::to_string)
+                .or_else(|| prior.and_then(|record| record.queue_session.clone())),
+            voice: prior.and_then(|record| record.voice.clone()),
+            language: prior.and_then(|record| record.language.clone()),
+        };
+        if prior != Some(&next) {
+            sessions.insert(pane_id.to_string(), next);
+            drop(sessions);
+            self.gate.bump();
+        }
+    }
+
+    /// Join engine-side stream narration back to the Herdr pane reported by hooks.
+    pub fn link_sessions(
+        &self,
+        logical_session: Option<&str>,
+        queue_session: Option<&str>,
+        source: Option<WiredAgent>,
+    ) {
+        let pane_id = queue_session
+            .and_then(ds_config::herdr_pane_id)
+            .or_else(|| logical_session.and_then(ds_config::herdr_pane_id));
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+        {
+            let mut aliases = self.herdr_aliases.lock().unwrap();
+            if let Some(logical) = logical_session {
+                aliases.insert(logical.to_string(), pane_id.to_string());
+            }
+            if let Some(queue) = queue_session {
+                aliases.insert(queue.to_string(), pane_id.to_string());
+            }
+        }
+        self.register_herdr_pane(Some(pane_id), source, queue_session);
+    }
+
+    pub fn unlink_sessions(&self, logical_session: Option<&str>, queue_session: Option<&str>) {
+        let mut aliases = self.herdr_aliases.lock().unwrap();
+        let pane_id = queue_session
+            .and_then(ds_config::herdr_pane_id)
+            .map(str::to_string)
+            .or_else(|| logical_session.and_then(|session| aliases.get(session).cloned()));
+        if let Some(logical) = logical_session {
+            aliases.remove(logical);
+        }
+        if let Some(queue) = queue_session {
+            aliases.remove(queue);
+        }
+        if let Some(pane_id) = pane_id {
+            aliases.retain(|_, mapped| mapped != &pane_id);
+            drop(aliases);
+            let removed = self.herdr_sessions.lock().unwrap().remove(&pane_id);
+            self.herdr_queue_depths.lock().unwrap().remove(&pane_id);
+            if removed.is_some() {
+                self.gate.bump();
+            }
+        }
+    }
+
+    fn publish_herdr_voice(&self, pane_id: Option<&str>, voice: &str, language: Option<&str>) {
+        let Some(pane_id) = pane_id else {
+            return;
+        };
+        let mut sessions = self.herdr_sessions.lock().unwrap();
+        let Some(record) = sessions.get_mut(pane_id) else {
+            return;
+        };
+        let next_voice = Some(voice.to_string());
+        let next_language = language.map(str::to_string);
+        if record.voice != next_voice || record.language != next_language {
+            record.voice = next_voice;
+            record.language = next_language;
+            drop(sessions);
+            self.gate.bump();
+        }
     }
 
     /// Global mute on warm child (speech silent; cues suppressed).
@@ -854,7 +1006,7 @@ impl TtsQueue {
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
         let discarded = discard_items(&mut items, |_| false);
-        self.publish_queue_depth(before, speech_depth(&items));
+        self.publish_queue_depth(before, &items);
         drop(items);
         // Not under `items` (spans helper I/O; status reads the ring).
         self.record_discarded(&discarded);
@@ -878,7 +1030,7 @@ impl TtsQueue {
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
         let discarded = prune_session(&mut items, &session);
-        self.publish_queue_depth(before, speech_depth(&items));
+        self.publish_queue_depth(before, &items);
         let cancel_current = self
             .playing
             .lock()
@@ -933,7 +1085,7 @@ impl TtsQueue {
                 if let Some(sticky) = grok_stop_sticky_sibling(&target) {
                     discarded.extend(prune_session(&mut items, &Some(sticky)));
                 }
-                self.publish_queue_depth(before, speech_depth(&items));
+                self.publish_queue_depth(before, &items);
                 if playing_is_target {
                     self.hard_cancel_in_flight_locked(&items);
                 }
@@ -953,7 +1105,7 @@ impl TtsQueue {
                     .as_ref()
                     .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
                 discarded = retain_only_session(&mut items, &Some(target));
-                self.publish_queue_depth(before, speech_depth(&items));
+                self.publish_queue_depth(before, &items);
                 if playing_is_other {
                     self.hard_cancel_in_flight_locked(&items);
                 }
@@ -1026,7 +1178,18 @@ impl TtsQueue {
     /// Mark active terminal (`MarkActive`). Holds items around update (no lost wakeup).
     pub fn set_active_session(&self, session: Option<String>) {
         let _q = self.items.lock().unwrap();
-        self.active.lock().unwrap().explicit = session;
+        let changed = {
+            let mut active = self.active.lock().unwrap();
+            if active.explicit == session {
+                false
+            } else {
+                active.explicit = session;
+                true
+            }
+        };
+        if changed {
+            self.gate.bump();
+        }
         self.cv.notify_one();
     }
 
@@ -1095,19 +1258,45 @@ impl TtsQueue {
 
     /// Status snapshot that never waits on `items`, which spans helper I/O.
     pub fn tts_status_sample(&self) -> TtsStatusSample {
-        let active = self.is_tts_active();
+        let speaking = self.is_tts_active();
         let pending = self.queue_depth.load(Ordering::SeqCst);
-        let claim = active
+        let claim = speaking
             .then(|| self.playing.lock().unwrap().clone())
             .flatten();
         let source = claim.as_ref().and_then(|claim| claim.source);
+        let active_session = self.active.lock().unwrap().effective();
+        let depths = self.herdr_queue_depths.lock().unwrap().clone();
+        let mut voice_sessions = self
+            .herdr_sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(pane_id, record)| {
+                let active = record.queue_session == active_session;
+                let queued = depths.get(pane_id).copied().unwrap_or(0);
+                ds_status::VoiceSessionStatus {
+                    pane_id: pane_id.clone(),
+                    source: record.source,
+                    active,
+                    speaking: speaking
+                        && claim.as_ref().and_then(|claim| claim.herdr_pane.as_deref())
+                            == Some(pane_id.as_str()),
+                    queued,
+                    blocked: queued > 0 && !active,
+                    voice: record.voice.clone(),
+                    language: record.language.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        voice_sessions.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
         // Playback edges already publish changes to this in-flight addend.
         let speaking_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
         TtsStatusSample {
-            speaking: active,
+            speaking,
             speaker: source,
             queued: pending + speaking_utterance,
             utterance: claim.and_then(|claim| claim.utterance),
+            voice_sessions,
             recent_utterances: self.utterances.lock().unwrap().iter().cloned().collect(),
         }
     }
@@ -1115,13 +1304,32 @@ impl TtsQueue {
     /// Publish the new pending speech depth, then bump WaitModelStatus only when it changed.
     /// Store-before-bump so a woken waiter reads the depth that caused the wake.
     /// Call under the `items` guard from every site that mutates the queue.
-    fn publish_queue_depth(&self, before: usize, after: usize) {
+    fn publish_queue_depth(&self, before: usize, items: &VecDeque<Item>) {
+        let after = speech_depth(items);
         let prev = self.queue_depth.swap(after as u64, Ordering::SeqCst);
         debug_assert_eq!(
             prev, before as u64,
             "pending speech depth drifted: an `items` mutation skipped publish_queue_depth"
         );
-        if before != after {
+        let mut by_pane = HashMap::new();
+        for item in items
+            .iter()
+            .filter(|item| item.action.speech_text().is_some())
+        {
+            if let Some(pane_id) = &item.herdr_pane {
+                *by_pane.entry(pane_id.clone()).or_insert(0) += 1;
+            }
+        }
+        let session_depth_changed = {
+            let mut depths = self.herdr_queue_depths.lock().unwrap();
+            if *depths == by_pane {
+                false
+            } else {
+                *depths = by_pane;
+                true
+            }
+        };
+        if before != after || session_depth_changed {
             self.gate.bump();
         }
     }
@@ -1136,7 +1344,7 @@ impl TtsQueue {
     ) -> R {
         let before = speech_depth(items);
         let out = f(items);
-        self.publish_queue_depth(before, speech_depth(items));
+        self.publish_queue_depth(before, items);
         out
     }
 
@@ -1271,13 +1479,18 @@ impl TtsQueue {
     }
 
     /// Get-or-assign agent voice ([`pick_agent_voice`]). Pool non-empty.
+    #[cfg(test)]
     fn assign_agent_voice(
         &self,
         agent: Option<WiredAgent>,
         language: &str,
         pool: &[String],
     ) -> String {
-        let key = (agent, language.to_string());
+        self.assign_voice(VoiceOwner::new(agent, None), language, pool)
+    }
+
+    fn assign_voice(&self, owner: VoiceOwner, language: &str, pool: &[String]) -> String {
+        let key = (owner, language.to_string());
         let mut map = self.agent_voices.lock().unwrap();
         let voice = pick_agent_voice(&map, pool, &key, &mut |n| fastrand::usize(..n));
         map.insert(key, voice.clone());
@@ -1308,18 +1521,30 @@ impl TtsQueue {
     /// Shared greeting+worker resolver: `(engine, voice)`. None if TTS off / empty pool.
     /// `language` is the detected language of the utterance; `None` (greeting) keeps the
     /// agent's default assignment.
+    #[cfg(test)]
     fn resolve_engine_voice(
         &self,
         cfg: &VoiceConfig,
         source: Option<WiredAgent>,
         language: Option<&str>,
     ) -> Option<(ds_config::TtsEngine, String)> {
+        self.resolve_engine_voice_for(cfg, source, None, language)
+    }
+
+    fn resolve_engine_voice_for(
+        &self,
+        cfg: &VoiceConfig,
+        source: Option<WiredAgent>,
+        herdr_pane: Option<&str>,
+        language: Option<&str>,
+    ) -> Option<(ds_config::TtsEngine, String)> {
+        let owner = VoiceOwner::new(source, herdr_pane);
         let engine = cfg.resolved_tts()?;
         let voice = match engine {
             ds_config::TtsEngine::System if cfg.tts_voices.system.is_empty() => String::new(),
             ds_config::TtsEngine::System => self.pick_for_language(
                 || ds_tts::enumerate::VoiceCatalog::System(self.system_voice_catalog()),
-                source,
+                owner.clone(),
                 language,
                 &cfg.tts_voices.system,
             ),
@@ -1337,12 +1562,13 @@ impl TtsQueue {
                 }
                 self.pick_for_language(
                     || self.built_in_voice_catalog(cfg.tts_model),
-                    source,
+                    owner,
                     language,
                     &pool.voices,
                 )
             }
         };
+        self.publish_herdr_voice(herdr_pane, &voice, language);
         Some((engine, voice))
     }
 
@@ -1361,12 +1587,12 @@ impl TtsQueue {
     fn pick_for_language<'a>(
         &self,
         catalog: impl FnOnce() -> ds_tts::enumerate::VoiceCatalog<'a>,
-        source: Option<WiredAgent>,
+        owner: VoiceOwner,
         language: Option<&str>,
         pool: &[String],
     ) -> String {
         let Some(language) = language else {
-            return self.assign_agent_voice(source, DEFAULT_VOICE_KEY, pool);
+            return self.assign_voice(owner, DEFAULT_VOICE_KEY, pool);
         };
         let catalog = catalog();
         let mut candidates = catalog.pool_for_language(pool, language);
@@ -1377,9 +1603,9 @@ impl TtsQueue {
             // No voice anywhere owns the language (fresh install, or a language the catalog
             // does not cover). Keep the agent's usual voice rather than drop the utterance:
             // synthesis still receives the detected language, so pronunciation stays right.
-            return self.assign_agent_voice(source, DEFAULT_VOICE_KEY, pool);
+            return self.assign_voice(owner, DEFAULT_VOICE_KEY, pool);
         }
-        self.assign_agent_voice(source, language, &candidates)
+        self.assign_voice(owner, language, &candidates)
     }
 
     /// Greet on open (if enabled). Claims agent voice now so same agent matches on open.
@@ -1388,7 +1614,11 @@ impl TtsQueue {
         if !cfg.greet {
             return;
         }
-        let Some((engine, voice)) = self.resolve_engine_voice(&cfg, source, None) else {
+        let herdr_pane = self.herdr_pane_for_session(&session);
+        self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
+        let Some((engine, voice)) =
+            self.resolve_engine_voice_for(&cfg, source, herdr_pane.as_deref(), None)
+        else {
             return;
         };
         let name = ds_tts::enumerate::voice_display_name(engine, cfg.tts_model, &voice);
@@ -1606,11 +1836,15 @@ impl TtsQueue {
             // uses — System and built-in both claim this agent's configured pool
             // voice. Off / no usable rung / empty pool ⇒ a blank voice (speak_one no-ops,
             // value unused). The selected target's `voice` then overrides that base.
-            let (engine, base_voice) =
-                match self.resolve_engine_voice(&cfg, item.source, Some(&language)) {
-                    Some((e, v)) => (Some(e), v),
-                    None => (None, String::new()),
-                };
+            let (engine, base_voice) = match self.resolve_engine_voice_for(
+                &cfg,
+                item.source,
+                item.herdr_pane.as_deref(),
+                Some(&language),
+            ) {
+                Some((e, v)) => (Some(e), v),
+                None => (None, String::new()),
+            };
             // Only the live target's block participates, so an override for another model cannot
             // leak across a config switch. System voices remain freeform; built-in ids are clamped.
             let voice_override = target_args.and_then(ds_config::TtsTargetArgs::voice);
@@ -1852,7 +2086,7 @@ impl TtsQueue {
         let mut q = self.items.lock().unwrap();
         let before = speech_depth(&q);
         q.push_front(item);
-        self.publish_queue_depth(before, speech_depth(&q));
+        self.publish_queue_depth(before, &q);
         true
     }
 
@@ -2203,8 +2437,8 @@ mod tests {
     }
 
     /// Assignment key for `agent` speaking English.
-    fn key(agent: WiredAgent) -> (Option<WiredAgent>, String) {
-        (Some(agent), "en".to_string())
+    fn key(agent: WiredAgent) -> (VoiceOwner, String) {
+        (VoiceOwner::new(Some(agent), None), "en".to_string())
     }
 
     #[test]
@@ -2270,7 +2504,10 @@ mod tests {
         let p = pool();
         let mut a = HashMap::new();
         a.insert(
-            (Some(WiredAgent::Codex), "it".to_string()),
+            (
+                VoiceOwner::new(Some(WiredAgent::Codex), None),
+                "it".to_string(),
+            ),
             "af_sarah".into(),
         );
         assert_eq!(
@@ -2278,7 +2515,10 @@ mod tests {
             "af_sarah"
         );
         a.insert(
-            (Some(WiredAgent::Codex), "en".to_string()),
+            (
+                VoiceOwner::new(Some(WiredAgent::Codex), None),
+                "en".to_string(),
+            ),
             "af_sarah".into(),
         );
         assert_eq!(
@@ -2316,7 +2556,7 @@ mod tests {
         // The greeting claims under the language-less key, then the first reply resolves under
         // a concrete language: without the seed it would roll a FRESH voice and the announced
         // name would never be heard again. The roll here would pick something else.
-        let claim = |agent| (Some(agent), String::new());
+        let claim = |agent| (VoiceOwner::new(Some(agent), None), String::new());
         let en = vec!["af_sarah".to_string(), "am_adam".to_string()];
 
         let mut a = HashMap::new();
@@ -2332,7 +2572,10 @@ mod tests {
             pick_agent_voice(
                 &a,
                 &italian,
-                &(Some(WiredAgent::Codex), "it".to_string()),
+                &(
+                    VoiceOwner::new(Some(WiredAgent::Codex), None),
+                    "it".to_string(),
+                ),
                 &mut |n| n - 1
             ),
             "if_sara"
@@ -2411,6 +2654,7 @@ mod tests {
             },
             source: None,
             session: session.map(str::to_string),
+            herdr_pane: None,
             resume_skip: 0,
             utterance_id: None,
         }
@@ -2607,6 +2851,7 @@ mod tests {
             },
             source: None,
             session: None,
+            herdr_pane: None,
             resume_skip: 0,
             utterance_id: None,
         }
@@ -3008,6 +3253,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3020,6 +3266,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: Some(WiredAgent::Grok),
             session: Some("open".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3035,12 +3282,92 @@ mod tests {
         assert_eq!(idle.queued, 0);
     }
 
+    #[test]
+    fn herdr_panes_keep_distinct_voices_and_publish_routing_state() {
+        let q = mk_queue();
+        let pane_a = ds_config::herdr_queue_scope("pane-a");
+        let pane_b = ds_config::herdr_queue_scope("pane-b");
+        q.link_sessions(Some("logical-a"), Some(&pane_a), Some(WiredAgent::Codex));
+        q.link_sessions(Some("logical-b"), Some(&pane_b), Some(WiredAgent::Codex));
+        q.set_active_session(Some(pane_a.clone()));
+
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let voice_a = q
+            .resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"))
+            .unwrap()
+            .1;
+        let voice_b = q
+            .resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-b"), Some("en"))
+            .unwrap()
+            .1;
+        assert_ne!(voice_a, voice_b);
+        assert_eq!(
+            q.resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"),)
+                .unwrap()
+                .1,
+            voice_a
+        );
+
+        q.enqueue_narration(
+            "from a".into(),
+            Some(WiredAgent::Codex),
+            Some("logical-a".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        q.enqueue_narration(
+            "from b".into(),
+            Some(WiredAgent::Codex),
+            Some("logical-b".into()),
+            None,
+            None,
+        )
+        .unwrap();
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.set_active_for_test(true);
+
+        let status = q.tts_status_sample();
+        let a = status
+            .voice_sessions
+            .iter()
+            .find(|row| row.pane_id == "pane-a")
+            .unwrap();
+        assert!(a.active);
+        assert!(a.speaking);
+        assert_eq!(a.queued, 0);
+        assert!(!a.blocked);
+        assert_eq!(a.voice.as_deref(), Some(voice_a.as_str()));
+
+        let b = status
+            .voice_sessions
+            .iter()
+            .find(|row| row.pane_id == "pane-b")
+            .unwrap();
+        assert!(!b.active);
+        assert!(!b.speaking);
+        assert_eq!(b.queued, 1);
+        assert!(b.blocked);
+        assert_eq!(b.voice.as_deref(), Some(voice_b.as_str()));
+    }
+
     /// Stand in for the worker's claim so the record tests can drive resolution and fate
     /// without a live helper child.
     fn claim_utterance_for_test(q: &TtsQueue, id: u64) {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            herdr_pane: None,
             speech: true,
             utterance: Some(ds_status::UtteranceStatus {
                 id,
@@ -3145,6 +3472,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            herdr_pane: None,
             speech: false,
             utterance: None,
         });
@@ -3727,6 +4055,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("a".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3744,6 +4073,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("b".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3782,6 +4112,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: playing.map(str::to_string),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3911,6 +4242,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("other".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3943,6 +4275,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("a".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -3974,6 +4307,7 @@ mod tests {
         *q3.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("grok-stop:a".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -4364,6 +4698,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("cleared".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -4385,6 +4720,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("current".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -4406,6 +4742,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("other".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -4966,7 +5303,10 @@ mod tests {
     fn end_session_barges_the_window_but_keeps_the_agent_assignment() {
         let q = mk_queue();
         q.agent_voices.lock().unwrap().insert(
-            (Some(WiredAgent::ClaudeCode), String::new()),
+            (
+                VoiceOwner::new(Some(WiredAgent::ClaudeCode), None),
+                String::new(),
+            ),
             "af_sarah".to_string(),
         );
         q.edit_items_for_test(|q| q.extend([narr(Some("other")), narr(Some("s1"))]));
@@ -4974,6 +5314,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("s1".into()),
+            herdr_pane: None,
             speech: true,
             utterance: None,
         });
@@ -4996,10 +5337,10 @@ mod tests {
         // The agent keeps its voice past the window's life (runtime-stable assignment):
         // the next Claude Code terminal must speak the same voice.
         assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
+            q.agent_voices.lock().unwrap().get(&(
+                VoiceOwner::new(Some(WiredAgent::ClaudeCode), None),
+                String::new(),
+            )),
             Some(&"af_sarah".to_string())
         );
     }
@@ -5012,10 +5353,10 @@ mod tests {
         let v1 = q.assign_agent_voice(Some(WiredAgent::ClaudeCode), "en", &pool);
         assert!(pool.contains(&v1), "the pick comes from the pool");
         assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(Some(WiredAgent::ClaudeCode), "en".to_string())),
+            q.agent_voices.lock().unwrap().get(&(
+                VoiceOwner::new(Some(WiredAgent::ClaudeCode), None),
+                "en".to_string(),
+            )),
             Some(&v1)
         );
         // The same agent reuses its recorded pick.
@@ -5074,10 +5415,10 @@ mod tests {
             Some((ds_config::TtsEngine::BuiltIn, "default".to_string()))
         );
         assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
+            q.agent_voices.lock().unwrap().get(&(
+                VoiceOwner::new(Some(WiredAgent::ClaudeCode), None),
+                String::new(),
+            )),
             Some(&"default".to_string())
         );
     }
@@ -5100,10 +5441,10 @@ mod tests {
         assert!(cfg.tts_voices.kokoro.contains(&voice));
         // The source is threaded through to the agent-voice map.
         assert_eq!(
-            q.agent_voices
-                .lock()
-                .unwrap()
-                .get(&(Some(WiredAgent::ClaudeCode), String::new())),
+            q.agent_voices.lock().unwrap().get(&(
+                VoiceOwner::new(Some(WiredAgent::ClaudeCode), None),
+                String::new(),
+            )),
             Some(&voice)
         );
         // Every later resolution for the same agent — any window, any request — reuses it.
@@ -5288,7 +5629,10 @@ mod tests {
             .expect("Kokoro is usable on this build");
         assert!(cfg.tts_voices.kokoro.contains(&voice));
         assert_eq!(
-            q.agent_voices.lock().unwrap().get(&(None, String::new())),
+            q.agent_voices
+                .lock()
+                .unwrap()
+                .get(&(VoiceOwner::new(None, None), String::new())),
             Some(&voice)
         );
     }
@@ -5315,7 +5659,10 @@ mod tests {
             .agent_voices
             .lock()
             .unwrap()
-            .get(&(Some(WiredAgent::Codex), String::new()))
+            .get(&(
+                VoiceOwner::new(Some(WiredAgent::Codex), None),
+                String::new(),
+            ))
             .cloned()
             .expect("greeting claims the agent voice at open");
         // The queued greeting carries the claimed voice as its per-item override, and

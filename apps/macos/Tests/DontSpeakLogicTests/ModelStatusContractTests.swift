@@ -22,6 +22,7 @@ final class ModelStatusContractTests: XCTestCase {
             "warning": null,
             "muted": false
           },
+          "voice_sessions": [],
           "tts": {
             "engine": "system",
             "model": null,
@@ -81,6 +82,7 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertNil(dto.activity.language)
         XCTAssertNil(dto.activity.warning)
         XCTAssertFalse(dto.activity.muted)
+        XCTAssertEqual(dto.voiceSessions, [])
 
         XCTAssertEqual(dto.tts.engine, "system")
         XCTAssertNil(dto.tts.model)
@@ -113,13 +115,13 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertFalse(dto.agents)
     }
 
-    func testSampleJSONObjectHasExactlyTenRootKeys() throws {
+    func testSampleJSONObjectHasExactlyElevenRootKeys() throws {
         let root = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(Self.sampleJSON.utf8)) as? [String: Any])
         let keys = Set(root.keys)
-        XCTAssertEqual(keys.count, 10, "no duplicated root-level engine fields")
+        XCTAssertEqual(keys.count, 11, "no duplicated root-level engine fields")
         for key in [
-            "seq", "activity", "tts", "stt", "diarization",
+            "seq", "activity", "voice_sessions", "tts", "stt", "diarization",
             "dictation", "stats", "tray", "downloads", "agents",
         ] {
             XCTAssertTrue(keys.contains(key), "missing root field \(key)")
@@ -138,6 +140,11 @@ final class ModelStatusContractTests: XCTestCase {
                     "speaking": true, "speaker": "claude", "utterance_id": 12,
                     "voice": "if_sara", "language": "it", "warning": null, "muted": false
                   },
+                  "voice_sessions": [{
+                    "pane_id": "workspace:p1", "source": "codex", "active": true,
+                    "speaking": true, "queued": 2, "blocked": false,
+                    "voice": "if_sara", "language": "it"
+                  }],
                   "tts": {
                     "engine": "built_in", "model": "kokoro", "language": "it",
                     "provider": "mlx",
@@ -183,6 +190,8 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertEqual(dto.activity.speaker, "claude")
         XCTAssertEqual(dto.activity.utteranceId, 12)
         XCTAssertEqual(dto.activity.voice, "if_sara")
+        XCTAssertEqual(dto.voiceSessions?.first?.paneId, "workspace:p1")
+        XCTAssertEqual(dto.voiceSessions?.first?.queued, 2)
         XCTAssertEqual(dto.tts.model, .kokoro)
         XCTAssertEqual(dto.tts.recentUtterances.first?.id, 11)
         XCTAssertEqual(dto.tts.recentUtterances.first?.voice, "if_sara")

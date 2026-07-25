@@ -95,6 +95,11 @@ fn handle_mark_active(
             grok_sessions.nudge(s);
         }
     }
+    ttsq.link_sessions(
+        sessions.logical.as_deref(),
+        sessions.queue.as_deref(),
+        source,
+    );
     if synthetic {
         return; // no active-terminal steal, no TTS queue touch
     }
@@ -185,6 +190,7 @@ pub(crate) fn spawn_ipc_server(
                             grok_sessions.nudge(s);
                         }
                     }
+                    ttsq.link_sessions(session.as_deref(), queue_session.as_deref(), source);
                     ttsq.greet_session(source, queue_session);
                     emit(&ds_ipc::Response::Done);
                 }
@@ -312,10 +318,11 @@ pub(crate) fn spawn_ipc_server(
                         }
                     }
                     if queue_session.is_some() {
-                        ttsq.end_session(queue_session);
+                        ttsq.end_session(queue_session.clone());
                     } else {
                         ttsq.clear();
                     }
+                    ttsq.unlink_sessions(session.as_deref(), queue_session.as_deref());
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::TestRecognitionStart => {

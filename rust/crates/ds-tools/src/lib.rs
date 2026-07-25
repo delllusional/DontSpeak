@@ -679,6 +679,27 @@ fn output_schema_for(output: Output) -> Value {
                         "tts_active": { "type": "boolean" },
                         "queued": { "type": "integer", "minimum": 0 },
                         "muted": { "type": "boolean" },
+                        "voice_sessions": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "pane_id": { "type": "string" },
+                                    "source": { "type": ["string", "null"] },
+                                    "active": { "type": "boolean" },
+                                    "speaking": { "type": "boolean" },
+                                    "queued": { "type": "integer", "minimum": 0 },
+                                    "blocked": { "type": "boolean" },
+                                    "voice": { "type": ["string", "null"] },
+                                    "language": { "type": ["string", "null"] }
+                                },
+                                "required": [
+                                    "pane_id", "source", "active", "speaking", "queued",
+                                    "blocked", "voice", "language"
+                                ],
+                                "additionalProperties": false
+                            }
+                        },
                         "utterance_id": { "type": ["integer", "null"], "minimum": 1 },
                         "voice": { "type": ["string", "null"] },
                         "detected_language": { "type": ["string", "null"] },

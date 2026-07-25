@@ -60,6 +60,9 @@ public class HealthSnapshotTests
     {
         var dto = JsonSerializer.Deserialize<ModelStatusDto>("""
             {"activity":{"utterance_id":12,"voice":"if_sara","language":"it","warning":null},
+             "voice_sessions":[{"pane_id":"pane-7","source":"codex","active":true,
+                    "speaking":true,"queued":2,"blocked":false,"voice":"af_sarah",
+                    "language":"en-us"}],
              "tts":{"model":null,"recent_utterances":[{"id":11,"voice":"if_sara",
                     "language":"it","warning":null,"outcome":"spoken"}]},
              "downloads":[{"target":"kokoro_model","done_bytes":25,"total_bytes":100,
@@ -69,6 +72,11 @@ public class HealthSnapshotTests
         Assert.Equal(12UL, dto!.Activity!.UtteranceId);
         Assert.Equal("if_sara", dto.Activity.Voice);
         Assert.Equal("it", dto.Activity.Language);
+        Assert.Single(dto.VoiceSessions!);
+        Assert.Equal("pane-7", dto.VoiceSessions![0].PaneId);
+        Assert.Equal("af_sarah", dto.VoiceSessions[0].Voice);
+        Assert.True(dto.VoiceSessions[0].Speaking);
+        Assert.Equal(2U, dto.VoiceSessions[0].Queued);
         Assert.Equal(11UL, dto.Tts!.RecentUtterances![0].Id);
         Assert.Equal("if_sara", dto.Tts.RecentUtterances[0].Voice);
         Assert.Equal("spoken", dto.Tts.RecentUtterances[0].Outcome);

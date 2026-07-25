@@ -398,6 +398,7 @@ internal sealed record ModelStatusDto
 {
     [JsonPropertyName("seq")] public ulong Seq { get; init; }
     [JsonPropertyName("activity")] public ActivityDto? Activity { get; init; }
+    [JsonPropertyName("voice_sessions")] public VoiceSessionDto[]? VoiceSessions { get; init; }
     [JsonPropertyName("tts")] public TtsStatusDto? Tts { get; init; }
     [JsonPropertyName("stt")] public SttStatusDto? Stt { get; init; }
     [JsonPropertyName("diarization")] public DiarizationStatusDto? Diarization { get; init; }
@@ -406,6 +407,18 @@ internal sealed record ModelStatusDto
     [JsonPropertyName("tray")] public string?[]? TrayIndicator { get; init; }
     [JsonPropertyName("downloads")] public DownloadStatusDto[]? Downloads { get; init; }
     [JsonPropertyName("agents")] public bool Agents { get; init; }
+}
+
+internal sealed record VoiceSessionDto
+{
+    [JsonPropertyName("pane_id")] public string? PaneId { get; init; }
+    [JsonPropertyName("source")] public string? Source { get; init; }
+    [JsonPropertyName("active")] public bool Active { get; init; }
+    [JsonPropertyName("speaking")] public bool Speaking { get; init; }
+    [JsonPropertyName("queued")] public uint Queued { get; init; }
+    [JsonPropertyName("blocked")] public bool Blocked { get; init; }
+    [JsonPropertyName("voice")] public string? Voice { get; init; }
+    [JsonPropertyName("language")] public string? Language { get; init; }
 }
 
 internal sealed record EngineStatusDto

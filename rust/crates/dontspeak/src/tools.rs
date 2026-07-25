@@ -360,6 +360,7 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
                 "tts_active": status.activity.speaking,
                 "queued": status.stats.tts.queued,
                 "muted": status.activity.muted,
+                "voice_sessions": status.voice_sessions,
                 "utterance_id": status.activity.utterance_id,
                 "voice": status.activity.voice,
                 "detected_language": status.activity.language,
@@ -414,6 +415,27 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
         };
     }
     Ok(out)
+}
+
+pub(crate) fn runtime_status_json(
+    since: Option<u64>,
+    timeout_ms: Option<u64>,
+) -> Result<Value, String> {
+    if timeout_ms.is_some() && since.is_none() {
+        return Err("status: `--timeout-ms` requires `--since`".into());
+    }
+    let paths = Paths::resolve().ok_or_else(|| "cannot resolve engine socket".to_string())?;
+    match probe_engine(
+        Some(&paths.engine_sock),
+        since,
+        timeout_ms.unwrap_or(30_000),
+    ) {
+        EngineProbe::Live(status) => serde_json::to_value(status)
+            .map_err(|error| format!("status serialization failed: {error}")),
+        EngineProbe::Invalid => Err("unexpected engine response".into()),
+        EngineProbe::Unreachable => Err("engine unavailable".into()),
+        EngineProbe::Unresolved => Err("cannot resolve engine socket".into()),
+    }
 }
 
 enum EngineProbe {
@@ -1127,6 +1149,11 @@ mod status_output {
                 "utterance_id": 12, "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
+            "voice_sessions": [{
+                "pane_id": "pane-7", "source": "codex", "active": true,
+                "speaking": true, "queued": 2, "blocked": false,
+                "voice": "if_sara", "language": "it"
+            }],
             "tts": {
                 "engine": "built_in", "model": "kokoro", "language": "en",
                 "provider": "cpu",
@@ -1397,6 +1424,8 @@ mod status_output {
         server.join().unwrap();
 
         assert_eq!(value["state"]["seq"], 8);
+        assert_eq!(value["state"]["voice_sessions"][0]["pane_id"], "pane-7");
+        assert_eq!(value["state"]["voice_sessions"][0]["queued"], 2);
         assert_eq!(value["state"]["utterance_id"], 12);
         assert_eq!(value["state"]["voice"], "if_sara");
         assert_eq!(value["state"]["detected_language"], "it");

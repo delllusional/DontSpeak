@@ -3,6 +3,21 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub const HERDR_PANE_ID_ENV: &str = "HERDR_PANE_ID";
+const HERDR_SCOPE_PREFIX: &str = "dontspeak:herdr:HERDR_PANE_ID:";
+
+/// Queue identity shared by hooks and MCP children inside one Herdr pane.
+pub fn herdr_queue_scope(pane_id: &str) -> String {
+    format!("{HERDR_SCOPE_PREFIX}{pane_id}")
+}
+
+/// Recover the public Herdr pane id used by `agent.list` and pane events.
+pub fn herdr_pane_id(scope: &str) -> Option<&str> {
+    scope
+        .strip_prefix(HERDR_SCOPE_PREFIX)
+        .filter(|value| !value.is_empty())
+}
+
 /// A client supported by DontSpeak's wiring registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WiredAgent {
@@ -108,5 +123,12 @@ mod tests {
     fn a_non_string_value_still_errors() {
         assert!(serde_json::from_str::<WiredAgent>("42").is_err());
         assert!(serde_json::from_str::<WiredAgent>("null").is_err());
+    }
+
+    #[test]
+    fn herdr_scope_round_trips_public_pane_ids_with_colons() {
+        let scope = herdr_queue_scope("workspace:p7");
+        assert_eq!(herdr_pane_id(&scope), Some("workspace:p7"));
+        assert_eq!(herdr_pane_id("dontspeak:launch:other"), None);
     }
 }
