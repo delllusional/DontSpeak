@@ -1,6 +1,7 @@
 # Fresh task baseline
 
-Start and land work from a current baseline.
+Canonical source for starting, publishing, landing, cleaning up, and closing related
+issues. Other instructions link here instead of copying these rules.
 
 ## Default workflow
 
@@ -39,8 +40,8 @@ Pure Q&A that doesn't inspect the repo needs no worktree.
   assigned worktree.
 - Workers never edit the `main` worktree or another task worktree and do not stash,
   rebase, reset, prune, remove worktrees, or rewrite shared branches.
-- The integrator alone updates `main`, lands verified commits, and performs worktree
-  cleanup when the user explicitly requests it.
+- The integrator alone updates `main`, lands verified commits, and cleans up their
+  worktrees and branches.
 - Namespace build outputs, ports, databases, processes, and other external state per
   task. Git worktrees isolate tracked files, not machine-wide resources.
 

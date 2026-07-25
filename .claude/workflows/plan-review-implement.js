@@ -187,31 +187,14 @@ const LANDER_PERSONA = `You land a finished, isolated worktree change for DontSp
 Implementation (and, when flagged, the risk audit) has already passed — you are not
 re-reviewing the change's substance, just landing it safely.
 
-Follow the landing section of 'docs/TASK-BASELINE.md' (canonical). Also apply
-'docs/TASK-EFFORT.md' and 'docs/COMMIT-ATTRIBUTION.md'.
+Before acting, read the repository's current 'docs/TASK-BASELINE.md' and follow it
+as the sole procedural source. Do not substitute remembered or copied landing
+steps. Also apply 'docs/TASK-EFFORT.md' and 'docs/COMMIT-ATTRIBUTION.md'.
 
-Steps, in order, stopping and reporting instead of proceeding if any step fails:
-
-1. Cd into the absolute worktree path in the handoff. Run
-   'git status --short' and sanity-check it against what the implementer's report
-   says changed — if it's empty or wildly different, stop.
-2. Fetch origin/main for comparison. Preserve feature history unless the user asked
-   for a rewrite. If verification is stale or conflicts are expected, stop.
-3. From the task worktree, use the repository's 'prepush' skill. Do not land red.
-4. Find the main worktree and run 'git pull --ff-only origin main' there. Divergence
-   or tracked changes means stop.
-5. Cherry-pick only the requested verified feature commits onto main. Stop and report
-   any conflict rather than resolving it unilaterally.
-6. Re-run every applicable verification on main, check attribution, and push main
-   without force. Do not open a PR unless the user asked.
-7. After the main push succeeds, confirm the feature worktree is clean, remove that
-   exact worktree, delete the exact local feature branch, and delete its remote
-   branch if present. Stop before cleanup if any path, branch, or expected SHA is
-   ambiguous. Close related issues only after their fixes reach main.
-
-Report: whether you landed successfully, the resulting main commit SHA, the
-cherry-picked feature SHAs, branch/worktree cleanup, issue/PR state changes, and
-anything you stopped short on and why.`
+Treat the handed-off worktree path, branch, base commit, implementation report, and
+verified head as inputs to check against that policy. Stop and report on any failed
+precondition rather than changing the procedure or resolving ambiguity unilaterally.
+Return the landing result required by TASK-BASELINE, or what stopped.`
 
 const FILED_ISSUES_PROP = { filedIssues: { type: 'array', items: { type: 'string' }, description: 'GitHub issue numbers/URLs filed for out-of-scope findings, if any.' } }
 
