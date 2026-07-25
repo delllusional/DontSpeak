@@ -28,6 +28,34 @@ Without it, local `bundle.sh` builds remain usable but finish with a conspicuous
 ONNX-CPU degradation warning. Distribution builds keep failing unless
 `DONTSPEAK_ALLOW_MISSING_SHIM=1` explicitly waives the missing MLX shim.
 
+### Deferred MLX params ABI release check
+
+At the next macOS release, close
+[#170](https://github.com/delllusional/DontSpeak/issues/170) only after verifying the
+exact signed Apple Silicon release candidate with all four built-in models downloaded:
+
+```sh
+cd apps/macos/DontSpeakShims
+swift test --filter TtsAbiTests
+
+release_app=/path/to/DontSpeak.app
+mlx_dylib="$release_app/Contents/Frameworks/libdontspeak_mlx.dylib"
+release_helper="$release_app/Contents/MacOS/ds-helper"
+DONTSPEAK_PROVIDER=mlx DONTSPEAK_MLX_DYLIB_PATH="$mlx_dylib" \
+  "$release_helper" --synth-check kokoro af_sarah "The release check is speaking."
+DONTSPEAK_PROVIDER=mlx DONTSPEAK_MLX_DYLIB_PATH="$mlx_dylib" \
+  "$release_helper" --synth-check chatterbox default "The release check is speaking."
+DONTSPEAK_PROVIDER=mlx DONTSPEAK_MLX_DYLIB_PATH="$mlx_dylib" \
+  "$release_helper" --synth-check qwen sohee "The release check is speaking."
+DONTSPEAK_PROVIDER=mlx DONTSPEAK_MLX_DYLIB_PATH="$mlx_dylib" \
+  "$release_helper" --synth-check omnivoice young_woman "The release check is speaking."
+```
+
+Each check must exit 0, report `provider=mlx`, positive samples and peak, and
+`non_finite=0`. The activity log must contain neither `malformed params_json` nor
+`unknown params`. Do not construct old/new helper-dylib pairs: the signed app bundles
+those components lockstep, so version skew is not a packaged-app verification case.
+
 ### Windows
 
 | Piece | Built+installed by | Running app uses |
