@@ -1441,7 +1441,6 @@ fn build_credits_page() -> gtk::Widget {
                     languages
                         .iter()
                         .filter_map(|code| code.as_str())
-                        .filter(|code| *code != "auto")
                         .map(|code| t(&format!("language.{code}")))
                         .collect::<Vec<_>>()
                         .join(", ")

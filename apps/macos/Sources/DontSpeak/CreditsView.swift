@@ -181,7 +181,6 @@ struct CreditsView: View {
             return L.t("libraries.automatic_languages", ["count": String(count)])
         }
         return lib.languages
-            .filter { $0 != "auto" }
             .map { L.t("language.\($0)") }
             .joined(separator: ", ")
     }
