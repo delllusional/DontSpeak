@@ -23,7 +23,9 @@ shape later but can't recover which runtime produced it).
 
 Capture sources:
 
-- **Codex** — hook model slug; turn context for effort.
+- **Codex** — hook model slug plus matching turn context, or the same turn
+  context when the current transcript's latest unfinished `exec_command` is the
+  commit for this exact worktree.
 - **Claude** — transcript for model; tool hooks for applied effort.
 - **Qwen** — transcript for model; settings for `/effort` (no separate post-provider field).
 - **Grok** — session model + effort (`summary.reasoning_effort` / chat turns /
@@ -38,6 +40,10 @@ Hook mechanics:
 - PreToolUse capture is best-effort. When it is absent, `commit-msg` asks the active
   client's resolver to prove the same model and effort from its session store. The
   commit remains blocked when either value is unavailable.
+- Codex project-hook trust is path-scoped, so a newly created managed worktree can
+  skip an otherwise trusted checkout hook. The fallback accepts only the latest
+  unfinished `exec_command` in the exact active session when it targets the
+  committing worktree; completed or unrelated calls fail closed.
 - Codex effort is accepted only from the `turn_context` whose session, turn ID, and
   model match the hook payload. Captures are keyed by session in the repository's
   common Git directory so the same worker can commit from a linked worktree without

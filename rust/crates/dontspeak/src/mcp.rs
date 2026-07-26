@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
-use ds_config::{WiredAgent, client_from_mcp_name};
+use ds_config::{ClientContext, WiredAgent};
 use serde_json::{Map, Value, json};
 
 use crate::engine_launch::ensure_engine;
@@ -516,7 +516,8 @@ fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Sessi
         ));
     }
 
-    let (client, raw) = client_from_initialize(message);
+    let (context, raw) = client_context_from_initialize(message);
+    let client = context.client;
     let queue_session = crate::session_scope::for_mcp(client);
     session.identity = Some(Identity {
         client,
@@ -524,11 +525,12 @@ fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Sessi
     });
     session.lifecycle = Lifecycle::Initialized;
     log(&format!(
-        "initialize clientInfo.name={raw:?} client={}",
-        client.map_or("unwired", WiredAgent::as_str)
+        "initialize clientInfo.name={raw:?} client={} family={:?} surface={:?}",
+        client.map_or("unwired", WiredAgent::as_str),
+        context.family,
+        context.surface,
     ));
-    let codex_desktop = client.is_some_and(crate::hook_prompt::is_codex_desktop);
-    Route::Reply(ok(Some(id.value()), initialize(message, codex_desktop)))
+    Route::Reply(ok(Some(id.value()), initialize(message, context)))
 }
 
 fn route_cancellation(envelope: Envelope<'_>, session: &Session) -> Route {
@@ -638,19 +640,19 @@ fn validate_initialize(params: Option<&Map<String, Value>>) -> Result<(), String
     Ok(())
 }
 
-fn client_from_initialize(message: &Value) -> (Option<WiredAgent>, String) {
+fn client_context_from_initialize(message: &Value) -> (ClientContext, String) {
     let raw = message["params"]["clientInfo"]["name"]
         .as_str()
         .unwrap_or_default()
         .to_string();
-    (client_from_mcp_name(&raw), raw)
+    (ClientContext::for_mcp_name(&raw), raw)
 }
 
-fn initialize(message: &Value, codex_desktop: bool) -> Value {
-    initialize_result(message, digests_narration_on(), codex_desktop)
+fn initialize(message: &Value, context: ClientContext) -> Value {
+    initialize_result(message, digests_narration_on(), context)
 }
 
-fn initialize_result(message: &Value, digests_on: bool, codex_desktop: bool) -> Value {
+fn initialize_result(message: &Value, digests_on: bool, context: ClientContext) -> Value {
     let requested = message["params"]["protocolVersion"].as_str();
     let version = requested
         .filter(|version| *version == PROTOCOL_VERSION)
@@ -661,8 +663,8 @@ fn initialize_result(message: &Value, digests_on: bool, codex_desktop: bool) -> 
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
     });
     // Grok ignores passive-hook additionalContext (#95), so MCP keeps the digest contract.
-    // Codex Desktop shares the CLI's MCP config but must keep its ordinary text surface clean.
-    if digests_on && !codex_desktop {
+    // Desktop text surfaces share config with their CLI but do not accept model-facing narration.
+    if digests_on && context.allows_narration() {
         result.as_object_mut().expect("object").insert(
             "instructions".into(),
             json!(ds_config::DEFAULT_NARRATION_SPEC.trim_end()),
@@ -1245,37 +1247,87 @@ mod tests {
                 "clientInfo": {"name": "claude-code", "version": "1"}
             }
         });
+        let context = ClientContext::for_mcp_name_with_markers("claude-code", None, None);
         assert_eq!(
-            initialize_result(&message, false, false)["protocolVersion"],
+            initialize_result(&message, false, context)["protocolVersion"],
             PROTOCOL_VERSION
         );
         assert_eq!(
-            initialize_result(&message, false, false)["capabilities"]["tools"]["listChanged"],
+            initialize_result(&message, false, context)["capabilities"]["tools"]["listChanged"],
             true
         );
-        assert_eq!(
-            client_from_initialize(&message),
-            (Some(WiredAgent::ClaudeCode), "claude-code".to_string())
-        );
+        let (classified, raw) = client_context_from_initialize(&message);
+        assert_eq!(classified.client, Some(WiredAgent::ClaudeCode));
+        assert_eq!(raw, "claude-code");
     }
 
     #[test]
-    fn codex_desktop_mcp_initialize_omits_narration_instructions() {
+    fn initialize_instructions_follow_the_client_surface_matrix() {
+        let cases = [
+            (
+                "codex CLI",
+                ClientContext::for_mcp_name_with_markers("codex-mcp-client", None, None),
+                true,
+            ),
+            (
+                "Codex Desktop",
+                ClientContext::for_mcp_name_with_markers(
+                    "codex-mcp-client",
+                    Some("Codex Desktop"),
+                    None,
+                ),
+                false,
+            ),
+            (
+                "Claude Code CLI",
+                ClientContext::for_mcp_name_with_markers("claude-code", None, None),
+                true,
+            ),
+            (
+                "Claude Desktop Code",
+                ClientContext::for_mcp_name_with_markers(
+                    "claude-code",
+                    None,
+                    Some("claude-desktop"),
+                ),
+                false,
+            ),
+            (
+                "Claude Desktop Code 3p",
+                ClientContext::for_mcp_name_with_markers(
+                    "claude-code",
+                    None,
+                    Some("claude-desktop-3p"),
+                ),
+                false,
+            ),
+            (
+                "Claude Desktop Chat",
+                ClientContext::for_mcp_name_with_markers("claude-ai", None, None),
+                false,
+            ),
+            (
+                "Claude Desktop identity variant",
+                ClientContext::for_mcp_name_with_markers("claude-desktop", None, None),
+                false,
+            ),
+        ];
         let message: Value = serde_json::from_str(&initialize_line(1)).unwrap();
-        let result = initialize_result(&message, true, true);
+        for (name, context, expects_instructions) in cases {
+            let result = initialize_result(&message, true, context);
+            assert_eq!(
+                result.get("instructions").is_some(),
+                expects_instructions,
+                "{name}: {context:?}"
+            );
+        }
+
+        let cli = ClientContext::for_mcp_name_with_markers("claude-code", None, None);
         assert!(
-            result.get("instructions").is_none(),
-            "Desktop must not receive the visible narration contract"
-        );
-    }
-
-    #[test]
-    fn codex_cli_mcp_initialize_keeps_narration_instructions() {
-        let message: Value = serde_json::from_str(&initialize_line(1)).unwrap();
-        let result = initialize_result(&message, true, false);
-        assert_eq!(
-            result["instructions"],
-            ds_config::DEFAULT_NARRATION_SPEC.trim_end()
+            initialize_result(&message, false, cli)
+                .get("instructions")
+                .is_none(),
+            "digests off always omits narration instructions"
         );
     }
 

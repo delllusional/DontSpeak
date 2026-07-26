@@ -9,6 +9,8 @@ import {
   removeAttributionCache,
   repositoryRoot,
   resolveAttribution,
+  resolveCodexLiveCommit,
+  repositoryCommonDirectory,
   rewriteCommitMessage,
   validateCacheRecord,
   validateCommitMessage,
@@ -40,7 +42,26 @@ const active = activeAgentEnvironment();
 if (active?.conflict) {
   fail([`conflicting active agent markers: ${active.conflict.join(", ")}`]);
 }
-const record = normalizeCacheRecord(readAttributionCache(root, active?.sessionId));
+let record = normalizeCacheRecord(readAttributionCache(root, active?.sessionId));
+
+if (!record && active?.client === "codex") {
+  const live = resolveCodexLiveCommit(root, active.sessionId);
+  if (live) {
+    writeAttributionCache(root, {
+      version: 1,
+      client: "codex",
+      sessionId: active.sessionId,
+      root,
+      commonDir: repositoryCommonDirectory(root),
+      model: live.model,
+      effort: live.effort,
+      errors: live.errors,
+      uses: live.uses,
+      capturedAt: new Date().toISOString(),
+    });
+    record = normalizeCacheRecord(readAttributionCache(root, active.sessionId));
+  }
+}
 
 if (!record) {
   // Missing capture gets one fail-closed live-session resolution attempt.

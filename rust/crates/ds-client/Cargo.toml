@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish.workspace = true
-description = "The closed wired-agent identity enum (WiredAgent) shared by wiring, hook command lines, IPC, MCP tool calls, and activity logs."
+description = "Shared client identity and execution-surface classification for wiring, hooks, MCP, launchers, IPC, and activity logs."
 
 [dependencies]
 # The only dependency: the token is (de)serialized on the ds-ipc wire and in our

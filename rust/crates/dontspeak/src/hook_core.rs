@@ -89,10 +89,8 @@ pub fn session_id_from_payload(payload: &str) -> Option<String> {
 /// `greet_only` = `notify --greet-only` (non-streaming SessionStart — see [`notify_at`]).
 /// `client` from wiring stamps every ds-ipc request so the activity log knows who caused it.
 pub fn notify(event: &str, payload: &str, greet_only: bool, client: ds_config::WiredAgent) {
-    // Desktop shares ~/.codex/config.toml with the CLI, but its visible text surface must
-    // stay untouched by DontSpeak. In particular, do not mark a session active or feed its
-    // final reply into the engine. The CLI has no Desktop origin marker and is unaffected.
-    if crate::hook_prompt::is_codex_desktop(client) {
+    let context = ds_config::ClientContext::for_hook(client);
+    if !hook_surface_allowed(context) {
         return;
     }
     let Some(paths) = ds_config::Paths::resolve() else {
@@ -156,15 +154,71 @@ pub(crate) fn notify_at(
 /// QUERY: context JSON for `event`, or `None` when no reply / narration off.
 /// Hermes uses flat `{"context":…}`; other clients keep Claude `hookSpecificOutput`.
 pub fn provide(event: &str, _payload: &str, client: ds_config::WiredAgent) -> Option<Value> {
+    let context = ds_config::ClientContext::for_hook(client);
+    if !hook_surface_allowed(context) {
+        return None;
+    }
     match event {
         "UserPromptSubmit" => hook_prompt::narration_context(client),
         _ => None,
     }
 }
 
+fn hook_surface_allowed(context: ds_config::ClientContext) -> bool {
+    context.allows_narration()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notify_and_provide_share_the_cli_vs_desktop_surface_policy() {
+        for (context, allowed) in [
+            (
+                ds_config::ClientContext::for_wired_with_markers(
+                    ds_config::WiredAgent::Codex,
+                    None,
+                    None,
+                ),
+                true,
+            ),
+            (
+                ds_config::ClientContext::for_wired_with_markers(
+                    ds_config::WiredAgent::ClaudeCode,
+                    None,
+                    None,
+                ),
+                true,
+            ),
+            (
+                ds_config::ClientContext::for_wired_with_markers(
+                    ds_config::WiredAgent::Codex,
+                    Some("Codex Desktop"),
+                    None,
+                ),
+                false,
+            ),
+            (
+                ds_config::ClientContext::for_wired_with_markers(
+                    ds_config::WiredAgent::ClaudeCode,
+                    None,
+                    Some("claude-desktop"),
+                ),
+                false,
+            ),
+            (
+                ds_config::ClientContext::for_wired_with_markers(
+                    ds_config::WiredAgent::ClaudeCode,
+                    None,
+                    Some("claude-desktop-3p"),
+                ),
+                false,
+            ),
+        ] {
+            assert_eq!(hook_surface_allowed(context), allowed, "{context:?}");
+        }
+    }
 
     #[test]
     fn event_name_normalizes_the_grok_dialect_without_an_event_table() {

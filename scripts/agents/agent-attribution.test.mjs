@@ -29,6 +29,7 @@ import {
   privateHooksDirectory,
   readJsonLinesReverse,
   resolveAttribution,
+  resolveCodexLiveCommit,
   repositoryCommonDirectory,
   resolveShellPath,
   rewriteCommitMessage,
@@ -579,7 +580,7 @@ test("conflicting runtime markers fail closed", () => {
   );
 });
 
-test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => {
+test("commit-msg live-resolves Codex when a worktree project hook was skipped", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const home = temporaryDirectory(t);
   const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
@@ -593,7 +594,21 @@ test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => 
     `rollout-2026-07-22T10-09-33-${sessionId}.jsonl`,
   );
   jsonLines(transcript, [
-    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "xhigh" } },
+    { type: "session_meta", payload: { id: sessionId } },
+    {
+      type: "turn_context",
+      payload: { turn_id: "turn-1", model: "gpt-5.6-sol", effort: "xhigh" },
+    },
+    {
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git commit -m live", workdir: "ROOT" }),
+        call_id: "call-live",
+      },
+    },
   ]);
   const env = {
     ...isolatedEnv,
@@ -602,6 +617,14 @@ test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => 
     HOME: home,
   };
   const { root } = initializedRepository(t, env);
+  const rows = readFileSync(transcript, "utf8").replace("ROOT", root);
+  writeFileSync(transcript, rows);
+  assert.deepEqual(resolveCodexLiveCommit(root, sessionId, { home }), {
+    model: "gpt-5.6-sol",
+    effort: "xhigh",
+    uses: 1,
+    errors: [],
+  });
   ensureCommitMessageHook(root);
   writeFileSync(join(root, "f.txt"), "x\n");
   assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
@@ -612,8 +635,54 @@ test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => 
     env,
     encoding: "utf8",
   });
-  assert.notEqual(commit.status, 0, commit.stderr + commit.stdout);
-  assert.match(commit.stderr, /active model slug is unavailable/);
+  assert.equal(commit.status, 0, commit.stderr + commit.stdout);
+  assert.equal(headMessage(root, env), "Live resolve\n\nAgent: gpt-5.6-sol xhigh");
+  assert.equal(existsSync(cache), false);
+});
+
+test("Codex live resolution rejects completed and unrelated tool calls", (t) => {
+  const { env: isolatedEnv } = isolatedGitEnvironment(t);
+  const home = temporaryDirectory(t);
+  const sessionId = "session-live-fail-closed";
+  const { root } = initializedRepository(t, isolatedEnv);
+  const transcript = join(home, ".codex", "sessions", `${sessionId}.jsonl`);
+  const base = [
+    { type: "session_meta", payload: { id: sessionId } },
+    { type: "turn_context", payload: { model: "gpt-5.6-sol", effort: "high" } },
+    {
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git commit -m live", workdir: root }),
+        call_id: "call-complete",
+      },
+    },
+  ];
+  jsonLines(transcript, [
+    ...base,
+    {
+      type: "response_item",
+      payload: { type: "function_call_output", call_id: "call-complete", output: "done" },
+    },
+  ]);
+  assert.equal(resolveCodexLiveCommit(root, sessionId, { home }), undefined);
+
+  jsonLines(transcript, [
+    ...base,
+    {
+      timestamp: new Date().toISOString(),
+      type: "response_item",
+      payload: {
+        type: "function_call",
+        name: "exec_command",
+        arguments: JSON.stringify({ cmd: "git status", workdir: root }),
+        call_id: "call-other",
+      },
+    },
+  ]);
+  assert.equal(resolveCodexLiveCommit(root, sessionId, { home }), undefined);
 });
 
 test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) => {

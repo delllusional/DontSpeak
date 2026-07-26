@@ -162,7 +162,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         launch: LaunchSpec {
             mode: LaunchMode::CodexRemote,
         },
-        // `codex-mcp-client`; prefix covers CLI + VS Code.
+        // Exact identities include `codex-mcp-client` (CLI/Desktop) and `codex-vscode`.
         client_config_dir: |p| &p.codex_dir,
         // TOML hooks: SessionStart greet-only, UserPromptSubmit notify+provide, Stop.
         // No SessionEnd/Notification (engine codex_stream). Mid-turn = app-server subscriber.
@@ -211,7 +211,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         launch: LaunchSpec {
             mode: LaunchMode::Direct,
         },
-        // Live: `qwen-cli-mcp-client-DontSpeak` and older `qwen-code*` use this prefix.
+        // Live identities include `qwen-cli-mcp-client-DontSpeak` and `qwen-code`.
         client_config_dir: |p| &p.qwen_dir,
         // JSON hooks, InlineShell (ms). Hooks+MCP share settings.json. Streaming pinned by
         // `inline_streaming_wires_messagedisplay_with_ms_timeout_and_plain_sessionstart`.
@@ -251,7 +251,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         launch: LaunchSpec {
             mode: LaunchMode::Direct,
         },
-        // Live: `grok-shell-DontSpeak` uses this prefix.
+        // Live identity: `grok-shell-DontSpeak`.
         client_config_dir: |p| &p.grok_dir,
         // MCP TomlMcp; hooks own file. Bare command dedupes with imported Claude;
         // GROK_HOOK_EVENT vs no-arg MCP. Stop → chat_history; mid-turn = updates.jsonl tail;
@@ -331,7 +331,7 @@ pub const CLIENT_REGISTRY: &[ClientSpec] = &[
         launch: LaunchSpec {
             mode: LaunchMode::Direct,
         },
-        // A generic MCP prefix would match every MCP client; use the launch-command prefix.
+        // Exact identities avoid attributing unrelated generic MCP clients.
         client_config_dir: |p| &p.hermes_dir,
         // Shell hooks + MCP share config.yaml; allowlist is the consent sidecar.
         // Non-streaming: on_session_start greet-only; pre_llm_call notify+provide;
@@ -390,22 +390,9 @@ pub fn client_spec_for_launch(name: &str) -> Option<&'static ClientSpec> {
         .find(|spec| spec.target.as_str() == name)
 }
 
-/// MCP `clientInfo.name` normalize: trim, lowercase, `_` → `-`.
-fn normalize_mcp_name(name: &str) -> String {
-    name.trim().to_ascii_lowercase().replace('_', "-")
-}
-
-/// MCP name → [`WiredAgent`] via the same canonical client identity.
-/// Matching is prefix-based because upstream names add suffixes such as `-code` or `-vscode`.
+/// MCP name → [`WiredAgent`] through the shared exact client-context classifier.
 pub fn client_from_mcp_name(name: &str) -> Option<WiredAgent> {
-    let n = normalize_mcp_name(name);
-    if n.is_empty() {
-        return None;
-    }
-    CLIENT_REGISTRY
-        .iter()
-        .find(|spec| n.starts_with(spec.target.as_str()))
-        .map(|spec| spec.target)
+    ds_client::ClientContext::for_mcp_name_with_markers(name, None, None).client
 }
 
 #[cfg(test)]
@@ -538,22 +525,14 @@ mod tests {
         }
     }
 
-    /// Canonical identities are nonempty and already normalized for MCP prefix matching.
+    /// Every registered client exposes at least one exact normalized MCP identity.
     #[test]
-    fn canonical_client_identity_is_valid_for_mcp_prefix_matching() {
+    fn every_client_has_a_canonical_mcp_identity() {
         for spec in CLIENT_REGISTRY {
-            let identity = spec.target.as_str();
             assert!(
-                !identity.is_empty(),
-                "{}: a client with no clientInfo.name prefix can never be identified over MCP",
+                spec.target.mcp_names().contains(&spec.target.as_str()),
+                "{}: canonical identity must be accepted over MCP",
                 spec.display_name
-            );
-            assert_eq!(
-                normalize_mcp_name(identity),
-                identity,
-                "{}: prefix {:?} must be written in normalized form",
-                spec.display_name,
-                identity
             );
         }
     }
@@ -562,6 +541,8 @@ mod tests {
     fn known_mcp_names_map_to_their_client() {
         for (name, want) in [
             ("claude-code", WiredAgent::ClaudeCode),
+            ("claude-ai", WiredAgent::ClaudeCode),
+            ("claude-desktop", WiredAgent::ClaudeCode),
             ("codex-mcp-client", WiredAgent::Codex),
             (WiredAgent::Codex.as_str(), WiredAgent::Codex),
             ("codex-vscode", WiredAgent::Codex),
@@ -586,17 +567,10 @@ mod tests {
         }
     }
 
-    /// Intentional prefix collision from canonical prefix matching.
     #[test]
-    fn prefix_match_accepts_the_foreign_client_collision_tradeoff() {
-        assert_eq!(
-            client_from_mcp_name("codex-community-fork"),
-            Some(WiredAgent::Codex)
-        );
-        assert_eq!(
-            client_from_mcp_name("claude-code-fork"),
-            Some(WiredAgent::ClaudeCode)
-        );
+    fn lookalike_prefixes_are_not_attributed() {
+        assert_eq!(client_from_mcp_name("codex-community-fork"), None);
+        assert_eq!(client_from_mcp_name("claude-code-fork"), None);
     }
 
     #[test]

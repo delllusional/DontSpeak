@@ -147,11 +147,10 @@ fn client_command(bin: &Path, args: &[String], client: ds_config::WiredAgent) ->
         crate::session_scope::DONTSPEAK_SESSION_ID,
         crate::session_scope::new_launcher_session(client),
     );
-    // A CLI spawned from a Desktop-owned terminal inherits Desktop's hook-origin marker.
-    // Remove it for the wrapped Codex child so its hooks retain the normal CLI narration
-    // contract. This changes only the child process; the Desktop process stays identified.
-    if client == ds_config::WiredAgent::Codex {
-        command.env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE");
+    let context = ds_config::ClientContext::for_launcher(client);
+    if let Some(marker) = context.inherited_desktop_marker() {
+        // A wrapped CLI is a terminal surface even when its parent terminal is Desktop-owned.
+        command.env_remove(marker);
     }
     command
 }
@@ -305,9 +304,16 @@ mod tests {
             .expect("launcher must give hooks and MCP a shared session")
             .to_string_lossy();
         assert!(session.starts_with("dontspeak:launch:"));
-        assert!(command.get_envs().any(|(name, value)| {
-            name == "CODEX_INTERNAL_ORIGINATOR_OVERRIDE" && value.is_none()
-        }));
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| { name == ds_config::CODEX_ORIGIN_ENV && value.is_none() })
+        );
+        assert!(
+            !command
+                .get_envs()
+                .any(|(name, _)| name == ds_config::CLAUDE_ENTRYPOINT_ENV)
+        );
 
         let claude = client_command(
             Path::new("client-bin"),
@@ -317,7 +323,12 @@ mod tests {
         assert!(
             !claude
                 .get_envs()
-                .any(|(name, _)| name == "CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+                .any(|(name, _)| name == ds_config::CODEX_ORIGIN_ENV)
+        );
+        assert!(
+            claude.get_envs().any(|(name, value)| {
+                name == ds_config::CLAUDE_ENTRYPOINT_ENV && value.is_none()
+            })
         );
     }
 

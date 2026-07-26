@@ -375,6 +375,68 @@ function codexTurnContext(file, sessionId, turnId, hookModel) {
   });
 }
 
+export function resolveCodexLiveCommit(root, sessionId, options = {}) {
+  const env = options.env ?? process.env;
+  const home = options.home ?? env.HOME ?? env.USERPROFILE ?? homedir();
+  const transcript = options.transcript ?? findSessionTranscript(home, "codex", sessionId);
+  if (!transcript || codexTranscriptSessionId(transcript) !== sessionId) return undefined;
+
+  let call;
+  const resolved = readJsonLinesReverse(transcript, (row) => {
+    if (!call) {
+      if (row.type !== "response_item") return undefined;
+      const item = row.payload;
+      if (!["function_call", "custom_tool_call", "function_call_output", "custom_tool_call_output"]
+        .includes(item?.type)) {
+        return undefined;
+      }
+      // The commit must be the current, still-running tool call. A completed or
+      // different latest tool call cannot be replayed as live attribution.
+      if (item.type !== "function_call" || item.name !== "exec_command") return {};
+      const arguments_ = parseJson(item.arguments);
+      const command = firstString(arguments_?.cmd, arguments_?.command);
+      const cwd = firstString(arguments_?.workdir, arguments_?.cwd);
+      if (!command || !cwd || !isAbsolute(cwd)) return {};
+      const invocations = gitCommitInvocations(command, cwd);
+      let uses = 0;
+      for (const invocation of invocations) {
+        const invocationRoot = resolveRepositoryRoot(invocation.workingDirectory);
+        if (invocationRoot && realpathSync(invocationRoot) === realpathSync(root)) uses += 1;
+      }
+      if (uses === 0) return {};
+      const calledAt = Date.parse(row.timestamp);
+      const now = options.now ?? Date.now();
+      if (
+        !Number.isFinite(calledAt)
+        || calledAt > now + 30_000
+        || now - calledAt > ATTRIBUTION_CACHE_MAX_AGE_MS
+      ) {
+        return {};
+      }
+      call = { uses };
+      return undefined;
+    }
+
+    if (row.type !== "turn_context") return undefined;
+    const model = firstString(
+      row.payload?.model,
+      row.payload?.collaboration_mode?.settings?.model,
+    );
+    const effort = normalizedEffort(firstString(
+      row.payload?.effort,
+      row.payload?.reasoning_effort,
+      row.payload?.collaboration_mode?.settings?.reasoning_effort,
+    ));
+    return {
+      model,
+      effort,
+      uses: call.uses,
+      errors: validateAttribution(model, effort),
+    };
+  });
+  return resolved && Object.keys(resolved).length > 0 ? resolved : undefined;
+}
+
 function resolveCodex(input, env, home) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
