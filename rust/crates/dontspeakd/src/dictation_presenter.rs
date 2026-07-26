@@ -1,9 +1,6 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-const MIN_TTL: Duration = Duration::from_millis(500);
-const MAX_TTL: Duration = Duration::from_secs(60);
-
 #[derive(Debug, Clone)]
 struct Lease {
     id: String,
@@ -50,7 +47,10 @@ impl DictationPresenterRegistry {
         ttl_ms: u64,
         now: Instant,
     ) -> PresenterMutation<AcquiredLease> {
-        let ttl = bounded_ttl(ttl_ms);
+        let ttl = match presenter_ttl(ttl_ms) {
+            Ok(ttl) => ttl,
+            Err(message) => return mutation_error(&message, false),
+        };
         let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
         let Some(generation) = self.session_generation(&session_id) else {
             return mutation_error("dictation presenter: invalid session", false);
@@ -128,6 +128,10 @@ impl DictationPresenterRegistry {
         ttl_ms: u64,
         now: Instant,
     ) -> PresenterMutation<()> {
+        let ttl = match presenter_ttl(ttl_ms) {
+            Ok(ttl) => ttl,
+            Err(message) => return mutation_error(&message, false),
+        };
         let mut slot = self.lease.lock().unwrap_or_else(|e| e.into_inner());
         let mut changed = prune_expired_locked(&mut slot, now);
         let lease = match matching_lease_mut(&mut slot, lease_id, session_id) {
@@ -152,7 +156,7 @@ impl DictationPresenterRegistry {
         if !lease.ready {
             return mutation_error("dictation presenter: lease is not ready", changed);
         }
-        lease.expires_at = now + bounded_ttl(ttl_ms);
+        lease.expires_at = now + ttl;
         PresenterMutation {
             result: Ok(()),
             changed,
@@ -264,8 +268,10 @@ fn generation_is_newer(candidate: u64, current: u64) -> bool {
     distance != 0 && distance < (1_u64 << 63)
 }
 
-fn bounded_ttl(ttl_ms: u64) -> Duration {
-    Duration::from_millis(ttl_ms).clamp(MIN_TTL, MAX_TTL)
+fn presenter_ttl(ttl_ms: u64) -> Result<Duration, String> {
+    ds_ipc::validate_presenter_ttl_ms(ttl_ms)
+        .map_err(|message| format!("dictation presenter: {message}"))?;
+    Ok(Duration::from_millis(ttl_ms))
 }
 
 fn new_lease_id() -> String {
@@ -424,6 +430,22 @@ mod tests {
             registry.external_ui_active(Some(&session), now + Duration::from_millis(501)),
             (false, false)
         );
+    }
+
+    #[test]
+    fn ttl_policy_rejects_out_of_range_values_instead_of_clamping() {
+        let registry = DictationPresenterRegistry::default();
+        let session = registry.session_id(7);
+        let now = Instant::now();
+
+        assert!(
+            registry
+                .acquire(session.clone(), Some(&session), 499, now)
+                .result
+                .unwrap_err()
+                .contains("between 500 and 60000")
+        );
+        assert_eq!(registry.current(), None);
     }
 
     #[test]

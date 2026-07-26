@@ -33,9 +33,8 @@ fn ttl(args: &[String]) -> Result<u64, String> {
     let ttl = option(args, "--ttl-ms")?
         .parse()
         .map_err(|_| "--ttl-ms requires a positive integer".to_string())?;
-    if !(500..=60_000).contains(&ttl) {
-        return Err("--ttl-ms must be between 500 and 60000".into());
-    }
+    ds_ipc::validate_presenter_ttl_ms(ttl)
+        .map_err(|_| "--ttl-ms must be between 500 and 60000".to_string())?;
     Ok(ttl)
 }
 
@@ -66,39 +65,39 @@ pub(crate) fn run(args: &[String]) -> i32 {
             .map(String::as_str)
             .ok_or_else(|| "expected acquire, ready, renew, or release".to_string())?;
         let options = &args[1..];
+        let allowed = match action {
+            "acquire" => &["--id", "--session", "--ttl-ms"][..],
+            "ready" | "release" => &["--lease", "--session"][..],
+            "renew" => &["--lease", "--session", "--ttl-ms"][..],
+            _ => return Err(format!("unknown presenter action {action:?}")),
+        };
+        validate_options(options, allowed)?;
         let session_id = option(options, "--session")?;
         let request = match action {
             "acquire" => {
-                validate_options(options, &["--id", "--session", "--ttl-ms"])?;
+                let presenter_id = option(options, "--id")?;
+                ds_ipc::validate_presenter_id(&presenter_id)
+                    .map_err(|_| "invalid --id".to_string())?;
                 ds_ipc::Request::AcquireDictationPresenter {
-                    presenter_id: option(options, "--id")?,
+                    presenter_id,
                     session_id,
                     ttl_ms: ttl(options)?,
                 }
             }
-            "ready" => {
-                validate_options(options, &["--lease", "--session"])?;
-                ds_ipc::Request::ReadyDictationPresenter {
-                    lease_id: option(options, "--lease")?,
-                    session_id,
-                }
-            }
-            "renew" => {
-                validate_options(options, &["--lease", "--session", "--ttl-ms"])?;
-                ds_ipc::Request::RenewDictationPresenter {
-                    lease_id: option(options, "--lease")?,
-                    session_id,
-                    ttl_ms: ttl(options)?,
-                }
-            }
-            "release" => {
-                validate_options(options, &["--lease", "--session"])?;
-                ds_ipc::Request::ReleaseDictationPresenter {
-                    lease_id: option(options, "--lease")?,
-                    session_id,
-                }
-            }
-            _ => return Err(format!("unknown presenter action {action:?}")),
+            "ready" => ds_ipc::Request::ReadyDictationPresenter {
+                lease_id: option(options, "--lease")?,
+                session_id,
+            },
+            "renew" => ds_ipc::Request::RenewDictationPresenter {
+                lease_id: option(options, "--lease")?,
+                session_id,
+                ttl_ms: ttl(options)?,
+            },
+            "release" => ds_ipc::Request::ReleaseDictationPresenter {
+                lease_id: option(options, "--lease")?,
+                session_id,
+            },
+            _ => unreachable!("action was validated above"),
         };
         match response(&request)? {
             ds_ipc::Response::DictationPresenterLease { lease_id, ttl_ms } => {

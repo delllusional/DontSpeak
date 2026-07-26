@@ -56,7 +56,8 @@ Relevant fields:
 - `speaking` identifies the pane holding the globally serialized TTS player.
 - `queued` counts pending speech for that pane and excludes speech already playing.
 - `active` reflects Don’t Speak’s active-terminal routing.
-- `blocked` means the pane has speech queued behind a different active terminal.
+- `blocked` means the pane has speech queued while it is not the active terminal,
+  including before any terminal has claimed active routing.
 - `activity.muted` is global mute state.
 - `voice` is the last voice resolved for the pane; it can be `null` before first
   greeting or utterance.

@@ -9,5 +9,8 @@ pub mod server;
 pub mod transport;
 
 pub use client::{Client, connect, request};
-pub use protocol::{Request, Response};
+pub use protocol::{
+    MAX_PRESENTER_TTL_MS, MIN_PRESENTER_TTL_MS, Request, Response, validate_presenter_id,
+    validate_presenter_ttl_ms,
+};
 pub use server::{Handler, serve};

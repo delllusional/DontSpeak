@@ -8,6 +8,32 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::Path;
 
+pub const MIN_PRESENTER_TTL_MS: u64 = 500;
+pub const MAX_PRESENTER_TTL_MS: u64 = 60_000;
+
+pub fn validate_presenter_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 120
+        || !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        return Err(
+            "presenter id accepts 1..=120 letters, digits, '-', '_' and '.' only".to_string(),
+        );
+    }
+    Ok(())
+}
+
+pub fn validate_presenter_ttl_ms(value: u64) -> Result<(), String> {
+    if !(MIN_PRESENTER_TTL_MS..=MAX_PRESENTER_TTL_MS).contains(&value) {
+        return Err(format!(
+            "presenter TTL must be between {MIN_PRESENTER_TTL_MS} and {MAX_PRESENTER_TTL_MS} ms"
+        ));
+    }
+    Ok(())
+}
+
 fn deserialize_nonempty_string<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -16,6 +42,24 @@ where
     if value.trim().is_empty() {
         return Err(serde::de::Error::custom("must not be empty"));
     }
+    Ok(value)
+}
+
+fn deserialize_presenter_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    validate_presenter_id(&value).map_err(serde::de::Error::custom)?;
+    Ok(value)
+}
+
+fn deserialize_presenter_ttl_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    validate_presenter_ttl_ms(value).map_err(serde::de::Error::custom)?;
     Ok(value)
 }
 
@@ -61,10 +105,11 @@ pub enum Request {
     },
     /// Reserve external presentation for one visible dictation session.
     AcquireDictationPresenter {
-        #[serde(deserialize_with = "deserialize_nonempty_string")]
+        #[serde(deserialize_with = "deserialize_presenter_id")]
         presenter_id: String,
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session_id: String,
+        #[serde(deserialize_with = "deserialize_presenter_ttl_ms")]
         ttl_ms: u64,
     },
     /// Hide the native fallback only after the external presenter has rendered.
@@ -74,12 +119,13 @@ pub enum Request {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session_id: String,
     },
-    /// Keep a ready or reserved presenter lease alive.
+    /// Keep a ready presenter lease alive.
     RenewDictationPresenter {
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         lease_id: String,
         #[serde(deserialize_with = "deserialize_nonempty_string")]
         session_id: String,
+        #[serde(deserialize_with = "deserialize_presenter_ttl_ms")]
         ttl_ms: u64,
     },
     /// Explicit presenter shutdown; expiry remains the crash fallback.
@@ -528,6 +574,23 @@ mod tests {
                 "missing-session error must name the field for {line}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn presenter_requests_reject_log_injection_and_out_of_policy_ttls() {
+        for line in [
+            r#"{"cmd":"acquire_dictation_presenter","presenter_id":"forged\nline","session_id":"s","ttl_ms":3500}"#,
+            r#"{"cmd":"acquire_dictation_presenter","presenter_id":"valid.id","session_id":"s","ttl_ms":499}"#,
+            r#"{"cmd":"renew_dictation_presenter","lease_id":"lease","session_id":"s","ttl_ms":60001}"#,
+        ] {
+            serde_json::from_str::<Request>(line)
+                .expect_err("raw socket clients must not bypass presenter policy");
+        }
+
+        serde_json::from_str::<Request>(
+            r#"{"cmd":"acquire_dictation_presenter","presenter_id":"valid.id","session_id":"s","ttl_ms":500}"#,
+        )
+        .unwrap();
     }
 
     #[test]

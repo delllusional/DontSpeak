@@ -49,13 +49,19 @@ The engine socket provides four external-presenter operations:
    dictation session.
 4. **Release** explicitly relinquishes the lease.
 
+Because renewal is available only after Ready, the bounded TTL supplied to
+Acquire is also the presenter's initial render budget.
+
 Unknown, stale, expired, mismatched, or superseded lease tokens fail closed.
 Only one external presenter can own a session. A second acquisition cannot
 replace a live lease, even when it reports the same presenter identifier.
 
-Lease identifiers are local UI-routing credentials only. No operation accepts
-text to paste, requests key injection, opens the microphone, or exposes a host
-capability token.
+Lease identifiers are local UI-routing credentials only. Presenter identity is
+self-asserted; the trust boundary is access to the local engine socket, not the
+`presenter_id` string. A live local holder can renew a ready lease indefinitely,
+so clients with socket access are trusted to render while ready and release on
+ineligibility. No operation accepts text to paste, requests key injection, opens
+the microphone, or exposes a host capability token.
 
 ## Failure semantics
 
@@ -71,8 +77,8 @@ current dictation session. It becomes the presenter again when:
 A session end deactivates the lease immediately; expiry or a later monotonic
 session generation clears it without allowing delayed observations to remove a
 newer lease. Ready-state removal bumps the existing status gate so native hosts
-refresh. A crash can therefore hide the native overlay for at most the bounded
-TTL plus one native status-wait interval, never indefinitely.
+refresh. A crashed or disconnected presenter can therefore hide the native
+overlay for at most the bounded TTL plus one native status-wait interval.
 
 ## Update transport
 
@@ -120,8 +126,8 @@ original paste and Enter behavior; the plugin never inserts text itself.
 - Existing Caps Lock gestures and paste behavior remain engine-owned.
 - The old receiver-on-status shortcut is removed from this pre-release feature
   branch; callers move to the explicit presenter lifecycle.
-- Native host DTOs gain only the optional session identifier and continue to
-  consume `external_ui_active`.
+- Native host DTOs gain the optional session identifier and
+  `external_ui_active` presenter-selection flag.
 - The terminal plugin is updated after the engine contract, then both sides are
   tested together. Older plugins simply fail to acquire a lease and the native
   overlay remains visible.

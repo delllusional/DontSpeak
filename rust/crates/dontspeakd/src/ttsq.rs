@@ -55,6 +55,7 @@ impl Drop for HealingGuard {
 struct PlayingClaim {
     source: Option<WiredAgent>,
     session: Option<String>,
+    cancel_session: Option<String>,
     herdr_pane: Option<String>,
     /// Speech (not cue) — contributes to status depth.
     speech: bool,
@@ -276,6 +277,8 @@ struct Item {
     source: Option<WiredAgent>,
     /// `None` = global. Voice keys off `source`.
     session: Option<String>,
+    /// Original MCP scope when `session` was routed to a Herdr pane.
+    cancel_session: Option<String>,
     /// Public Herdr pane id, resolved from the queue scope or logical-session alias.
     herdr_pane: Option<String>,
     /// `PROGRESS` high-water; barge resume sends as `skip`.
@@ -348,6 +351,14 @@ fn session_belongs_to_real(session: &Option<String>, target: &str) -> bool {
     }
 }
 
+fn routed_session_belongs_to_real(
+    session: &Option<String>,
+    cancel_session: &Option<String>,
+    target: &str,
+) -> bool {
+    session_belongs_to_real(session, target) || session_belongs_to_real(cancel_session, target)
+}
+
 /// Drop what `keep` rejects; return discarded handles oldest-first (ring push keeps newest first).
 fn discard_items(q: &mut VecDeque<Item>, keep: impl Fn(&Item) -> bool) -> Vec<u64> {
     let mut discarded = Vec::new();
@@ -361,15 +372,24 @@ fn discard_items(q: &mut VecDeque<Item>, keep: impl Fn(&Item) -> bool) -> Vec<u6
     discarded
 }
 
-/// Drop only exact `target`. Sticky survives MarkActive current-clear; Stop/SessionEnd
-/// also clear the sticky sibling.
+/// Drop an exact queue scope or its original routed MCP scope. Sticky survives
+/// MarkActive current-clear; Stop/SessionEnd also clear the sticky sibling.
 fn prune_session(q: &mut VecDeque<Item>, target: &Option<String>) -> Vec<u64> {
-    discard_items(q, |it| &it.session != target)
+    discard_items(q, |it| {
+        &it.session != target
+            && !it
+                .cancel_session
+                .as_ref()
+                .is_some_and(|cancel| target.as_ref() == Some(cancel))
+    })
 }
 
 /// Keep only `keep` + sticky sibling.
 fn retain_only_session(q: &mut VecDeque<Item>, keep: &Option<String>) -> Vec<u64> {
-    discard_items(q, |it| session_is_keep_or_sticky(&it.session, keep))
+    discard_items(q, |it| {
+        session_is_keep_or_sticky(&it.session, keep)
+            || (it.cancel_session.is_some() && session_is_keep_or_sticky(&it.cancel_session, keep))
+    })
 }
 
 /// Untagged, exact, or sticky under `active`.
@@ -615,7 +635,7 @@ impl TtsQueue {
         if text.trim().is_empty() {
             return Ok(None);
         }
-        let (session, herdr_pane) = self.route_herdr_speech(session, source);
+        let (session, cancel_session, herdr_pane) = self.route_herdr_speech(session, source);
         self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
         // Standalone chunk (MCP Speak / greeting) — language from text alone.
         self.enqueue_action(
@@ -626,6 +646,7 @@ impl TtsQueue {
             },
             source,
             session,
+            cancel_session,
             herdr_pane,
         )
     }
@@ -639,8 +660,14 @@ impl TtsQueue {
     ) -> Result<(), String> {
         let herdr_pane = self.herdr_pane_for_session(&session);
         self.register_herdr_pane(herdr_pane.as_deref(), source, session.as_deref());
-        self.enqueue_action(QueueAction::Earcon(event), source, session, herdr_pane)
-            .map(|_| ())
+        self.enqueue_action(
+            QueueAction::Earcon(event),
+            source,
+            session,
+            None,
+            herdr_pane,
+        )
+        .map(|_| ())
     }
 
     /// Ordered queue by default. Needs-input under focus hold + idle → detached oob play
@@ -710,6 +737,7 @@ impl TtsQueue {
         action: QueueAction,
         source: Option<WiredAgent>,
         session: Option<String>,
+        cancel_session: Option<String>,
         herdr_pane: Option<String>,
     ) -> Result<Option<u64>, String> {
         let mut q = self.items.lock().unwrap();
@@ -778,6 +806,7 @@ impl TtsQueue {
             action,
             source,
             session,
+            cancel_session,
             herdr_pane,
             resume_skip: 0,
             utterance_id,
@@ -821,10 +850,10 @@ impl TtsQueue {
                 return Ok(());
             }
             // Lock order: accepted_narrations before items (existing).
-            self.enqueue_action(action, source, session.clone(), herdr_pane)?;
+            self.enqueue_action(action, source, session.clone(), None, herdr_pane)?;
             accepted.insert(id, session);
         } else {
-            self.enqueue_action(action, source, session, herdr_pane)?;
+            self.enqueue_action(action, source, session, None, herdr_pane)?;
         }
         Ok(())
     }
@@ -868,6 +897,7 @@ impl TtsQueue {
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
             session: item.session.clone(),
+            cancel_session: item.cancel_session.clone(),
             herdr_pane: item.herdr_pane.clone(),
             speech: item.action.speech_text().is_some(),
             utterance: Self::claimed_utterance(&item),
@@ -897,15 +927,16 @@ impl TtsQueue {
         &self,
         session: Option<String>,
         source: Option<WiredAgent>,
-    ) -> (Option<String>, Option<String>) {
+    ) -> (Option<String>, Option<String>, Option<String>) {
         let pane = self.herdr_pane_for_session(&session);
         if pane.is_some()
             || !session
                 .as_deref()
                 .is_some_and(|value| value.starts_with("dontspeak:mcp:"))
         {
-            return (session, pane);
+            return (session, None, pane);
         }
+        let cancel_session = session.clone();
         let sessions = self.herdr_sessions.lock().unwrap();
         let mut matches = sessions.iter().filter_map(|(pane_id, record)| {
             (record.source == source)
@@ -913,12 +944,16 @@ impl TtsQueue {
                 .flatten()
         });
         let Some((pane_id, queue_session)) = matches.next() else {
-            return (session, None);
+            return (session, None, None);
         };
         if matches.next().is_some() {
-            return (session, None);
+            return (session, None, None);
         }
-        (Some(queue_session.clone()), Some(pane_id.clone()))
+        (
+            Some(queue_session.clone()),
+            cancel_session,
+            Some(pane_id.clone()),
+        )
     }
 
     fn register_herdr_pane(
@@ -963,6 +998,9 @@ impl TtsQueue {
         };
         {
             let mut aliases = self.herdr_aliases.lock().unwrap();
+            // One pane hosts one current logical agent session. A crash can skip
+            // SessionEnd, so a later link for the stable pane replaces its stale aliases.
+            aliases.retain(|_, mapped| mapped != pane_id);
             if let Some(logical) = logical_session {
                 aliases.insert(logical.to_string(), pane_id.to_string());
             }
@@ -990,10 +1028,6 @@ impl TtsQueue {
             drop(aliases);
             let removed = self.herdr_sessions.lock().unwrap().remove(&pane_id);
             self.herdr_queue_depths.lock().unwrap().remove(&pane_id);
-            self.agent_voices
-                .lock()
-                .unwrap()
-                .retain(|(owner, _), _| owner.herdr_pane.as_deref() != Some(pane_id.as_str()));
             if removed.is_some() {
                 self.gate.bump();
             }
@@ -1059,19 +1093,20 @@ impl TtsQueue {
         self.cv.notify_one();
     }
 
-    /// Drop session queue; cancel in-flight only if matching. `session: None` → [`clear`].
+    /// Drop a queue or original routed MCP scope; cancel in-flight only if matching.
+    /// `session: None` targets untagged audio; global barge uses [`clear`].
     pub fn clear_session(&self, session: Option<String>) {
         // items → playing (worker order); prune + snapshot under one lock.
         let mut items = self.items.lock().unwrap();
         let before = speech_depth(&items);
         let discarded = prune_session(&mut items, &session);
         self.publish_queue_depth(before, &items);
-        let cancel_current = self
-            .playing
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|p| p.session == session);
+        let cancel_current = self.playing.lock().unwrap().as_ref().is_some_and(|p| {
+            p.session == session
+                || p.cancel_session
+                    .as_ref()
+                    .is_some_and(|cancel| session.as_ref() == Some(cancel))
+        });
         if cancel_current {
             self.hard_cancel_in_flight_locked(&items);
         }
@@ -1109,12 +1144,9 @@ impl TtsQueue {
                 let before = speech_depth(&items);
                 // Snapshot `playing` under `items` (the worker's claim order, like the `other`
                 // branch) so a claim can't slip in between the prune and the decision.
-                let playing_is_target = self
-                    .playing
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|p| session_belongs_to_real(&p.session, target.as_str()));
+                let playing_is_target = self.playing.lock().unwrap().as_ref().is_some_and(|p| {
+                    routed_session_belongs_to_real(&p.session, &p.cancel_session, target.as_str())
+                });
                 discarded = prune_session(&mut items, &Some(target.clone()));
                 // Voice submit path (not MarkActive): also drop sticky of same terminal.
                 if let Some(sticky) = grok_stop_sticky_sibling(&target) {
@@ -1133,12 +1165,9 @@ impl TtsQueue {
                 // Prune + playing snapshot under items (avoid claim race after return).
                 let mut items = self.items.lock().unwrap();
                 let before = speech_depth(&items);
-                let playing_is_other = self
-                    .playing
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|p| !session_belongs_to_real(&p.session, target.as_str()));
+                let playing_is_other = self.playing.lock().unwrap().as_ref().is_some_and(|p| {
+                    !routed_session_belongs_to_real(&p.session, &p.cancel_session, target.as_str())
+                });
                 discarded = retain_only_session(&mut items, &Some(target));
                 self.publish_queue_depth(before, &items);
                 if playing_is_other {
@@ -1508,7 +1537,7 @@ impl TtsQueue {
         });
     }
 
-    /// SessionEnd: per-window barge. Agent voice survives (keyed by client).
+    /// SessionEnd: per-window barge. Agent/pane voice assignment survives.
     pub fn end_session(&self, session: Option<String>) {
         self.clear_session(session);
     }
@@ -2689,6 +2718,7 @@ mod tests {
             },
             source: None,
             session: session.map(str::to_string),
+            cancel_session: None,
             herdr_pane: None,
             resume_skip: 0,
             utterance_id: None,
@@ -2886,6 +2916,7 @@ mod tests {
             },
             source: None,
             session: None,
+            cancel_session: None,
             herdr_pane: None,
             resume_skip: 0,
             utterance_id: None,
@@ -3288,6 +3319,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -3301,6 +3333,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: Some(WiredAgent::Grok),
             session: Some("open".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -3397,9 +3430,10 @@ mod tests {
     }
 
     #[test]
-    fn mcp_speak_uses_the_active_matching_herdr_pane() {
+    fn mcp_stop_cancels_speech_after_routing_to_the_matching_herdr_pane() {
         let q = mk_queue();
         let pane = ds_config::herdr_queue_scope("pane-a");
+        let mcp_session = "dontspeak:mcp:codex:42:0";
         q.link_sessions(Some("logical-a"), Some(&pane), Some(WiredAgent::Codex));
         q.set_active_session(Some(pane.clone()));
 
@@ -3407,14 +3441,78 @@ mod tests {
             "speak from the MCP child".into(),
             None,
             Some(WiredAgent::Codex),
-            Some("dontspeak:mcp:codex:42:0".into()),
+            Some(mcp_session.into()),
         )
         .unwrap();
 
-        let items = q.items.lock().unwrap();
-        let item = items.front().unwrap();
-        assert_eq!(item.session.as_deref(), Some(pane.as_str()));
-        assert_eq!(item.herdr_pane.as_deref(), Some("pane-a"));
+        {
+            let items = q.items.lock().unwrap();
+            let item = items.front().unwrap();
+            assert_eq!(item.session.as_deref(), Some(pane.as_str()));
+            assert_eq!(item.cancel_session.as_deref(), Some(mcp_session));
+            assert_eq!(item.herdr_pane.as_deref(), Some("pane-a"));
+        }
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.set_active_for_test(true);
+        let generation = q.generation.load(Ordering::SeqCst);
+
+        q.clear_session(Some(mcp_session.into()));
+
+        assert!(!q.is_tts_active());
+        assert!(q.generation.load(Ordering::SeqCst) > generation);
+    }
+
+    #[test]
+    fn relinking_a_reused_herdr_pane_prunes_stale_aliases_and_keeps_its_voice() {
+        let q = mk_queue();
+        let pane = ds_config::herdr_queue_scope("pane-a");
+        q.link_sessions(Some("crashed-agent"), Some(&pane), Some(WiredAgent::Codex));
+        let cfg = VoiceConfig {
+            tts_engine_ladder: vec![ds_config::TtsEngine::BuiltIn],
+            tts_voices: ds_config::TtsVoicePools {
+                kokoro: vec!["af_sarah".to_string(), "am_adam".to_string()],
+                ..Default::default()
+            },
+            ..VoiceConfig::default()
+        };
+        let voice = q
+            .resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"))
+            .unwrap()
+            .1;
+
+        q.link_sessions(
+            Some("replacement-agent"),
+            Some(&pane),
+            Some(WiredAgent::Codex),
+        );
+        assert_eq!(
+            q.herdr_pane_for_session(&Some("crashed-agent".into())),
+            None
+        );
+        assert_eq!(
+            q.herdr_pane_for_session(&Some("replacement-agent".into()))
+                .as_deref(),
+            Some("pane-a")
+        );
+        assert_eq!(
+            q.resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"))
+                .unwrap()
+                .1,
+            voice
+        );
+
+        q.unlink_sessions(Some("replacement-agent"), Some(&pane));
+        q.link_sessions(Some("next-agent"), Some(&pane), Some(WiredAgent::Codex));
+        assert_eq!(
+            q.resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"))
+                .unwrap()
+                .1,
+            voice,
+            "SessionEnd must not reroll a stable pane's voice assignment"
+        );
     }
 
     /// Stand in for the worker's claim so the record tests can drive resolution and fate
@@ -3423,6 +3521,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: Some(ds_status::UtteranceStatus {
@@ -3528,6 +3627,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: None,
+            cancel_session: None,
             herdr_pane: None,
             speech: false,
             utterance: None,
@@ -4111,6 +4211,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("a".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4129,6 +4230,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("b".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4168,6 +4270,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: playing.map(str::to_string),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4298,6 +4401,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("other".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4331,6 +4435,7 @@ mod tests {
         *q2.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("a".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4363,6 +4468,7 @@ mod tests {
         *q3.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("grok-stop:a".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4754,6 +4860,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("cleared".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4776,6 +4883,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("current".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -4798,6 +4906,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("other".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,
@@ -5370,6 +5479,7 @@ mod tests {
         *q.playing.lock().unwrap() = Some(PlayingClaim {
             source: None,
             session: Some("s1".into()),
+            cancel_session: None,
             herdr_pane: None,
             speech: true,
             utterance: None,

@@ -90,6 +90,57 @@ pub(crate) struct EngineShared {
     pub dictation_presenters: Arc<DictationPresenterRegistry>,
 }
 
+struct DictationPresentation {
+    text: String,
+    awaiting: bool,
+    can_paste: bool,
+    refused: bool,
+    recording: bool,
+    session_generation: u64,
+}
+
+fn dictation_presentation(
+    stt_active: &AtomicBool,
+    paste: &PasteState,
+    now: Instant,
+) -> DictationPresentation {
+    // Producers publish the paste buffer and generation before setting recording.
+    // Read the flag first so a snapshot cannot pair the prior generation with a
+    // newly-published recording edge.
+    let recording = stt_active.load(Ordering::SeqCst);
+    paste
+        .lock()
+        .map(|p| {
+            let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
+            DictationPresentation {
+                text,
+                awaiting,
+                can_paste: p.can_paste,
+                refused: crate::engine::refusal_live(p.refused_until, now),
+                recording,
+                session_generation: p.presentation_session_id,
+            }
+        })
+        .unwrap_or(DictationPresentation {
+            text: String::new(),
+            awaiting: false,
+            can_paste: true,
+            refused: false,
+            recording,
+            session_generation: 0,
+        })
+}
+
+pub(crate) fn current_dictation_session_id(
+    presenters: &DictationPresenterRegistry,
+    stt_active: &AtomicBool,
+    paste: &PasteState,
+) -> Option<String> {
+    let presentation = dictation_presentation(stt_active, paste, Instant::now());
+    (presentation.recording || presentation.awaiting || presentation.refused)
+        .then(|| presenters.session_id(presentation.session_generation))
+}
+
 /// Model presence report. `read_tts` under `gate.snapshot` (mid-report transitions unacked).
 pub(crate) fn model_status_json(
     shared: &EngineShared,
@@ -159,19 +210,7 @@ pub(crate) fn model_status_json(
         };
 
     // Confirm panel: finalized while awaiting, else partial; never finalized under Caps hold.
-    let (dict_text, dict_awaiting, dict_has_target, dict_refused, presentation_session_id) = paste
-        .lock()
-        .map(|p| {
-            let (text, awaiting) = dictation_preview(&p.final_state, &p.partial, p.caps_held);
-            (
-                text,
-                awaiting,
-                p.can_paste,
-                crate::engine::refusal_live(p.refused_until, std::time::Instant::now()),
-                p.presentation_session_id,
-            )
-        })
-        .unwrap_or((String::new(), false, true, false, 0));
+    let dictation_presentation = dictation_presentation(stt_active, paste, Instant::now());
 
     let (dl, download_transfer_start) = {
         let downloads = downloads.lock().unwrap_or_else(|e| e.into_inner());
@@ -232,7 +271,7 @@ pub(crate) fn model_status_json(
         &[DownloadTarget::ParakeetModel, DownloadTarget::ParakeetMlx],
     );
 
-    let dict_recording = stt_active.load(Ordering::Relaxed);
+    let dict_recording = dictation_presentation.recording;
     let dict_local = dictation_local_stt(parakeet_running, system_running);
 
     let tts_status = match resolved_tts {
@@ -327,11 +366,16 @@ pub(crate) fn model_status_json(
         diar_present && diar_shim,
     );
 
-    let dictation_state = dictation_state(dict_recording, dict_awaiting, dict_local, dict_refused);
+    let dictation_state = dictation_state(
+        dict_recording,
+        dictation_presentation.awaiting,
+        dict_local,
+        dictation_presentation.refused,
+    );
     let dictation_session_id = dictation_session_id(
         dictation_presenters,
         dictation_state,
-        presentation_session_id,
+        dictation_presentation.session_generation,
     );
     let (external_ui_active, presenter_changed) =
         dictation_presenters.external_ui_active(dictation_session_id.as_deref(), Instant::now());
@@ -392,8 +436,8 @@ pub(crate) fn model_status_json(
         },
         dictation: Dictation {
             state: dictation_state,
-            text: dict_text,
-            can_paste: dict_has_target,
+            text: dictation_presentation.text,
+            can_paste: dictation_presentation.can_paste,
             session_id: dictation_session_id,
             external_ui_active,
         },
@@ -681,14 +725,14 @@ fn dictation_session_id(
 #[cfg(test)]
 mod tests {
     use super::{
-        EngineShared, StatusGate, active_download_statuses, combined_error, diarization_present,
-        diarization_provider_token, diarization_set_for, dictation_local_stt, dictation_session_id,
-        dictation_state, engine_state, model_status_json, realized_provider_token,
-        row_download_frac, row_downloading, status_tts_model, stt_provider_token,
-        tts_provider_token,
+        EngineShared, StatusGate, active_download_statuses, combined_error,
+        current_dictation_session_id, diarization_present, diarization_provider_token,
+        diarization_set_for, dictation_local_stt, dictation_session_id, dictation_state,
+        engine_state, model_status_json, realized_provider_token, row_download_frac,
+        row_downloading, status_tts_model, stt_provider_token, tts_provider_token,
     };
     use crate::downloads::{DownloadProgress, DownloadState, TargetState};
-    use crate::engine::PasteBuf;
+    use crate::engine::{FinalState, PasteBuf};
     use crate::stats::{LifetimeSeconds, SttStats, TtsStats};
     use crate::tts::TtsManager;
     use crate::ttsq::TtsStatusSample;
@@ -750,6 +794,7 @@ mod tests {
             let mut p = paste.lock().unwrap();
             p.partial = "live words".to_string();
             p.can_paste = false;
+            p.final_state = FinalState::Armed;
         }
         let downloads = Arc::new(Mutex::new(DownloadState::default()));
         {
@@ -768,6 +813,27 @@ mod tests {
         }
         let gate = StatusGate::new();
         gate.bump();
+        let dictation_presenters =
+            Arc::new(crate::dictation_presenter::DictationPresenterRegistry::default());
+        let dictation_session = dictation_presenters.session_id(0);
+        let lease = dictation_presenters
+            .acquire(
+                dictation_session.clone(),
+                Some(&dictation_session),
+                3_500,
+                Instant::now(),
+            )
+            .result
+            .unwrap();
+        dictation_presenters
+            .ready(
+                &lease.id,
+                &dictation_session,
+                Some(&dictation_session),
+                Instant::now(),
+            )
+            .result
+            .unwrap();
         let shared = EngineShared {
             tts,
             caps_active: Arc::new(AtomicBool::new(true)),
@@ -778,9 +844,7 @@ mod tests {
             stt_stats,
             lifetime,
             gate,
-            dictation_presenters: Arc::new(
-                crate::dictation_presenter::DictationPresenterRegistry::default(),
-            ),
+            dictation_presenters,
         };
 
         let utterance = UtteranceStatus {
@@ -832,7 +896,12 @@ mod tests {
         assert_eq!(status.stats.tts.queued, 3);
         assert_eq!(status.dictation.text, "live words");
         assert!(!status.dictation.can_paste);
-        assert_eq!(status.dictation.state, DictationState::Hidden);
+        assert_eq!(status.dictation.state, DictationState::AwaitingConfirm);
+        assert_eq!(
+            status.dictation.session_id.as_deref(),
+            Some(dictation_session.as_str())
+        );
+        assert!(status.dictation.external_ui_active);
         assert_eq!(status.stats.tts.utterances, 1);
         assert_eq!(status.stats.stt.transcriptions, 1);
         assert_eq!(status.seq, 1);
@@ -907,6 +976,39 @@ mod tests {
             gate.wait_changed(snapshot_seq, Duration::from_secs(5)),
             gate.seq(),
             "the next wait must return immediately for the unacknowledged transition"
+        );
+    }
+
+    #[test]
+    fn new_recording_generation_cannot_reuse_the_previous_ready_presenter() {
+        let presenters = crate::dictation_presenter::DictationPresenterRegistry::default();
+        let old_session = presenters.session_id(7);
+        let lease = presenters
+            .acquire(
+                old_session.clone(),
+                Some(&old_session),
+                3_500,
+                Instant::now(),
+            )
+            .result
+            .unwrap();
+        presenters
+            .ready(&lease.id, &old_session, Some(&old_session), Instant::now())
+            .result
+            .unwrap();
+
+        let paste = Arc::new(Mutex::new(PasteBuf {
+            presentation_session_id: 8,
+            ..PasteBuf::default()
+        }));
+        let stt_active = AtomicBool::new(true);
+        let current = current_dictation_session_id(&presenters, &stt_active, &paste).unwrap();
+
+        assert_eq!(current, presenters.session_id(8));
+        assert_eq!(
+            presenters.external_ui_active(Some(&current), Instant::now()),
+            (false, true),
+            "the previous turn's ready lease must not suppress native UI for the new turn"
         );
     }
 

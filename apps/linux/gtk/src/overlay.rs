@@ -99,10 +99,9 @@ impl Overlay {
     /// Show/update or hide from a status push (same gate as the other hosts).
     pub fn apply(&self, snap: &Snapshot) {
         // Visibility is engine-side via canonical `dictation.state` (incl. REFUSED brief glow).
-        let show = snap
-            .status
-            .as_ref()
-            .is_some_and(|s| s.dictation.state != DictationState::Hidden && !s.dictation.external_ui_active);
+        let show = snap.status.as_ref().is_some_and(|s| {
+            s.dictation.state != DictationState::Hidden && !s.dictation.external_ui_active
+        });
 
         if !show {
             if self.visible.replace(false) {

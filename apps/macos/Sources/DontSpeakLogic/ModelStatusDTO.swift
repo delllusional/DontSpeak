@@ -119,7 +119,7 @@ public struct SttStatusDTO: Decodable, Sendable, Equatable {
 public struct ModelStatusDTO: Decodable, Sendable, Equatable {
     public var seq: UInt64
     public var activity: ActivityDTO
-    /// Optional so a newer app can still inspect an older running engine.
+    /// Transport mirror for plugin status; the native host does not render per-pane rows.
     public var voiceSessions: [VoiceSessionDTO]?
     public var tts: TtsStatusDTO
     public var stt: SttStatusDTO

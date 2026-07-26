@@ -5,7 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds_config::{CancelSpeechScope, Paths, TtsArgPools, VoiceConfig, WiredAgent};
 
-use crate::status::{EngineShared, model_status_json};
+use crate::dictation_presenter::DictationPresenterRegistry;
+use crate::engine::PasteState;
+use crate::status::{EngineShared, StatusGate, current_dictation_session_id, model_status_json};
 use crate::stt_test::TestSession;
 use crate::ttsq::TtsQueue;
 
@@ -62,12 +64,6 @@ fn agent_usage_response(refresh: bool) -> ds_ipc::Response {
     agent_usage_response_with(refresh, ds_agent_usage::snapshot)
 }
 
-fn presenter_session_id(shared: &EngineShared, paths: &Paths, ttsq: &TtsQueue) -> Option<String> {
-    model_status_json(shared, paths, || ttsq.tts_status_sample())["dictation"]["session_id"]
-        .as_str()
-        .map(str::to_owned)
-}
-
 fn agent_usage_response_with(
     refresh: bool,
     snapshot: impl FnOnce(bool) -> ds_agent_usage::UsageDeck,
@@ -75,6 +71,94 @@ fn agent_usage_response_with(
     match serde_json::to_value(snapshot(refresh)) {
         Ok(deck) => ds_ipc::Response::AgentUsage { deck },
         Err(error) => ds_ipc::Response::error(format!("agent usage: {error}")),
+    }
+}
+
+fn presenter_response(
+    presenters: &DictationPresenterRegistry,
+    gate: &StatusGate,
+    stt_active: &AtomicBool,
+    paste: &PasteState,
+    paths: &Paths,
+    request: ds_ipc::Request,
+    now: std::time::Instant,
+) -> ds_ipc::Response {
+    let current = || current_dictation_session_id(presenters, stt_active, paste);
+    match request {
+        ds_ipc::Request::AcquireDictationPresenter {
+            presenter_id,
+            session_id,
+            ttl_ms,
+        } => {
+            if let Err(message) = ds_ipc::validate_presenter_id(&presenter_id) {
+                return ds_ipc::Response::error(format!("dictation presenter: {message}"));
+            }
+            let current = current();
+            let result = presenters.acquire(session_id.clone(), current.as_deref(), ttl_ms, now);
+            if result.changed {
+                gate.bump();
+            }
+            match result.result {
+                Ok(lease) => {
+                    log_client(
+                        paths,
+                        None,
+                        &format!(
+                            "dictation presenter acquired presenter={presenter_id} \
+                             session={session_id}"
+                        ),
+                    );
+                    ds_ipc::Response::DictationPresenterLease {
+                        lease_id: lease.id,
+                        ttl_ms: lease.ttl_ms,
+                    }
+                }
+                Err(message) => ds_ipc::Response::error(message),
+            }
+        }
+        ds_ipc::Request::ReadyDictationPresenter {
+            lease_id,
+            session_id,
+        } => {
+            let current = current();
+            let result = presenters.ready(&lease_id, &session_id, current.as_deref(), now);
+            if result.changed {
+                gate.bump();
+            }
+            match result.result {
+                Ok(()) => ds_ipc::Response::Done,
+                Err(message) => ds_ipc::Response::error(message),
+            }
+        }
+        ds_ipc::Request::RenewDictationPresenter {
+            lease_id,
+            session_id,
+            ttl_ms,
+        } => {
+            let current = current();
+            let result = presenters.renew(&lease_id, &session_id, current.as_deref(), ttl_ms, now);
+            if result.changed {
+                gate.bump();
+            }
+            match result.result {
+                Ok(()) => ds_ipc::Response::Done,
+                Err(message) => ds_ipc::Response::error(message),
+            }
+        }
+        ds_ipc::Request::ReleaseDictationPresenter {
+            lease_id,
+            session_id,
+        } => {
+            let result = presenters.release(&lease_id, &session_id, now);
+            if result.changed {
+                gate.bump();
+            }
+            match result.result {
+                Ok(()) => ds_ipc::Response::Done,
+                Err(message) => ds_ipc::Response::error(message),
+            }
+        }
+        _ => unreachable!("presenter_response only accepts presenter requests"),
     }
 }
 
@@ -101,14 +185,14 @@ fn handle_mark_active(
             grok_sessions.nudge(s);
         }
     }
+    if synthetic {
+        return; // no active-terminal steal, no TTS queue touch
+    }
     ttsq.link_sessions(
         sessions.logical.as_deref(),
         sessions.queue.as_deref(),
         source,
     );
-    if synthetic {
-        return; // no active-terminal steal, no TTS queue touch
-    }
     ttsq.set_active_session(sessions.queue.clone());
     // Voice-submit echo: engine already applied clear_on_input; skip re-cancel.
     let was_voice = ttsq.take_recent_voice_submit();
@@ -286,99 +370,18 @@ pub(crate) fn spawn_ipc_server(
                     ttsq.set_muted(on);
                     emit(&ds_ipc::Response::Done);
                 }
-                ds_ipc::Request::AcquireDictationPresenter {
-                    presenter_id,
-                    session_id,
-                    ttl_ms,
-                } => {
-                    let now = std::time::Instant::now();
-                    let current = presenter_session_id(&shared, &paths, &ttsq);
-                    let result = shared.dictation_presenters.acquire(
-                        session_id.clone(),
-                        current.as_deref(),
-                        ttl_ms,
-                        now,
-                    );
-                    if result.changed {
-                        shared.gate.bump();
-                    }
-                    match result.result {
-                        Ok(lease) => {
-                            log_client(
-                                &paths,
-                                None,
-                                &format!(
-                                    "dictation presenter acquired presenter={presenter_id} \
-                                     session={session_id}"
-                                ),
-                            );
-                            emit(&ds_ipc::Response::DictationPresenterLease {
-                                lease_id: lease.id,
-                                ttl_ms: lease.ttl_ms,
-                            });
-                        }
-                        Err(message) => emit(&ds_ipc::Response::error(message)),
-                    }
-                }
-                ds_ipc::Request::ReadyDictationPresenter {
-                    lease_id,
-                    session_id,
-                } => {
-                    let now = std::time::Instant::now();
-                    let current = presenter_session_id(&shared, &paths, &ttsq);
-                    let result = shared.dictation_presenters.ready(
-                        &lease_id,
-                        &session_id,
-                        current.as_deref(),
-                        now,
-                    );
-                    if result.changed {
-                        shared.gate.bump();
-                    }
-                    match result.result {
-                        Ok(()) => emit(&ds_ipc::Response::Done),
-                        Err(message) => emit(&ds_ipc::Response::error(message)),
-                    }
-                }
-                ds_ipc::Request::RenewDictationPresenter {
-                    lease_id,
-                    session_id,
-                    ttl_ms,
-                } => {
-                    let now = std::time::Instant::now();
-                    let current = presenter_session_id(&shared, &paths, &ttsq);
-                    let result = shared.dictation_presenters.renew(
-                        &lease_id,
-                        &session_id,
-                        current.as_deref(),
-                        ttl_ms,
-                        now,
-                    );
-                    if result.changed {
-                        shared.gate.bump();
-                    }
-                    match result.result {
-                        Ok(()) => emit(&ds_ipc::Response::Done),
-                        Err(message) => emit(&ds_ipc::Response::error(message)),
-                    }
-                }
-                ds_ipc::Request::ReleaseDictationPresenter {
-                    lease_id,
-                    session_id,
-                } => {
-                    let result = shared.dictation_presenters.release(
-                        &lease_id,
-                        &session_id,
-                        std::time::Instant::now(),
-                    );
-                    if result.changed {
-                        shared.gate.bump();
-                    }
-                    match result.result {
-                        Ok(()) => emit(&ds_ipc::Response::Done),
-                        Err(message) => emit(&ds_ipc::Response::error(message)),
-                    }
-                }
+                request @ (ds_ipc::Request::AcquireDictationPresenter { .. }
+                | ds_ipc::Request::ReadyDictationPresenter { .. }
+                | ds_ipc::Request::RenewDictationPresenter { .. }
+                | ds_ipc::Request::ReleaseDictationPresenter { .. }) => emit(&presenter_response(
+                    &shared.dictation_presenters,
+                    &shared.gate,
+                    &shared.stt_active,
+                    &shared.paste,
+                    &paths,
+                    request,
+                    std::time::Instant::now(),
+                )),
                 ds_ipc::Request::Stop { session, source } => {
                     // MCP stop is per-window: prune only that session's items and cancel
                     // playback only if it is that session's, so one terminal never
@@ -397,8 +400,8 @@ pub(crate) fn spawn_ipc_server(
                     queue_session,
                     source,
                 } => {
-                    // Window closed for good: per-window barge. The agent's voice assignment
-                    // is keyed by client, not session, and deliberately survives.
+                    // Window closed for good: per-window barge. The agent/pane voice assignment
+                    // is independent of the logical session and deliberately survives.
                     // Missing queue identity → global hard barge for sessionless hooks.
                     // Grok: also drop the updates.jsonl tail registration.
                     log_client(
@@ -673,6 +676,7 @@ fn diarize_named_segments(json: &str, paths: &Paths) -> Result<serde_json::Value
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::PasteBuf;
     use std::sync::Mutex;
 
     #[test]
@@ -768,8 +772,8 @@ mod tests {
             &grok_sessions,
             &paths,
             HookSessions {
-                logical: Some("a".into()),
-                queue: Some("a".into()),
+                logical: Some("logical-a".into()),
+                queue: Some(ds_config::herdr_queue_scope("pane-a")),
             },
             true,
             Some(WiredAgent::ClaudeCode),
@@ -785,6 +789,117 @@ mod tests {
             1,
             "a synthetic continuation must not cancel queued speech"
         );
+        assert!(
+            ttsq.tts_status_sample().voice_sessions.is_empty(),
+            "a synthetic continuation must not register Herdr queue state"
+        );
+    }
+
+    #[test]
+    fn presenter_handler_flow_maps_responses_and_bumps_only_visible_transitions() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::rooted_at(dir.path());
+        let presenters = DictationPresenterRegistry::default();
+        let gate = StatusGate::new();
+        let stt_active = AtomicBool::new(true);
+        let paste = Arc::new(Mutex::new(PasteBuf {
+            presentation_session_id: 7,
+            ..PasteBuf::default()
+        }));
+        let session = presenters.session_id(7);
+        let now = std::time::Instant::now();
+
+        let acquired = presenter_response(
+            &presenters,
+            &gate,
+            &stt_active,
+            &paste,
+            &paths,
+            ds_ipc::Request::AcquireDictationPresenter {
+                presenter_id: "herdr.voice".into(),
+                session_id: session.clone(),
+                ttl_ms: 3_500,
+            },
+            now,
+        );
+        let lease_id = match acquired {
+            ds_ipc::Response::DictationPresenterLease { lease_id, ttl_ms } => {
+                assert_eq!(ttl_ms, 3_500);
+                lease_id
+            }
+            other => panic!("expected presenter lease, got {other:?}"),
+        };
+        assert_eq!(gate.seq(), 0, "a reservation does not hide native UI");
+
+        assert!(matches!(
+            presenter_response(
+                &presenters,
+                &gate,
+                &stt_active,
+                &paste,
+                &paths,
+                ds_ipc::Request::ReadyDictationPresenter {
+                    lease_id: lease_id.clone(),
+                    session_id: session.clone(),
+                },
+                now,
+            ),
+            ds_ipc::Response::Done
+        ));
+        assert_eq!(gate.seq(), 1, "ready wakes the native status waiter");
+
+        assert!(matches!(
+            presenter_response(
+                &presenters,
+                &gate,
+                &stt_active,
+                &paste,
+                &paths,
+                ds_ipc::Request::RenewDictationPresenter {
+                    lease_id: lease_id.clone(),
+                    session_id: session.clone(),
+                    ttl_ms: 4_000,
+                },
+                now,
+            ),
+            ds_ipc::Response::Done
+        ));
+        assert_eq!(gate.seq(), 1, "renew does not change presentation state");
+
+        assert!(matches!(
+            presenter_response(
+                &presenters,
+                &gate,
+                &stt_active,
+                &paste,
+                &paths,
+                ds_ipc::Request::ReleaseDictationPresenter {
+                    lease_id,
+                    session_id: session,
+                },
+                now,
+            ),
+            ds_ipc::Response::Done
+        ));
+        assert_eq!(gate.seq(), 2, "release restores native UI promptly");
+
+        assert!(matches!(
+            presenter_response(
+                &presenters,
+                &gate,
+                &stt_active,
+                &paste,
+                &paths,
+                ds_ipc::Request::AcquireDictationPresenter {
+                    presenter_id: "forged\nline".into(),
+                    session_id: presenters.session_id(7),
+                    ttl_ms: 3_500,
+                },
+                now,
+            ),
+            ds_ipc::Response::Error { .. }
+        ));
+        assert_eq!(gate.seq(), 2, "rejected input does not wake status waiters");
     }
 
     #[test]

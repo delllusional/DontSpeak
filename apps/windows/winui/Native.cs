@@ -400,6 +400,7 @@ internal sealed record ModelStatusDto
 {
     [JsonPropertyName("seq")] public ulong Seq { get; init; }
     [JsonPropertyName("activity")] public ActivityDto? Activity { get; init; }
+    // Transport mirror for plugin status; the native host does not render per-pane rows.
     [JsonPropertyName("voice_sessions")] public VoiceSessionDto[]? VoiceSessions { get; init; }
     [JsonPropertyName("tts")] public TtsStatusDto? Tts { get; init; }
     [JsonPropertyName("stt")] public SttStatusDto? Stt { get; init; }
