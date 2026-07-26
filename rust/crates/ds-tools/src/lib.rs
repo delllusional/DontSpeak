@@ -701,6 +701,14 @@ fn output_schema_for(output: Output) -> Value {
                             }
                         },
                         "utterance_id": { "type": ["integer", "null"], "minimum": 1 },
+                        "playback_state": {
+                            "type": ["string", "null"],
+                            "enum": ["held", "playing", null]
+                        },
+                        "playback_hold_reason": {
+                            "type": ["string", "null"],
+                            "enum": ["microphone", "focus", "readiness", null]
+                        },
                         "voice": { "type": ["string", "null"] },
                         "detected_language": { "type": ["string", "null"] },
                         "warning": {

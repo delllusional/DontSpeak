@@ -17,6 +17,8 @@ final class ModelStatusContractTests: XCTestCase {
             "speaking": false,
             "speaker": null,
             "utterance_id": null,
+            "playback_state": null,
+            "playback_hold_reason": null,
             "voice": null,
             "language": null,
             "warning": null,
@@ -142,6 +144,7 @@ final class ModelStatusContractTests: XCTestCase {
                   "activity": {
                     "caps": true, "caps_active": true, "recording": false,
                     "speaking": true, "speaker": "claude", "utterance_id": 12,
+                    "playback_state": "held", "playback_hold_reason": "microphone",
                     "voice": "if_sara", "language": "it", "warning": null, "muted": false
                   },
                   "voice_sessions": [{
@@ -193,6 +196,8 @@ final class ModelStatusContractTests: XCTestCase {
         XCTAssertEqual(dto.seq, 7)
         XCTAssertEqual(dto.activity.speaker, "claude")
         XCTAssertEqual(dto.activity.utteranceId, 12)
+        XCTAssertEqual(dto.activity.playbackState, "held")
+        XCTAssertEqual(dto.activity.playbackHoldReason, "microphone")
         XCTAssertEqual(dto.activity.voice, "if_sara")
         XCTAssertEqual(dto.voiceSessions?.first?.paneId, "workspace:p1")
         XCTAssertEqual(dto.voiceSessions?.first?.queued, 2)
@@ -218,6 +223,7 @@ final class ModelStatusContractTests: XCTestCase {
               "activity": {
                 "caps": false, "caps_active": false, "recording": false,
                 "speaking": false, "speaker": null, "utterance_id": null,
+                "playback_state": null, "playback_hold_reason": null,
                 "voice": null, "language": null, "warning": null, "muted": false
               },
               "tts": {

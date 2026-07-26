@@ -49,6 +49,21 @@ pub enum UtteranceWarning {
     VoiceLanguageMismatch,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackState {
+    Held,
+    Playing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlaybackHoldReason {
+    Microphone,
+    Focus,
+    Readiness,
+}
+
 /// Terminal ACK for a `speak` handle ([`UtteranceStatus::id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -119,10 +134,14 @@ pub struct Activity {
     pub caps_active: bool,
     pub recording: bool,
     pub speaking: bool,
-    /// In-flight TTS client; `null` idle/unattributed.
+    /// Claimed TTS client; `null` idle/unattributed.
     pub speaker: Option<ds_client::WiredAgent>,
-    /// In-flight `speak` handle; `null` idle/cue.
+    /// Claimed `speak` handle; remains present while playback is held.
     pub utterance_id: Option<u64>,
+    /// Claimed playback lifecycle; `null` when no queue item is claimed.
+    pub playback_state: Option<PlaybackState>,
+    /// Why claimed playback is held; `null` while playing or idle.
+    pub playback_hold_reason: Option<PlaybackHoldReason>,
     pub voice: Option<String>,
     pub language: Option<String>,
     pub warning: Option<UtteranceWarning>,
@@ -137,7 +156,7 @@ pub struct VoiceSessionStatus {
     /// Selected by the queue's active-terminal routing.
     pub active: bool,
     pub speaking: bool,
-    /// Pending speech items; excludes the item already speaking.
+    /// Pending speech items; includes a held claim and excludes one already playing.
     pub queued: u64,
     /// Queued behind a different active terminal.
     pub blocked: bool,
@@ -257,6 +276,8 @@ mod tests {
                 speaking: false,
                 speaker: None,
                 utterance_id: None,
+                playback_state: None,
+                playback_hold_reason: None,
                 voice: None,
                 language: None,
                 warning: None,
@@ -324,7 +345,7 @@ mod tests {
         ] {
             assert!(root.contains_key(key), "missing root field {key}");
         }
-        assert_eq!(v["activity"].as_object().unwrap().len(), 10);
+        assert_eq!(v["activity"].as_object().unwrap().len(), 12);
         assert!(v["voice_sessions"].as_array().unwrap().is_empty());
         assert_eq!(v["stats"]["tts"].as_object().unwrap().len(), 10);
         assert_eq!(v["stats"]["tts"]["queued"], 0);
@@ -355,6 +376,8 @@ mod tests {
             "activity.speaker null when idle"
         );
         assert!(v["activity"]["utterance_id"].is_null());
+        assert!(v["activity"]["playback_state"].is_null());
+        assert!(v["activity"]["playback_hold_reason"].is_null());
         assert!(v["activity"]["voice"].is_null());
         assert!(v["activity"]["language"].is_null());
         assert!(v["activity"]["warning"].is_null());
@@ -428,6 +451,18 @@ mod tests {
             UtteranceOutcome::Failed,
             UtteranceOutcome::Cancelled,
             UtteranceOutcome::Dropped,
+        ])
+    }
+
+    fn playback_state_strategy() -> impl Strategy<Value = PlaybackState> {
+        prop::sample::select(vec![PlaybackState::Held, PlaybackState::Playing])
+    }
+
+    fn playback_hold_reason_strategy() -> impl Strategy<Value = PlaybackHoldReason> {
+        prop::sample::select(vec![
+            PlaybackHoldReason::Microphone,
+            PlaybackHoldReason::Focus,
+            PlaybackHoldReason::Readiness,
         ])
     }
 
@@ -511,6 +546,8 @@ mod tests {
             speaking in any::<bool>(),
             speaker in prop::option::of(wired_client_strategy()),
             utterance_id in prop::option::of(any::<u64>()),
+            playback_state in prop::option::of(playback_state_strategy()),
+            playback_hold_reason in prop::option::of(playback_hold_reason_strategy()),
             voice in opt_short_string(),
             language in opt_short_string(),
             warning in prop::option::of(utterance_warning_strategy()),
@@ -523,6 +560,8 @@ mod tests {
                 speaking,
                 speaker,
                 utterance_id,
+                playback_state,
+                playback_hold_reason,
                 voice,
                 language,
                 warning,

@@ -61,12 +61,20 @@ struct PlayingClaim {
     speech: bool,
     /// Admit-time id; voice/language filled at play; `outcome` written to the ring. Cues: `None`.
     utterance: Option<ds_status::UtteranceStatus>,
+    playback_state: ds_status::PlaybackState,
+    hold_reason: Option<ds_status::PlaybackHoldReason>,
 }
 
-struct PlayingGuard<'a>(&'a Mutex<Option<PlayingClaim>>);
+struct PlayingGuard<'a> {
+    playing: &'a Mutex<Option<PlayingClaim>>,
+    gate: &'a StatusGate,
+}
+
 impl Drop for PlayingGuard<'_> {
     fn drop(&mut self) {
-        *self.0.lock().unwrap() = None;
+        if self.playing.lock().unwrap().take().is_some() {
+            self.gate.bump();
+        }
     }
 }
 
@@ -84,6 +92,9 @@ const ACCEPTED_NARRATION_IDS_MAX: usize = 8192;
 
 /// Terminal utterance ring for `model_status` (producer poll after `speak` must still hit).
 const RECENT_UTTERANCES_MAX: usize = 16;
+
+/// Active/sessionless service before the oldest waiting background item gets one turn.
+const ACTIVE_SESSION_BURST: usize = 3;
 
 #[derive(Default)]
 struct AcceptedNarrations {
@@ -292,6 +303,8 @@ pub(crate) struct TtsStatusSample {
     pub speaking: bool,
     pub speaker: Option<WiredAgent>,
     pub queued: u64,
+    pub playback_state: Option<ds_status::PlaybackState>,
+    pub playback_hold_reason: Option<ds_status::PlaybackHoldReason>,
     pub utterance: Option<ds_status::UtteranceStatus>,
     pub voice_sessions: Vec<ds_status::VoiceSessionStatus>,
     /// Terminal records, most recent first.
@@ -403,23 +416,56 @@ fn session_preferred_for_active(item_session: &Option<String>, active: &str) -> 
     }
 }
 
-/// Prefer active/untagged/sticky; else FIFO (avoids starving backgrounded windows).
-fn select_pos(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
-    match active {
-        None => (!q.is_empty()).then_some(0),
-        Some(active_id) => q
-            .iter()
-            .position(|it| session_preferred_for_active(&it.session, active_id))
-            .or_else(|| (!q.is_empty()).then_some(0)),
+#[derive(Default)]
+struct SchedulerState {
+    preferred_run: usize,
+}
+
+/// Prefer active/untagged/sticky in bounded bursts, preserving FIFO within each class.
+fn select_pos(
+    q: &VecDeque<Item>,
+    active: &Option<String>,
+    scheduler: &mut SchedulerState,
+) -> Option<usize> {
+    let Some(active_id) = active else {
+        scheduler.preferred_run = 0;
+        return (!q.is_empty()).then_some(0);
+    };
+
+    let preferred = q
+        .iter()
+        .position(|it| session_preferred_for_active(&it.session, active_id));
+    let background = q
+        .iter()
+        .position(|it| !session_preferred_for_active(&it.session, active_id));
+    match (preferred, background) {
+        (Some(_), Some(background)) if scheduler.preferred_run >= ACTIVE_SESSION_BURST => {
+            scheduler.preferred_run = 0;
+            Some(background)
+        }
+        (Some(preferred), _) => {
+            scheduler.preferred_run = scheduler.preferred_run.saturating_add(1);
+            Some(preferred)
+        }
+        (None, Some(background)) => {
+            scheduler.preferred_run = 0;
+            Some(background)
+        }
+        (None, None) => None,
     }
 }
 
 /// Worker claim gate: a paused queue claims nothing, however selectable the head is.
-fn claimable_pos(paused: bool, q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
+fn claimable_pos(
+    paused: bool,
+    q: &VecDeque<Item>,
+    active: &Option<String>,
+    scheduler: &mut SchedulerState,
+) -> Option<usize> {
     if paused {
         return None;
     }
-    select_pos(q, active)
+    select_pos(q, active, scheduler)
 }
 
 /// Asymmetric: Dictation wins; barge auto-resume is no-op under Dictation.
@@ -892,7 +938,6 @@ impl TtsQueue {
     fn claim_item(&self, q: &mut VecDeque<Item>, pos: usize) -> Item {
         let before = speech_depth(q);
         let item = q.remove(pos).expect("select_pos returns a valid index");
-        self.publish_queue_depth(before, q);
         self.in_flight.store(true, Ordering::SeqCst);
         *self.playing.lock().unwrap() = Some(PlayingClaim {
             source: item.source,
@@ -901,7 +946,10 @@ impl TtsQueue {
             herdr_pane: item.herdr_pane.clone(),
             speech: item.action.speech_text().is_some(),
             utterance: Self::claimed_utterance(&item),
+            playback_state: ds_status::PlaybackState::Held,
+            hold_reason: Some(ds_status::PlaybackHoldReason::Readiness),
         });
+        self.publish_queue_depth(before, q);
         item
     }
 
@@ -1359,9 +1407,7 @@ impl TtsQueue {
     pub fn tts_status_sample(&self) -> TtsStatusSample {
         let speaking = self.is_tts_active();
         let pending = self.queue_depth.load(Ordering::SeqCst);
-        let claim = speaking
-            .then(|| self.playing.lock().unwrap().clone())
-            .flatten();
+        let claim = self.playing.lock().unwrap().clone();
         let source = claim.as_ref().and_then(|claim| claim.source);
         let active_session = self.active.lock().unwrap().effective();
         let depths = self.herdr_queue_depths.lock().unwrap().clone();
@@ -1372,7 +1418,13 @@ impl TtsQueue {
             .iter()
             .map(|(pane_id, record)| {
                 let active = record.queue_session == active_session;
-                let queued = depths.get(pane_id).copied().unwrap_or(0);
+                let held = u64::from(
+                    !speaking
+                        && claim.as_ref().is_some_and(|claim| {
+                            claim.speech && claim.herdr_pane.as_deref() == Some(pane_id.as_str())
+                        }),
+                );
+                let queued = depths.get(pane_id).copied().unwrap_or(0) + held;
                 ds_status::VoiceSessionStatus {
                     pane_id: pane_id.clone(),
                     source: record.source,
@@ -1389,11 +1441,13 @@ impl TtsQueue {
             .collect::<Vec<_>>();
         voice_sessions.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
         // Playback edges already publish changes to this in-flight addend.
-        let speaking_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
+        let claimed_utterance = u64::from(claim.as_ref().is_some_and(|claim| claim.speech));
         TtsStatusSample {
             speaking,
             speaker: source,
-            queued: pending + speaking_utterance,
+            queued: pending + claimed_utterance,
+            playback_state: claim.as_ref().map(|claim| claim.playback_state),
+            playback_hold_reason: claim.as_ref().and_then(|claim| claim.hold_reason),
             utterance: claim.and_then(|claim| claim.utterance),
             voice_sessions,
             recent_utterances: self.utterances.lock().unwrap().iter().cloned().collect(),
@@ -1457,6 +1511,30 @@ impl TtsQueue {
     fn set_tts_active(&self, on: bool) {
         if self.tts_active.swap(on, Ordering::SeqCst) != on {
             self.gate.bump();
+        }
+    }
+
+    fn set_playback_held(&self, reason: ds_status::PlaybackHoldReason) {
+        let changed = {
+            let mut playing = self.playing.lock().unwrap();
+            let Some(claim) = playing.as_mut() else {
+                return;
+            };
+            let changed = claim.playback_state != ds_status::PlaybackState::Held
+                || claim.hold_reason != Some(reason);
+            claim.playback_state = ds_status::PlaybackState::Held;
+            claim.hold_reason = Some(reason);
+            changed
+        };
+        if changed {
+            self.gate.bump();
+        }
+    }
+
+    fn set_playback_playing(&self) {
+        if let Some(claim) = self.playing.lock().unwrap().as_mut() {
+            claim.playback_state = ds_status::PlaybackState::Playing;
+            claim.hold_reason = None;
         }
     }
 
@@ -1749,6 +1827,7 @@ impl TtsQueue {
     }
 
     fn run(self: Arc<Self>) {
+        let mut scheduler = SchedulerState::default();
         'outer: loop {
             // Wait for playable item ([`claimable_pos`]); lock order items → active.
             let (mut item, gen0) = {
@@ -1760,14 +1839,18 @@ impl TtsQueue {
                     // while paused.
                     let gen0 = self.generation.load(Ordering::SeqCst);
                     let active = self.active.lock().unwrap().effective();
-                    if let Some(pos) = claimable_pos(self.is_paused(), &q, &active) {
+                    if let Some(pos) = claimable_pos(self.is_paused(), &q, &active, &mut scheduler)
+                    {
                         break (self.claim_item(&mut q, pos), gen0);
                     }
                     q = self.cv.wait(q).unwrap();
                 }
             };
             let _in_flight = InFlightGuard(&self.in_flight);
-            let _playing = PlayingGuard(&self.playing);
+            let _playing = PlayingGuard {
+                playing: &self.playing,
+                gate: &self.gate,
+            };
 
             let mut played = None;
             match &item.action {
@@ -1794,6 +1877,7 @@ impl TtsQueue {
                         self.requeue_if_resuming(item, gen0);
                         continue 'outer;
                     }
+                    self.set_playback_playing();
                     self.set_tts_active(true);
                     if let Err(e) = self.cue_one(*event) {
                         log::warn!(target: "ttsq", "queued earcon failed: {e}");
@@ -1846,6 +1930,7 @@ impl TtsQueue {
                 &language,
                 utterance_warning(engine, model, &voice, &language),
             );
+            self.set_playback_playing();
             self.set_tts_active(true);
             let result =
                 self.speak_one(engine, text, &voice, &language, rate, &params, resume_skip);
@@ -1903,6 +1988,7 @@ impl TtsQueue {
                 if !hold.any() {
                     break;
                 }
+                self.set_playback_held(hold.reason());
                 // Focus takes precedence while both gates are live. Reporting the mic hold as
                 // busy here made always-listening alternate between opening its capture and
                 // immediately closing/resetting it. Once focus returns, the focus gate clears,
@@ -1916,6 +2002,7 @@ impl TtsQueue {
             if self.generation.load(Ordering::SeqCst) != gen0 {
                 return GateOutcome::Requeue;
             }
+            self.set_playback_held(ds_status::PlaybackHoldReason::Readiness);
 
             let mut cfg = self.config.lock().unwrap().clone();
             let selected_engine = cfg.resolved_tts();
@@ -2013,6 +2100,7 @@ impl TtsQueue {
                 self.in_flight.store(true, Ordering::SeqCst);
                 return true;
             }
+            self.set_playback_held(hold.reason());
             self.in_flight.store(hold.reports_busy(), Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(120));
         }
@@ -2294,6 +2382,14 @@ impl HoldState {
     fn reports_busy(self) -> bool {
         self.mic && !self.focus
     }
+
+    fn reason(self) -> ds_status::PlaybackHoldReason {
+        if self.focus {
+            ds_status::PlaybackHoldReason::Focus
+        } else {
+            ds_status::PlaybackHoldReason::Microphone
+        }
+    }
 }
 
 fn mic_holds(full_duplex: bool, mic_active: bool) -> bool {
@@ -2378,16 +2474,19 @@ mod tests {
         let focus_only = hold_state(false, false, true, true, false);
         assert!(focus_only.any());
         assert!(!focus_only.reports_busy());
+        assert_eq!(focus_only.reason(), ds_status::PlaybackHoldReason::Focus);
 
         // Always-listening opens the mic while focus holds. That must remain idle to the
         // listener; mirroring this mic edge into busy would close it and oscillate forever.
         let both = hold_state(false, true, true, true, false);
         assert!(both.any());
         assert!(!both.reports_busy());
+        assert_eq!(both.reason(), ds_status::PlaybackHoldReason::Focus);
 
         // Once focus returns, the mic-only hold closes capture exactly once so playback can run.
         let mic_only = hold_state(false, true, true, true, true);
         assert!(mic_only.reports_busy());
+        assert_eq!(mic_only.reason(), ds_status::PlaybackHoldReason::Microphone);
         assert!(!hold_state(true, true, false, false, false).any());
     }
 
@@ -2764,19 +2863,23 @@ mod tests {
         sessions.iter().map(|s| narr(*s)).collect()
     }
 
+    fn fresh_select(q: &VecDeque<Item>, active: &Option<String>) -> Option<usize> {
+        select_pos(q, active, &mut SchedulerState::default())
+    }
+
     #[test]
     fn no_active_session_is_strict_fifo() {
         // None active (no prompt-hook yet) → always the front item, regardless of tags.
         let q = deque(&[Some("a"), Some("b")]);
-        assert_eq!(select_pos(&q, &None), Some(0));
-        assert_eq!(select_pos(&VecDeque::new(), &None), None);
+        assert_eq!(fresh_select(&q, &None), Some(0));
+        assert_eq!(fresh_select(&VecDeque::new(), &None), None);
     }
 
     #[test]
     fn active_session_picks_its_item_and_holds_others() {
         // Active = "b": PREFER b's item while b has one queued (a's wait behind it).
         let q = deque(&[Some("a"), Some("b"), Some("a")]);
-        assert_eq!(select_pos(&q, &Some("b".into())), Some(1));
+        assert_eq!(fresh_select(&q, &Some("b".into())), Some(1));
     }
 
     #[test]
@@ -2785,9 +2888,46 @@ mod tests {
         // still play (FIFO), never be held forever. (Regression: the old behavior
         // returned None here, silencing a backgrounded window indefinitely.)
         let q = deque(&[Some("a"), Some("a")]);
-        assert_eq!(select_pos(&q, &Some("b".into())), Some(0));
+        assert_eq!(fresh_select(&q, &Some("b".into())), Some(0));
         // Empty queue is still nothing to play.
-        assert_eq!(select_pos(&VecDeque::new(), &Some("b".into())), None);
+        assert_eq!(fresh_select(&VecDeque::new(), &Some("b".into())), None);
+    }
+
+    #[test]
+    fn continuously_producing_active_session_cannot_starve_a_waiting_session() {
+        let active = Some("active".to_string());
+        let mut scheduler = SchedulerState::default();
+        let mut q = deque(&[Some("waiting")]);
+
+        for _ in 0..ACTIVE_SESSION_BURST {
+            q.push_back(narr(Some("active")));
+            let pos = select_pos(&q, &active, &mut scheduler).expect("active item selected");
+            assert_eq!(q.remove(pos).unwrap().session.as_deref(), Some("active"));
+        }
+
+        q.push_back(narr(Some("active")));
+        let pos = select_pos(&q, &active, &mut scheduler).expect("waiting item selected");
+        assert_eq!(
+            q.remove(pos).unwrap().session.as_deref(),
+            Some("waiting"),
+            "bounded preference must yield even while the active session keeps producing"
+        );
+    }
+
+    #[test]
+    fn changing_active_session_does_not_reset_the_fairness_budget() {
+        let mut scheduler = SchedulerState::default();
+        let mut q = deque(&[Some("waiting")]);
+
+        for session in ["a", "b", "c"] {
+            q.push_back(narr(Some(session)));
+            let pos = select_pos(&q, &Some(session.into()), &mut scheduler).unwrap();
+            assert_eq!(q.remove(pos).unwrap().session.as_deref(), Some(session));
+        }
+
+        q.push_back(narr(Some("d")));
+        let pos = select_pos(&q, &Some("d".into()), &mut scheduler).unwrap();
+        assert_eq!(q.remove(pos).unwrap().session.as_deref(), Some("waiting"));
     }
 
     #[test]
@@ -2795,7 +2935,7 @@ mod tests {
         // session == None is reserved for global/sessionless hook audio. It plays even
         // when another terminal is active; MCP speak/stop never use this path.
         let q = deque(&[Some("a"), None, Some("a")]);
-        assert_eq!(select_pos(&q, &Some("b".into())), Some(1));
+        assert_eq!(fresh_select(&q, &Some("b".into())), Some(1));
     }
 
     #[test]
@@ -2805,16 +2945,16 @@ mod tests {
         // terminal's FIFO items (not fall through to "no preferred → play front").
         let q = deque(&[Some("other"), Some("grok-stop:active"), Some("active")]);
         assert_eq!(
-            select_pos(&q, &Some("active".into())),
+            fresh_select(&q, &Some("active".into())),
             Some(1),
             "sticky digests for the active terminal must not wait behind other sessions"
         );
         // Real session id still preferred when it appears first among preferred tags.
         let q2 = deque(&[Some("active"), Some("grok-stop:active")]);
-        assert_eq!(select_pos(&q2, &Some("active".into())), Some(0));
+        assert_eq!(fresh_select(&q2, &Some("active".into())), Some(0));
         // Sticky for a different session is not preferred.
         let q3 = deque(&[Some("grok-stop:other"), Some("active")]);
-        assert_eq!(select_pos(&q3, &Some("active".into())), Some(1));
+        assert_eq!(fresh_select(&q3, &Some("active".into())), Some(1));
     }
 
     #[test]
@@ -3322,10 +3462,9 @@ mod tests {
         assert_eq!(q.active_session(), None);
     }
 
-    /// In-flight claim carries the producer's `WiredAgent` so `activity.speaker`
-    /// can highlight the matching Usage card. Non-client producers stay null.
+    /// A claim stays visible while held, including its source, depth, state, and reason.
     #[test]
-    fn tts_status_sample_exposes_wireable_playing_source_only() {
+    fn tts_status_sample_exposes_playing_and_held_claims() {
         let q = mk_queue();
         let idle = q.tts_status_sample();
         assert!(!idle.speaking);
@@ -3343,12 +3482,18 @@ mod tests {
             let mut items = q.items.lock().unwrap();
             let _ = q.claim_item(&mut items, 0);
         }
+        q.set_playback_playing();
         q.set_active_for_test(true);
         // Nothing waiting, but the claimed utterance is still outstanding → 1.
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
         assert_eq!(speaking.speaker, Some(WiredAgent::ClaudeCode));
         assert_eq!(speaking.queued, 1);
+        assert_eq!(
+            speaking.playback_state,
+            Some(ds_status::PlaybackState::Playing)
+        );
+        assert_eq!(speaking.playback_hold_reason, None);
 
         // Unwired producers must not light a Usage card.
         *q.playing.lock().unwrap() = Some(PlayingClaim {
@@ -3358,6 +3503,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
@@ -3372,6 +3519,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let speaking = q.tts_status_sample();
         assert!(speaking.speaking);
@@ -3379,10 +3528,49 @@ mod tests {
         assert_eq!(speaking.queued, 1);
 
         q.set_active_for_test(false);
+        q.set_playback_held(ds_status::PlaybackHoldReason::Microphone);
+        let held = q.tts_status_sample();
+        assert!(!held.speaking);
+        assert_eq!(held.speaker, Some(WiredAgent::Grok));
+        assert_eq!(held.queued, 1);
+        assert_eq!(held.playback_state, Some(ds_status::PlaybackState::Held));
+        assert_eq!(
+            held.playback_hold_reason,
+            Some(ds_status::PlaybackHoldReason::Microphone)
+        );
+
+        *q.playing.lock().unwrap() = None;
         let idle = q.tts_status_sample();
         assert!(!idle.speaking);
         assert_eq!(idle.speaker, None);
         assert_eq!(idle.queued, 0);
+        assert_eq!(idle.playback_state, None);
+        assert_eq!(idle.playback_hold_reason, None);
+    }
+
+    #[test]
+    fn admitted_utterance_held_by_microphone_keeps_its_status_record() {
+        let q = mk_queue();
+        let id = q
+            .enqueue("held".into(), None, None, Some("session".into()))
+            .unwrap()
+            .unwrap();
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.set_playback_held(ds_status::PlaybackHoldReason::Microphone);
+
+        let held = q.tts_status_sample();
+        assert!(!held.speaking);
+        assert_eq!(held.queued, 1);
+        assert_eq!(held.utterance.as_ref().map(|item| item.id), Some(id));
+        assert_eq!(held.playback_state, Some(ds_status::PlaybackState::Held));
+        assert_eq!(
+            held.playback_hold_reason,
+            Some(ds_status::PlaybackHoldReason::Microphone)
+        );
+        assert!(held.recent_utterances.is_empty());
     }
 
     #[test]
@@ -3679,6 +3867,8 @@ mod tests {
                 warning: None,
                 outcome: None,
             }),
+            playback_state: ds_status::PlaybackState::Held,
+            hold_reason: Some(ds_status::PlaybackHoldReason::Readiness),
         });
     }
 
@@ -3779,6 +3969,8 @@ mod tests {
             herdr_pane: None,
             speech: false,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         q.finish_utterance(ds_status::UtteranceOutcome::Spoken);
         assert!(q.tts_status_sample().recent_utterances.is_empty());
@@ -3836,6 +4028,36 @@ mod tests {
             !recent.iter().any(|u| Some(u.id) == other),
             "another window's queued utterance is untouched"
         );
+    }
+
+    #[test]
+    fn every_admitted_utterance_eventually_has_one_terminal_record() {
+        let q = mk_queue();
+        let ids = ["one", "two", "three"]
+            .into_iter()
+            .map(|text| {
+                q.enqueue(text.into(), None, None, Some("session".into()))
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        {
+            let mut items = q.items.lock().unwrap();
+            let _ = q.claim_item(&mut items, 0);
+        }
+        q.finish_utterance(ds_status::UtteranceOutcome::Spoken);
+        *q.playing.lock().unwrap() = None;
+        q.clear_session(Some("session".into()));
+
+        let recent = q.tts_status_sample().recent_utterances;
+        assert_eq!(recent.len(), ids.len());
+        for id in ids {
+            assert_eq!(
+                recent.iter().filter(|record| record.id == id).count(),
+                1,
+                "handle {id} must have exactly one terminal record"
+            );
+        }
     }
 
     /// A record-barge requeue is not a terminal outcome — the utterance is still going to be
@@ -3921,8 +4143,14 @@ mod tests {
         q.set_active_for_test(false);
         assert_eq!(
             q.tts_status_sample().queued,
+            1,
+            "a claimed utterance held before playback remains outstanding"
+        );
+        *q.playing.lock().unwrap() = None;
+        assert_eq!(
+            q.tts_status_sample().queued,
             0,
-            "silence reports nothing outstanding"
+            "the depth clears when the claim ends"
         );
     }
 
@@ -3998,6 +4226,8 @@ mod tests {
             after_clear,
             "second empty clear must not bump depth"
         );
+        // This test has no worker guard to retire the cancelled claim.
+        *q.playing.lock().unwrap() = None;
 
         // Per-session prune: only a prune that actually drops an item bumps.
         q.edit_items_for_test(|q| q.push_back(narr(Some("a"))));
@@ -4363,6 +4593,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
         q.clear_session(Some("a".into()));
@@ -4382,6 +4614,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
         q2.clear_session(Some("a".into()));
@@ -4422,6 +4656,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         q
     }
@@ -4553,6 +4789,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 
@@ -4587,6 +4825,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before2 = q2.generation.load(Ordering::SeqCst);
 
@@ -4620,6 +4860,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before3 = q3.generation.load(Ordering::SeqCst);
         q3.cancel_for_submit(Some("a".into()), false, true);
@@ -4689,13 +4931,17 @@ mod tests {
         let mut q: VecDeque<Item> = VecDeque::new();
         q.push_back(narr(Some("a")));
         let active = Some("a".to_string());
-        assert_eq!(claimable_pos(false, &q, &active), Some(0));
+        let mut scheduler = SchedulerState::default();
+        assert_eq!(claimable_pos(false, &q, &active, &mut scheduler), Some(0));
         assert_eq!(
-            claimable_pos(true, &q, &active),
+            claimable_pos(true, &q, &active, &mut scheduler),
             None,
             "a paused queue claims nothing, however selectable the head is"
         );
-        assert_eq!(claimable_pos(true, &VecDeque::new(), &None), None);
+        assert_eq!(
+            claimable_pos(true, &VecDeque::new(), &None, &mut scheduler),
+            None
+        );
     }
 
     #[test]
@@ -5012,6 +5258,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
 
         let (selected_generation, final_generation) =
@@ -5035,6 +5283,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
 
         let (selected_generation, final_generation) =
@@ -5058,6 +5308,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
 
         let (selected_generation, final_generation) =
@@ -5631,6 +5883,8 @@ mod tests {
             herdr_pane: None,
             speech: true,
             utterance: None,
+            playback_state: ds_status::PlaybackState::Playing,
+            hold_reason: None,
         });
         let gen_before = q.generation.load(Ordering::SeqCst);
 

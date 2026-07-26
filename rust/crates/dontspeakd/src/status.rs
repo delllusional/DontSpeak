@@ -392,6 +392,8 @@ pub(crate) fn model_status_json(
             speaking: tts_sample.speaking,
             speaker: tts_sample.speaker,
             utterance_id: tts_sample.utterance.as_ref().map(|utterance| utterance.id),
+            playback_state: tts_sample.playback_state,
+            playback_hold_reason: tts_sample.playback_hold_reason,
             voice: tts_sample
                 .utterance
                 .as_ref()
@@ -858,6 +860,8 @@ mod tests {
             speaking: true,
             speaker: None,
             queued: 3,
+            playback_state: Some(ds_status::PlaybackState::Playing),
+            playback_hold_reason: None,
             utterance: Some(utterance.clone()),
             voice_sessions: vec![],
             recent_utterances: vec![UtteranceStatus {
@@ -869,6 +873,8 @@ mod tests {
         assert!(value.get("caps_events").is_none());
         assert_eq!(value["stats"]["tts"]["queued"], 3);
         assert_eq!(value["activity"]["utterance_id"], 7);
+        assert_eq!(value["activity"]["playback_state"], "playing");
+        assert!(value["activity"]["playback_hold_reason"].is_null());
         assert_eq!(value["activity"]["voice"], "af_sarah");
         assert_eq!(value["activity"]["language"], "it");
         assert_eq!(value["activity"]["warning"], "voice_language_mismatch");

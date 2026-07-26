@@ -362,6 +362,8 @@ fn call_status(paths: &Paths, sock: Option<&PathBuf>, args: &Value) -> Result<Va
                 "muted": status.activity.muted,
                 "voice_sessions": status.voice_sessions,
                 "utterance_id": status.activity.utterance_id,
+                "playback_state": status.activity.playback_state,
+                "playback_hold_reason": status.activity.playback_hold_reason,
                 "voice": status.activity.voice,
                 "detected_language": status.activity.language,
                 "warning": status.activity.warning,
@@ -1146,7 +1148,8 @@ mod status_output {
             "activity": {
                 "caps": true, "caps_active": false, "recording": false,
                 "speaking": true, "speaker": WiredAgent::Codex.as_str(),
-                "utterance_id": 12, "voice": "if_sara",
+                "utterance_id": 12, "playback_state": "playing",
+                "playback_hold_reason": null, "voice": "if_sara",
                 "language": "it", "warning": null, "muted": false
             },
             "voice_sessions": [{
@@ -1433,6 +1436,8 @@ mod status_output {
         assert_eq!(value["state"]["voice_sessions"][0]["pane_id"], "pane-7");
         assert_eq!(value["state"]["voice_sessions"][0]["queued"], 2);
         assert_eq!(value["state"]["utterance_id"], 12);
+        assert_eq!(value["state"]["playback_state"], "playing");
+        assert!(value["state"]["playback_hold_reason"].is_null());
         assert_eq!(value["state"]["voice"], "if_sara");
         assert_eq!(value["state"]["detected_language"], "it");
         assert_eq!(value["state"]["recent_utterances"][0]["id"], 11);

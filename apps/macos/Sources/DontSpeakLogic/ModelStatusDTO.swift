@@ -14,6 +14,8 @@ public struct ActivityDTO: Decodable, Sendable, Equatable {
     public var speaking: Bool
     public var speaker: String?
     public var utteranceId: UInt64?
+    public var playbackState: String?
+    public var playbackHoldReason: String?
     public var voice: String?
     public var language: String?
     public var warning: String?
@@ -26,6 +28,8 @@ public struct ActivityDTO: Decodable, Sendable, Equatable {
         case speaking
         case speaker
         case utteranceId = "utterance_id"
+        case playbackState = "playback_state"
+        case playbackHoldReason = "playback_hold_reason"
         case voice
         case language
         case warning

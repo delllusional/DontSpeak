@@ -439,6 +439,8 @@ internal sealed record ActivityDto
     [JsonPropertyName("speaking")] public bool Speaking { get; init; }
     [JsonPropertyName("speaker")] public string? Speaker { get; init; }
     [JsonPropertyName("utterance_id")] public ulong? UtteranceId { get; init; }
+    [JsonPropertyName("playback_state")] public string? PlaybackState { get; init; }
+    [JsonPropertyName("playback_hold_reason")] public string? PlaybackHoldReason { get; init; }
     [JsonPropertyName("voice")] public string? Voice { get; init; }
     [JsonPropertyName("language")] public string? Language { get; init; }
     [JsonPropertyName("warning")] public string? Warning { get; init; }

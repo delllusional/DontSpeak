@@ -59,7 +59,9 @@ public class HealthSnapshotTests
     public void StatusMirrorDecodesUtteranceAndDownloadTelemetry()
     {
         var dto = JsonSerializer.Deserialize<ModelStatusDto>("""
-            {"activity":{"utterance_id":12,"voice":"if_sara","language":"it","warning":null},
+            {"activity":{"utterance_id":12,"playback_state":"held",
+                         "playback_hold_reason":"microphone",
+                         "voice":"if_sara","language":"it","warning":null},
              "voice_sessions":[{"pane_id":"pane-7","source":"codex","active":true,
                     "speaking":true,"queued":2,"blocked":false,"voice":"af_sarah",
                     "language":"en-us"}],
@@ -70,6 +72,8 @@ public class HealthSnapshotTests
             """);
 
         Assert.Equal(12UL, dto!.Activity!.UtteranceId);
+        Assert.Equal("held", dto.Activity.PlaybackState);
+        Assert.Equal("microphone", dto.Activity.PlaybackHoldReason);
         Assert.Equal("if_sara", dto.Activity.Voice);
         Assert.Equal("it", dto.Activity.Language);
         Assert.Single(dto.VoiceSessions!);
