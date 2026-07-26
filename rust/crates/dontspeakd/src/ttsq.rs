@@ -1033,10 +1033,10 @@ impl TtsQueue {
         }
     }
 
-    /// End the hook session only while its logical alias still owns the stable pane.
+    /// End the hook session only while the event still owns the stable pane.
     ///
-    /// Holding aliases through queue cleanup serializes this teardown with relink. A delayed
-    /// SessionEnd from a replaced logical session must not barge or remove the replacement.
+    /// A logical event must match its alias. A sessionless event owns only a pane with no
+    /// logical alias. Holding aliases through cleanup serializes teardown with relink.
     pub fn end_hook_session(&self, logical_session: Option<&str>, queue_session: &str) -> bool {
         let Some(pane_id) = ds_config::herdr_pane_id(queue_session) else {
             self.end_session(Some(queue_session.to_string()));
@@ -1045,9 +1045,16 @@ impl TtsQueue {
         };
 
         let mut aliases = self.herdr_aliases.lock().unwrap();
-        let owns_pane = logical_session
-            .and_then(|logical| aliases.get(logical))
+        let queue_is_current = aliases
+            .get(queue_session)
             .is_some_and(|mapped| mapped == pane_id);
+        let owns_pane = queue_is_current
+            && match logical_session {
+                Some(logical) => aliases.get(logical).is_some_and(|mapped| mapped == pane_id),
+                None => aliases
+                    .iter()
+                    .all(|(alias, mapped)| mapped != pane_id || alias == queue_session),
+            };
         if !owns_pane {
             return false;
         }
@@ -3560,6 +3567,7 @@ mod tests {
         )
         .unwrap();
 
+        assert!(!q.end_hook_session(None, &pane));
         assert!(!q.end_hook_session(Some("old-agent"), &pane));
 
         let items = q.items.lock().unwrap();
@@ -3583,6 +3591,26 @@ mod tests {
             .expect("replacement pane status must survive delayed SessionEnd");
         assert_eq!(pane.queued, 1);
         assert_eq!(pane.source, Some(WiredAgent::Codex));
+    }
+
+    #[test]
+    fn sessionless_session_end_tears_down_an_unowned_ambient_herdr_pane() {
+        let q = mk_queue();
+        let pane = ds_config::herdr_queue_scope("pane-a");
+        q.link_sessions(None, Some(&pane), Some(WiredAgent::Codex));
+        q.enqueue(
+            "ambient pane speech".into(),
+            None,
+            Some(WiredAgent::Codex),
+            Some(pane.clone()),
+        )
+        .unwrap();
+
+        assert!(q.end_hook_session(None, &pane));
+
+        assert!(q.items.lock().unwrap().is_empty());
+        assert!(q.herdr_aliases.lock().unwrap().is_empty());
+        assert!(q.tts_status_sample().voice_sessions.is_empty());
     }
 
     #[test]
