@@ -38,6 +38,10 @@ Hook mechanics:
 - PreToolUse capture is best-effort. When it is absent, `commit-msg` asks the active
   client's resolver to prove the same model and effort from its session store. The
   commit remains blocked when either value is unavailable.
+- Codex effort is accepted only from the `turn_context` whose session, turn ID, and
+  model match the hook payload. Captures are keyed by session in the repository's
+  common Git directory so the same worker can commit from a linked worktree without
+  sharing metadata with another concurrent session.
 - The hook can attribute merge commits found in existing history, but the task
   workflow prohibits creating them; see `docs/TASK-BASELINE.md`.
 - `--amend` preserves the existing pair (appending the amending pair if it

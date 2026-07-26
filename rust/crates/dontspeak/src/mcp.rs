@@ -527,7 +527,8 @@ fn route_initialize(message: &Value, envelope: Envelope<'_>, session: &mut Sessi
         "initialize clientInfo.name={raw:?} client={}",
         client.map_or("unwired", WiredAgent::as_str)
     ));
-    Route::Reply(ok(Some(id.value()), initialize(message)))
+    let codex_desktop = client.is_some_and(crate::hook_prompt::is_codex_desktop);
+    Route::Reply(ok(Some(id.value()), initialize(message, codex_desktop)))
 }
 
 fn route_cancellation(envelope: Envelope<'_>, session: &Session) -> Route {
@@ -645,7 +646,11 @@ fn client_from_initialize(message: &Value) -> (Option<WiredAgent>, String) {
     (client_from_mcp_name(&raw), raw)
 }
 
-fn initialize(message: &Value) -> Value {
+fn initialize(message: &Value, codex_desktop: bool) -> Value {
+    initialize_result(message, digests_narration_on(), codex_desktop)
+}
+
+fn initialize_result(message: &Value, digests_on: bool, codex_desktop: bool) -> Value {
     let requested = message["params"]["protocolVersion"].as_str();
     let version = requested
         .filter(|version| *version == PROTOCOL_VERSION)
@@ -655,9 +660,9 @@ fn initialize(message: &Value) -> Value {
         "capabilities": { "tools": { "listChanged": true } },
         "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
     });
-    // Grok ignores passive-hook additionalContext (#95); MCP initialize.instructions still
-    // delivers the digest contract at connect when digests are on.
-    if digests_narration_on() {
+    // Grok ignores passive-hook additionalContext (#95), so MCP keeps the digest contract.
+    // Codex Desktop shares the CLI's MCP config but must keep its ordinary text surface clean.
+    if digests_on && !codex_desktop {
         result.as_object_mut().expect("object").insert(
             "instructions".into(),
             json!(ds_config::DEFAULT_NARRATION_SPEC.trim_end()),
@@ -1240,14 +1245,37 @@ mod tests {
                 "clientInfo": {"name": "claude-code", "version": "1"}
             }
         });
-        assert_eq!(initialize(&message)["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(
-            initialize(&message)["capabilities"]["tools"]["listChanged"],
+            initialize_result(&message, false, false)["protocolVersion"],
+            PROTOCOL_VERSION
+        );
+        assert_eq!(
+            initialize_result(&message, false, false)["capabilities"]["tools"]["listChanged"],
             true
         );
         assert_eq!(
             client_from_initialize(&message),
             (Some(WiredAgent::ClaudeCode), "claude-code".to_string())
+        );
+    }
+
+    #[test]
+    fn codex_desktop_mcp_initialize_omits_narration_instructions() {
+        let message: Value = serde_json::from_str(&initialize_line(1)).unwrap();
+        let result = initialize_result(&message, true, true);
+        assert!(
+            result.get("instructions").is_none(),
+            "Desktop must not receive the visible narration contract"
+        );
+    }
+
+    #[test]
+    fn codex_cli_mcp_initialize_keeps_narration_instructions() {
+        let message: Value = serde_json::from_str(&initialize_line(1)).unwrap();
+        let result = initialize_result(&message, true, false);
+        assert_eq!(
+            result["instructions"],
+            ds_config::DEFAULT_NARRATION_SPEC.trim_end()
         );
     }
 

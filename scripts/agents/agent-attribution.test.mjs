@@ -17,8 +17,8 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  ATTRIBUTION_CACHE_FILE,
   activeAgentEnvironment,
+  attributionCachePath,
   commandFromHookInput,
   detectClient,
   ensureCommitMessageHook,
@@ -29,6 +29,7 @@ import {
   privateHooksDirectory,
   readJsonLinesReverse,
   resolveAttribution,
+  repositoryCommonDirectory,
   resolveShellPath,
   rewriteCommitMessage,
   validateAttribution,
@@ -101,19 +102,26 @@ function captureCodex(root, scripts, env, command, options = {}) {
   const model = options.model ?? "gpt-5.6-sol";
   const effort = options.effort ?? "xhigh";
   const transcript = options.transcript ?? join(root, "rollout.jsonl");
-  jsonLines(transcript, [{ type: "turn_context", payload: { model, effort } }]);
+  const session = options.session ?? "session-1";
+  const turnId = options.turnId ?? "turn-1";
+  jsonLines(transcript, [
+    { type: "session_meta", payload: { id: session } },
+    { type: "turn_context", payload: { turn_id: turnId, model, effort } },
+  ]);
+  const input = {
+    session_id: session,
+    turn_id: turnId,
+    cwd: options.cwd ?? root,
+    model,
+    transcript_path: transcript,
+    tool_input: { command },
+  };
+  if (options.directEffort !== false) input.reasoning_effort = effort;
   const capture = spawnSync(process.execPath, [join(scripts, "capture-agent-attribution.mjs"), "codex"], {
     cwd: options.spawnCwd ?? root,
     env,
     encoding: "utf8",
-    input: JSON.stringify({
-      session_id: options.session ?? "session-1",
-      cwd: options.cwd ?? root,
-      model,
-      reasoning_effort: effort,
-      transcript_path: transcript,
-      tool_input: { command },
-    }),
+    input: JSON.stringify(input),
   });
   if (options.expectFailure !== true) assert.equal(capture.status, 0, capture.stderr);
   return capture;
@@ -297,7 +305,7 @@ test("argv-array commands parse without re-tokenizing", () => {
   );
 });
 
-test("Codex uses only explicit runtime capture", () => {
+test("Codex accepts explicit hook model and effort", () => {
   assert.deepEqual(
     resolveAttribution("codex", { model: "gpt-5.6-sol", reasoning_effort: "xhigh" }),
     {
@@ -306,6 +314,62 @@ test("Codex uses only explicit runtime capture", () => {
       errors: [],
     },
   );
+});
+
+test("Codex supplements hook model with effort from the exact hook turn", (t) => {
+  const home = temporaryDirectory(t);
+  const sessionId = "019f88df-7241-7fe3-b83c-c5e8c56e8268";
+  const transcript = join(home, "rollout.jsonl");
+  jsonLines(transcript, [
+    { type: "session_meta", payload: { id: sessionId } },
+    {
+      type: "turn_context",
+      payload: { turn_id: "older", model: "gpt-5.6-sol", effort: "low" },
+    },
+    {
+      type: "turn_context",
+      payload: { turn_id: "active", model: "gpt-5.6-sol", effort: "high" },
+    },
+  ]);
+  assert.deepEqual(
+    resolveAttribution("codex", {
+      session_id: sessionId,
+      turn_id: "active",
+      model: "gpt-5.6-sol",
+      transcript_path: transcript,
+    }, { home, env: {} }),
+    {
+      model: "gpt-5.6-sol",
+      effort: "high",
+      errors: [],
+    },
+  );
+});
+
+test("Codex turn-context fallback rejects mismatched session, turn, and model", (t) => {
+  const home = temporaryDirectory(t);
+  const transcript = join(home, "rollout.jsonl");
+  jsonLines(transcript, [
+    { type: "session_meta", payload: { id: "session-one" } },
+    {
+      type: "turn_context",
+      payload: { turn_id: "turn-one", model: "gpt-5.6-sol", effort: "high" },
+    },
+  ]);
+  for (const input of [
+    { session_id: "session-two", turn_id: "turn-one", model: "gpt-5.6-sol" },
+    { session_id: "session-one", turn_id: "turn-two", model: "gpt-5.6-sol" },
+    { session_id: "session-one", turn_id: "turn-one", model: "gpt-5.6-terra" },
+  ]) {
+    const resolved = resolveAttribution(
+      "codex",
+      { ...input, transcript_path: transcript },
+      { home, env: {} },
+    );
+    assert.equal(resolved.model, input.model);
+    assert.equal(resolved.effort, undefined);
+    assert.deepEqual(resolved.errors, ["active reasoning-effort level is unavailable"]);
+  }
 });
 
 test("Codex rejects a transcript-only attribution", (t) => {
@@ -541,7 +605,7 @@ test("commit-msg rejects Codex when a fresh runtime capture is missing", (t) => 
   ensureCommitMessageHook(root);
   writeFileSync(join(root, "f.txt"), "x\n");
   assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
-  const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+  const cache = attributionCachePath(root, sessionId);
   assert.equal(existsSync(cache), false);
   const commit = spawnSync("git", ["commit", "-m", "Live resolve"], {
     cwd: root,
@@ -583,7 +647,7 @@ test("commit-msg live-resolves Grok when the PreToolUse cache is missing", (t) =
   writeFileSync(join(root, "f.txt"), "x\n");
   assert.equal(spawnSync("git", ["add", "f.txt"], { cwd: root, env, encoding: "utf8" }).status, 0);
   // No PreToolUse cache — live path must stamp high.
-  const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+  const cache = attributionCachePath(root);
   assert.equal(existsSync(cache), false);
   const commit = spawnSync("git", ["commit", "-m", "Live resolve\n\nAgent: grok-4.5 none"], {
     cwd: root,
@@ -923,6 +987,52 @@ test("a linked worktree does not chain to the main worktree's managed hook", (t)
   assert.equal(realpathSync(recordedHooks), realpathSync(neutralHooks));
 });
 
+test("Codex capture from the session cwd is consumed by its linked worktree", (t) => {
+  const { env: isolatedEnv } = isolatedGitEnvironment(t);
+  const env = { ...isolatedEnv, CODEX_THREAD_ID: "session-worktree" };
+  const { root, scripts } = initializedRepository(t, env);
+  const linked = join(temporaryDirectory(t), "linked");
+  const initial = spawnSync("git", ["add", "scripts"], { cwd: root, env, encoding: "utf8" });
+  assert.equal(initial.status, 0, initial.stderr);
+  const committed = spawnSync("git", ["commit", "-qm", "Initial"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(committed.status, 0, committed.stderr);
+
+  // Unified exec runs PreToolUse from session cwd even when the tool itself is
+  // assigned another workdir. The capture must therefore cross the worktree.
+  captureCodex(root, scripts, env, "git commit -m linked", {
+    session: "session-worktree",
+    directEffort: false,
+  });
+  const cache = attributionCachePath(root, "session-worktree");
+  const record = JSON.parse(readFileSync(cache, "utf8"));
+  assert.equal(realpathSync(record.commonDir), realpathSync(repositoryCommonDirectory(root)));
+  assert.equal(realpathSync(record.root), realpathSync(root));
+
+  const addedWorktree = spawnSync("git", ["worktree", "add", "-q", "-b", "linked-test", linked], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(addedWorktree.status, 0, addedWorktree.stderr);
+  writeFileSync(join(linked, "linked.txt"), "change\n");
+  assert.equal(
+    spawnSync("git", ["add", "linked.txt"], { cwd: linked, env, encoding: "utf8" }).status,
+    0,
+  );
+  const linkedCommit = spawnSync("git", ["commit", "-m", "Linked commit"], {
+    cwd: linked,
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(linkedCommit.status, 0, linkedCommit.stderr + linkedCommit.stdout);
+  assert.equal(headMessage(linked, env), "Linked commit\n\nAgent: gpt-5.6-sol xhigh");
+  assert.equal(existsSync(cache), false);
+});
+
 test("capture skips silently outside a git repository", (t) => {
   const { env: isolatedEnv } = isolatedGitEnvironment(t);
   const env = { ...isolatedEnv, CODEX_THREAD_ID: "session-1" };
@@ -954,7 +1064,7 @@ test("capture keys on the first invocation whose repository resolves", (t) => {
   const { root, scripts } = initializedRepository(t, env);
   const outside = temporaryDirectory(t).replaceAll("\\", "/"); // not a repo
   captureCodex(root, scripts, env, `git -C ${outside} commit -m a && git commit -m b && git commit -m c`);
-  const record = JSON.parse(readFileSync(join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE), "utf8"));
+  const record = JSON.parse(readFileSync(attributionCachePath(root, "session-1"), "utf8"));
   assert.equal(record.uses, 2);
   assert.equal(realpathSync(record.root), realpathSync(root));
 });
@@ -968,7 +1078,7 @@ test("a captured Codex command stamps each counted commit", (t) => {
   assert.equal(added.status, 0, added.stderr);
 
   captureCodex(root, scripts, env, "git commit -m first && git commit -m second");
-  const cache = join(privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+  const cache = attributionCachePath(root, "session-1");
   assert.equal(existsSync(cache), true);
   assert.equal(JSON.parse(readFileSync(cache, "utf8")).uses, 2);
 

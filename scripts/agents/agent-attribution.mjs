@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -342,15 +343,50 @@ function modelDoesNotReason(home, model) {
   return false;
 }
 
-function resolveCodex(input) {
+function codexTranscriptSessionId(file) {
+  if (!file || !existsSync(file)) return undefined;
+  const text = readFileSlice(file, 0, 1024 * 1024);
+  for (const line of text.split(/\r?\n/)) {
+    const row = parseJson(line);
+    if (row?.type !== "session_meta") continue;
+    return firstString(row.payload?.id, row.session_id, row.sessionId);
+  }
+  return undefined;
+}
+
+function codexTurnContext(file, sessionId, turnId, hookModel) {
+  if (!file || !sessionId || !turnId || !hookModel) return undefined;
+  if (codexTranscriptSessionId(file) !== sessionId) return undefined;
+  return readJsonLinesReverse(file, (row) => {
+    if (row.type !== "turn_context" || row.payload?.turn_id !== turnId) return undefined;
+    const model = firstString(
+      row.payload?.model,
+      row.payload?.collaboration_mode?.settings?.model,
+    );
+    if (model !== hookModel) return {};
+    return {
+      model,
+      effort: normalizedEffort(firstString(
+        row.payload?.effort,
+        row.payload?.reasoning_effort,
+        row.payload?.collaboration_mode?.settings?.reasoning_effort,
+      )),
+    };
+  });
+}
+
+function resolveCodex(input, env, home) {
   const hookModel = firstString(input?.model, input?.model_id, input?.modelId);
   const hookEffort = directEffort(input);
-  // A transcript's last turn_context may be stale or belong to a delegated agent. A Codex
-  // commit therefore needs an explicit, fresh runtime capture with both values; fail closed
-  // rather than putting a plausible-but-wrong identity into immutable Git history.
+  const sessionId = firstString(input?.session_id, input?.sessionId, env.CODEX_THREAD_ID);
+  const turnId = firstString(input?.turn_id, input?.turnId);
+  const transcript = transcriptPath(input) ?? findSessionTranscript(home, "codex", sessionId);
+  // Codex hooks expose the exact session, turn, and model but not effort. Read
+  // effort only from that same turn and require the transcript model to agree.
+  const turn = hookEffort ? undefined : codexTurnContext(transcript, sessionId, turnId, hookModel);
   return {
     model: hookModel,
-    effort: hookEffort,
+    effort: hookEffort ?? turn?.effort,
   };
 }
 
@@ -751,8 +787,19 @@ export function privateHooksDirectory(root) {
   return resolve(root, git(root, "rev-parse", "--git-path", "dontspeak-hooks"));
 }
 
-export function attributionCachePath(root, hooksDirectory) {
-  return join(hooksDirectory ?? privateHooksDirectory(root), ATTRIBUTION_CACHE_FILE);
+export function repositoryCommonDirectory(root) {
+  return resolve(root, git(root, "rev-parse", "--git-common-dir"));
+}
+
+function attributionCacheFile(sessionId) {
+  const cleaned = cleanString(sessionId);
+  if (!cleaned) return ATTRIBUTION_CACHE_FILE;
+  const digest = createHash("sha256").update(cleaned).digest("hex");
+  return `agent-attribution-${digest}.json`;
+}
+
+export function attributionCachePath(root, sessionId) {
+  return join(repositoryCommonDirectory(root), "dontspeak-hooks", attributionCacheFile(sessionId));
 }
 
 function unwrapManagedHooksDirectory(root, directory, fallback) {
@@ -848,8 +895,8 @@ export function ensureCommitMessageHook(root) {
   return hooksDirectory;
 }
 
-export function writeAttributionCache(root, record, hooksDirectory) {
-  const file = attributionCachePath(root, hooksDirectory);
+export function writeAttributionCache(root, record) {
+  const file = attributionCachePath(root, record?.sessionId);
   mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(record, null, 2)}\n`, "utf8");
@@ -865,13 +912,13 @@ export function writeAttributionCache(root, record, hooksDirectory) {
   }
 }
 
-export function readAttributionCache(root, hooksDirectory) {
-  return loadJson(attributionCachePath(root, hooksDirectory));
+export function readAttributionCache(root, sessionId) {
+  return loadJson(attributionCachePath(root, sessionId));
 }
 
-export function removeAttributionCache(root, hooksDirectory) {
+export function removeAttributionCache(root, sessionId) {
   try {
-    unlinkSync(attributionCachePath(root, hooksDirectory));
+    unlinkSync(attributionCachePath(root, sessionId));
   } catch {
     // missing is fine
   }
@@ -1028,7 +1075,19 @@ export function validateCacheRecord(record, root, env = process.env, now = Date.
   if (!Number.isInteger(record.uses) || record.uses <= 0) {
     errors.push("no usable runtime attribution capture was found");
   }
-  if (!record.root || resolve(record.root) !== resolve(root)) errors.push("runtime capture belongs to a different worktree");
+  if (!record.root) {
+    errors.push("runtime capture has no repository identity");
+  } else if (resolve(record.root) !== resolve(root)) {
+    let commonDir;
+    try {
+      commonDir = repositoryCommonDirectory(root);
+    } catch {
+      commonDir = undefined;
+    }
+    if (!record.commonDir || !commonDir || resolve(record.commonDir) !== resolve(commonDir)) {
+      errors.push("runtime capture belongs to a different repository");
+    }
+  }
   const active = activeAgentEnvironment(env);
   if (active?.conflict) {
     errors.push(`conflicting active agent markers: ${active.conflict.join(", ")}`);

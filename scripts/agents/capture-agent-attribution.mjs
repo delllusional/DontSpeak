@@ -7,6 +7,7 @@ import {
   gitCommitInvocations,
   hookWorkingDirectory,
   resolveAttribution,
+  repositoryCommonDirectory,
   resolveRepositoryRoot,
   sessionIdFromInput,
   writeAttributionCache,
@@ -47,19 +48,21 @@ async function main() {
   const client = detectClient(process.argv[2] ?? "auto", input);
   if (!client) throw new Error("could not identify the CLI client that is creating this commit");
 
-  const hooksDirectory = ensureCommitMessageHook(root);
+  ensureCommitMessageHook(root);
   const resolved = resolveAttribution(client, input, { root });
+  const sessionId = sessionIdFromInput(input);
   writeAttributionCache(root, {
     version: 1,
     client,
-    sessionId: sessionIdFromInput(input),
+    sessionId,
     root,
+    commonDir: repositoryCommonDirectory(root),
     model: resolved.model,
     effort: resolved.effort,
     errors: resolved.errors,
     uses,
     capturedAt: new Date().toISOString(),
-  }, hooksDirectory);
+  });
 }
 
 main().catch((error) => {

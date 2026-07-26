@@ -5,7 +5,6 @@ import {
   activeAgentEnvironment,
   messageMatchesHead,
   normalizeCacheRecord,
-  privateHooksDirectory,
   readAttributionCache,
   removeAttributionCache,
   repositoryRoot,
@@ -36,13 +35,12 @@ const messageFile = process.argv[2];
 if (!messageFile) fail(["the commit-msg hook did not receive a message file"]);
 
 const root = repositoryRoot(process.cwd());
-const hooksDirectory = privateHooksDirectory(root);
 const message = readFileSync(messageFile, "utf8");
-const record = normalizeCacheRecord(readAttributionCache(root, hooksDirectory));
 const active = activeAgentEnvironment();
 if (active?.conflict) {
   fail([`conflicting active agent markers: ${active.conflict.join(", ")}`]);
 }
+const record = normalizeCacheRecord(readAttributionCache(root, active?.sessionId));
 
 if (!record) {
   // Missing capture gets one fail-closed live-session resolution attempt.
@@ -77,8 +75,8 @@ if (errors.length > 0) fail(errors);
 try {
   stamp(messageFile, message, root, record.model, record.effort);
   record.uses -= 1;
-  if (record.uses > 0) writeAttributionCache(root, record, hooksDirectory);
-  else removeAttributionCache(root, hooksDirectory);
+  if (record.uses > 0) writeAttributionCache(root, record);
+  else removeAttributionCache(root, record.sessionId);
 } catch (error) {
   fail([error.message]);
 }
