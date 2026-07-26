@@ -1,9 +1,9 @@
 //! Speaker diarization — who spoke when, optionally labelled by enrolled name.
 //!
-//! Platform-agnostic [`Diarizer`] with macOS MLX/Fluid backends; ONNX room later.
+//! Platform-agnostic [`crate::diarize::Diarizer`] with macOS MLX/Fluid backends; ONNX room later.
 //! One-shot on the full utterance buffer (not streamed). Enrollment:
-//! [`Diarizer::embed`] → [`SpeakerStore`]; diarize returns cluster embeddings and the
-//! engine relabels via pure [`match_speaker`].
+//! [`crate::diarize::Diarizer::embed`] → [`ds_config::speakers::SpeakerStore`]; diarize
+//! returns cluster embeddings and the engine relabels via pure [`crate::diarize::match_speaker`].
 
 use std::collections::HashMap;
 
