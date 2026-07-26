@@ -419,12 +419,11 @@ pub(crate) fn spawn_ipc_server(
                             grok_sessions.forget(session);
                         }
                     }
-                    if queue_session.is_some() {
-                        ttsq.end_session(queue_session.clone());
+                    if let Some(queue_session) = queue_session.as_deref() {
+                        ttsq.end_hook_session(session.as_deref(), queue_session);
                     } else {
                         ttsq.clear();
                     }
-                    ttsq.unlink_sessions(session.as_deref(), queue_session.as_deref());
                     emit(&ds_ipc::Response::Done);
                 }
                 ds_ipc::Request::TestRecognitionStart => {

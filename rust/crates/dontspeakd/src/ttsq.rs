@@ -996,22 +996,21 @@ impl TtsQueue {
         let Some(pane_id) = pane_id else {
             return;
         };
-        {
-            let mut aliases = self.herdr_aliases.lock().unwrap();
-            // One pane hosts one current logical agent session. A crash can skip
-            // SessionEnd, so a later link for the stable pane replaces its stale aliases.
-            aliases.retain(|_, mapped| mapped != pane_id);
-            if let Some(logical) = logical_session {
-                aliases.insert(logical.to_string(), pane_id.to_string());
-            }
-            if let Some(queue) = queue_session {
-                aliases.insert(queue.to_string(), pane_id.to_string());
-            }
+        let mut aliases = self.herdr_aliases.lock().unwrap();
+        // One pane hosts one current logical agent session. A crash can skip
+        // SessionEnd, so a later link for the stable pane replaces its stale aliases.
+        aliases.retain(|_, mapped| mapped != pane_id);
+        if let Some(logical) = logical_session {
+            aliases.insert(logical.to_string(), pane_id.to_string());
+        }
+        if let Some(queue) = queue_session {
+            aliases.insert(queue.to_string(), pane_id.to_string());
         }
         self.register_herdr_pane(Some(pane_id), source, queue_session);
+        drop(aliases);
     }
 
-    pub fn unlink_sessions(&self, logical_session: Option<&str>, queue_session: Option<&str>) {
+    fn unlink_sessions(&self, logical_session: Option<&str>, queue_session: Option<&str>) {
         let mut aliases = self.herdr_aliases.lock().unwrap();
         let pane_id = queue_session
             .and_then(ds_config::herdr_pane_id)
@@ -1032,6 +1031,35 @@ impl TtsQueue {
                 self.gate.bump();
             }
         }
+    }
+
+    /// End the hook session only while its logical alias still owns the stable pane.
+    ///
+    /// Holding aliases through queue cleanup serializes this teardown with relink. A delayed
+    /// SessionEnd from a replaced logical session must not barge or remove the replacement.
+    pub fn end_hook_session(&self, logical_session: Option<&str>, queue_session: &str) -> bool {
+        let Some(pane_id) = ds_config::herdr_pane_id(queue_session) else {
+            self.end_session(Some(queue_session.to_string()));
+            self.unlink_sessions(logical_session, Some(queue_session));
+            return true;
+        };
+
+        let mut aliases = self.herdr_aliases.lock().unwrap();
+        let owns_pane = logical_session
+            .and_then(|logical| aliases.get(logical))
+            .is_some_and(|mapped| mapped == pane_id);
+        if !owns_pane {
+            return false;
+        }
+
+        self.end_session(Some(queue_session.to_string()));
+        aliases.retain(|_, mapped| mapped != pane_id);
+        let removed = self.herdr_sessions.lock().unwrap().remove(pane_id);
+        self.herdr_queue_depths.lock().unwrap().remove(pane_id);
+        if removed.is_some() {
+            self.gate.bump();
+        }
+        true
     }
 
     fn publish_herdr_voice(&self, pane_id: Option<&str>, voice: &str, language: Option<&str>) {
@@ -3430,12 +3458,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_stop_cancels_speech_after_routing_to_the_matching_herdr_pane() {
+    fn mcp_stop_prunes_pending_routed_speech_without_touching_a_neighbor_pane() {
         let q = mk_queue();
-        let pane = ds_config::herdr_queue_scope("pane-a");
+        let pane_a = ds_config::herdr_queue_scope("pane-a");
+        let pane_b = ds_config::herdr_queue_scope("pane-b");
         let mcp_session = "dontspeak:mcp:codex:42:0";
-        q.link_sessions(Some("logical-a"), Some(&pane), Some(WiredAgent::Codex));
-        q.set_active_session(Some(pane.clone()));
+        q.link_sessions(Some("logical-a"), Some(&pane_a), Some(WiredAgent::Codex));
+        q.link_sessions(Some("logical-b"), Some(&pane_b), Some(WiredAgent::Grok));
 
         q.enqueue(
             "speak from the MCP child".into(),
@@ -3444,14 +3473,62 @@ mod tests {
             Some(mcp_session.into()),
         )
         .unwrap();
+        q.enqueue(
+            "neighbor pane speech".into(),
+            None,
+            Some(WiredAgent::Grok),
+            Some(pane_b.clone()),
+        )
+        .unwrap();
 
         {
             let items = q.items.lock().unwrap();
+            assert_eq!(items.len(), 2);
             let item = items.front().unwrap();
-            assert_eq!(item.session.as_deref(), Some(pane.as_str()));
+            assert_eq!(item.session.as_deref(), Some(pane_a.as_str()));
             assert_eq!(item.cancel_session.as_deref(), Some(mcp_session));
             assert_eq!(item.herdr_pane.as_deref(), Some("pane-a"));
         }
+
+        q.clear_session(Some(mcp_session.into()));
+
+        {
+            let items = q.items.lock().unwrap();
+            assert_eq!(items.len(), 1);
+            let neighbor = items.front().unwrap();
+            assert_eq!(neighbor.session.as_deref(), Some(pane_b.as_str()));
+            assert_eq!(neighbor.cancel_session, None);
+            assert_eq!(neighbor.herdr_pane.as_deref(), Some("pane-b"));
+        }
+        let status = q.tts_status_sample();
+        let pane_a = status
+            .voice_sessions
+            .iter()
+            .find(|row| row.pane_id == "pane-a")
+            .unwrap();
+        let pane_b = status
+            .voice_sessions
+            .iter()
+            .find(|row| row.pane_id == "pane-b")
+            .unwrap();
+        assert_eq!(pane_a.queued, 0);
+        assert_eq!(pane_b.queued, 1);
+    }
+
+    #[test]
+    fn mcp_stop_cancels_in_flight_speech_after_routing_to_a_herdr_pane() {
+        let q = mk_queue();
+        let pane = ds_config::herdr_queue_scope("pane-a");
+        let mcp_session = "dontspeak:mcp:codex:42:0";
+        q.link_sessions(Some("logical-a"), Some(&pane), Some(WiredAgent::Codex));
+        q.set_active_session(Some(pane));
+        q.enqueue(
+            "speak from the MCP child".into(),
+            None,
+            Some(WiredAgent::Codex),
+            Some(mcp_session.into()),
+        )
+        .unwrap();
         {
             let mut items = q.items.lock().unwrap();
             let _ = q.claim_item(&mut items, 0);
@@ -3463,6 +3540,49 @@ mod tests {
 
         assert!(!q.is_tts_active());
         assert!(q.generation.load(Ordering::SeqCst) > generation);
+    }
+
+    #[test]
+    fn delayed_session_end_cannot_tear_down_a_relinked_herdr_pane() {
+        let q = mk_queue();
+        let pane = ds_config::herdr_queue_scope("pane-a");
+        q.link_sessions(Some("old-agent"), Some(&pane), Some(WiredAgent::Codex));
+        q.link_sessions(
+            Some("replacement-agent"),
+            Some(&pane),
+            Some(WiredAgent::Codex),
+        );
+        q.enqueue(
+            "replacement speech".into(),
+            None,
+            Some(WiredAgent::Codex),
+            Some(pane.clone()),
+        )
+        .unwrap();
+
+        assert!(!q.end_hook_session(Some("old-agent"), &pane));
+
+        let items = q.items.lock().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            items.front().unwrap().session.as_deref(),
+            Some(pane.as_str())
+        );
+        drop(items);
+        assert_eq!(
+            q.herdr_pane_for_session(&Some("replacement-agent".into()))
+                .as_deref(),
+            Some("pane-a")
+        );
+        assert_eq!(q.herdr_pane_for_session(&Some("old-agent".into())), None);
+        let status = q.tts_status_sample();
+        let pane = status
+            .voice_sessions
+            .iter()
+            .find(|row| row.pane_id == "pane-a")
+            .expect("replacement pane status must survive delayed SessionEnd");
+        assert_eq!(pane.queued, 1);
+        assert_eq!(pane.source, Some(WiredAgent::Codex));
     }
 
     #[test]
@@ -3504,7 +3624,7 @@ mod tests {
             voice
         );
 
-        q.unlink_sessions(Some("replacement-agent"), Some(&pane));
+        assert!(q.end_hook_session(Some("replacement-agent"), &pane));
         q.link_sessions(Some("next-agent"), Some(&pane), Some(WiredAgent::Codex));
         assert_eq!(
             q.resolve_engine_voice_for(&cfg, Some(WiredAgent::Codex), Some("pane-a"), Some("en"))
