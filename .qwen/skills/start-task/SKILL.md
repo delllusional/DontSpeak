@@ -36,9 +36,12 @@ the task's base commit.
 - One writing agent owns one worktree and branch. Read-only agents may inspect it.
 - Workers never edit the `main` worktree or another task worktree.
 - Workers do not stash, rebase, reset, prune, remove worktrees, or rewrite shared
-  branches. The integrator owns repository administration and landing.
-- The integrator immediately fast-forwards an exact CI-green feature head onto
-  `main` without repeated local checks; see `docs/TASK-BASELINE.md`.
+  branches. The integrator owns task-history consolidation, the final rebase,
+  repository administration, and landing.
+- The integrator prepares exactly one task commit, requires remote CI for its exact
+  post-rebase SHA, and lands one non-merge commit through an existing PR or by
+  fast-forward; see `docs/TASK-BASELINE.md`.
 - Keep build outputs, ports, databases, and live processes task-local. A worktree
   isolates tracked files, not external resources.
-- Commit and report the branch, absolute worktree path, base commit, and checks run.
+- Commit and report the branch, absolute worktree path, base commit, prepared
+  one-commit SHA, and checks run.

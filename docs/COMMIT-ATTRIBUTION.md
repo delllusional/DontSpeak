@@ -38,7 +38,8 @@ Hook mechanics:
 - PreToolUse capture is best-effort. When it is absent, `commit-msg` asks the active
   client's resolver to prove the same model and effort from its session store. The
   commit remains blocked when either value is unavailable.
-- Merge commits (`git merge`) are captured and stamped like regular commits.
+- The hook can attribute merge commits found in existing history, but the task
+  workflow prohibits creating them; see `docs/TASK-BASELINE.md`.
 - `--amend` preserves the existing pair (appending the amending pair if it
   differs) only when the amended message is identical to `HEAD`'s (`--no-edit`,
   unedited editor, reused message); a changed message gets rewrite-lone

@@ -60,8 +60,8 @@ writing agent owns each. Give every worker:
 
 - the issue URL and raw issue body/comments;
 - its branch, worktree, base SHA, and non-overlap boundary;
-- instructions to inspect, plan, implement, test proportionately, commit with
-  `Fixes #N`, and report SHA/checks;
+- instructions to inspect, plan, implement, test proportionately, leave exactly
+  one commit with `Fixes #N`, and report SHA/checks;
 - permission to fix only small obvious adjacent defects and otherwise file an
   issue under the repository policy;
 - a prohibition on pushing, issue closure, integration, landing, cleanup,
@@ -78,21 +78,25 @@ exact CI head gates the batch.
 
 After implementation, have each worker review another worker's issue and exact
 commit read-only. Review the issue fit, diff, tests, regression risk, scope, and
-file overlap. Send findings back to the owning worker; require a new exact commit
-and repeat review for material changes.
+file overlap. Send findings back to the owning worker; require an amended
+single-commit SHA and repeat review for material changes.
 
 The integrator then:
 
 1. Confirm every worker branch is clean, based on the recorded batch base,
    independently reviewed, and limited to its assigned scope.
-2. Cherry-pick the reviewed commits onto the integration branch in the least
-   dependency-sensitive order. Stop on ambiguity or conflicts; do not improvise a
+2. Cherry-pick the reviewed worker commits onto the integration branch in the least
+   dependency-sensitive order, then consolidate the whole wave into exactly one
+   intentional integration commit. Preserve all distinct `Agent:` trailers and
+   every `Fixes #N` reference. Stop on ambiguity or conflicts; do not improvise a
    semantic resolution without re-review.
 3. Run the narrow integration checks needed to catch combined-state failures.
-4. Invoke `prepush` on the integration branch. Require successful terminal status
-   for every applicable non-release check on its exact head.
-5. Fast-forward that exact green head to `main`, push without force, and verify
-   `origin/main` equals it. Do not repeat local tests after green CI.
+4. Invoke `prepush` on the one-commit integration branch. Require successful
+   terminal status for every applicable non-release check on its exact post-rebase
+   head.
+5. Land through an existing integration PR or fast-forward that exact green commit
+   to `main`, push without force, and verify the landed range is one non-merge
+   commit. Do not repeat local tests after green CI.
 6. Verify each `Fixes #N` issue closed only after the commit reached `main`; close
    manually with the main SHA only if GitHub did not.
 7. Remove only clean, exact worker and integration worktrees and delete their exact

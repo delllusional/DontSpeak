@@ -1,6 +1,6 @@
 ---
 name: prepush
-description: On feature branches, run only fast local hygiene, push, monitor CI, then immediately fast-forward a green exact head onto main without local retesting. Run full gates locally only for a direct unverified main push or when explicitly requested. Use when asked to push, prepush, check CI, or land.
+description: Prepare one intentional feature commit, run fast local hygiene, push and monitor exact-head CI, rebase onto current main when needed, then land one non-merge commit through its PR or by fast-forward. Run full gates locally only for a direct unverified main push or when explicitly requested. Use when asked to push, prepush, check CI, or land.
 ---
 
 # DontSpeak — prepush
@@ -31,10 +31,16 @@ Before pushing any branch other than `main`:
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main
 git log --format=full origin/main..HEAD
+test "$(git rev-list --count origin/main..HEAD)" -eq 1
+test -z "$(git rev-list --merges origin/main..HEAD)"
 git diff --check origin/main...HEAD
 node scripts/agents/sync-agent-skills.mjs --check
 git push origin "$(git branch --show-current)"
 ```
+
+Consolidate the complete task into that one intentional commit before pushing.
+Amend it for later fixes, preserving every distinct `Agent:` trailer; do not stack
+fixup commits on the task branch.
 
 Do not duplicate the full script, clippy, or workspace-test suites locally unless
 the user explicitly requests local CI or a CI failure needs focused reproduction.
@@ -51,13 +57,12 @@ If the branch has no pull request yet, use `gh run list --branch <branch>` and
 report the push as complete while required CI is still pending unless the user
 explicitly asks not to wait.
 
-When every applicable non-release check for the exact current head is green, land
-it immediately using [`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md):
-update the dedicated `main` worktree with `git pull --ff-only`, require
-`origin/main` to be an ancestor of the recorded feature SHA, run `git merge
---ff-only <feature-sha>` there, and push `main` without force. Do not re-run local
-checks, cherry-pick, rebase, or create a merge commit. If fast-forward is
-impossible, stop and report.
+When every applicable non-release check for the exact current head is green, apply
+[`docs/TASK-BASELINE.md`](../../../docs/TASK-BASELINE.md). Fetch `origin/main`; if
+it advanced, the integrator rebases the one task commit, force-pushes only with
+`--force-with-lease`, and reruns remote CI for the rebased exact SHA. Land through
+an existing task PR with a one-commit rebase/squash method; otherwise fast-forward
+the prepared commit onto `main`. Never create a merge commit or bypass an open PR.
 
 ## Full local gates: direct main push or explicit request
 
@@ -110,9 +115,10 @@ Drift → run without `--check`, review, re-check. See [AGENT-SKILLS.md](../../.
 
 ## Push
 
-Confirm commits to push and attribution. Feature branch: push first, then monitor
-CI and fast-forward a green exact head onto `main` immediately. Direct unverified
-`main`: run the full local gates first. Push to `delllusional/DontSpeak`.
+Confirm the one commit to push and its attribution. Feature branch: push, monitor
+exact-head CI, rebase and rerun CI if `main` advanced, then land exactly one
+non-merge commit through its PR or by fast-forward. Direct unverified `main`: run
+the full local gates first. Push to `delllusional/DontSpeak`.
 
 ## Caveats
 
@@ -125,15 +131,17 @@ CI and fast-forward a green exact head onto `main` immediately. Direct unverifie
 
 ```bash
 node scripts/agents/check-commit-attribution.mjs origin/main && git log --format=full origin/main..HEAD
+test "$(git rev-list --count origin/main..HEAD)" -eq 1
+test -z "$(git rev-list --merges origin/main..HEAD)"
 git diff --check origin/main...HEAD
 node scripts/agents/sync-agent-skills.mjs --check
 git push origin "$(git branch --show-current)"
 gh pr checks --watch --interval 10
 ```
 
-Green CI continues directly into the ff-only landing procedure in
-`docs/TASK-BASELINE.md`; there is no local test step between CI and the `main`
-push.
+Green CI continues into the rebase/PR-aware landing procedure in
+`docs/TASK-BASELINE.md`; a rebase changes the SHA and therefore requires another
+remote CI run before landing.
 
 ## Direct-main full gate
 
