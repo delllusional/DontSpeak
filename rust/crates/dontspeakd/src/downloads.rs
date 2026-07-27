@@ -661,6 +661,50 @@ mod tests {
         );
     }
 
+    /// Runs in a child process holding the fixture environment — see [`crate::test_env`].
+    #[test]
+    fn checksum_invalid_tts_files_remain_in_the_download_plan() {
+        const TEST: &str =
+            "downloads::tests::checksum_invalid_tts_files_remain_in_the_download_plan";
+        let Some(_child) = crate::test_env::child_run() else {
+            let model_dir = tempfile::tempdir().unwrap();
+            let model = ds_config::TtsModel::Chatterbox;
+            let set = ds_model::tts_ort_asset_set(model);
+            let dir = model_dir
+                .path()
+                .join(set.dir_name.expect("chatterbox subdirectory"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for file in set.files_for(false) {
+                std::fs::write(dir.join(file.file_name), b"stale but present").unwrap();
+            }
+            let runtime = model_dir.path().join("onnxruntime.dll");
+            std::fs::write(&runtime, b"present runtime").unwrap();
+            crate::test_env::run_child(
+                TEST,
+                crate::test_env::ChildEnv {
+                    phase: "checksum-invalid-files-present",
+                    model_dir: model_dir.path(),
+                    ort_dylib: Some(&runtime),
+                },
+            );
+            return;
+        };
+
+        let config = ds_config::VoiceConfig {
+            tts_engine: Some(vec![ds_config::TtsEngine::BuiltIn]),
+            tts_model: ds_config::TtsModel::Chatterbox,
+            provider: vec![ds_config::Provider::OrtCpu],
+            stt_engine: Some(Vec::new()),
+            ..ds_config::VoiceConfig::default()
+        };
+
+        assert_eq!(
+            compute_needs(&config).tts_model,
+            Some(DownloadTarget::ChatterboxModel),
+            "a complete-looking set with stale bytes must still reach the downloader"
+        );
+    }
+
     #[test]
     fn child_reload_is_model_and_provider_aware() {
         use ds_config::{Provider, TtsEngine, TtsModel, VoiceConfig};

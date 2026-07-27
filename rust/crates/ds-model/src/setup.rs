@@ -65,6 +65,7 @@ pub fn run_setup_kokoro_with_progress(progress: &dyn Fn(u64, u64)) -> std::io::R
             Box::new(|p| ensure_onnxruntime_with_progress(p).map(|_| ())),
         ],
     )?;
+    crate::tts_assets::record_verified_model(ds_config::TtsModel::Kokoro, false);
     model_path(&kokoro_onnx_spec().file_name).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::NotFound, "cannot resolve model_dir()")
     })

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use ds_config::TtsModel;
 
 use crate::download::{ensure_in_dir, with_destination_flight};
-use crate::hash::verify_sha256_cached;
+use crate::hash::{file_stamp, verify_sha256_cached};
 use crate::setup::{DownloadStep, run_download_set};
 use crate::spec::ModelSpec;
 use crate::urls::{self, Download};
@@ -554,24 +554,168 @@ pub fn tts_model_file_path(model: TtsModel, file_name: &str) -> Option<PathBuf> 
     Some(tts_model_dir(model)?.join(file_name))
 }
 
+const PIN_MARKER_VERSION: &str = "dontspeak-tts-pin-v1";
+
+pub(crate) fn tts_pin_marker_path(dir: &Path, model: TtsModel) -> PathBuf {
+    dir.join(format!(".dontspeak-{}-pin", model.as_str()))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PinRecord {
+    // Checksum provenance is reusable only while the file's cheap identity stays unchanged.
+    sha256: String,
+    len: u64,
+    modified_nanos: i128,
+}
+
+fn read_pin_marker(
+    set: &TtsOrtAssetSet,
+    dir: &Path,
+) -> Option<std::collections::HashMap<String, PinRecord>> {
+    let contents = std::fs::read_to_string(tts_pin_marker_path(dir, set.model)).ok()?;
+    let mut lines = contents.lines();
+    if lines.next()? != format!("{PIN_MARKER_VERSION}\t{}", set.model.as_str()) {
+        return None;
+    }
+    let mut records = std::collections::HashMap::new();
+    for line in lines {
+        let mut fields = line.split('\t');
+        let file_name = fields.next()?;
+        let sha256 = fields.next()?;
+        let len = fields.next()?.parse().ok()?;
+        let modified_nanos = fields.next()?.parse().ok()?;
+        if file_name.is_empty()
+            || sha256.is_empty()
+            || fields.next().is_some()
+            || records
+                .insert(
+                    file_name.to_string(),
+                    PinRecord {
+                        sha256: sha256.to_string(),
+                        len,
+                        modified_nanos,
+                    },
+                )
+                .is_some()
+        {
+            return None;
+        }
+    }
+    Some(records)
+}
+
+fn write_pin_marker(
+    set: &TtsOrtAssetSet,
+    dir: &Path,
+    records: &std::collections::HashMap<String, PinRecord>,
+) -> std::io::Result<()> {
+    let marker = tts_pin_marker_path(dir, set.model);
+    let mut names: Vec<_> = records.keys().collect();
+    names.sort_unstable();
+    let mut contents = format!("{PIN_MARKER_VERSION}\t{}\n", set.model.as_str());
+    for name in names {
+        let record = &records[name];
+        contents.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            name, record.sha256, record.len, record.modified_nanos
+        ));
+    }
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    std::io::Write::write_all(tmp.as_file_mut(), contents.as_bytes())?;
+    tmp.as_file().sync_all()?;
+    tmp.persist(marker).map_err(|error| error.error)?;
+    Ok(())
+}
+
+fn record_verified_set(set: &TtsOrtAssetSet, dir: &Path, cuda_assets: bool) {
+    let mut records = read_pin_marker(set, dir).unwrap_or_default();
+    for file in set.files_for(cuda_assets) {
+        let Some((len, modified_nanos)) = file_stamp(&dir.join(file.file_name)) else {
+            return;
+        };
+        records.insert(
+            file.file_name.to_string(),
+            PinRecord {
+                sha256: file.sha256.to_string(),
+                len,
+                modified_nanos,
+            },
+        );
+    }
+    let _ = write_pin_marker(set, dir, &records);
+}
+
+pub(crate) fn record_verified_model(model: TtsModel, cuda_assets: bool) {
+    if let Some(dir) = tts_model_dir(model) {
+        record_verified_set(tts_ort_asset_set(model), &dir, cuda_assets);
+    }
+}
+
+fn tts_model_files_present_at(
+    set: &TtsOrtAssetSet,
+    dir: &Path,
+    cuda_assets: bool,
+    verify: impl Fn(&Path, &str) -> bool,
+) -> bool {
+    let (mut records, mut changed) = match read_pin_marker(set, dir) {
+        Some(records) => (records, false),
+        None => (std::collections::HashMap::new(), true),
+    };
+    let mut current = Vec::new();
+    for file in set.files_for(cuda_assets) {
+        let path = dir.join(file.file_name);
+        let Some((len, modified_nanos)) = file_stamp(&path) else {
+            return false;
+        };
+        let record = PinRecord {
+            sha256: file.sha256.to_string(),
+            len,
+            modified_nanos,
+        };
+        if records.get(file.file_name) != Some(&record) {
+            if !verify(&path, file.sha256) {
+                return false;
+            }
+            if file_stamp(&path) != Some((len, modified_nanos)) {
+                return false;
+            }
+            records.insert(file.file_name.to_string(), record.clone());
+            changed = true;
+        }
+        current.push((path, record));
+    }
+
+    // Cover replacements of an earlier file while a later file was being validated.
+    if current
+        .iter()
+        .any(|(path, record)| file_stamp(path) != Some((record.len, record.modified_nanos)))
+    {
+        return false;
+    }
+    if changed {
+        // Best effort: failure only makes the next probe verify again.
+        let _ = write_pin_marker(set, dir, &records);
+    }
+    true
+}
+
+/// Pin-aware model-file presence. Ordinary launches read one tiny marker and stat the selected
+/// set; a missing/stale marker hashes once, then persists the verified path/size/mtime state.
 /// `cuda_assets` is the effective-provider decision, not the raw preference.
 pub fn tts_model_files_present(model: TtsModel, cuda_assets: bool) -> bool {
     let Some(dir) = tts_model_dir(model) else {
         return false;
     };
-    tts_ort_asset_set(model)
-        .files_for(cuda_assets)
-        .all(|file| dir.join(file.file_name).is_file())
+    tts_model_files_present_at(
+        tts_ort_asset_set(model),
+        &dir,
+        cuda_assets,
+        verify_sha256_cached,
+    )
 }
 
 pub fn is_tts_model_present(model: TtsModel, cuda_assets: bool) -> bool {
-    let Some(dir) = tts_model_dir(model) else {
-        return false;
-    };
-    tts_ort_asset_set(model)
-        .files_for(cuda_assets)
-        .all(|file| verify_sha256_cached(&dir.join(file.file_name), file.sha256))
-        && crate::ort::is_onnxruntime_dylib_version_ok()
+    tts_model_files_present(model, cuda_assets) && crate::ort::is_onnxruntime_dylib_version_ok()
 }
 
 fn spec(file: &Download) -> ModelSpec {
@@ -609,6 +753,9 @@ pub fn run_setup_tts_model_with_progress(
         crate::ort::ensure_onnxruntime_with_progress(p).map(|_| ())
     }));
     run_tts_download_set(set, &dir, progress, total, steps)?;
+    // Every step checksum-verifies before landing, so record its final identity without reading
+    // multi-GB files again. Marker failure merely makes a later probe verify once.
+    record_verified_model(model, cuda_assets);
     Ok(dir)
 }
 
@@ -636,6 +783,142 @@ fn run_tts_download_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fixture_set(file_name: &'static str, sha256: String) -> TtsOrtAssetSet {
+        let sha256 = Box::leak(sha256.into_boxed_str());
+        let files = Box::leak(
+            vec![Download {
+                file_name,
+                url: "https://example.invalid/model.bin",
+                sha256,
+                size_bytes: 1,
+            }]
+            .into_boxed_slice(),
+        );
+        TtsOrtAssetSet {
+            model: TtsModel::Chatterbox,
+            dir_name: Some("fixture"),
+            files,
+            cuda_files: &[],
+            display_name: "Fixture",
+            homepage: "https://example.invalid",
+            license: "MIT",
+            license_url: "https://example.invalid/license",
+            attribution_partitions: &[],
+        }
+    }
+
+    #[test]
+    fn same_name_changed_pin_is_redownloaded_and_restamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_name = "same-name.bin";
+        let old_bytes = b"old pinned bytes";
+        let new_bytes = b"new pinned bytes";
+        let old_set = fixture_set(file_name, crate::hash::sha256_hex(old_bytes));
+        let new_set = fixture_set(file_name, crate::hash::sha256_hex(new_bytes));
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, old_bytes).unwrap();
+
+        assert!(tts_model_files_present_at(
+            &old_set,
+            dir.path(),
+            false,
+            crate::hash::verify_sha256,
+        ));
+        assert!(
+            !tts_model_files_present_at(&new_set, dir.path(), false, crate::hash::verify_sha256,),
+            "the old marker cannot bless stale bytes under the new pin"
+        );
+
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/same-name.bin");
+            then.status(200).body(new_bytes);
+        });
+        let spec = ModelSpec {
+            file_name: file_name.into(),
+            url: server.url("/same-name.bin"),
+            sha256: crate::hash::sha256_hex(new_bytes),
+        };
+        ensure_in_dir(dir.path(), &spec, &|_, _| {}).unwrap();
+        mock.assert_calls(1);
+        assert_eq!(std::fs::read(&path).unwrap(), new_bytes);
+
+        record_verified_set(&new_set, dir.path(), false);
+        assert!(tts_model_files_present_at(
+            &new_set,
+            dir.path(),
+            false,
+            |_, _| panic!("a current marker must avoid another content hash"),
+        ));
+    }
+
+    #[test]
+    fn exact_current_file_is_reused_without_a_download_or_second_launch_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_name = "current.bin";
+        let bytes = b"already current pinned bytes";
+        let sha256 = crate::hash::sha256_hex(bytes);
+        let set = fixture_set(file_name, sha256.clone());
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(tts_model_files_present_at(
+            &set,
+            dir.path(),
+            false,
+            crate::hash::verify_sha256,
+        ));
+        assert!(tts_model_files_present_at(
+            &set,
+            dir.path(),
+            false,
+            |_, _| panic!("ordinary probes must use the persisted marker"),
+        ));
+
+        let server = httpmock::MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(httpmock::Method::GET).path("/current.bin");
+            then.status(200).body(bytes);
+        });
+        let spec = ModelSpec {
+            file_name: file_name.into(),
+            url: server.url("/current.bin"),
+            sha256,
+        };
+        ensure_in_dir(dir.path(), &spec, &|_, _| {}).unwrap();
+        mock.assert_calls(0);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn malformed_marker_and_file_replacement_fail_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_name = "model.bin";
+        let bytes = b"verified bytes";
+        let set = fixture_set(file_name, crate::hash::sha256_hex(bytes));
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::write(
+            tts_pin_marker_path(dir.path(), set.model),
+            b"truncated marker",
+        )
+        .unwrap();
+
+        assert!(
+            !tts_model_files_present_at(&set, dir.path(), false, |path, expected| {
+                let valid = crate::hash::verify_sha256(path, expected);
+                std::fs::write(path, b"replacement during validation").unwrap();
+                valid
+            }),
+            "a file replacement during the slow verification pass must not be stamped"
+        );
+        assert_ne!(std::fs::read(&path).unwrap(), bytes);
+        assert!(
+            !tts_model_files_present_at(&set, dir.path(), false, crate::hash::verify_sha256,),
+            "the changed bytes remain absent until the downloader repairs them"
+        );
+    }
 
     #[test]
     fn registry_matches_config_models_and_pins_every_file() {

@@ -163,7 +163,7 @@ pub(crate) fn model_status_json(
     let cfg = VoiceConfig::load(paths);
     let resolved_tts = cfg.resolved_tts();
     let resolved_stt = cfg.resolved_stt();
-    // File existence only — no sha256 (polled UI dots; sha stays on load path).
+    // Pin markers keep polled model presence cheap after one verified state.
     let shims = NativeShims::probe().unwrap_or_default();
     let tts_uses_native = native_tts_active(&cfg);
     let tts_present = tts_model_files_present(&cfg);

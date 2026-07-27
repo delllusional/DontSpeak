@@ -2427,6 +2427,37 @@ mod status_gate_tests {
         (tts, gate)
     }
 
+    fn write_verified_tts_fixture_marker(root: &std::path::Path, model: ds_config::TtsModel) {
+        let mut rows = Vec::new();
+        for file in ds_model::tts_ort_asset_set(model).files_for(false) {
+            let metadata = std::fs::metadata(root.join(file.file_name)).unwrap();
+            let modified = match metadata
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+            {
+                Ok(duration) => i128::try_from(duration.as_nanos()).unwrap(),
+                Err(error) => -i128::try_from(error.duration().as_nanos()).unwrap(),
+            };
+            rows.push(format!(
+                "{}\t{}\t{}\t{}",
+                file.file_name,
+                file.sha256,
+                metadata.len(),
+                modified
+            ));
+        }
+        rows.sort_unstable();
+        let mut marker = format!("dontspeak-tts-pin-v1\t{}\n", model.as_str());
+        marker.push_str(&rows.join("\n"));
+        marker.push('\n');
+        std::fs::write(
+            root.join(format!(".dontspeak-{}-pin", model.as_str())),
+            marker,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn realized_backend_token_parses_only_a_real_observation() {
         assert_eq!(realized_backend_token("MLX").as_deref(), Some("MLX"));
@@ -2918,6 +2949,9 @@ mod status_gate_tests {
             ] {
                 std::fs::write(tmp.path().join(file), b"dummy").unwrap();
             }
+            // This test targets Command::spawn, so seed the checksum-provenance marker that a
+            // completed model install would have written for these synthetic fixture files.
+            write_verified_tts_fixture_marker(tmp.path(), ds_config::TtsModel::Kokoro);
             let dylib = tmp.path().join("dummy-onnxruntime.dylib");
             std::fs::write(&dylib, b"dummy").unwrap();
             crate::test_env::run_child(

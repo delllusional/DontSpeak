@@ -61,6 +61,16 @@ fn file_identity(path: &Path) -> Option<FileIdentity> {
     })
 }
 
+/// Stable metadata token for a persisted verification stamp.
+pub(crate) fn file_stamp(path: &Path) -> Option<(u64, i128)> {
+    let identity = file_identity(path)?;
+    let modified = match identity.modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).ok()?,
+        Err(error) => -i128::try_from(error.duration().as_nanos()).ok()?,
+    };
+    Some((identity.len, modified))
+}
+
 fn verification_cache() -> &'static std::sync::Mutex<VerificationCache> {
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<VerificationCache>> = OnceLock::new();

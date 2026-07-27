@@ -5,7 +5,7 @@
 //! [`ModelRoots`] only (no ambient roots, even in `remove_at` flights) so tests never touch
 //! real caches.
 //!
-//! `installed` = cheap presence (files + markers). Load-time checksums still gate the engine.
+//! `installed` = cheap ownership presence. Engine readiness owns pin/content validation.
 //! Sizes are logical (`symlink_metadata().len()`), no follow — same walk as the orphan sweep.
 //!
 //! Diarization rows stay unlisted while the feature is hidden (#77).
@@ -190,12 +190,17 @@ fn hf_dirs(roots: &ModelRoots, repos: &[&'static HfRepo]) -> Vec<PathBuf> {
 pub fn owned_paths_under(roots: &ModelRoots, target: DownloadTarget) -> Vec<PathBuf> {
     let root = roots.model.as_path();
     let onnx_tts = |model: TtsModel| -> Vec<PathBuf> {
+        let dir = crate::tts_assets::tts_model_dir_under(root, model);
         match crate::tts_assets::tts_ort_asset_set(model).dir_name {
             Some(_) => vec![crate::tts_assets::tts_model_dir_under(root, model)],
-            None => flat_weight_files(model)
-                .into_iter()
-                .map(|name| root.join(name))
-                .collect(),
+            None => {
+                let mut paths: Vec<_> = flat_weight_files(model)
+                    .into_iter()
+                    .map(|name| root.join(name))
+                    .collect();
+                paths.push(crate::tts_assets::tts_pin_marker_path(&dir, model));
+                paths
+            }
         }
     };
     match target {
@@ -640,6 +645,7 @@ mod tests {
             vec![
                 root.join(crate::spec::KOKORO_ONNX_FILE),
                 root.join(crate::spec::KOKORO_VOICES_FILE),
+                crate::tts_assets::tts_pin_marker_path(root, TtsModel::Kokoro),
             ]
         );
         assert_eq!(
