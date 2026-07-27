@@ -1,6 +1,7 @@
 using System;
 using System.Drawing;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Input;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Win32;
@@ -51,7 +52,7 @@ internal sealed class TrayIcon : IDisposable
     private MenuFlyout BuildMenu()
     {
         _muteItem = new ToggleMenuFlyoutItem { Text = Loc.T("tray.mute"), IsChecked = _muted };
-        _muteItem.Click += (_, _) => SetMuted(!_muted);
+        _muteItem.Click += async (_, _) => await SetMutedAsync(!_muted);
 
         var settings = new MenuFlyoutItem { Text = Loc.T("tray.settings") };
         settings.Click += (_, _) => OpenStatus?.Invoke();
@@ -88,12 +89,24 @@ internal sealed class TrayIcon : IDisposable
         return flyout;
     }
 
-    private void SetMuted(bool muted)
+    private async Task SetMutedAsync(bool muted)
     {
-        // Cache only when engine accepted — else icon lies until next status push.
-        if (Native.SetMuted(muted)) _muted = muted;
-        if (_muteItem != null) _muteItem.IsChecked = _muted;
-        ApplyIcon();
+        if (_muteItem != null) _muteItem.IsEnabled = false;
+        try
+        {
+            bool accepted;
+            try { accepted = await TrayCommand.RunAsync(() => Native.SetMuted(muted)); }
+            catch { accepted = false; }
+            if (_disposed) return;
+            // Cache only when engine accepted — else icon lies until next status push.
+            if (accepted) _muted = muted;
+            if (_muteItem != null) _muteItem.IsChecked = _muted;
+            ApplyIcon();
+        }
+        finally
+        {
+            if (!_disposed && _muteItem != null) _muteItem.IsEnabled = true;
+        }
     }
 
     private void ApplyIcon()

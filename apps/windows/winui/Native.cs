@@ -290,14 +290,22 @@ internal sealed class HealthSnapshot
 
     /// <summary>Injectable state-word formatter (tests without ds_core.dll).</summary>
     public static HealthSnapshot FromJson(string json, Func<string, double, string, string> stateWord)
+        => TryFromJson(json, stateWord, out var snapshot) ? snapshot : new HealthSnapshot();
+
+    /// <summary>False for engine-down or undecodable payloads so push state can retain its sequence.</summary>
+    internal static bool TryFromJson(
+        string json,
+        Func<string, double, string, string> stateWord,
+        out HealthSnapshot snapshot)
     {
         var s = new HealthSnapshot();
-        if (string.IsNullOrWhiteSpace(json) || json == "{}") return s;
+        snapshot = s;
+        if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}") return false;
         try
         {
             var dto = JsonSerializer.Deserialize<ModelStatusDto>(json, ModelStatusJsonOptions);
-            if (dto is null) return s;
-            // Well-formed non-empty JSON ⇒ engine up; malformed → catch → empty.
+            if (dto is null) return false;
+            // Well-formed non-empty JSON ⇒ engine up.
             s.Activity.EngineRunning = true;
             s.StatusSeq = dto.Seq;
             s.AgentsEnabled = dto.Agents;
@@ -365,9 +373,14 @@ internal sealed class HealthSnapshot
                     s.Lifetime.SttSecs = lt.SttSecs;
                 }
             }
+            snapshot = s;
+            return true;
         }
-        catch { /* mid-write / malformed → empty */ }
-        return s;
+        catch
+        {
+            // Mid-write / malformed payload.
+            return false;
+        }
     }
 
     /// <summary>`state` string → enum 1:1 with dontspeakd; missing object → Missing; word from shared Rust.</summary>
@@ -392,6 +405,43 @@ internal sealed class HealthSnapshot
     }
 
 }
+
+/// <summary>Push-loop transition state: valid status, engine-down edge, or paced bad input.</summary>
+internal sealed class StatusPushState
+{
+    private readonly Func<string, double, string, string> _stateWord;
+    private bool _delivered;
+    private bool _lastRunning;
+
+    public StatusPushState(Func<string, double, string, string> stateWord)
+    {
+        _stateWord = stateWord;
+    }
+
+    public ulong Since { get; private set; }
+
+    public StatusPushResult Accept(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json) || json.Trim() == "{}")
+        {
+            bool changed = !_delivered || _lastRunning;
+            _delivered = true;
+            _lastRunning = false;
+            return new StatusPushResult(changed ? new HealthSnapshot() : null, true);
+        }
+
+        if (!HealthSnapshot.TryFromJson(json, _stateWord, out var snapshot))
+            return new StatusPushResult(null, true);
+
+        bool statusChanged = !_delivered || !_lastRunning || snapshot.StatusSeq != Since;
+        Since = snapshot.StatusSeq;
+        _delivered = true;
+        _lastRunning = true;
+        return new StatusPushResult(statusChanged ? snapshot : null, false);
+    }
+}
+
+internal readonly record struct StatusPushResult(HealthSnapshot? Snapshot, bool Pace);
 
 // Hand mirror of ds-status model_status JSON. No codegen — round-trip test keeps lockstep.
 // Unknown members OK.

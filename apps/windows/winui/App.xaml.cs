@@ -292,28 +292,18 @@ public partial class App : Application
         var uiQueue = DispatcherQueue.GetForCurrentThread();
         _pushThread = new Thread(() =>
         {
-            ulong since = 0; // 0 ⇒ immediate first sample
-            bool delivered = false;
+            var state = new StatusPushState(Native.EngineStateWord);
             while (!_pushStop)
             {
                 string json;
-                try { json = Native.ModelStatusWait(since, 1000); }
+                try { json = Native.ModelStatusWait(state.Since, 1000); }
                 catch { Thread.Sleep(500); continue; }
                 if (_pushStop) break;
-                if (string.IsNullOrWhiteSpace(json) || json == "{}")
-                {
-                    // Engine down: wait returns immediately — pace to avoid hot spin.
+                var result = state.Accept(json);
+                if (result.Snapshot is { } snapshot)
+                    QueueLatestStatus(uiQueue, snapshot);
+                if (result.Pace)
                     Thread.Sleep(400);
-                    continue;
-                }
-                var s = HealthSnapshot.FromJson(json);
-                // Idle timeout returns same seq (StatusGate::wait_changed) — skip re-marshal.
-                // Win liveness = payload presence; macOS also yields on engineRunning flip — keep split.
-                bool changed = !delivered || s.StatusSeq != since;
-                since = s.StatusSeq;
-                if (!changed) continue;
-                delivered = true;
-                QueueLatestStatus(uiQueue, s);
             }
         })
         { IsBackground = true, Name = "dictation-push" };
