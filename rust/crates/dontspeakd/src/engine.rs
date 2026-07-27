@@ -161,8 +161,9 @@ pub(crate) struct Engine<P: Platform + 'static> {
     pending_tap_at: Option<Instant>,
     /// Deferred Enter after paste (`paste_delay_ms`).
     pending_enter_at: Option<Instant>,
-    /// Exact native window captured for the current Caps-triggered turn. Retained
-    /// through deferred paste/Enter so destruction invalidates every late delivery.
+    /// Owner of the deferred Enter, which may outlive the Caps turn that scheduled it.
+    pending_enter_owner: Option<WindowOwner>,
+    /// Exact native window captured for the current Caps-triggered turn.
     caps_owner: Option<WindowOwner>,
 
     /// Last applied config for surgical [`Engine::reload`] diffs.
@@ -235,6 +236,7 @@ impl<P: Platform + 'static> Engine<P> {
             press: PressState::Up,
             pending_tap_at: None,
             pending_enter_at: None,
+            pending_enter_owner: None,
             caps_owner: None,
             cfg,
             // `set_caps_gate` is the sole Caps-key acquire site; start false so that rule
@@ -341,11 +343,9 @@ impl<P: Platform + 'static> Engine<P> {
             // Invalidate detached `stop` joiner (survives HelperStt drop).
             p.epoch = p.epoch.wrapping_add(1);
         }
-        // A delayed Enter is deliberately allowed to survive reload/mode changes.
-        // Keep its owner token too so owner destruction can still cancel it.
-        if self.pending_enter_at.is_none() {
-            self.caps_owner = None;
-        }
+        // A delayed Enter is deliberately allowed to survive reload/mode changes;
+        // its independent owner token remains protected while this PTT owner is done.
+        self.caps_owner = None;
         // `stt_active=false` last: gate bump can wake a status reader; buffer must be settled
         // (same ordering as `stop_recording`).
         self.set_stt_active(false);
@@ -412,6 +412,8 @@ impl<P: Platform + 'static> Engine<P> {
                     );
                 }
                 // Polled timer — tick thread must not block-sleep.
+                self.pending_enter_at = None;
+                self.pending_enter_owner = self.caps_owner.take();
                 if self.cfg.paste_delay_ms > 0 {
                     self.pending_enter_at =
                         Some(Instant::now() + Duration::from_millis(self.cfg.paste_delay_ms));
@@ -422,9 +424,9 @@ impl<P: Platform + 'static> Engine<P> {
         }
         let inserted_only = !enter_after_paste;
         self.disarm_confirm();
-        if inserted_only {
-            self.caps_owner = None;
-        }
+        // Submit moved the token to `pending_enter_owner`; insert-only has no
+        // remaining delivery. Either way, this Caps turn no longer owns work.
+        self.caps_owner = None;
         self.record_caps("confirm");
         if inserted_only {
             log::debug!(
@@ -460,6 +462,7 @@ impl<P: Platform + 'static> Engine<P> {
             p.epoch = p.epoch.wrapping_add(1);
         }
         self.pending_enter_at = None;
+        self.pending_enter_owner = None;
         self.caps_owner = None;
         self.record_caps("cancel");
         log::debug!(target: "engine", "HOLD cancel — dictation discarded, voice silenced, LED off, idle");
@@ -772,10 +775,11 @@ impl<P: Platform + 'static> Engine<P> {
     ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
-        // Owner liveness is a Caps-PTT concern only: Always mode never captures a
-        // token. Run before delayed Enter so a destroyed owner cannot receive any
-        // late delivery through whichever window gained focus next.
+        // Always mode never captures an owner. A prior PTT delayed Enter may survive
+        // a mode switch, so keep that independent token live without touching the
+        // listener's state.
         self.cancel_if_caps_owner_closed();
+        self.cancel_if_pending_enter_owner_closed();
         // A confirmed submit's deferred Enter (see `confirm_paste`/`pending_enter_at`)
         // must still fire even if caps gets disabled or the mode changes mid-delay —
         // same belt-and-suspenders reasoning as `discard_stale_caps_backlog` below, so
@@ -1124,7 +1128,7 @@ impl<P: Platform + 'static> Engine<P> {
     /// double-count its own echo as a separate submit. Called either immediately
     /// (zero delay) or once `check_pending_enter`'s timer elapses.
     fn press_deferred_enter(&mut self) {
-        if self.cancel_if_caps_owner_closed() {
+        if self.cancel_if_pending_enter_owner_closed() {
             return;
         }
         self.plat.press_enter();
@@ -1135,7 +1139,26 @@ impl<P: Platform + 'static> Engine<P> {
             // `note_voice_submit`'s de-dup window is a few seconds wide.
             q.note_voice_submit();
         }
-        self.caps_owner = None;
+        self.pending_enter_owner = None;
+    }
+
+    /// Cancel only a deferred Enter when the window that received its paste was
+    /// destroyed. A later PTT turn (or Always listener) owns separate engine state.
+    fn cancel_if_pending_enter_owner_closed(&mut self) -> bool {
+        let Some(owner) = self.pending_enter_owner else {
+            return false;
+        };
+        if self.plat.window_owner_state(owner) != WindowOwnerState::Closed {
+            return false;
+        }
+        self.pending_enter_at = None;
+        self.pending_enter_owner = None;
+        self.record_caps("owner-closed-enter");
+        log::debug!(
+            target: "engine",
+            "Caps owner window closed — delayed Enter discarded"
+        );
+        true
     }
 
     /// Cancel one Caps-triggered turn when its exact native owner was destroyed.
@@ -1157,7 +1180,6 @@ impl<P: Platform + 'static> Engine<P> {
         self.sync_caps_led();
         self.press = PressState::Up;
         self.pending_tap_at = None;
-        self.pending_enter_at = None;
         self.caps_owner = None;
         if let Ok(mut p) = self.paste.lock() {
             p.partial.clear();
@@ -1338,6 +1360,7 @@ impl<P: Platform + 'static> Engine<P> {
         self.listener = None;
         self.pending_tap_at = None;
         self.pending_enter_at = None;
+        self.pending_enter_owner = None;
         self.caps_owner = None;
         self.press = PressState::Up;
         self.set_caps_gate(false);
@@ -2538,6 +2561,11 @@ mod tests {
         d.tick();
         assert_eq!(d.plat.type_text_calls.get(), 1);
         assert!(d.pending_enter_at.is_some(), "delayed Enter is armed");
+        assert_eq!(
+            d.pending_enter_owner.map(WindowOwner::native_id),
+            Some(91),
+            "delayed Enter retains the window that received the paste"
+        );
 
         d.plat.closed_owner_id.set(Some(91));
         d.tick();
@@ -2547,6 +2575,76 @@ mod tests {
             d.plat.press_enter_calls.get(),
             0,
             "Enter cannot land in the replacement focus"
+        );
+    }
+
+    #[test]
+    fn delayed_enter_keeps_its_owner_when_a_later_caps_turn_starts() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(91);
+        d.stt = Box::new(DeferStt);
+        d.cfg.paste_delay_ms = 60_000;
+        MockPlatform::tap(&mut d);
+        MockPlatform::tap(&mut d);
+        deposit_final(&d, "first window");
+        lapse_stop_window(&mut d);
+        d.tick();
+        assert!(d.pending_enter_at.is_some());
+
+        d.plat.frontmost_owner_id.set(92);
+        MockPlatform::tap(&mut d);
+        assert!(d.is_recording(), "a later PTT turn starts normally");
+        assert_eq!(
+            d.caps_owner.map(WindowOwner::native_id),
+            Some(92),
+            "the new capture owns the new window"
+        );
+
+        d.plat.closed_owner_id.set(Some(91));
+        d.tick();
+
+        assert!(
+            d.is_recording(),
+            "closing the earlier owner does not cancel the later capture"
+        );
+        assert!(
+            d.pending_enter_at.is_none(),
+            "the earlier Enter is disarmed"
+        );
+        assert_eq!(d.plat.press_enter_calls.get(), 0);
+    }
+
+    #[test]
+    fn delayed_ptt_enter_cleanup_does_not_clear_always_listener_state() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(91);
+        d.stt = Box::new(DeferStt);
+        d.cfg.paste_delay_ms = 60_000;
+        MockPlatform::tap(&mut d);
+        MockPlatform::tap(&mut d);
+        deposit_final(&d, "PTT paste");
+        lapse_stop_window(&mut d);
+        d.tick();
+        assert!(d.pending_enter_at.is_some());
+
+        d.cfg.listen_mode = ds_config::ListenMode::Always;
+        let active = Arc::new(AtomicBool::new(true));
+        d.stt_active = Some(active.clone());
+        d.paste.lock().unwrap().partial = "always-listening partial".into();
+        d.plat.closed_owner_id.set(Some(91));
+        d.tick();
+
+        assert!(d.pending_enter_at.is_none(), "stale PTT Enter is disarmed");
+        assert!(
+            active.load(Ordering::Relaxed),
+            "PTT cleanup must not change the listener's recording state"
+        );
+        assert_eq!(
+            d.paste.lock().unwrap().partial,
+            "always-listening partial",
+            "PTT cleanup must not clear the listener's transcript"
         );
     }
 
