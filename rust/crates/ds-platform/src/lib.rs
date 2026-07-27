@@ -50,11 +50,67 @@ pub fn restore_clipboard_after_paste(prev: Option<String>, pasted: String) {
     });
 }
 
+/// Stable identity of one native window captured while it was frontmost.
+///
+/// The fields stay opaque to callers. Platforms pair the native window id with its
+/// process id where available so a recycled id from another process is not mistaken
+/// for the original window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WindowOwner {
+    native_id: u64,
+    process_id: Option<u32>,
+}
+
+impl WindowOwner {
+    /// Platform/test constructor. Callers should obtain owners through
+    /// [`FrontmostWindow::capture_frontmost_window`].
+    #[doc(hidden)]
+    pub const fn from_native(native_id: u64, process_id: Option<u32>) -> Self {
+        Self {
+            native_id,
+            process_id,
+        }
+    }
+
+    #[doc(hidden)]
+    pub const fn native_id(self) -> u64 {
+        self.native_id
+    }
+
+    #[doc(hidden)]
+    pub const fn process_id(self) -> Option<u32> {
+        self.process_id
+    }
+}
+
+/// Result of probing a captured window owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowOwnerState {
+    Alive,
+    Closed,
+    /// The platform cannot currently distinguish alive from closed. Callers must
+    /// preserve the session rather than treating a probe failure as destruction.
+    Unknown,
+}
+
 pub trait FrontmostWindow {
     fn is_terminal_frontmost(&self) -> bool;
 
     fn frontmost_app_name(&self) -> Option<String> {
         None
+    }
+
+    /// Capture the exact frontmost window, when the platform exposes a stable id.
+    ///
+    /// `None` is the documented fallback for unsupported environments such as
+    /// Wayland compositors without a portable global window API.
+    fn capture_frontmost_window(&self) -> Option<WindowOwner> {
+        None
+    }
+
+    /// Probe the exact captured window without considering focus or minimized state.
+    fn window_owner_state(&self, _owner: WindowOwner) -> WindowOwnerState {
+        WindowOwnerState::Unknown
     }
 
     /// Warn-only paste probe; does not gate delivery. Default true.

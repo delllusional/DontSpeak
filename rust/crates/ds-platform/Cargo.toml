@@ -18,6 +18,9 @@ log = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Ctrl+G via CGEventPost (CGEvent + CGEventSource).
 core-graphics = "0.25"
+# Typed access to the public CGWindow information dictionaries used for exact
+# window-owner capture.
+core-foundation = "0.10"
 # Bridge to Objective-C for NSWorkspace frontmost app. Uses the workspace pin
 # (current objc2-app-kit 0.3), adding only the classes we need.
 objc2-app-kit = { workspace = true, features = [

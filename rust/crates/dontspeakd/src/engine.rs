@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ds_config::{CancelSpeechScope, VoiceConfig};
-use ds_platform::Platform;
+use ds_platform::{Platform, WindowOwner, WindowOwnerState};
 use ds_stt::Stt;
 
 use crate::config_gate::{
@@ -161,6 +161,9 @@ pub(crate) struct Engine<P: Platform + 'static> {
     pending_tap_at: Option<Instant>,
     /// Deferred Enter after paste (`paste_delay_ms`).
     pending_enter_at: Option<Instant>,
+    /// Exact native window captured for the current Caps-triggered turn. Retained
+    /// through deferred paste/Enter so destruction invalidates every late delivery.
+    caps_owner: Option<WindowOwner>,
 
     /// Last applied config for surgical [`Engine::reload`] diffs.
     pub(crate) cfg: VoiceConfig,
@@ -232,6 +235,7 @@ impl<P: Platform + 'static> Engine<P> {
             press: PressState::Up,
             pending_tap_at: None,
             pending_enter_at: None,
+            caps_owner: None,
             cfg,
             // `set_caps_gate` is the sole Caps-key acquire site; start false so that rule
             // lives in one place. Safe post-construction: fields it touches are still defaults.
@@ -337,6 +341,11 @@ impl<P: Platform + 'static> Engine<P> {
             // Invalidate detached `stop` joiner (survives HelperStt drop).
             p.epoch = p.epoch.wrapping_add(1);
         }
+        // A delayed Enter is deliberately allowed to survive reload/mode changes.
+        // Keep its owner token too so owner destruction can still cancel it.
+        if self.pending_enter_at.is_none() {
+            self.caps_owner = None;
+        }
         // `stt_active=false` last: gate bump can wake a status reader; buffer must be settled
         // (same ordering as `stop_recording`).
         self.set_stt_active(false);
@@ -366,6 +375,9 @@ impl<P: Platform + 'static> Engine<P> {
     /// Paste finalized transcript (any focused app); Enter when `enter_after_paste`.
     /// LED sync via `disarm_confirm`.
     fn confirm_paste(&mut self) {
+        if self.cancel_if_caps_owner_closed() {
+            return;
+        }
         // Capture before `disarm_confirm` drops the variant. Only called from ConfirmArmed arm.
         let enter_after_paste = match self.gesture {
             GestureState::ConfirmArmed {
@@ -410,6 +422,9 @@ impl<P: Platform + 'static> Engine<P> {
         }
         let inserted_only = !enter_after_paste;
         self.disarm_confirm();
+        if inserted_only {
+            self.caps_owner = None;
+        }
         self.record_caps("confirm");
         if inserted_only {
             log::debug!(
@@ -445,6 +460,7 @@ impl<P: Platform + 'static> Engine<P> {
             p.epoch = p.epoch.wrapping_add(1);
         }
         self.pending_enter_at = None;
+        self.caps_owner = None;
         self.record_caps("cancel");
         log::debug!(target: "engine", "HOLD cancel — dictation discarded, voice silenced, LED off, idle");
     }
@@ -756,6 +772,10 @@ impl<P: Platform + 'static> Engine<P> {
     ///
     /// See the inline GESTURE MODEL block below for the full rationale.
     pub(crate) fn tick(&mut self) {
+        // Owner liveness is a Caps-PTT concern only: Always mode never captures a
+        // token. Run before delayed Enter so a destroyed owner cannot receive any
+        // late delivery through whichever window gained focus next.
+        self.cancel_if_caps_owner_closed();
         // A confirmed submit's deferred Enter (see `confirm_paste`/`pending_enter_at`)
         // must still fire even if caps gets disabled or the mode changes mid-delay —
         // same belt-and-suspenders reasoning as `discard_stale_caps_backlog` below, so
@@ -923,6 +943,7 @@ impl<P: Platform + 'static> Engine<P> {
                 // The deferred final landed EMPTY — nothing to submit. Disarm
                 // (`disarm_confirm` maps the buffer's `Empty → Idle` too).
                 self.disarm_confirm();
+                self.caps_owner = None;
                 self.record_caps("confirm");
             }
             // `Armed` (final not landed yet) / `Idle`: keep waiting.
@@ -1103,6 +1124,9 @@ impl<P: Platform + 'static> Engine<P> {
     /// double-count its own echo as a separate submit. Called either immediately
     /// (zero delay) or once `check_pending_enter`'s timer elapses.
     fn press_deferred_enter(&mut self) {
+        if self.cancel_if_caps_owner_closed() {
+            return;
+        }
         self.plat.press_enter();
         if let Some(q) = &self.ttsq {
             // Mark the voice submit's own auto-Enter so the `MarkActive` path doesn't
@@ -1111,6 +1135,52 @@ impl<P: Platform + 'static> Engine<P> {
             // `note_voice_submit`'s de-dup window is a few seconds wide.
             q.note_voice_submit();
         }
+        self.caps_owner = None;
+    }
+
+    /// Cancel one Caps-triggered turn when its exact native owner was destroyed.
+    /// Unknown probe results preserve the turn; focus changes and minimization keep
+    /// the native window alive and therefore do not enter this path.
+    fn cancel_if_caps_owner_closed(&mut self) -> bool {
+        let Some(owner) = self.caps_owner else {
+            return false;
+        };
+        if self.plat.window_owner_state(owner) != WindowOwnerState::Closed {
+            return false;
+        }
+
+        let was_recording = self.is_recording();
+        if was_recording {
+            self.stt.owner_closed();
+        }
+        self.gesture = GestureState::Idle;
+        self.sync_caps_led();
+        self.press = PressState::Up;
+        self.pending_tap_at = None;
+        self.pending_enter_at = None;
+        self.caps_owner = None;
+        if let Ok(mut p) = self.paste.lock() {
+            p.partial.clear();
+            p.final_state = FinalState::Idle;
+            p.target = None;
+            p.can_paste = true;
+            p.caps_held = false;
+            p.refused_until = None;
+            // Detached local-STT finals are stamped with the prior epoch.
+            p.epoch = p.epoch.wrapping_add(1);
+        }
+        self.set_stt_active(false);
+        if was_recording && let Some(q) = &self.ttsq {
+            // The start tap paused shared narration. Resume it for surviving windows;
+            // session-scoped narration ownership remains separate follow-up work.
+            q.resume();
+        }
+        self.record_caps("owner-closed");
+        log::debug!(
+            target: "engine",
+            "Caps owner window closed — capture and pending delivery discarded, LED off"
+        );
+        true
     }
 
     /// The time-based half of the gesture, run once per [`tick`] regardless of edges:
@@ -1156,6 +1226,7 @@ impl<P: Platform + 'static> Engine<P> {
         if self.cfg.resolved_stt().is_none() {
             return;
         }
+        self.caps_owner = self.plat.capture_frontmost_window();
         // A Caps tap = "I have the floor": PAUSE the in-process queue in BOTH duplex
         // modes (it resumes on stop) so the voice never talks over your dictation.
         // `tts.stop()` is a playback-stop control message, not a child kill, so it is
@@ -1252,6 +1323,10 @@ impl<P: Platform + 'static> Engine<P> {
             if let Ok(mut p) = self.paste.lock() {
                 p.arm();
             }
+        } else {
+            // Inline clients completed delivery in `stt.stop`; no engine paste or
+            // delayed Enter remains to protect.
+            self.caps_owner = None;
         }
         self.record_caps("stop");
         log::debug!(target: "engine", "LED OFF — stt.stop()");
@@ -1263,6 +1338,7 @@ impl<P: Platform + 'static> Engine<P> {
         self.listener = None;
         self.pending_tap_at = None;
         self.pending_enter_at = None;
+        self.caps_owner = None;
         self.press = PressState::Up;
         self.set_caps_gate(false);
         self.plat.set_caps_lock(false);
@@ -1551,7 +1627,10 @@ mod tests {
         );
     }
     use crate::config_gate::DEFAULT_LONG_PRESS_MS;
-    use ds_platform::{CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError};
+    use ds_platform::{
+        CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyInjector, PreflightError, WindowOwner,
+        WindowOwnerState,
+    };
     use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
 
@@ -1563,6 +1642,11 @@ mod tests {
         caps_phys_down: Cell<bool>,
         lock_state: Cell<bool>,
         terminal_frontmost: Cell<bool>,
+        /// Exact frontmost window id returned at recording start. Zero means the
+        /// platform has no owner capability (the documented fallback).
+        frontmost_owner_id: Cell<u64>,
+        /// Native window id whose liveness probe reports destroyed.
+        closed_owner_id: Cell<Option<u64>>,
         /// Whether an editable field is "focused" — backs `can_paste`, which
         /// the engine samples live to drive the dictation "no target" glow. Defaults
         /// false (Cell default).
@@ -1627,6 +1711,17 @@ mod tests {
     impl FrontmostWindow for MockPlatform {
         fn is_terminal_frontmost(&self) -> bool {
             self.terminal_frontmost.get()
+        }
+        fn capture_frontmost_window(&self) -> Option<WindowOwner> {
+            let id = self.frontmost_owner_id.get();
+            (id != 0).then_some(WindowOwner::from_native(id, Some(7)))
+        }
+        fn window_owner_state(&self, owner: WindowOwner) -> WindowOwnerState {
+            if self.closed_owner_id.get() == Some(owner.native_id()) {
+                WindowOwnerState::Closed
+            } else {
+                WindowOwnerState::Alive
+            }
         }
         fn can_paste(&self) -> bool {
             self.paste_target.get()
@@ -2344,6 +2439,114 @@ mod tests {
             d.plat.type_text_calls.get(),
             0,
             "nothing pasted for an empty final"
+        );
+    }
+
+    #[test]
+    fn closing_the_caps_owner_aborts_capture_and_invalidates_late_finals() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(41);
+        MockPlatform::tap(&mut d);
+        assert!(d.is_recording());
+        let epoch = {
+            let mut paste = d.paste.lock().unwrap();
+            paste.partial = "still listening".into();
+            paste.epoch
+        };
+
+        d.plat.closed_owner_id.set(Some(41));
+        d.tick();
+
+        let paste = d.paste.lock().unwrap();
+        assert!(!d.is_recording(), "destroyed owner stops Caps capture");
+        assert!(!d.plat.lock_state.get(), "recording LED is cleared");
+        assert!(paste.partial.is_empty(), "dictation overlay is cleared");
+        assert!(matches!(paste.final_state, FinalState::Idle));
+        assert_eq!(paste.target, None);
+        assert_ne!(
+            paste.epoch, epoch,
+            "detached final carries the old epoch and cannot repopulate the overlay"
+        );
+        assert_eq!(
+            d.plat.tap_down_calls.get(),
+            1,
+            "owner destruction does not toggle Claude dictation in the replacement focus"
+        );
+    }
+
+    #[test]
+    fn focus_move_to_another_same_process_window_does_not_cancel_until_owner_closes() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(11);
+        MockPlatform::tap(&mut d);
+        assert!(d.is_recording());
+
+        // Window 22 represents another terminal window in the same process. Changing
+        // focus does not change the captured owner token or its liveness.
+        d.plat.frontmost_owner_id.set(22);
+        d.plat.terminal_frontmost.set(false);
+        d.tick();
+        assert!(
+            d.is_recording(),
+            "focus loss/minimization is not window destruction"
+        );
+
+        d.plat.closed_owner_id.set(Some(11));
+        d.tick();
+        assert!(
+            !d.is_recording(),
+            "the original window is independently identified from its sibling"
+        );
+    }
+
+    #[test]
+    fn closing_owner_after_stop_cancels_late_paste_and_enter() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(73);
+        d.stt = Box::new(DeferStt);
+        MockPlatform::tap(&mut d);
+        MockPlatform::tap(&mut d);
+        deposit_final(&d, "must not escape");
+        lapse_stop_window(&mut d);
+
+        d.plat.closed_owner_id.set(Some(73));
+        d.tick();
+
+        assert!(!d.is_confirm_armed());
+        assert!(matches!(
+            d.paste.lock().unwrap().final_state,
+            FinalState::Idle
+        ));
+        assert_eq!(d.plat.type_text_calls.get(), 0, "late paste was dropped");
+        assert_eq!(d.plat.press_enter_calls.get(), 0, "late Enter was dropped");
+    }
+
+    #[test]
+    fn closing_owner_after_paste_cancels_the_delayed_enter() {
+        let mut d = mk(600);
+        d.plat.terminal_frontmost.set(true);
+        d.plat.frontmost_owner_id.set(91);
+        d.stt = Box::new(DeferStt);
+        d.cfg.paste_delay_ms = 60_000;
+        MockPlatform::tap(&mut d);
+        MockPlatform::tap(&mut d);
+        deposit_final(&d, "paste before close");
+        lapse_stop_window(&mut d);
+        d.tick();
+        assert_eq!(d.plat.type_text_calls.get(), 1);
+        assert!(d.pending_enter_at.is_some(), "delayed Enter is armed");
+
+        d.plat.closed_owner_id.set(Some(91));
+        d.tick();
+
+        assert!(d.pending_enter_at.is_none(), "delayed Enter is disarmed");
+        assert_eq!(
+            d.plat.press_enter_calls.get(),
+            0,
+            "Enter cannot land in the replacement focus"
         );
     }
 

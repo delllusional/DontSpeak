@@ -1013,6 +1013,7 @@ name = "ds-platform"
 version = "0.4.1-dev"
 dependencies = [
  "arboard",
+ "core-foundation",
  "core-graphics",
  "evdev",
  "log",

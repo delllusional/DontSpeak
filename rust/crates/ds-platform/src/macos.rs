@@ -17,14 +17,24 @@ use std::ffi::c_void;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use core_foundation::array::CFArray;
+use core_foundation::base::{CFType, TCFType};
+use core_foundation::dictionary::CFDictionary;
+use core_foundation::number::CFNumber;
+use core_foundation::string::{CFString, CFStringRef as CoreFoundationStringRef};
 use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+use core_graphics::window::{
+    create_description_from_array, create_window_list, kCGNullWindowID, kCGWindowLayer,
+    kCGWindowListExcludeDesktopElements, kCGWindowListOptionOnScreenOnly, kCGWindowNumber,
+    kCGWindowOwnerPID,
+};
 
 use objc2_app_kit::NSWorkspace;
 
 use crate::{
     CapsKeyMonitor, FrontmostWindow, KNOWN_TERMINALS, KeyBase, KeyChord, KeyInjector, Platform,
-    PreflightError,
+    PreflightError, WindowOwner, WindowOwnerState,
 };
 
 /// kVK_ANSI_V — for the synthetic Cmd+V paste in `type_text` (§C.3).
@@ -405,6 +415,43 @@ fn is_custom_text_bundle(bid: &str, extra: &[String]) -> bool {
     CUSTOM_TEXT_BUNDLES.contains(&bid) || extra.iter().any(|e| e.eq_ignore_ascii_case(bid))
 }
 
+fn window_info_number(
+    info: &CFDictionary<CFString, CFType>,
+    key: CoreFoundationStringRef,
+) -> Option<i32> {
+    // SAFETY: the kCGWindow* keys are process-lifetime CoreFoundation constants.
+    let key = unsafe { CFString::wrap_under_get_rule(key) };
+    info.find(&key)?.downcast::<CFNumber>()?.to_i32()
+}
+
+fn window_info_owner_pid(info: &CFDictionary<CFString, CFType>) -> Option<i32> {
+    // SAFETY: kCGWindowOwnerPID is a process-lifetime CoreFoundation constant.
+    window_info_number(info, unsafe { kCGWindowOwnerPID })
+}
+
+fn window_info_layer_and_number(info: &CFDictionary<CFString, CFType>) -> Option<(i32, i32)> {
+    // SAFETY: both kCGWindow* values are process-lifetime CoreFoundation constants.
+    unsafe {
+        Some((
+            window_info_number(info, kCGWindowLayer)?,
+            window_info_number(info, kCGWindowNumber)?,
+        ))
+    }
+}
+
+fn frontmost_window_for_pid(pid: u32) -> Option<u32> {
+    let ids = create_window_list(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID,
+    )?;
+    let descriptions = create_description_from_array(ids)?;
+    descriptions.iter().find_map(|info| {
+        let owner_pid = window_info_owner_pid(&info)?;
+        let (layer, window) = window_info_layer_and_number(&info)?;
+        (owner_pid == pid as i32 && layer == 0 && window > 0).then_some(window as u32)
+    })
+}
+
 impl FrontmostWindow for MacOsPlatform {
     fn is_terminal_frontmost(&self) -> bool {
         // THREAD SAFETY (reviewed 2026-06-20, macOS 14/15 Apple Silicon):
@@ -444,6 +491,33 @@ impl FrontmostWindow for MacOsPlatform {
         let ws = NSWorkspace::sharedWorkspace();
         let app = ws.frontmostApplication()?;
         app.localizedName().map(|n| n.to_string())
+    }
+
+    fn capture_frontmost_window(&self) -> Option<WindowOwner> {
+        let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+        let pid = app.processIdentifier() as u32;
+        let window = frontmost_window_for_pid(pid)?;
+        Some(WindowOwner::from_native(window as u64, Some(pid)))
+    }
+
+    fn window_owner_state(&self, owner: WindowOwner) -> WindowOwnerState {
+        let Ok(window) = u32::try_from(owner.native_id()) else {
+            return WindowOwnerState::Closed;
+        };
+        let Some(descriptions) = create_description_from_array(CFArray::from_copyable(&[window]))
+        else {
+            return WindowOwnerState::Unknown;
+        };
+        let Some(info) = descriptions.get(0) else {
+            return WindowOwnerState::Closed;
+        };
+        let Some(pid) = window_info_owner_pid(&info) else {
+            return WindowOwnerState::Unknown;
+        };
+        match owner.process_id() {
+            Some(expected) if pid as u32 != expected => WindowOwnerState::Closed,
+            _ => WindowOwnerState::Alive,
+        }
     }
 
     fn can_paste(&self) -> bool {

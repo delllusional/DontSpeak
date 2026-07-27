@@ -106,6 +106,13 @@ pub trait Stt {
         self.stop();
     }
 
+    /// The exact window that owned a Caps-triggered capture was destroyed. Local
+    /// engines discard like [`Self::abort`]; inline clients may instead drop their
+    /// pairing state because injecting a toggle into the newly focused window is unsafe.
+    fn owner_closed(&mut self) {
+        self.abort();
+    }
+
     /// Debug tag for tests / logs.
     fn kind(&self) -> &'static str {
         "stt"

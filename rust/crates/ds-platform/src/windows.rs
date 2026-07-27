@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::time::Instant;
 
-use windows::Win32::Foundation::{CloseHandle, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{
     GetCurrentThreadId, OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -18,7 +18,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-    HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
+    HHOOK, IsWindow, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, PostThreadMessageW, SetWindowsHookExW,
     TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_QUIT,
     WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
@@ -26,7 +26,7 @@ use windows::core::PWSTR;
 
 use crate::{
     CapsEdge, CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform,
-    PreflightError,
+    PreflightError, WindowOwner, WindowOwnerState,
 };
 
 const VK_RETURN: u16 = 0x0D; // Enter/Return — the auto-submit keystroke
@@ -560,6 +560,36 @@ impl FrontmostWindow for WindowsPlatform {
         // `frontmost_process_basename`) returns false and nothing is injected.
         frontmost_process_basename()
             .is_some_and(|base| is_known_terminal_exe(&base, &self.extra_terminals.borrow()))
+    }
+
+    fn capture_frontmost_window(&self) -> Option<WindowOwner> {
+        // SAFETY: both calls return scalar identifiers and write only to the stack-local pid.
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                return None;
+            }
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            (pid != 0).then_some(WindowOwner::from_native(hwnd.0 as usize as u64, Some(pid)))
+        }
+    }
+
+    fn window_owner_state(&self, owner: WindowOwner) -> WindowOwnerState {
+        let hwnd = HWND(owner.native_id() as usize as *mut std::ffi::c_void);
+        // SAFETY: IsWindow and GetWindowThreadProcessId accept an opaque HWND value.
+        unsafe {
+            if !IsWindow(hwnd).as_bool() {
+                return WindowOwnerState::Closed;
+            }
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            match (pid, owner.process_id()) {
+                (0, _) => WindowOwnerState::Unknown,
+                (actual, Some(expected)) if actual != expected => WindowOwnerState::Closed,
+                _ => WindowOwnerState::Alive,
+            }
+        }
     }
 
     fn can_paste(&self) -> bool {

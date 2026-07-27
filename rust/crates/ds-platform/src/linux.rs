@@ -21,6 +21,7 @@ use evdev::{
 
 use crate::{
     CapsKeyMonitor, FrontmostWindow, KeyBase, KeyChord, KeyInjector, Platform, PreflightError,
+    WindowOwner, WindowOwnerState,
 };
 
 /// Is `name` (a lowercased X11 WM_CLASS value) one of the shared table's known
@@ -359,6 +360,28 @@ impl FrontmostWindow for LinuxPlatform {
         }
     }
 
+    fn capture_frontmost_window(&self) -> Option<WindowOwner> {
+        if self.wayland {
+            return None;
+        }
+        self.x11
+            .as_ref()?
+            .active_window()
+            .map(|window| WindowOwner::from_native(window as u64, None))
+    }
+
+    fn window_owner_state(&self, owner: WindowOwner) -> WindowOwnerState {
+        if self.wayland {
+            return WindowOwnerState::Unknown;
+        }
+        let Ok(window) = u32::try_from(owner.native_id()) else {
+            return WindowOwnerState::Closed;
+        };
+        self.x11
+            .as_ref()
+            .map_or(WindowOwnerState::Unknown, |x11| x11.window_state(window))
+    }
+
     fn set_extra_terminals(&self, extra: Vec<String>) {
         *self.extra_terminals.borrow_mut() = extra;
     }
@@ -435,6 +458,7 @@ impl Platform for LinuxPlatform {
 // per-edge query is one round-trip. Reused across calls; all x11rb calls take &self.
 
 use x11rb::connection::Connection;
+use x11rb::errors::ReplyError;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt, Window};
 use x11rb::rust_connection::RustConnection;
 
@@ -477,6 +501,17 @@ impl X11Focus {
             .ok()?;
         let win = reply.value32()?.next()?;
         if win == 0 { None } else { Some(win) }
+    }
+
+    fn window_state(&self, window: Window) -> WindowOwnerState {
+        let Ok(cookie) = self.conn.get_window_attributes(window) else {
+            return WindowOwnerState::Unknown;
+        };
+        match cookie.reply() {
+            Ok(_) => WindowOwnerState::Alive,
+            Err(ReplyError::X11Error(_)) => WindowOwnerState::Closed,
+            Err(ReplyError::ConnectionError(_)) => WindowOwnerState::Unknown,
+        }
     }
 
     fn is_terminal_frontmost(&self, extra: &[String]) -> bool {

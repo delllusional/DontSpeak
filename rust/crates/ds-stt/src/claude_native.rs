@@ -73,6 +73,13 @@ impl<P: KeyInjector + FrontmostWindow> Stt for ClaudeNative<P> {
         }
     }
 
+    fn owner_closed(&mut self) {
+        // The owning terminal window no longer exists, so its Claude process/capture
+        // cannot receive the matching toggle. Forget the pair: tapping now would target
+        // whichever unrelated window gained focus and could start dictation there.
+        self.toggled_on = false;
+    }
+
     // abort() == stop() (default): one toggle returns Claude to idle — §F long-press reset.
 
     fn kind(&self) -> &'static str {
@@ -200,5 +207,23 @@ mod tests {
             "an unpaired extra abort() must not re-tap"
         );
         assert_eq!(p.ups.get(), 2);
+    }
+
+    #[test]
+    fn owner_close_drops_the_pair_without_toggling_the_new_focus() {
+        let p = Rc::new(MockPlat::default());
+        p.frontmost.set(true);
+        let mut e = ClaudeNative::new(p.clone(), KeyChord::default());
+        e.start();
+        assert_eq!(p.downs.get(), 1);
+
+        e.owner_closed();
+        assert_eq!(
+            p.downs.get(),
+            1,
+            "destroyed owner must not send a toggle into the replacement focus"
+        );
+        e.stop();
+        assert_eq!(p.downs.get(), 1, "the pairing state was consumed");
     }
 }
