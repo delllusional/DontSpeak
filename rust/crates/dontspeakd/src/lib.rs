@@ -38,6 +38,6 @@ mod status;
 mod test_env;
 mod timer;
 
-pub use boot::{EngineError, engine_run};
+pub use boot::{EngineError, EngineRunOutcome, engine_run};
 
 pub(crate) use engine::{FinalState, PasteBuf, PasteState};

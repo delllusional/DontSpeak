@@ -5,6 +5,7 @@
 
 use std::ffi::{CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Duration;
 
 use crate::engine;
 
@@ -30,6 +31,12 @@ pub extern "C" fn ds_engine_start() -> u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_engine_stop() -> u8 {
     guard_val(0, || crate::host::engine_stop() as u8)
+}
+
+/// 1 only after the embedded engine has exited and requested whole-host relaunch.
+#[unsafe(no_mangle)]
+pub extern "C" fn ds_engine_host_relaunch_requested() -> u8 {
+    guard_val(0, || crate::host::host_relaunch_requested() as u8)
 }
 
 /// Mute (`on != 0`); playback drains. 1 if IPC delivered.
@@ -109,25 +116,30 @@ pub extern "C" fn ds_model_status_json() -> *mut c_char {
     })
 }
 
-/// Block until `seq` ≠ `since` or timeout. Overlay push: background thread loop
-/// (`since = 0` first). Owned `char*`; `"{}"` if down.
+/// Block until `seq` ≠ `since` or timeout, with 250ms transport slack. Overlay push:
+/// background thread loop (`since = 0` first). Owned `char*`; `"{}"` if down.
 #[unsafe(no_mangle)]
 pub extern "C" fn ds_model_status_wait(since: u64, timeout_ms: u32) -> *mut c_char {
     guard_str("{}", || {
         let Some(paths) = ds_config::Paths::resolve() else {
             return to_cstring("{}");
         };
-        match ds_ipc::request(
+        match ds_ipc::request_with_read_timeout(
             &paths.engine_sock,
             &ds_ipc::Request::WaitModelStatus {
                 since,
                 timeout_ms: timeout_ms as u64,
             },
+            status_wait_read_timeout(timeout_ms),
         ) {
             Ok(ds_ipc::Response::ModelStatus { status }) => to_cstring(status.to_string()),
             _ => to_cstring("{}"),
         }
     })
+}
+
+fn status_wait_read_timeout(timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(timeout_ms) + 250)
 }
 
 const USAGE_DECK_EMPTY: &str = r#"{"cards":[]}"#;
@@ -491,6 +503,14 @@ mod tests {
         let empty = CString::new("").unwrap();
         assert_eq!(cstr_or(empty.as_ptr(), "default"), "");
         ds_string_free(std::ptr::null_mut());
+    }
+
+    #[test]
+    fn model_status_wait_has_a_small_bounded_transport_slack() {
+        assert_eq!(
+            status_wait_read_timeout(1_000),
+            Duration::from_millis(1_250)
+        );
     }
 
     #[test]

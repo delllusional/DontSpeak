@@ -8,7 +8,7 @@ pub mod protocol;
 pub mod server;
 pub mod transport;
 
-pub use client::{Client, connect, request};
+pub use client::{Client, connect, request, request_with_read_timeout};
 pub use protocol::{
     MAX_PRESENTER_TTL_MS, MIN_PRESENTER_TTL_MS, Request, Response, validate_presenter_id,
     validate_presenter_ttl_ms,

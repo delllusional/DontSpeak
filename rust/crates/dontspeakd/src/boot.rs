@@ -37,11 +37,18 @@ const DL_PROGRESS_BUMP_INTERVAL: Duration = Duration::from_millis(400);
 /// Coarse mtime backstop if config_watch drops events.
 const MTIME_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Native-host action after the embedded engine has released all owned resources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EngineRunOutcome {
+    Stopped,
+    RelaunchHost,
+}
+
 /// Engine entry on this thread. Host drives `running` / `reload_requested` (C ABI).
 pub fn engine_run(
     running: Arc<AtomicBool>,
     reload_requested: Arc<AtomicBool>,
-) -> Result<(), EngineError> {
+) -> Result<EngineRunOutcome, EngineError> {
     let debug = debug_enabled();
     ds_log::init();
     log::set_max_level(if debug {
@@ -389,32 +396,11 @@ pub fn engine_run(
     }
     let _ = std::fs::remove_file(&paths.engine_sock);
 
-    // Caps-HID stuck: re-exec this binary (not open -b — could reactivate dying instance).
+    // Caps-HID stuck: the native host owns whole-app relaunch after this thread exits.
     if relaunch_after_shutdown {
-        if caps_relaunch_budget_exhausted(&paths) {
-            log::info!(
-                target: "engine",
-                "caps HID relaunch: already relaunched {MAX_CAPS_RELAUNCHES} times in the \
-                 last {}s over {} — giving up rather than loop forever; it stays broken \
-                 until a manual restart",
-                CAPS_RELAUNCH_WINDOW.as_secs(),
-                relaunch_reason.unwrap_or("a caps-related HID resource"),
-            );
-            return Ok(());
-        }
-        let relaunched = std::env::current_exe()
-            .and_then(|exe| std::process::Command::new(&exe).spawn().map(|_| ()));
-        if let Err(e) = relaunched {
-            // Resources already released — stay alive so user can find/relaunch manually.
-            log::info!(
-                target: "engine",
-                "relaunch failed ({e}) — NOT exiting; this instance has already released \
-                 its resources (no RPC, no caps monitor) and can't serve as a fallback \
-                 host, but exiting with nothing left to bring the app back is worse"
-            );
-        }
+        return Ok(caps_relaunch_outcome(&paths, relaunch_reason));
     }
-    Ok(())
+    Ok(EngineRunOutcome::Stopped)
 }
 
 /// Off-thread System STT speech-auth when needed. Nudges reload on completion unless
@@ -447,6 +433,22 @@ fn authorize_system_stt_if_needed(
 const MAX_CAPS_RELAUNCHES: u32 = 3;
 /// Streak older than this doesn't count (fresh stuck episode).
 const CAPS_RELAUNCH_WINDOW: Duration = Duration::from_secs(120);
+
+fn caps_relaunch_outcome(paths: &Paths, relaunch_reason: Option<&'static str>) -> EngineRunOutcome {
+    if caps_relaunch_budget_exhausted(paths) {
+        log::info!(
+            target: "engine",
+            "caps HID relaunch: already relaunched {MAX_CAPS_RELAUNCHES} times in the \
+             last {}s over {} — giving up rather than loop forever; it stays broken \
+             until a manual restart",
+            CAPS_RELAUNCH_WINDOW.as_secs(),
+            relaunch_reason.unwrap_or("a caps-related HID resource"),
+        );
+        EngineRunOutcome::Stopped
+    } else {
+        EngineRunOutcome::RelaunchHost
+    }
+}
 
 /// RMW relaunch-streak marker. Exhausted → true without bumping (stay tripped).
 fn caps_relaunch_budget_exhausted(paths: &Paths) -> bool {
@@ -555,6 +557,21 @@ mod tests {
         std::fs::write(&marker, format!("{MAX_CAPS_RELAUNCHES} {stale_at}")).unwrap();
 
         assert!(!caps_relaunch_budget_exhausted(&paths));
+    }
+
+    #[test]
+    fn caps_relaunch_returns_a_host_outcome_until_the_budget_is_exhausted() {
+        let (_dir, paths) = test_paths();
+        for _ in 0..MAX_CAPS_RELAUNCHES {
+            assert_eq!(
+                caps_relaunch_outcome(&paths, Some("caps HID")),
+                EngineRunOutcome::RelaunchHost
+            );
+        }
+        assert_eq!(
+            caps_relaunch_outcome(&paths, Some("caps HID")),
+            EngineRunOutcome::Stopped
+        );
     }
 
     #[test]

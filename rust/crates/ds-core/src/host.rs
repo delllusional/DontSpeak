@@ -19,6 +19,7 @@ struct EngineHandle {
 }
 
 static ENGINE: Mutex<Option<EngineHandle>> = Mutex::new(None);
+static HOST_RELAUNCH_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// Max wait for a stale engine thread before detach (see `join_stale`). Exceeds both
 /// platforms' teardown bounds (Windows `shutdown_caps_hook` 2s, macOS
@@ -69,6 +70,7 @@ pub(crate) fn engine_start() -> bool {
         join_stale(t, STALE_JOIN_TIMEOUT);
     }
 
+    HOST_RELAUNCH_REQUESTED.store(false, Ordering::SeqCst);
     let running = Arc::new(AtomicBool::new(true));
     // engine_run's reload flag: dontspeakd's own config watch owns hot-reload, so nothing
     // on this side ever raises it.
@@ -79,10 +81,20 @@ pub(crate) fn engine_start() -> bool {
     let thread = std::thread::Builder::new()
         .name("ds-engine".into())
         .spawn(move || {
-            if let Err(e) = dontspeakd::engine_run(r.clone(), rl) {
-                log::error!(target: "core", "engine startup failed: {e}");
-                r.store(false, Ordering::SeqCst);
+            match dontspeakd::engine_run(r.clone(), rl) {
+                Ok(dontspeakd::EngineRunOutcome::Stopped) => {}
+                Ok(dontspeakd::EngineRunOutcome::RelaunchHost) => {
+                    HOST_RELAUNCH_REQUESTED.store(true, Ordering::SeqCst);
+                    log::info!(
+                        target: "core",
+                        "embedded engine released its resources and requested a host relaunch"
+                    );
+                }
+                Err(e) => {
+                    log::error!(target: "core", "engine startup failed: {e}");
+                }
             }
+            r.store(false, Ordering::SeqCst);
         })
         .ok();
     if thread.is_none() {
@@ -90,6 +102,11 @@ pub(crate) fn engine_start() -> bool {
     }
     *ENGINE.lock().unwrap_or_else(|e| e.into_inner()) = Some(EngineHandle { running, thread });
     true
+}
+
+/// True only after the embedded engine has fully exited with a host-relaunch outcome.
+pub(crate) fn host_relaunch_requested() -> bool {
+    HOST_RELAUNCH_REQUESTED.load(Ordering::SeqCst)
 }
 
 /// Stop the engine (clear run flag, join). True if one was running. Safe on quit.

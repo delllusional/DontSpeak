@@ -126,24 +126,29 @@ final class Core {
     /// ~3s poll — grants aren't on the status push.
     @ObservationIgnored private var permsTask: Task<Void, Never>?
     @ObservationIgnored private var continuation: AsyncStream<HealthSnapshot>.Continuation?
-    /// Blocks in ds_model_status_wait (raw Thread — never Task/cooperative pool).
-    /// nonisolated(unsafe): main-actor write once; deinit cancel is thread-safe.
-    @ObservationIgnored private nonisolated(unsafe) var pushThread: Thread?
+    @ObservationIgnored private var statusPump: StatusPump<HealthSnapshot>?
 
     init() {
         let agents = ds_agents_ui_enabled() != 0
         agentsEnabled = agents
         screen = agents ? .agents : .status
 
-        // Prime from non-blocking probe; first stream value can wait ~1s.
-        let snap = Core.probe()
-        apply(snap)
-        perms = snap.perms
-
         // bufferingNewest(1): no stale backlog.
         let (stream, cont) = AsyncStream<HealthSnapshot>.makeStream(bufferingPolicy: .bufferingNewest(1))
         continuation = cont
-        startStatusProducer(cont)
+        statusPump = StatusPump(
+            name: "status-push",
+            wait: { since in
+                let (snap, seq) = Core.probeStatusWait(since)
+                return StatusPoll(
+                    snapshot: snap,
+                    seq: seq,
+                    running: snap.activity.engineRunning
+                )
+            },
+            deliver: { snap in cont.yield(snap) },
+            finish: { cont.finish() }
+        )
         statusTask = Task { [weak self] in
             for await snap in stream {
                 guard let self else { break }
@@ -205,41 +210,7 @@ final class Core {
         statusTask?.cancel()
         permsTask?.cancel()
         continuation?.finish()
-        pushThread?.cancel()
-    }
-
-    /// Block in WaitModelStatus → yield. Engine down: yield once then 0.4s pace.
-    private func startStatusProducer(_ cont: AsyncStream<HealthSnapshot>.Continuation) {
-        let t = Thread {
-            var since: UInt64 = 0  // 0 ⇒ immediate current state
-            var delivered = false
-            var lastRunning = true
-            while !Thread.current.isCancelled {
-                let (snap, seq) = Core.probeStatusWait(since)
-                let running = snap.activity.engineRunning
-                // Idle timeout keeps seq unchanged — statusShouldYield dedups (incl. engineRunning
-                // flip, external to gate seq). See StatusYield.swift.
-                if statusShouldYield(
-                    delivered: delivered,
-                    seq: seq,
-                    since: since,
-                    running: running,
-                    lastRunning: lastRunning
-                ) {
-                    cont.yield(snap)
-                    delivered = true
-                    lastRunning = running
-                }
-                since = seq
-                if !running {
-                    Thread.sleep(forTimeInterval: 0.4)
-                }
-            }
-            cont.finish()
-        }
-        t.name = "status-push"
-        pushThread = t
-        t.start()
+        statusPump?.cancel()
     }
 
     /// Assign only when != so @Observable invalidation stays granular. Perms polled separately.

@@ -3,6 +3,7 @@
 
 import AppKit
 import CDontSpeak
+import DontSpeakLogic
 import ServiceManagement
 import SwiftUI
 
@@ -229,7 +230,11 @@ private enum MenuBarIcon {
 }
 
 /// Accessory policy, login item, bundled dylib env, engine start/stop.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var engineLifecycleTimer: Timer?
+    private var relaunchPending = false
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         registerLoginItem()
@@ -238,9 +243,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // In-process: caps loop + RPC + TTS on a bg thread. Accessibility / Input-Monitoring /
         // Mic all grant to this one signed bundle. MCP/hooks hit the socket we serve.
         _ = ds_engine_start()
+        engineLifecycleTimer = Timer.scheduledTimer(
+            timeInterval: 0.2,
+            target: self,
+            selector: #selector(checkEngineLifecycle),
+            userInfo: nil,
+            repeats: true
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        engineLifecycleTimer?.invalidate()
         _ = ds_engine_stop()
     }
 
@@ -248,6 +261,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         WindowOpener.shared.openMain()
         return true
+    }
+
+    @objc private func checkEngineLifecycle() {
+        guard ds_engine_host_relaunch_requested() != 0 else { return }
+        relaunchAfterExit()
+    }
+
+    /// Start a waiter first; it opens a new bundle instance only after this PID is gone.
+    private func relaunchAfterExit() {
+        guard !relaunchPending else { return }
+        let plan = HostRelaunchPlan(
+            bundlePath: Bundle.main.bundlePath,
+            processIdentifier: ProcessInfo.processInfo.processIdentifier
+        )
+        let helper = Process()
+        helper.executableURL = URL(fileURLWithPath: plan.executablePath)
+        helper.arguments = plan.arguments
+        do {
+            try helper.run()
+        } catch {
+            NSLog("DontSpeak: host relaunch helper failed: \(error.localizedDescription)")
+            return
+        }
+        relaunchPending = true
+        engineLifecycleTimer?.invalidate()
+        NSApp.terminate(nil)
     }
 
     /// Notarized builds ship ORT in Frameworks (avoids Gatekeeper on runtime download).

@@ -64,6 +64,9 @@ uint8_t ds_engine_start(void);
 // 1 if was running. Safe on quit.
 uint8_t ds_engine_stop(void);
 
+// 1 only after the embedded engine exited and requested whole-host relaunch.
+uint8_t ds_engine_host_relaunch_requested(void);
+
 // Mute (`on != 0`); playback drains. 1 if IPC delivered.
 uint8_t ds_set_muted(uint8_t on);
 
@@ -76,8 +79,8 @@ uint8_t ds_engine_running_global(void);
 // Model-status JSON. Owned `char*` (`ds_string_free`); `"{}"` if down. HANDLE-FREE.
 char *ds_model_status_json(void);
 
-// Block until `seq` ≠ `since` or timeout. Overlay push: background thread loop
-// (`since = 0` first). Owned `char*`; `"{}"` if down.
+// Block until `seq` ≠ `since` or timeout, with 250ms transport slack. Overlay push:
+// background thread loop (`since = 0` first). Owned `char*`; `"{}"` if down.
 char *ds_model_status_wait(uint64_t since, uint32_t timeout_ms);
 
 // Usage skeleton (`ds_agent_usage::skeleton`). No network. Empty deck while the config

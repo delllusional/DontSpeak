@@ -10,10 +10,14 @@ use crate::transport::{self, Stream};
 
 /// Connect to the engine socket. Err ⇒ engine not running.
 pub fn connect(sock_path: &Path) -> io::Result<Client> {
+    connect_with_read_timeout(sock_path, Duration::from_secs(120))
+}
+
+fn connect_with_read_timeout(sock_path: &Path, read_timeout: Duration) -> io::Result<Client> {
     let stream = transport::connect(sock_path)?;
     // 120s covers longest STREAMING dictate (~60s silence possible) + final pass; shorter
-    // would abort a quiet session. Write stays tight.
-    stream.set_read_timeout(Some(Duration::from_secs(120)))?;
+    // would abort a quiet session. Bounded status waits override it explicitly.
+    stream.set_read_timeout(Some(read_timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     Ok(Client {
         writer: stream.try_clone()?,
@@ -24,6 +28,18 @@ pub fn connect(sock_path: &Path) -> io::Result<Client> {
 /// Connect, one request, drain to terminal response. Err if engine down or link breaks.
 pub fn request(sock_path: &Path, req: &Request) -> io::Result<Response> {
     let mut c = connect(sock_path)?;
+    c.send(req)?;
+    c.recv_terminal()
+}
+
+/// One request with a caller-owned read bound. Use for operations whose protocol timeout
+/// is shorter than the default streaming-dictation allowance.
+pub fn request_with_read_timeout(
+    sock_path: &Path,
+    req: &Request,
+    read_timeout: Duration,
+) -> io::Result<Response> {
+    let mut c = connect_with_read_timeout(sock_path, read_timeout)?;
     c.send(req)?;
     c.recv_terminal()
 }
@@ -178,5 +194,35 @@ mod tests {
             "expected a timeout-flavored error, got: {err:?}"
         );
         drop(server_stream); // keep peer alive until here so this is timeout, not EOF
+    }
+
+    #[test]
+    fn bounded_request_times_out_when_the_peer_accepts_but_never_replies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("dontspeak.sock");
+        let listener = transport::bind(&path).expect("bind test socket");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            thread::sleep(Duration::from_millis(300));
+            drop(stream);
+        });
+
+        let started = std::time::Instant::now();
+        let err =
+            request_with_read_timeout(&path, &Request::ModelStatus, Duration::from_millis(100))
+                .expect_err("a bounded request must not inherit the 120s streaming timeout");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the caller-owned read timeout must bound the request: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(
+                err.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ),
+            "expected a timeout-flavored error, got: {err:?}"
+        );
+        server.join().expect("join fake server");
     }
 }
