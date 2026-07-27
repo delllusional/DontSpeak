@@ -1,8 +1,9 @@
 # AEC — full-duplex TTS/STT
 
-Default Caps dictation is half-duplex (mic closed during TTS). Full-duplex lets the
-user dictate while speech continues: native OS acoustic echo cancellation strips
-playback from the mic before the recognizer.
+Default Caps dictation pauses TTS while the mic is open, and this pause-and-resume
+policy applies in both duplex modes. Full-duplex keeps playback and capture available
+at the same time for always-listening dictation: native OS acoustic echo cancellation
+strips playback from the mic before the recognizer.
 
 ## Scope
 
@@ -29,9 +30,10 @@ is possible but not implemented.
 
 `ds-aec` `DuplexAudio` wraps one VPIO unit; realtime callbacks use lock-free SPSC rings;
 resample to 16 kHz off the RT thread. Always-on VPIO makes `is_mic_active()` true for
-helper lifetime → full-duplex bypasses TTS hold-gate and mic-barge watcher; barge uses
-AEC-cleaned energy + residual-echo floor. Caps tap dictates while voice continues; only
-long-press stops speech (no barge-in).
+helper lifetime → full-duplex bypasses the generic mic-activity hold gate and foreign-mic
+barge watcher; always-listening barge uses AEC-cleaned energy + residual-echo floor.
+Caps PTT has an explicit policy independent of those gates: the start tap pauses the TTS
+queue, the stop tap resumes it, and a long-press clears it without resuming.
 
 ## Windows / Linux
 
@@ -51,4 +53,5 @@ VPIO has AGC; half-duplex does not. Default `"auto"`: peak-normalize each uttera
 ## Testing
 
 Unit: rings/resamplers. On-device: captured RMS during playback ≈ silence floor; Parakeet
-transcribes over in-progress reply without self-barge. `ds-aec-probe` for platform units.
+always-listening transcribes over an in-progress reply without self-barge.
+`ds-aec-probe` for platform units.

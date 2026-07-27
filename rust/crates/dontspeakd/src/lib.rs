@@ -1,7 +1,7 @@
 //! In-process dictation engine (host apps via `ds-core`; no standalone binary).
 //!
 //! Caps edges each POLL_MS; decisions on RELEASE (LED pure output):
-//! - TAP (< long_press_ms): toggle dictation (`stt.start`/`stop`; start barges TTS).
+//! - TAP (< long_press_ms): toggle dictation (`stt.start`/`stop`; pause/resume TTS).
 //! - LONG-PRESS: `cancel_all` — abort + silence; release is not a tap.
 //!
 //! STT from `ds-engines`. Reload (mtime + C ABI / Reload RPC) aborts in-flight hold

@@ -194,8 +194,9 @@ Prep: synth+validate batch, commit, overlap next batch while playing (first-batc
 TTFA). Slow synth may gap between batches; re-prepend leading silence after drain.
 Memory: one batch. Warm: persistent stream; macOS one-shot: accumulate for `afplay`.
 
-Record-barge: rodio `PROGRESS` HWM (batches fully played); requeue with `skip`. Skew →
-replay-from-top. Full-duplex: no mark (no pause/resume).
+Caps/PTT record-barge pauses and requeues in both duplex modes. Rodio `PROGRESS` HWM
+(batches fully played) resumes with `skip`; skew replays from the top. Full-duplex has
+no progress mark, so its interrupted utterance replays from the top after dictation.
 
 macOS full-duplex: feeder thread + ~2 s VPIO lookahead; mute zeros output at render
 while draining ring at wall rate (AEC far-end = speakers). Fail: abort feeder before

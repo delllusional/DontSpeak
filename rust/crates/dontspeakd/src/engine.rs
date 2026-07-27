@@ -1220,8 +1220,8 @@ impl<P: Platform + 'static> Engine<P> {
         self.sync_caps_led();
         self.stt.stop();
         self.set_stt_active(false);
-        // Mic freed: resume the TTS queue paused on the start-tap (half-duplex). No-op
-        // in full-duplex (never paused) and when nothing was paused/playing.
+        // Mic freed: resume the TTS queue paused on the start-tap in either duplex
+        // mode. No-op when nothing was paused/playing.
         if let Some(q) = &self.ttsq {
             q.resume();
         }

@@ -4,8 +4,9 @@
 //! live here (child stays dumb). Exception: needs-input under focus hold
 //! ([`TtsQueue::dispatch_earcon`]).
 //!
-//! Focus (`pause_bg`): hold off-terminal after first sighting. Half-duplex record
-//! barge pauses; full-duplex coexists. Hard barge clears.
+//! Focus (`pause_bg`): hold off-terminal after first sighting. Caps/PTT record barge
+//! pauses in both duplex modes; full-duplex only bypasses the mic-activity gate and
+//! foreign-mic watcher. Hard barge clears.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -4945,25 +4946,28 @@ mod tests {
     }
 
     #[test]
-    fn pause_for_record_pauses_bumps_generation_and_marks_resume_intent() {
-        let q = mk_queue();
-        q.tts_active.store(true, Ordering::SeqCst);
-        let gen_before = q.generation.load(Ordering::SeqCst);
+    fn pause_for_record_applies_in_both_duplex_modes_and_marks_resume_intent() {
+        for full_duplex in [false, true] {
+            let q = mk_queue();
+            q.tts.set_full_duplex_active_for_test(full_duplex);
+            q.tts_active.store(true, Ordering::SeqCst);
+            let gen_before = q.generation.load(Ordering::SeqCst);
 
-        q.pause_for_record();
+            q.pause_for_record();
 
-        {
-            let st = q.paused.lock().unwrap();
-            assert!(st.paused);
-            assert_eq!(st.cause, Some(PauseCause::Dictation));
+            {
+                let st = q.paused.lock().unwrap();
+                assert!(st.paused);
+                assert_eq!(st.cause, Some(PauseCause::Dictation));
+            }
+            assert!(!q.tts_active.load(Ordering::SeqCst));
+            assert!(q.generation.load(Ordering::SeqCst) > gen_before);
+            assert_eq!(
+                q.cancel_kind.lock().unwrap().get(&gen_before),
+                Some(&true),
+                "a record-barge pause records RESUME (true) against the pre-bump generation"
+            );
         }
-        assert!(!q.tts_active.load(Ordering::SeqCst));
-        assert!(q.generation.load(Ordering::SeqCst) > gen_before);
-        assert_eq!(
-            q.cancel_kind.lock().unwrap().get(&gen_before),
-            Some(&true),
-            "a record-barge pause records RESUME (true) against the pre-bump generation"
-        );
     }
 
     #[test]
